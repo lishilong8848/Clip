@@ -322,7 +322,7 @@ function openDatePicker(): void {
 
 .repair-field-control.compact.wide textarea {
   height: auto;
-  min-height: 58px;
+  min-height: 40px;
   max-height: 132px;
   overflow-y: auto;
   resize: vertical;

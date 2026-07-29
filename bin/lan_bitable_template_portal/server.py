@@ -36,6 +36,7 @@ from .portal_service import (
 from .identity_utils import (
     canonical_target_record_id,
     is_local_record_id,
+    notice_payload_matches_month,
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
@@ -178,6 +179,15 @@ class PortalRuntime:
     # Event closure is authoritative. Repair-project creation remains isolated
     # from it, but transient Feishu/cache failures must be retried durably.
     event_repair_max_attempts = 5
+    maintenance_refresh_lock = threading.RLock()
+    maintenance_refresh_inflight = False
+    maintenance_refresh_event = threading.Event()
+    maintenance_refresh_last_result: dict = {}
+    maintenance_refresh_last_error = ""
+    maintenance_refresh_last_finished = 0.0
+    maintenance_refresh_started_at = 0.0
+    maintenance_refresh_completed_at = 0.0
+    maintenance_refresh_reuse_window_s = 10.0
     repair_refresh_lock = threading.RLock()
     repair_refresh_inflight = False
     repair_refresh_event = threading.Event()
@@ -1022,6 +1032,95 @@ class PortalRuntime:
         return payload
 
     @classmethod
+    def start_maintenance_source_refresh(cls) -> dict:
+        """Start maintenance-only source refresh in the background."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {
+                "maintenance_refresh_started": False,
+                "maintenance_refresh_inflight": False,
+                "maintenance_refresh_reused": False,
+                "mock_external": True,
+            }
+        now = time.monotonic()
+        with cls.maintenance_refresh_lock:
+            if (
+                cls.maintenance_refresh_last_result
+                and now - float(cls.maintenance_refresh_last_finished or 0)
+                <= float(cls.maintenance_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.maintenance_refresh_last_result)
+                result.update(
+                    {
+                        "maintenance_refresh_started": False,
+                        "maintenance_refresh_inflight": False,
+                        "maintenance_refresh_reused": True,
+                    }
+                )
+                return result
+            if cls.maintenance_refresh_inflight:
+                return {
+                    "maintenance_refresh_started": False,
+                    "maintenance_refresh_inflight": True,
+                    "maintenance_refresh_reused": True,
+                }
+            event = threading.Event()
+            cls.maintenance_refresh_event = event
+            cls.maintenance_refresh_inflight = True
+            cls.maintenance_refresh_last_error = ""
+            cls.maintenance_refresh_started_at = time.time()
+            cls.maintenance_refresh_completed_at = 0.0
+
+        def _worker() -> None:
+            try:
+                result = cls.service.refresh_maintenance_source()
+                if not isinstance(result, dict):
+                    result = {}
+                result = copy.deepcopy(result)
+                result.update(
+                    {
+                        "maintenance_refresh_started": True,
+                        "maintenance_refresh_inflight": False,
+                        "maintenance_refresh_reused": False,
+                    }
+                )
+                cls.clear_payload_cache()
+                with cls.maintenance_refresh_lock:
+                    cls.maintenance_refresh_last_result = copy.deepcopy(result)
+                    cls.maintenance_refresh_last_error = ""
+                    cls.maintenance_refresh_last_finished = time.monotonic()
+                    cls.maintenance_refresh_completed_at = time.time()
+            except Exception as exc:
+                error = str(exc)
+                with cls.maintenance_refresh_lock:
+                    cls.maintenance_refresh_last_error = error
+                    cls.maintenance_refresh_last_finished = time.monotonic()
+                    cls.maintenance_refresh_completed_at = time.time()
+                logging.warning("维保源表后台刷新失败: %s", error)
+            finally:
+                with cls.maintenance_refresh_lock:
+                    cls.maintenance_refresh_inflight = False
+                    event.set()
+
+        try:
+            threading.Thread(
+                target=_worker,
+                name="LANMaintenanceRefresh",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            with cls.maintenance_refresh_lock:
+                cls.maintenance_refresh_inflight = False
+                cls.maintenance_refresh_last_error = str(exc)
+                cls.maintenance_refresh_completed_at = time.time()
+                event.set()
+            raise PortalError(f"维保源表刷新启动失败: {exc}") from exc
+        return {
+            "maintenance_refresh_started": True,
+            "maintenance_refresh_inflight": True,
+            "maintenance_refresh_reused": False,
+        }
+
+    @classmethod
     def _refresh_repair_source_singleflight(cls) -> dict:
         now = time.monotonic()
         with cls.repair_refresh_lock:
@@ -1512,7 +1611,15 @@ class PortalRuntime:
     def source_refresh_status(cls, kind: str, *, month: str = "") -> dict:
         """Return a lightweight terminal/running state for remote source refreshes."""
         normalized_kind = str(kind or "").strip().lower()
-        if normalized_kind == "repair":
+        if normalized_kind == "maintenance":
+            lock = cls.maintenance_refresh_lock
+            with lock:
+                inflight = bool(cls.maintenance_refresh_inflight)
+                result = copy.deepcopy(cls.maintenance_refresh_last_result)
+                error = str(cls.maintenance_refresh_last_error or "")
+                started_at = float(cls.maintenance_refresh_started_at or 0)
+                completed_at = float(cls.maintenance_refresh_completed_at or 0)
+        elif normalized_kind == "repair":
             lock = cls.repair_refresh_lock
             with lock:
                 inflight = bool(cls.repair_refresh_inflight)
@@ -1960,6 +2067,27 @@ class PortalRuntime:
                 )
             except PortalError as exc:
                 return self._send_json(500, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/daily-tasks":
+            qs = parse_qs(parsed.query)
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                data = self.service.get_daily_task_checklist(
+                    scope=scope,
+                    date=(qs.get("date") or [""])[0],
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(
+                            self._with_runtime_warnings(data), session
+                        ),
+                    },
+                )
+            except PortalError as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/history-summary":
             qs = parse_qs(parsed.query)
             try:
@@ -2217,6 +2345,24 @@ class PortalRuntime:
                 )
                 data["source_refresh_triggered"] = refreshed
                 data.update(refresh_result)
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(
+                            self._with_runtime_warnings(data), session
+                        ),
+                    },
+                )
+            except PortalError as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/maintenance-refresh":
+            qs = parse_qs(parsed.query)
+            try:
+                self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                data = PortalRuntime.start_maintenance_source_refresh()
                 return self._send_json(
                     200,
                     {
@@ -3249,6 +3395,7 @@ class PortalRuntime:
                 for item in items
                 if isinstance(item, dict)
                 and not _is_ended(item)
+                and notice_payload_matches_month(item)
                 and _not_deleted_by_qt(item, deleted_keys)
                 and self.service._scope_matches_item(scope, item)
             ]
@@ -3293,6 +3440,7 @@ class PortalRuntime:
             for item in result
             if isinstance(item, dict)
             and not _is_ended(item)
+            and notice_payload_matches_month(item)
             and self.service._scope_matches_item(scope, item)
         ]
         return filtered
@@ -3379,6 +3527,19 @@ class PortalRuntime:
                             min_interval_seconds=min_interval_seconds
                         )
                     )
+                if refreshed and hasattr(
+                    cls.service,
+                    "refresh_notice_target_replicas",
+                ):
+                    target_refresh_result = (
+                        cls.service.refresh_notice_target_replicas()
+                    )
+                    for target_warning in (
+                        target_refresh_result.get("warnings") or []
+                    ):
+                        target_warning = str(target_warning or "").strip()
+                        if target_warning and target_warning not in warnings:
+                            warnings.append(target_warning)
                 if refreshed:
                     try:
                         service_warnings = (

@@ -12,6 +12,9 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.identity_utils import (  # noqa: E402
+    notice_payload_matches_month,
+)
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from lan_bitable_template_portal import workbench_lite  # noqa: E402
@@ -24,6 +27,51 @@ from upload_event_module.services.handlers.event_notice import EventNoticeHandle
 class NoticeIdentityBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = object.__new__(MaintenancePortalService)
+
+    def test_qt_active_notice_month_visibility_uses_business_dates(self) -> None:
+        current = {
+            "text": "【维保通告】状态：开始\n【时间】2026-07-08 09:00~2026-07-08 18:00"
+        }
+        old = {
+            "text": "【变更通告】状态：更新\n【时间】2026-04-08 09:00~2026-04-08 18:00"
+        }
+        cross_month = {
+            "start_time": "2026-06-28 09:00",
+            "end_time": "2026-08-02 18:00",
+        }
+        updated_this_month = {
+            "start_time": "2026-04-08 09:00",
+            "end_time": "2026-04-08 18:00",
+            "actions": [{"action": "update", "time": "2026-07-08 10:00"}],
+        }
+
+        self.assertTrue(
+            notice_payload_matches_month(current, month_key="2026-07")
+        )
+        self.assertFalse(notice_payload_matches_month(old, month_key="2026-07"))
+        self.assertTrue(
+            notice_payload_matches_month(cross_month, month_key="2026-07")
+        )
+        self.assertTrue(
+            notice_payload_matches_month(updated_this_month, month_key="2026-07")
+        )
+        self.assertTrue(
+            notice_payload_matches_month(
+                {"text": "【维保通告】状态：开始\n【名称】无日期通告"},
+                month_key="2026-07",
+            )
+        )
+
+    def test_qt_active_notice_month_visibility_ignores_root_cache_timestamp(self) -> None:
+        payload = {
+            "time_str": "2026-04-08 09:00~2026-04-08 18:00",
+            "created_at": "2026-07-08 09:00",
+            "last_updated_at": "2026-07-08 10:00",
+        }
+
+        self.assertFalse(
+            notice_payload_matches_month(payload, month_key="2026-07")
+        )
 
     def test_source_record_id_is_not_treated_as_target_record_id(self) -> None:
         payload = {
@@ -211,6 +259,53 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             self.assertIsNotNone(deleted_rows[0]["deleted_at"])
             self.assertEqual(result["preserved"], 1)
 
+    def test_stale_qt_delta_does_not_revive_explicitly_deleted_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            payload = {
+                "active_item_id": "qt-delta-deleted-1",
+                "target_record_id": "recQtDeltaDeleted1",
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "status": "更新",
+                "text": "【维保通告】状态：更新\n【名称】已结束旧通告",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="qt",
+                )
+            )
+            self.assertTrue(
+                store.delete_qt_active_item(active_item_id="qt-delta-deleted-1")
+            )
+
+            self.assertFalse(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="qt",
+                )
+            )
+            self.assertEqual(store.list_qt_active_items(include_deleted=False), [])
+
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="notice_undo",
+                    allow_revive=True,
+                )
+            )
+            self.assertEqual(
+                {
+                    row["active_item_id"]
+                    for row in store.list_qt_active_items(include_deleted=False)
+                },
+                {"qt-delta-deleted-1"},
+            )
+
     def test_live_portal_identity_repairs_snapshot_deleted_items_for_all_types(self) -> None:
         notice_types = (
             ("maintenance", "维保通告"),
@@ -246,6 +341,10 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 self.assertTrue(
                     store.delete_qt_active_item(active_item_id=active_item_id)
                 )
+                store.upsert_notice_identity(
+                    payload,
+                    origin="newer_live_confirmation",
+                )
 
             result = store.restore_live_portal_qt_active_items(
                 force=True,
@@ -258,6 +357,37 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             }
             self.assertEqual(result["restored"], len(notice_types))
             self.assertEqual(active_ids, expected_ids)
+
+    def test_stale_live_identity_does_not_restore_deleted_portal_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            payload = {
+                "active_item_id": "stale-live-portal-1",
+                "target_record_id": "recStaleLivePortal1",
+                "work_type": "repair",
+                "notice_type": "设备检修",
+                "status": "更新",
+                "text": "【设备检修】状态：更新\n【标题】旧版本已结束检修",
+                "lan_created_from_portal": True,
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="portal",
+                )
+            )
+            self.assertTrue(
+                store.delete_qt_active_item(active_item_id="stale-live-portal-1")
+            )
+
+            result = store.restore_live_portal_qt_active_items(
+                force=True,
+                grace_seconds=0,
+            )
+
+            self.assertEqual(result["restored"], 0)
+            self.assertEqual(store.list_qt_active_items(include_deleted=False), [])
 
     def test_live_portal_identity_does_not_restore_ended_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

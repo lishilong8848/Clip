@@ -445,6 +445,7 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "canonicalLiteUrlFromDocument",
         "refresh-picker",
         "lite-refresh-page",
+        "lite-refresh-maintenance",
         "lite-refresh-repair",
         "lite-refresh-change",
         "fetchLiteRefreshJson",
@@ -492,7 +493,9 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
     backend_markers = [
         "@app.get(\"/workbench-lite\")",
         "@app.post(\"/workbench-lite/parse\")",
+        "@app.get(\"/api/maintenance-refresh\")",
         "@app.get(\"/api/source-refresh-status\")",
+        "PortalRuntime.start_maintenance_source_refresh()",
         "PortalRuntime.request_repair_source_refresh()",
         "PortalRuntime.start_change_source_refresh()",
         "PortalRuntime.start_event_month_refresh(month)",

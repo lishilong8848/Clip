@@ -98,6 +98,14 @@
       @switch-scope="enterEventManagement"
     />
 
+    <DailyTaskChecklistPage
+      v-else-if="isDailyTaskPage"
+      :scope="currentScope"
+      :scope-options="visibleScopeOptions"
+      @status="syncText = $event"
+      @switch-scope="enterDailyTasks"
+    />
+
     <WaterManagementPage
       v-else-if="isWaterManagementPage"
       :scope="currentScope"
@@ -118,6 +126,7 @@
       @engineer="enterEngineerMop"
       @repair-management="enterRepairManagement"
       @water="enterWaterManagement"
+      @daily="enterDailyTasks"
       @request-permission="openAdditionalPermissionRequest"
     />
 
@@ -147,6 +156,7 @@ const AdminTools = asyncPage(() => import("./components/AdminTools.vue"));
 const AuthPanels = asyncPage(() => import("./components/AuthPanels.vue"));
 const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue"));
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
+const DailyTaskChecklistPage = asyncPage(() => import("./components/DailyTaskChecklistPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
@@ -224,6 +234,7 @@ const repairModuleComponent = computed(() => (
 ));
 const isSignaturePage = computed(() => routePath.value === "/signature");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
+const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
@@ -269,6 +280,7 @@ const headerSubtitle = computed(() => {
   if (isRepairStatusPage.value) return `${scopeLabel(currentScope.value)} · 检修状态`;
   if (isSignaturePage.value) return "线上签名 · 手机手写保存";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
+  if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (authChecking.value) return "功能选择 · 正在检查登录";
   if (!auth.loggedIn) return "功能选择 · 请先登录";
@@ -572,9 +584,21 @@ function enterWaterManagement(scope: string): void {
   navigate(url);
 }
 
+function enterDailyTasks(scope: string): void {
+  const url = new URL("/daily-tasks", window.location.origin);
+  url.searchParams.set("scope", normalizeScopeValue(scope));
+  const selectedDate = String(routeParams.value.get("date") || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(selectedDate)) {
+    url.searchParams.set("date", selectedDate);
+  }
+  navigate(url);
+}
+
 function switchScope(scope: string): void {
   if (isEventPage.value) {
     enterEventManagement(scope, true);
+  } else if (isDailyTaskPage.value) {
+    enterDailyTasks(scope);
   } else if (isWaterManagementPage.value) {
     enterWaterManagement(scope);
   }

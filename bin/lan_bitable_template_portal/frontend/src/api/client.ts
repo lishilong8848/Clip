@@ -160,7 +160,7 @@ export async function requestJson(
   return Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
 }
 
-export type RemoteSourceRefreshKind = "repair" | "change" | "event";
+export type RemoteSourceRefreshKind = "maintenance" | "repair" | "change" | "event";
 
 type RemoteSourceRefreshOptions = {
   scope?: string;

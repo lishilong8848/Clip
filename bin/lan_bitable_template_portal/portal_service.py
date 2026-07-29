@@ -42,6 +42,7 @@ from .identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
     is_local_record_id,
+    notice_payload_matches_month,
     normalize_notice_identity_payload,
 )
 from .signature_crypto import (
@@ -437,6 +438,7 @@ REPAIR_SNAPSHOT_SOURCE_EVENTS = "repair_events"
 REPAIR_SNAPSHOT_SOURCE_NOTICES = "repair_notices"
 REPAIR_SNAPSHOT_SOURCE_CMDB = "repair_cmdb"
 REPAIR_CMDB_SNAPSHOT_VERSION = 2
+REPAIR_PROJECT_CANONICAL_PROJECTION_VERSION = 1
 REPAIR_CMDB_SNAPSHOT_MAX_RECORDS = 100_000
 REPAIR_SNAPSHOT_TTL_SECONDS = {
     REPAIR_SNAPSHOT_SOURCE_PROJECTS: 2 * 60,
@@ -712,6 +714,15 @@ NOTICE_TYPE_POLLING = "设备轮巡"
 NOTICE_TYPE_ADJUST = "设备调整"
 WORK_TYPE_EVENT = "event"
 NOTICE_TYPE_EVENT = "事件通告"
+NOTICE_TARGET_SNAPSHOT_SOURCE_BY_WORK_TYPE = {
+    WORK_TYPE_MAINTENANCE: "notice_target.maintenance",
+    WORK_TYPE_CHANGE: "notice_target.change",
+    WORK_TYPE_REPAIR: REPAIR_SNAPSHOT_SOURCE_NOTICES,
+    WORK_TYPE_POWER: "notice_target.power",
+    WORK_TYPE_POLLING: "notice_target.polling",
+    WORK_TYPE_ADJUST: "notice_target.adjust",
+    WORK_TYPE_EVENT: REPAIR_SNAPSHOT_SOURCE_EVENTS,
+}
 NOTICE_TIME_SEPARATOR = "~"
 NOTICE_TEXT_TEMPLATES = {
     WORK_TYPE_MAINTENANCE: {
@@ -1206,7 +1217,9 @@ class MaintenancePortalService:
         self._work_status_backfilled = False
         self._work_status_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._work_status_cache_items: list[dict[str, Any]] | None = None
-        self._target_record_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._target_record_cache: dict[
+            tuple[str, str, str], dict[str, Any]
+        ] = {}
         self._engineer_mop_cache_lock = threading.RLock()
         self._engineer_mop_cache: dict[str, Any] | None = None
         self._signature_people_cache_lock = threading.RLock()
@@ -1628,13 +1641,29 @@ class MaintenancePortalService:
                         )
                 normalized_records.append(normalized)
             records = normalized_records
+        if table_id == REPAIR_MANAGEMENT_TABLE_ID:
+            records, _duplicate_groups = (
+                self._canonical_repair_management_projects(
+                    records,
+                    meta_by_name={
+                        meta.field_name: meta for meta in metas
+                    },
+                )
+            )
         return metas, {meta.field_name: meta for meta in metas}, records
 
     def _repair_project_status_source_signature(self) -> str:
-        source_state = []
+        source_state = [
+            {
+                "canonical_projection_version": (
+                    REPAIR_PROJECT_CANONICAL_PROJECTION_VERSION
+                )
+            }
+        ]
         for source_key in (
             REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+            REPAIR_SNAPSHOT_SOURCE_NOTICES,
         ):
             meta = self._state_store.get_repair_snapshot_meta(source_key)
             source_state.append(
@@ -1654,6 +1683,7 @@ class MaintenancePortalService:
         *,
         meta_by_name: dict[str, FieldMeta],
         followups: list[dict[str, Any]],
+        target_record: dict[str, Any] | None,
         state_verified: bool,
     ) -> dict[str, Any]:
         record_payload = self._repair_management_record_payload(
@@ -1661,9 +1691,23 @@ class MaintenancePortalService:
             meta_by_name=meta_by_name,
             authoritative_followup_count=len(followups),
             authoritative_followups=followups,
+            authoritative_target_record=target_record,
             followup_state_verified=state_verified,
             summary_only=True,
         )
+        completion_record = dict(record)
+        target_projection = self._repair_management_relation_projection_fields(
+            target_record=target_record,
+        )
+        if target_projection:
+            for container_name in ("raw_fields", "display_fields"):
+                container = (
+                    dict(record.get(container_name))
+                    if isinstance(record.get(container_name), dict)
+                    else {}
+                )
+                container.update(target_projection)
+                completion_record[container_name] = container
         latest_followup_sort_time = 0.0
         valid_followups = [
             item for item in followups if isinstance(item, dict)
@@ -1697,7 +1741,7 @@ class MaintenancePortalService:
             ),
             "latest_followup_sort_time": latest_followup_sort_time,
             "completed_at": repair_completed_at_seconds(
-                record,
+                completion_record,
                 is_completed=is_completed,
                 parse_datetime_ms=self._repair_management_datetime_ms,
             ),
@@ -1730,6 +1774,21 @@ class MaintenancePortalService:
                 for item in projects
                 if str(item.get("record_id") or "").strip()
             ]
+            target_ids_by_project = {
+                str(project.get("record_id") or "").strip(): (
+                    self._repair_target_record_id(project)
+                )
+                for project in projects
+                if str(project.get("record_id") or "").strip()
+            }
+            target_records_by_id = self._repair_relation_snapshot_records(
+                REPAIR_SNAPSHOT_SOURCE_NOTICES,
+                {
+                    target_record_id
+                    for target_record_id in target_ids_by_project.values()
+                    if target_record_id
+                },
+            )
             followup_meta = self._state_store.get_repair_snapshot_meta(
                 REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
             )
@@ -1751,6 +1810,12 @@ class MaintenancePortalService:
                             str(project.get("record_id") or "").strip()
                         )
                         or []
+                    ),
+                    target_record=target_records_by_id.get(
+                        target_ids_by_project.get(
+                            str(project.get("record_id") or "").strip(),
+                            "",
+                        ),
                     ),
                     state_verified=followup_state_verified,
                 )
@@ -1798,15 +1863,11 @@ class MaintenancePortalService:
         if force_refresh or not followup_meta.get("exists"):
             self._load_repair_followup_snapshot(force_refresh=force_refresh)
         expected_signature = self._repair_project_status_source_signature()
-        project_meta = self._state_store.get_repair_snapshot_meta(
-            REPAIR_SNAPSHOT_SOURCE_PROJECTS
-        )
         index_meta = self._state_store.repair_project_status_index_meta()
         if (
             str(index_meta.get("source_signature") or "")
             == expected_signature
-            and int(index_meta.get("record_count") or 0)
-            == int(project_meta.get("record_count") or 0)
+            and float(index_meta.get("updated_at") or 0) > 0
         ):
             return {"status": "ready", **index_meta}
         return self._rebuild_repair_project_status_index()
@@ -1844,7 +1905,6 @@ class MaintenancePortalService:
             return {}
         project_snapshot = self._state_store.get_repair_snapshot(
             REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-            record_ids=[summary_id],
         )
         _metas, meta_by_name, projects = self._repair_snapshot_from_local(
             project_snapshot
@@ -1949,6 +2009,21 @@ class MaintenancePortalService:
                     return self._repair_snapshot_from_local(current)
             try:
                 metas, records = loader()
+                upstream_records = [
+                    dict(item) for item in records if isinstance(item, dict)
+                ]
+                projected_records = list(upstream_records)
+                upstream_record_count = len(upstream_records)
+                duplicate_groups: list[dict[str, Any]] = []
+                if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS:
+                    projected_records, duplicate_groups = (
+                        self._canonical_repair_management_projects(
+                            upstream_records,
+                            meta_by_name={
+                                meta.field_name: meta for meta in metas
+                            },
+                        )
+                    )
                 self._state_store.replace_repair_snapshot(
                     source_key,
                     records=[
@@ -1956,8 +2031,7 @@ class MaintenancePortalService:
                             record,
                             parent_field_name=parent_field_name,
                         )
-                        for record in records
-                        if isinstance(record, dict)
+                        for record in upstream_records
                     ],
                     app_token=app_token,
                     table_id=table_id,
@@ -1966,6 +2040,25 @@ class MaintenancePortalService:
                     ],
                     meta={
                         "source_key": source_key,
+                        **(
+                            {
+                                "canonical_projection_version": (
+                                    REPAIR_PROJECT_CANONICAL_PROJECTION_VERSION
+                                ),
+                                "upstream_record_count": upstream_record_count,
+                                "duplicate_group_count": len(duplicate_groups),
+                                "suppressed_duplicate_count": sum(
+                                    len(
+                                        item.get("duplicate_record_ids") or []
+                                    )
+                                    for item in duplicate_groups
+                                ),
+                                "duplicate_groups": duplicate_groups,
+                            }
+                            if source_key
+                            == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                            else {}
+                        ),
                         **(
                             {"catalog_version": REPAIR_CMDB_SNAPSHOT_VERSION}
                             if source_key == REPAIR_SNAPSHOT_SOURCE_CMDB
@@ -1976,23 +2069,29 @@ class MaintenancePortalService:
                 if source_key in {
                     REPAIR_SNAPSHOT_SOURCE_PROJECTS,
                     REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                    REPAIR_SNAPSHOT_SOURCE_NOTICES,
                 }:
                     with suppress(Exception):
                         self._rebuild_repair_project_status_index()
                     with suppress(Exception):
                         self._emit_repair_management_change(
-                            entity_type=(
-                                "project"
-                                if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
-                                else "followup"
-                            ),
+                            entity_type={
+                                REPAIR_SNAPSHOT_SOURCE_PROJECTS: "project",
+                                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS: "followup",
+                                REPAIR_SNAPSHOT_SOURCE_NOTICES: "repair_notice",
+                            }[source_key],
                             action="refresh",
                             payload={
                                 "source_key": source_key,
-                                "record_count": len(records),
+                                "record_count": len(upstream_records),
+                                "projected_record_count": len(projected_records),
                             },
                         )
-                return metas, {meta.field_name: meta for meta in metas}, records
+                return (
+                    metas,
+                    {meta.field_name: meta for meta in metas},
+                    projected_records,
+                )
             except Exception as exc:
                 self._state_store.mark_repair_snapshot_failed(source_key, str(exc))
                 stale = self._state_store.get_repair_snapshot(source_key)
@@ -2062,6 +2161,15 @@ class MaintenancePortalService:
     ) -> tuple[list[FieldMeta], dict[str, FieldMeta], list[dict[str, Any]]]:
         if not self._repair_snapshots_enabled:
             metas, records = loader()
+            if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS:
+                records, _duplicate_groups = (
+                    self._canonical_repair_management_projects(
+                        records,
+                        meta_by_name={
+                            meta.field_name: meta for meta in metas
+                        },
+                    )
+                )
             return metas, {meta.field_name: meta for meta in metas}, records
         snapshot = self._state_store.get_repair_snapshot(source_key)
         if snapshot.get("records") and (
@@ -4668,6 +4776,221 @@ class MaintenancePortalService:
         return "未命名维修项目"
 
     @classmethod
+    def _repair_management_identity_fields(
+        cls,
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for bucket_name in ("raw_fields", "display_fields"):
+            bucket = record.get(bucket_name)
+            if not isinstance(bucket, dict):
+                continue
+            result.update(
+                cls._repair_logical_record_fields(
+                    REPAIR_MANAGEMENT_TABLE_ID,
+                    bucket,
+                )
+            )
+        return result
+
+    @staticmethod
+    def _repair_management_identity_text(value: Any) -> str:
+        return re.sub(
+            r"[^0-9a-z\u4e00-\u9fff]+",
+            "",
+            str(value or "").casefold(),
+        )
+
+    @classmethod
+    def _repair_management_business_identity(
+        cls,
+        record: dict[str, Any],
+    ) -> str:
+        fields = cls._repair_management_identity_fields(record)
+        description = cls._repair_management_plain_text(
+            fields.get("故障维修原因")
+            or fields.get("告警描述")
+            or fields.get("事件描述")
+            or fields.get("故障发生现象描述")
+            or fields.get("维修名称")
+            or record.get("title")
+            or ""
+        ).strip()
+        fault_time = (
+            fields.get("故障发生时间")
+            or fields.get("事件发生时间")
+            or ""
+        )
+        building_value = (
+            fields.get("所属数据中心/楼栋-使用")
+            or fields.get("楼栋")
+            or fields.get("机楼")
+            or ""
+        )
+        description_key = cls._repair_management_identity_text(description)
+        fault_time_ms = cls._repair_management_datetime_ms(fault_time)
+        building_codes = sorted(
+            set(cls._repair_building_codes_from_value(building_value))
+        )
+        if not description_key or fault_time_ms is None or not building_codes:
+            return ""
+        return "|".join(
+            (
+                description_key,
+                str(int(fault_time_ms) // 60_000),
+                ",".join(building_codes),
+            )
+        )
+
+    @classmethod
+    def _repair_management_event_business_identity(
+        cls,
+        event: dict[str, Any],
+    ) -> str:
+        display_fields = (
+            event.get("display_fields")
+            if isinstance(event.get("display_fields"), dict)
+            else {}
+        )
+        building_value: Any = (
+            event.get("building_codes")
+            or event.get("building")
+            or display_fields.get("机楼")
+            or display_fields.get("楼栋")
+            or ""
+        )
+        record = {
+            "display_fields": {
+                "故障维修原因": (
+                    event.get("alarm_desc")
+                    or event.get("title")
+                    or display_fields.get("告警描述")
+                    or ""
+                ),
+                "故障发生时间": (
+                    event.get("occurrence_time")
+                    or display_fields.get("事件发生时间")
+                    or ""
+                ),
+                "所属数据中心/楼栋-使用": building_value,
+            }
+        }
+        return cls._repair_management_business_identity(record)
+
+    @classmethod
+    def _repair_management_project_canonical_score(
+        cls,
+        record: dict[str, Any],
+        *,
+        followups: list[dict[str, Any]] | None = None,
+        meta_by_name: dict[str, FieldMeta] | None = None,
+    ) -> tuple[int, int, int, int, int, int, str]:
+        fields = cls._repair_management_identity_fields(record)
+        linked_followup_ids = cls._repair_management_record_ids(
+            fields.get("维修跟进记录")
+        )
+        followup_count = (
+            len([item for item in followups if isinstance(item, dict)])
+            if followups is not None
+            else len(linked_followup_ids)
+        )
+        progress_value: Any = fields.get("当前维修进度")
+        if followups:
+            latest_followup = max(
+                (item for item in followups if isinstance(item, dict)),
+                key=cls._repair_followup_order_key,
+                default={},
+            )
+            latest_fields = cls._repair_management_identity_fields(
+                latest_followup
+            )
+            progress_value = latest_fields.get("维修进度")
+        progress_percent = cls._repair_followup_progress_percent(progress_value)
+        workflow = cls._repair_management_workflow_text(
+            record,
+            meta_by_name,
+        )
+        end_time_ms = cls._repair_management_datetime_ms(
+            fields.get("维修结束时间（2026）")
+            or fields.get("维修结束时间")
+        )
+        modified_time_ms = cls._repair_management_datetime_ms(
+            record.get("last_modified_time")
+            or fields.get("最后修改时间")
+            or record.get("created_time")
+        )
+        return (
+            int(followup_count > 0),
+            followup_count,
+            int(workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW),
+            int(round(progress_percent or 0)),
+            int(end_time_ms is not None),
+            int(modified_time_ms or 0),
+            str(record.get("record_id") or ""),
+        )
+
+    @classmethod
+    def _canonical_repair_management_projects(
+        cls,
+        records: list[dict[str, Any]],
+        *,
+        followups_by_project: dict[str, list[dict[str, Any]]] | None = None,
+        meta_by_name: dict[str, FieldMeta] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        candidates: dict[str, list[dict[str, Any]]] = {}
+        passthrough: list[dict[str, Any]] = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            record_id = str(item.get("record_id") or "").strip()
+            if record_id and is_local_record_id(record_id):
+                continue
+            identity = cls._repair_management_business_identity(item)
+            if not identity:
+                passthrough.append(item)
+                continue
+            candidates.setdefault(identity, []).append(item)
+
+        selected_ids: set[int] = {id(item) for item in passthrough}
+        duplicate_groups: list[dict[str, Any]] = []
+        for identity, group in candidates.items():
+            selected = max(
+                group,
+                key=lambda item: cls._repair_management_project_canonical_score(
+                    item,
+                    followups=(
+                        (followups_by_project or {}).get(
+                            str(item.get("record_id") or "").strip()
+                        )
+                        if followups_by_project is not None
+                        else None
+                    ),
+                    meta_by_name=meta_by_name,
+                ),
+            )
+            selected_ids.add(id(selected))
+            if len(group) <= 1:
+                continue
+            selected_record_id = str(selected.get("record_id") or "").strip()
+            duplicate_groups.append(
+                {
+                    "identity": hashlib.sha256(
+                        identity.encode("utf-8")
+                    ).hexdigest()[:16],
+                    "canonical_record_id": selected_record_id,
+                    "duplicate_record_ids": [
+                        str(item.get("record_id") or "").strip()
+                        for item in group
+                        if item is not selected
+                    ],
+                }
+            )
+        return (
+            [item for item in records if id(item) in selected_ids],
+            duplicate_groups,
+        )
+
+    @classmethod
     def _repair_management_workflow_text(
         cls,
         record: dict[str, Any],
@@ -5324,33 +5647,12 @@ class MaintenancePortalService:
                 app_token=app_token,
                 table_id=table_id,
             )
-            records = self._search_table_records(
+            records = self._load_table_records(
                 app_token=app_token,
                 table_id=table_id,
                 meta_by_name=meta_by_name,
                 work_type=WORK_TYPE_REPAIR,
                 notice_type=NOTICE_TYPE_REPAIR,
-                field_names=(
-                    "检修概述",
-                    "专业",
-                    "楼栋",
-                    "检修状态",
-                    "位置",
-                    "名称（标题）",
-                    "紧急程度",
-                    "维修设备",
-                    "维修故障",
-                    "故障现象",
-                    "故障原因",
-                    "维修方式",
-                    "发生故障时间",
-                    "实际开始时间",
-                    "实际结束时间",
-                    REPAIR_TARGET_SUMMARY_ID_FIELD_NAME,
-                    "创建时间",
-                ),
-                sort_field="创建时间",
-                limit=250,
             )
             self._repair_management_target_cache = {
                 "loaded_at": time.monotonic(),
@@ -5458,40 +5760,12 @@ class MaintenancePortalService:
                 app_token=app_token,
                 table_id=table_id,
             )
-            records = self._search_table_records(
+            records = self._load_table_records(
                 app_token=app_token,
                 table_id=table_id,
                 meta_by_name=meta_by_name,
                 work_type=WORK_TYPE_EVENT,
                 notice_type=NOTICE_TYPE_EVENT,
-                field_names=(
-                    "事件简述",
-                    "告警描述",
-                    "故障现象",
-                    "事件等级",
-                    "事件发现来源",
-                    "事件发现来源（统一）",
-                    "事件发生时间",
-                    "事件进展响应时间",
-                    "事件状态",
-                    "最终状态",
-                    "事件目前进展",
-                    "事件发生原因",
-                    "事件应急措施",
-                    "事件解决措施",
-                    "备注",
-                    "最后更新时间",
-                    "进展更新时间",
-                    "是否转检修",
-                    "机楼",
-                    "南通楼栋",
-                    "专业",
-                    "值班账号",
-                    "工程师（消息推送）",
-                    "创建时间",
-                ),
-                sort_field="事件发生时间",
-                limit=500,
             )
             self._repair_management_event_cache = {
                 "loaded_at": time.monotonic(),
@@ -12999,6 +13273,11 @@ class MaintenancePortalService:
                     "completed_followup_count": completed_count,
                     "progress_percent": progress_percent,
                     "completed_at": completed_at_ms,
+                    "project_created_time": self._repair_management_plain_text(
+                        project_fields.get("创建日期")
+                        or project_raw_fields.get("创建日期")
+                        or project.get("created_time")
+                    ),
                     "latest_followup_time": self._repair_management_plain_text(
                         latest_fields.get("创建时间")
                         or latest_followup.get("last_modified_time")
@@ -13158,6 +13437,168 @@ class MaintenancePortalService:
             },
         }
 
+    def _repair_management_relation_projection_fields(
+        self,
+        *,
+        target_record: dict[str, Any] | None = None,
+        event_record: dict[str, Any] | None = None,
+        followups: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        projected: dict[str, Any] = {}
+        target_fields = self._target_record_fields(target_record)
+        if target_fields:
+            target_config = get_field_config(NOTICE_TYPE_REPAIR)
+
+            def target_value(logical_name: str, *fallbacks: str) -> Any:
+                names = (
+                    str(target_config.get(logical_name) or "").strip(),
+                    *fallbacks,
+                )
+                for field_name in names:
+                    if field_name and field_name in target_fields:
+                        return target_fields.get(field_name)
+                return None
+
+            projected["检修通告名称"] = self._repair_management_plain_text(
+                target_value("title", "名称（标题）", "检修概述")
+            )
+            projected["维修开始时间"] = target_value(
+                "actual_start",
+                "实际开始时间",
+            )
+            projected["维修结束时间（2026）"] = target_value(
+                "actual_end",
+                "实际结束时间",
+            )
+            projected["维修进展描述"] = self._repair_management_plain_text(
+                target_value("progress", "进度（完成情况）")
+            )
+            projected["设备名称"] = self._repair_management_plain_text(
+                target_value("repair_device", "维修设备")
+            )
+
+        event_fields = self._target_record_fields(event_record)
+        if event_fields:
+            alarm_desc = self._repair_management_plain_text(
+                event_fields.get("告警描述")
+            )
+            projected["对应来源"] = self._repair_management_plain_text(
+                event_fields.get("事件发现来源（统一）")
+            )
+            projected["对应事件等级"] = self._repair_management_plain_text(
+                event_fields.get("事件等级")
+            )
+            projected["故障发生时间"] = event_fields.get("事件发生时间")
+            projected["故障维修原因"] = alarm_desc
+            projected["故障发生现象描述"] = alarm_desc
+            projected["事件描述"] = alarm_desc
+            building_codes = self._repair_building_codes_from_value(
+                event_fields.get("机楼")
+            )
+            if building_codes:
+                projected["所属数据中心/楼栋-使用"] = (
+                    self._repair_management_building_label(building_codes)
+                )
+            specialty = self._repair_management_plain_text(
+                event_fields.get("专业")
+                or event_fields.get("所属专业")
+            )
+            if specialty:
+                projected["所属专业"] = specialty
+
+        verified_followups = [
+            item for item in (followups or []) if isinstance(item, dict)
+        ]
+        if followups is not None and not verified_followups:
+            for field_name in (
+                REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME,
+                "设备编号",
+                "设备品牌",
+                "设备型号",
+                "维修进展描述",
+                "跟进项",
+                "后续整改措施",
+                "维修方",
+                "供应商名称",
+                "供应商维修人员",
+                "最新维修跟进时间",
+            ):
+                projected[field_name] = ""
+            if not target_fields:
+                projected["设备名称"] = ""
+        if verified_followups:
+            latest = max(
+                verified_followups,
+                key=self._repair_followup_order_key,
+            )
+            latest_raw = (
+                latest.get("raw_fields")
+                if isinstance(latest.get("raw_fields"), dict)
+                else {}
+            )
+            latest_display = (
+                latest.get("display_fields")
+                if isinstance(latest.get("display_fields"), dict)
+                else {}
+            )
+
+            def latest_value(field_name: str) -> Any:
+                value = latest_display.get(field_name)
+                if value in (None, "", [], {}):
+                    value = latest_raw.get(field_name)
+                return value
+
+            def unique_followup_text(field_name: str) -> str:
+                values: list[Any] = []
+                for followup in verified_followups:
+                    visible = (
+                        followup.get("display_fields")
+                        if isinstance(followup.get("display_fields"), dict)
+                        else {}
+                    )
+                    raw = (
+                        followup.get("raw_fields")
+                        if isinstance(followup.get("raw_fields"), dict)
+                        else {}
+                    )
+                    value = visible.get(field_name)
+                    if value in (None, "", [], {}):
+                        value = raw.get(field_name)
+                    values.append(value)
+                return self._repair_management_unique_text(values)
+
+            projected[REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME] = ",".join(
+                str(item.get("record_id") or "").strip()
+                for item in verified_followups
+                if str(item.get("record_id") or "").strip()
+            )
+            for target_name, source_name in (
+                ("设备名称", REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME),
+                ("设备编号", REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME),
+                ("设备品牌", REPAIR_FOLLOWUP_BRAND_FIELD_NAME),
+                ("设备型号", REPAIR_FOLLOWUP_MODEL_FIELD_NAME),
+            ):
+                projected[target_name] = unique_followup_text(source_name)
+            for target_name, source_name in (
+                ("维修进展描述", "维修进展描述"),
+                ("跟进项", "跟进项（如有）"),
+                ("后续整改措施", "后续整改措施（如有）"),
+                ("维修方", REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME),
+                ("供应商名称", REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME),
+                (
+                    "供应商维修人员",
+                    REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME,
+                ),
+            ):
+                projected[target_name] = latest_value(source_name)
+            projected["最新维修跟进时间"] = self._format_source_datetime(
+                latest_display.get("创建时间")
+                or latest_raw.get("创建时间")
+                or latest.get("last_modified_time")
+                or latest.get("created_time")
+            )
+        return projected
+
     def _repair_management_record_payload(
         self,
         item: dict[str, Any],
@@ -13165,6 +13606,8 @@ class MaintenancePortalService:
         meta_by_name: dict[str, FieldMeta] | None = None,
         authoritative_followup_count: int | None = None,
         authoritative_followups: list[dict[str, Any]] | None = None,
+        authoritative_target_record: dict[str, Any] | None = None,
+        authoritative_event_record: dict[str, Any] | None = None,
         followup_state_verified: bool = True,
         summary_only: bool = False,
     ) -> dict[str, Any]:
@@ -13175,6 +13618,11 @@ class MaintenancePortalService:
         )
         source_event_ids = self._repair_management_record_ids(
             raw_fields.get("关联事件单")
+            or (
+                item.get("display_fields", {}).get("关联事件单")
+                if isinstance(item.get("display_fields"), dict)
+                else None
+            )
         )
         repair_target_record_id = self._repair_target_record_id(item)
         source_repair_ids = (
@@ -13193,6 +13641,13 @@ class MaintenancePortalService:
             )
             for field_name, value in display_fields.items()
         }
+        display_fields.update(
+            self._repair_management_relation_projection_fields(
+                target_record=authoritative_target_record,
+                event_record=authoritative_event_record,
+                followups=authoritative_followups,
+            )
+        )
         followup_ids = self._repair_management_record_ids(
             raw_fields.get("维修跟进记录")
             or display_fields.get("维修跟进记录")
@@ -13259,8 +13714,9 @@ class MaintenancePortalService:
             has_followup = int(authoritative_followup_count or 0) > 0
         else:
             has_followup = bool(followup_ids)
+        projected_item = {**item, "display_fields": display_fields}
         workflow = self._repair_management_effective_workflow(
-            item,
+            projected_item,
             has_followup=has_followup,
             latest_progress_percent=progress_percent,
             meta_by_name=meta_by_name,
@@ -13269,7 +13725,7 @@ class MaintenancePortalService:
         payload = {
             "record_id": str(item.get("record_id") or ""),
             "record_version": self._repair_record_version(item),
-            "title": self._repair_management_title(item),
+            "title": self._repair_management_title(projected_item),
             "created_time": created_time,
             "last_modified_time": last_modified_time,
             "building_codes": self._repair_record_building_codes(item),
@@ -13320,6 +13776,31 @@ class MaintenancePortalService:
         else:
             payload["summary_only"] = False
         return payload
+
+    def _repair_relation_snapshot_records(
+        self,
+        source_key: str,
+        record_ids: list[str] | tuple[str, ...] | set[str],
+    ) -> dict[str, dict[str, Any]]:
+        normalized_ids = list(
+            dict.fromkeys(
+                str(record_id or "").strip()
+                for record_id in record_ids
+                if str(record_id or "").strip()
+            )
+        )
+        if not normalized_ids:
+            return {}
+        snapshot = self._state_store.get_repair_snapshot(
+            source_key,
+            record_ids=normalized_ids,
+        )
+        return {
+            str(record.get("record_id") or "").strip(): record
+            for record in (snapshot.get("records") or [])
+            if isinstance(record, dict)
+            and str(record.get("record_id") or "").strip()
+        }
 
     def get_repair_management_record(
         self,
@@ -13408,12 +13889,35 @@ class MaintenancePortalService:
         schema_warnings = self._repair_management_schema_warnings(meta_by_name)
         if followup_state_warning:
             schema_warnings = [*schema_warnings, followup_state_warning]
+        target_record_id = self._repair_target_record_id(record)
+        event_record_ids = self._repair_management_record_ids(
+            (
+                (record.get("raw_fields") or {}).get("关联事件单")
+                if isinstance(record.get("raw_fields"), dict)
+                else None
+            )
+            or (
+                (record.get("display_fields") or {}).get("关联事件单")
+                if isinstance(record.get("display_fields"), dict)
+                else None
+            )
+        )
+        target_record = self._repair_relation_snapshot_records(
+            REPAIR_SNAPSHOT_SOURCE_NOTICES,
+            [target_record_id] if target_record_id else [],
+        ).get(target_record_id)
+        event_record = self._repair_relation_snapshot_records(
+            REPAIR_SNAPSHOT_SOURCE_EVENTS,
+            event_record_ids[:1],
+        ).get(event_record_ids[0] if event_record_ids else "")
         return {
             "record": self._repair_management_record_payload(
                 record,
                 meta_by_name=meta_by_name,
                 authoritative_followup_count=authoritative_followup_count,
                 authoritative_followups=authoritative_followups,
+                authoritative_target_record=target_record,
+                authoritative_event_record=event_record,
                 followup_state_verified=followup_state_verified,
             ),
             "fields": [self._repair_management_field_payload(meta) for meta in metas],
@@ -13488,6 +13992,34 @@ class MaintenancePortalService:
                 followups_by_record = {}
                 followup_state_verified = False
                 followup_state_warning = f"维修跟进状态暂未确认：{exc}"
+            target_ids_by_project = {
+                str(item.get("record_id") or "").strip(): (
+                    self._repair_target_record_id(item)
+                )
+                for item in page_records
+            }
+            event_ids_by_project = {
+                str(item.get("record_id") or "").strip(): (
+                    self._repair_management_record_ids(
+                        (item.get("raw_fields") or {}).get("关联事件单")
+                        if isinstance(item.get("raw_fields"), dict)
+                        else None
+                    )
+                )
+                for item in page_records
+            }
+            target_records_by_id = self._repair_relation_snapshot_records(
+                REPAIR_SNAPSHOT_SOURCE_NOTICES,
+                list(target_ids_by_project.values()),
+            )
+            event_records_by_id = self._repair_relation_snapshot_records(
+                REPAIR_SNAPSHOT_SOURCE_EVENTS,
+                [
+                    event_id
+                    for event_ids in event_ids_by_project.values()
+                    for event_id in event_ids[:1]
+                ],
+            )
             payload_records = [
                 self._repair_management_record_payload(
                     item,
@@ -13511,6 +14043,21 @@ class MaintenancePortalService:
                         )
                         if followups_by_record is not None
                         else None
+                    ),
+                    authoritative_target_record=target_records_by_id.get(
+                        target_ids_by_project.get(
+                            str(item.get("record_id") or "").strip(),
+                            "",
+                        ),
+                    ),
+                    authoritative_event_record=event_records_by_id.get(
+                        (
+                            event_ids_by_project.get(
+                                str(item.get("record_id") or "").strip(),
+                                [],
+                            )
+                            or [""]
+                        )[0],
                     ),
                     followup_state_verified=followup_state_verified,
                     summary_only=summary_only,
@@ -13704,8 +14251,37 @@ class MaintenancePortalService:
             )
             if focus_index >= 0:
                 page_offset = (focus_index // max_limit) * max_limit
+        page_items = records[page_offset : page_offset + max_limit]
+        target_ids_by_project = {
+            str(item.get("record_id") or "").strip(): (
+                self._repair_target_record_id(item)
+            )
+            for item in page_items
+        }
+        event_ids_by_project = {
+            str(item.get("record_id") or "").strip(): (
+                self._repair_management_record_ids(
+                    (item.get("raw_fields") or {}).get("关联事件单")
+                    if isinstance(item.get("raw_fields"), dict)
+                    else None
+                )
+            )
+            for item in page_items
+        }
+        target_records_by_id = self._repair_relation_snapshot_records(
+            REPAIR_SNAPSHOT_SOURCE_NOTICES,
+            list(target_ids_by_project.values()),
+        )
+        event_records_by_id = self._repair_relation_snapshot_records(
+            REPAIR_SNAPSHOT_SOURCE_EVENTS,
+            [
+                event_id
+                for event_ids in event_ids_by_project.values()
+                for event_id in event_ids[:1]
+            ],
+        )
         payload_records = []
-        for item in records[page_offset : page_offset + max_limit]:
+        for item in page_items:
             record_id = str(item.get("record_id") or "").strip()
             payload_records.append(
                 self._repair_management_record_payload(
@@ -13720,6 +14296,12 @@ class MaintenancePortalService:
                         list((followups_by_record or {}).get(record_id) or [])
                         if followups_by_record is not None
                         else None
+                    ),
+                    authoritative_target_record=target_records_by_id.get(
+                        target_ids_by_project.get(record_id, "")
+                    ),
+                    authoritative_event_record=event_records_by_id.get(
+                        (event_ids_by_project.get(record_id, []) or [""])[0]
                     ),
                     followup_state_verified=followup_state_verified,
                     summary_only=summary_only,
@@ -13875,53 +14457,88 @@ class MaintenancePortalService:
         event_record_id = str(event_record_id or "").strip()
         if not event_record_id.startswith("rec") or is_local_record_id(event_record_id):
             raise PortalError("事件结束已上传，但缺少有效的事件目标记录 ID，无法创建维修单。")
-        _metas, _meta_by_name, projects = (
-            self._load_repair_management_project_records()
-        )
-        for project in projects:
-            raw_fields = (
-                project.get("raw_fields")
-                if isinstance(project.get("raw_fields"), dict)
-                else {}
-            )
-            display_fields = (
-                project.get("display_fields")
-                if isinstance(project.get("display_fields"), dict)
-                else {}
-            )
-            linked_ids = self._repair_management_record_ids(
-                raw_fields.get("关联事件单")
-                or display_fields.get("关联事件单")
-            )
-            if event_record_id not in linked_ids:
-                continue
-            return {
-                "record_id": str(project.get("record_id") or "").strip(),
-                "created": False,
-                "idempotent_replay": True,
-                "warnings": [],
-            }
         event_record = self._repair_management_event_from_notice_payload(
             record_id=event_record_id,
             notice_data=notice_data,
             remote_fields=remote_fields,
             scope=scope,
         )
-        response = self.create_repair_management_record(
-            {},
-            operation_id=(
-                f"event-end-transfer:{REPAIR_MANAGEMENT_TABLE_ID}:{event_record_id}"
-            ),
-            source_event_id=event_record_id,
-            source_repair_ids=[],
-            source_month=source_month,
-            scope=scope,
-            source_event_record=event_record,
-            sync_event_transfer_status=False,
-            retry_failed_operation=True,
+        event_identity = self._repair_management_event_business_identity(
+            event_record
         )
-        response["created"] = not bool(response.get("idempotent_replay"))
-        return response
+        lock_identity = event_identity or f"event:{event_record_id}"
+        lock_key = (
+            "repair-business:"
+            + hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()
+        )
+        with self._repair_management_record_lock(lock_key):
+            _metas, project_meta_by_name, projects = (
+                self._load_repair_management_project_records()
+            )
+            for project in projects:
+                raw_fields = (
+                    project.get("raw_fields")
+                    if isinstance(project.get("raw_fields"), dict)
+                    else {}
+                )
+                display_fields = (
+                    project.get("display_fields")
+                    if isinstance(project.get("display_fields"), dict)
+                    else {}
+                )
+                linked_ids = self._repair_management_record_ids(
+                    raw_fields.get("关联事件单")
+                    or display_fields.get("关联事件单")
+                )
+                if event_record_id not in linked_ids:
+                    continue
+                return {
+                    "record_id": str(project.get("record_id") or "").strip(),
+                    "created": False,
+                    "idempotent_replay": True,
+                    "warnings": [],
+                }
+            if event_identity:
+                semantic_matches = [
+                    project
+                    for project in projects
+                    if self._repair_management_business_identity(project)
+                    == event_identity
+                ]
+                if semantic_matches:
+                    selected, _duplicate_groups = (
+                        self._canonical_repair_management_projects(
+                            semantic_matches,
+                            meta_by_name=project_meta_by_name,
+                        )
+                    )
+                    existing = selected[0] if selected else semantic_matches[0]
+                    return {
+                        "record_id": str(existing.get("record_id") or "").strip(),
+                        "created": False,
+                        "idempotent_replay": True,
+                        "duplicate_prevented": True,
+                        "warnings": [
+                            "多维表中已存在同一故障、时间和楼栋的维修单，"
+                            "已复用原记录。"
+                        ],
+                    }
+            response = self.create_repair_management_record(
+                {},
+                operation_id=(
+                    f"event-end-transfer:{REPAIR_MANAGEMENT_TABLE_ID}:"
+                    f"{event_record_id}"
+                ),
+                source_event_id=event_record_id,
+                source_repair_ids=[],
+                source_month=source_month,
+                scope=scope,
+                source_event_record=event_record,
+                sync_event_transfer_status=False,
+                retry_failed_operation=True,
+            )
+            response["created"] = not bool(response.get("idempotent_replay"))
+            return response
 
     def create_repair_management_record(
         self,
@@ -13945,7 +14562,7 @@ class MaintenancePortalService:
         )
         if len(source_repair_ids) > 1:
             raise PortalError("设备检修关联一次只能选择一条检修通告。")
-        metas, meta_by_name, _records = (
+        metas, meta_by_name, existing_projects = (
             self._load_repair_management_project_records()
         )
         has_repair_link = any(
@@ -14008,6 +14625,106 @@ class MaintenancePortalService:
         missing = self._missing_repair_management_required_fields(prepared, meta_by_name)
         if missing:
             raise PortalError("请先填写检修单必填字段：" + "、".join(missing) + "。")
+        proposed_record = {
+            "display_fields": self._repair_logical_record_fields(
+                REPAIR_MANAGEMENT_TABLE_ID,
+                prepared,
+            ),
+            "raw_fields": self._repair_logical_record_fields(
+                REPAIR_MANAGEMENT_TABLE_ID,
+                prepared,
+            ),
+        }
+        business_identity = self._repair_management_business_identity(
+            proposed_record
+        )
+        if business_identity:
+            semantic_matches = [
+                item
+                for item in existing_projects
+                if self._repair_management_business_identity(item)
+                == business_identity
+            ]
+            if not semantic_matches and self._repair_snapshots_enabled:
+                _fresh_metas, _fresh_meta_by_name, fresh_projects = (
+                    self._load_repair_management_project_records(
+                        force_refresh=True
+                    )
+                )
+                refreshed_meta = self._state_store.get_repair_snapshot_meta(
+                    REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                )
+                if str(refreshed_meta.get("status") or "") == "failed":
+                    raise PortalError(
+                        "维修项目多维表读取失败，暂未创建维修单，"
+                        "请刷新后重试，避免产生重复记录。"
+                    )
+                semantic_matches = [
+                    item
+                    for item in fresh_projects
+                    if self._repair_management_business_identity(item)
+                    == business_identity
+                ]
+            if semantic_matches:
+                selected, _duplicate_groups = (
+                    self._canonical_repair_management_projects(
+                        semantic_matches,
+                        meta_by_name=meta_by_name,
+                    )
+                )
+                existing = selected[0] if selected else semantic_matches[0]
+                existing_record_id = str(
+                    existing.get("record_id") or ""
+                ).strip()
+                existing_fields = self._repair_management_identity_fields(
+                    existing
+                )
+                warnings = list(
+                    dict.fromkeys(
+                        [
+                            *(auto.get("warnings") or []),
+                            *write_warnings,
+                            "多维表中已存在同一故障、时间和楼栋的维修单，"
+                            "已复用原记录，未重复创建。",
+                        ]
+                    )
+                )
+                if (
+                    sync_event_transfer_status
+                    and str(source_event_id or "").strip()
+                ):
+                    try:
+                        self.mark_event_transferred_to_repair(
+                            record_id=str(source_event_id or "").strip(),
+                            month=str(source_month or ""),
+                            refresh_snapshot=False,
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            f"维修单已复用，事件转检修状态暂未同步：{exc}"
+                        )
+                return {
+                    "record_id": existing_record_id,
+                    "fields": existing_fields,
+                    "record_version": self._repair_snapshot_record_version(
+                        REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                        existing_record_id,
+                    ),
+                    "field_count": len(existing_fields),
+                    "workflow": self._repair_management_workflow_text(
+                        existing,
+                        meta_by_name,
+                    ),
+                    "workflow_synced": True,
+                    "warnings": list(dict.fromkeys(warnings)),
+                    "editable_fields": [
+                        self._repair_management_field_payload(meta)
+                        for meta in metas
+                    ],
+                    "event_transfer_sync_pending": False,
+                    "idempotent_replay": True,
+                    "duplicate_prevented": True,
+                }
         stable_operation_id = str(operation_id or "").strip()
         operation: dict[str, Any] | None = None
         if stable_operation_id:
@@ -15162,6 +15879,61 @@ class MaintenancePortalService:
         with self._engineer_mop_cache_lock:
             self._engineer_mop_cache = None
 
+    def refresh_notice_target_replicas(
+        self,
+        work_types: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Refresh complete Feishu target tables and reconcile their local replicas."""
+
+        requested_work_types = tuple(
+            work_types
+            or (
+                WORK_TYPE_MAINTENANCE,
+                WORK_TYPE_CHANGE,
+                WORK_TYPE_REPAIR,
+                WORK_TYPE_POWER,
+                WORK_TYPE_POLLING,
+                WORK_TYPE_ADJUST,
+            )
+        )
+        results: dict[str, dict[str, Any]] = {}
+        skipped: list[str] = []
+        warnings: list[str] = []
+        with self._refresh_lock:
+            self._target_record_cache.clear()
+            for requested_work_type in requested_work_types:
+                work_type = self._normalize_notice_work_type_alias(
+                    requested_work_type
+                )
+                notice_type = self._notice_type_for_work_type(work_type)
+                if not str(config.app_token or "").strip() or not str(
+                    config.get_table_id(notice_type) or ""
+                ).strip():
+                    skipped.append(work_type)
+                    continue
+                try:
+                    results[work_type] = self._refresh_notice_target_replica(
+                        work_type=work_type,
+                        notice_type=notice_type,
+                    )
+                except Exception as exc:
+                    warning = self._source_sync_warning(
+                        f"{notice_type}目标表",
+                        exc,
+                    )
+                    warnings.append(warning)
+            for warning in warnings:
+                if warning not in self._load_warnings:
+                    self._load_warnings.append(warning)
+            if results:
+                self._touch_state_cache_version()
+        return {
+            "results": results,
+            "refreshed_work_types": list(results),
+            "skipped_work_types": skipped,
+            "warnings": warnings,
+        }
+
     def refresh(self) -> None:
         with self._refresh_lock:
             warnings: list[str] = []
@@ -15214,6 +15986,71 @@ class MaintenancePortalService:
                 self._save_source_scope_snapshots()
                 self._touch_state_cache_version()
 
+    def refresh_maintenance_source(self) -> dict[str, Any]:
+        """Refresh only maintenance plans while preserving every local work state."""
+        with self._refresh_lock:
+            if not (
+                self._maintenance_loaded_once
+                and self._change_loaded_once
+                and self._repair_loaded_once
+                and self._zhihang_change_loaded_once
+            ):
+                self._hydrate_source_records_from_sqlite()
+            warnings = [
+                str(item)
+                for item in (self._load_warnings or [])
+                if not str(item or "").startswith("维保源表同步失败")
+                and not str(item or "").startswith("维保目标表同步失败")
+            ]
+            previous_field_meta_list = list(self._field_meta_list)
+            previous_field_meta_by_name = dict(self._field_meta_by_name)
+            previous_records = list(self._records)
+            previous_loaded_once = bool(self._maintenance_loaded_once)
+            try:
+                self._load_fields()
+                self._load_records()
+            except Exception as exc:
+                self._field_meta_list = previous_field_meta_list
+                self._field_meta_by_name = previous_field_meta_by_name
+                self._records = previous_records
+                self._maintenance_loaded_once = previous_loaded_once
+                warning = self._source_sync_warning("维保源表", exc)
+                if warning not in warnings:
+                    warnings.append(warning)
+                self._load_warnings = warnings
+                raise PortalError(warning) from exc
+            target_result: dict[str, Any] = {}
+            target_warning = ""
+            if self._repair_snapshots_enabled:
+                try:
+                    target_result = self._refresh_notice_target_replica(
+                        work_type=WORK_TYPE_MAINTENANCE,
+                        notice_type=NOTICE_TYPE_MAINTENANCE,
+                    )
+                except Exception as exc:
+                    target_warning = self._source_sync_warning(
+                        "维保目标表",
+                        exc,
+                    )
+                    if target_warning not in warnings:
+                        warnings.append(target_warning)
+            now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._last_loaded_at = now
+            self._last_loaded_ts = time.time()
+            self._load_warnings = warnings
+            self._save_source_scope_snapshots()
+            self.clear_engineer_mop_cache()
+            self._touch_state_cache_version()
+            return {
+                "maintenance_refreshed_at": now,
+                "maintenance_count": len(self._records),
+                "maintenance_target_count": int(
+                    target_result.get("remote_count") or 0
+                ),
+                "maintenance_target_reconcile": target_result,
+                "maintenance_target_warning": target_warning,
+            }
+
     def refresh_repair_source(self) -> dict[str, Any]:
         """Refresh repair projects once and publish both workbench snapshots."""
         with self._refresh_lock:
@@ -15229,6 +16066,8 @@ class MaintenancePortalService:
                 for item in (self._load_warnings or [])
                 if not str(item or "").startswith("检修源表同步失败")
                 and not str(item or "").startswith("维修跟进表同步失败")
+                and not str(item or "").startswith("检修目标表同步失败")
+                and not str(item or "").startswith("维修关联事件表同步失败")
             ]
             try:
                 metas, _meta_by_name, project_records = (
@@ -15286,6 +16125,51 @@ class MaintenancePortalService:
             if followup_warning and followup_warning not in warnings:
                 warnings.append(followup_warning)
 
+            target_result: dict[str, Any] = {}
+            target_warning = ""
+            event_count = 0
+            event_warning = ""
+            if self._repair_snapshots_enabled:
+                try:
+                    target_result = self._refresh_notice_target_replica(
+                        work_type=WORK_TYPE_REPAIR,
+                        notice_type=NOTICE_TYPE_REPAIR,
+                    )
+                except Exception as exc:
+                    target_warning = self._source_sync_warning(
+                        "检修目标表",
+                        exc,
+                    )
+                    if target_warning not in warnings:
+                        warnings.append(target_warning)
+                try:
+                    _event_metas, _event_meta_by_name, event_records = (
+                        self._load_repair_management_event_records(
+                            force_refresh=True
+                        )
+                    )
+                    event_snapshot_meta = (
+                        self._state_store.get_repair_snapshot_meta(
+                            REPAIR_SNAPSHOT_SOURCE_EVENTS
+                        )
+                    )
+                    if (
+                        str(event_snapshot_meta.get("status") or "")
+                        == "failed"
+                    ):
+                        raise PortalError(
+                            str(event_snapshot_meta.get("error") or "")
+                            or "维修关联事件表刷新失败，当前仍保留上次成功数据。"
+                        )
+                    event_count = len(event_records)
+                except Exception as exc:
+                    event_warning = self._source_sync_warning(
+                        "维修关联事件表",
+                        exc,
+                    )
+                    if event_warning not in warnings:
+                        warnings.append(event_warning)
+
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
@@ -15300,7 +16184,20 @@ class MaintenancePortalService:
                 "repair_count": len(self._repair_records),
                 "repair_project_count": len(project_records),
                 "repair_followup_count": followup_count,
-                "repair_refresh_warning": followup_warning,
+                "repair_target_count": int(
+                    target_result.get("remote_count") or 0
+                ),
+                "repair_event_count": event_count,
+                "repair_target_reconcile": target_result,
+                "repair_refresh_warning": "；".join(
+                    item
+                    for item in (
+                        followup_warning,
+                        target_warning,
+                        event_warning,
+                    )
+                    if item
+                ),
             }
 
     def refresh_change_source(self) -> dict[str, Any]:
@@ -15319,6 +16216,7 @@ class MaintenancePortalService:
                 if not (
                     str(item or "").startswith("变更源表同步失败")
                     or str(item or "").startswith("智航变更源表同步失败")
+                    or str(item or "").startswith("变更目标表同步失败")
                 )
             ]
             try:
@@ -15339,6 +16237,21 @@ class MaintenancePortalService:
                     warnings.append(warning)
                 self._load_warnings = warnings
                 raise PortalError(warning) from exc
+            target_result: dict[str, Any] = {}
+            target_warning = ""
+            if self._repair_snapshots_enabled:
+                try:
+                    target_result = self._refresh_notice_target_replica(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type=NOTICE_TYPE_CHANGE,
+                    )
+                except Exception as exc:
+                    target_warning = self._source_sync_warning(
+                        "变更目标表",
+                        exc,
+                    )
+                    if target_warning not in warnings:
+                        warnings.append(target_warning)
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
@@ -15349,6 +16262,11 @@ class MaintenancePortalService:
                 "change_refreshed_at": now,
                 "change_count": len(self._change_records),
                 "zhihang_change_count": len(self._zhihang_change_records),
+                "change_target_count": int(
+                    target_result.get("remote_count") or 0
+                ),
+                "change_target_reconcile": target_result,
+                "change_target_warning": target_warning,
             }
 
     @staticmethod
@@ -15590,12 +16508,18 @@ class MaintenancePortalService:
                 snapshot_records,
                 meta=meta,
             )
+            target_reconcile = self._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_EVENT,
+                notice_type=NOTICE_TYPE_EVENT,
+                records=all_records,
+            )
             self._touch_state_cache_version()
             return {
                 **result,
                 "event_refreshed_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "event_count": len(snapshot_records),
                 "source_key": source_key,
+                "event_target_reconcile": target_reconcile,
             }
         except Exception as exc:
             warning = f"事件通告表同步失败: {exc}"
@@ -20102,15 +21026,11 @@ class MaintenancePortalService:
         prepared = job.get("prepared") if isinstance(job.get("prepared"), dict) else {}
         request = job.get("request") if isinstance(job.get("request"), dict) else {}
         action = str(prepared.get("action") or request.get("action") or "").strip().lower()
-        merged = {}
-        merged.update(request)
-        merged.update(prepared)
-        if record_id:
-            merged["target_record_id"] = str(record_id or "").strip()
-            merged["record_id"] = str(record_id or "").strip()
-        if active_item_id:
-            merged["active_item_id"] = str(active_item_id or "").strip()
-        identity = normalize_notice_identity_payload(merged, action=action)
+        identity = self._resolve_successful_action_identity(
+            job,
+            record_id=record_id,
+            active_item_id=active_item_id,
+        )
         target_record_id = str(
             record_id
             or identity.get("target_record_id")
@@ -20165,6 +21085,98 @@ class MaintenancePortalService:
             if isinstance(candidates, list):
                 patch["target_candidates"] = copy.deepcopy(candidates[:20])
         return patch
+
+    def _resolve_successful_action_identity(
+        self,
+        job: dict[str, Any],
+        *,
+        record_id: str = "",
+        active_item_id: str = "",
+    ) -> dict[str, Any]:
+        """Recover the canonical source/target relationship before UI/state updates."""
+        prepared = job.get("prepared") if isinstance(job.get("prepared"), dict) else {}
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        action = str(prepared.get("action") or request.get("action") or "").strip().lower()
+        merged: dict[str, Any] = copy.deepcopy(request)
+        merged.update(copy.deepcopy(prepared))
+        work_type = str(
+            merged.get("work_type") or WORK_TYPE_MAINTENANCE
+        ).strip()
+        resolved_active_item_id = str(
+            active_item_id
+            or merged.get("active_item_id")
+            or job.get("active_item_id")
+            or ""
+        ).strip()
+        resolved_target_record_id = str(
+            record_id
+            or job.get("target_record_id")
+            or canonical_target_record_id(merged)
+            or ""
+        ).strip()
+        if is_local_record_id(resolved_target_record_id):
+            resolved_target_record_id = ""
+        if resolved_active_item_id:
+            merged["active_item_id"] = resolved_active_item_id
+        if resolved_target_record_id:
+            merged["target_record_id"] = resolved_target_record_id
+            merged["record_id"] = resolved_target_record_id
+        identity = normalize_notice_identity_payload(merged, action=action)
+        resolved_source_record_id = canonical_source_record_id(identity)
+
+        stored_identity: dict[str, Any] | None = None
+        if (
+            resolved_active_item_id
+            or resolved_source_record_id
+            or resolved_target_record_id
+        ):
+            try:
+                stored_identity = self._state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    active_item_id=resolved_active_item_id,
+                    source_record_id=resolved_source_record_id,
+                    target_record_id=resolved_target_record_id,
+                )
+            except Exception:
+                stored_identity = None
+        if isinstance(stored_identity, dict):
+            resolved_active_item_id = (
+                resolved_active_item_id
+                or str(stored_identity.get("active_item_id") or "").strip()
+            )
+            resolved_source_record_id = (
+                resolved_source_record_id
+                or canonical_source_record_id(stored_identity)
+            )
+            resolved_target_record_id = (
+                resolved_target_record_id
+                or canonical_target_record_id(stored_identity)
+            )
+
+        if not resolved_source_record_id and work_type == WORK_TYPE_REPAIR:
+            repair_management_record_id = str(
+                merged.get("repair_management_record_id") or ""
+            ).strip()
+            if repair_management_record_id and not is_local_record_id(
+                repair_management_record_id
+            ):
+                resolved_source_record_id = repair_management_record_id
+        if not resolved_source_record_id:
+            resolved_source_record_id = self._source_record_id_from_work_status(
+                work_type=work_type,
+                target_record_id=resolved_target_record_id,
+                active_item_id=resolved_active_item_id,
+            )
+
+        if resolved_active_item_id:
+            identity["active_item_id"] = resolved_active_item_id
+        if resolved_source_record_id:
+            identity["source_record_id"] = resolved_source_record_id
+        if resolved_target_record_id:
+            identity["target_record_id"] = resolved_target_record_id
+            identity["record_id"] = resolved_target_record_id
+        identity["work_type"] = work_type
+        return normalize_notice_identity_payload(identity, action=action)
 
     def mark_action_upload_result(
         self,
@@ -20287,7 +21299,19 @@ class MaintenancePortalService:
         action = str(prepared.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             return
-        prepared_identity = normalize_notice_identity_payload(dict(prepared), action=action)
+        prepared_identity = self._resolve_successful_action_identity(
+            job,
+            record_id=record_id,
+            active_item_id=active_item_id,
+        )
+        for identity_field in (
+            "active_item_id",
+            "source_record_id",
+            "target_record_id",
+        ):
+            identity_value = prepared_identity.get(identity_field)
+            if identity_value not in (None, ""):
+                prepared[identity_field] = identity_value
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         source_record_id = canonical_source_record_id(prepared_identity)
         title = str(prepared.get("title") or "").strip()
@@ -20304,7 +21328,13 @@ class MaintenancePortalService:
         fallback_key = self._summary_key(
             title=title, building=building, reason=reason, work_type=work_type
         )
-        active_item_id = str(active_item_id or prepared.get("active_item_id") or job.get("active_item_id") or "").strip()
+        active_item_id = str(
+            active_item_id
+            or prepared_identity.get("active_item_id")
+            or prepared.get("active_item_id")
+            or job.get("active_item_id")
+            or ""
+        ).strip()
         target_record_id = str(
             record_id
             or job.get("target_record_id")
@@ -20729,11 +21759,15 @@ class MaintenancePortalService:
         return stats
 
     def get_daily_summary(
-        self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None
+        self,
+        *,
+        scope: str = "ALL",
+        ongoing_items: list[dict[str, Any]] | None = None,
+        date: str = "",
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
         with self._summary_lock:
-            payload = self._load_day_summary_locked()
+            payload = self._load_day_summary_locked(date or None)
             raw_items = [item for item in payload.get("items") or [] if isinstance(item, dict)]
         items = [
             copy.deepcopy(item)
@@ -20758,6 +21792,940 @@ class MaintenancePortalService:
                 "ended": completed_count,
                 "ongoing": ongoing_count,
             },
+        }
+
+    @staticmethod
+    def _daily_task_date(value: Any = None) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return dt.datetime.now().astimezone().strftime("%Y-%m-%d")
+        try:
+            return dt.datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError as exc:
+            raise PortalError("日期格式必须为 YYYY-MM-DD。") from exc
+
+    @staticmethod
+    def _daily_task_id(category: str, raw_key: Any) -> str:
+        digest = hashlib.sha256(
+            f"{str(category or '').strip()}:{str(raw_key or '').strip()}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return f"{str(category or 'task').strip()}-{digest[:16]}"
+
+    @classmethod
+    def _daily_task_sort_time(cls, *values: Any) -> float:
+        timestamps: list[float] = []
+        for value in values:
+            text = cls._format_source_datetime(value)
+            if not text:
+                continue
+            parsed = cls._parse_notice_datetime(text)
+            if parsed is None:
+                match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+                if match:
+                    with suppress(ValueError):
+                        parsed = dt.datetime(
+                            int(match.group(1)),
+                            int(match.group(2)),
+                            int(match.group(3)),
+                        )
+            if parsed is not None:
+                with suppress(OSError, OverflowError, ValueError):
+                    timestamps.append(float(parsed.timestamp()))
+        return max(timestamps, default=0.0)
+
+    @staticmethod
+    def _daily_task_time_text(sort_time: float, *, all_day: bool = False) -> str:
+        if all_day:
+            return "全天"
+        if float(sort_time or 0) <= 0:
+            return ""
+        with suppress(OSError, OverflowError, ValueError):
+            return dt.datetime.fromtimestamp(float(sort_time)).strftime("%H:%M")
+        return ""
+
+    @classmethod
+    def _daily_task_status_tone(cls, status: Any) -> str:
+        text = str(status or "").strip()
+        if re.search(r"失败|异常|超时|错误", text):
+            return "error"
+        if re.search(r"待处理|待闭环|待跟进|未开始|待签|待上传", text):
+            return "warning"
+        if re.search(r"结束|完成|闭环|已上传|已录入", text):
+            return "completed"
+        if re.search(r"进行中|处理中|维修中|更新|恢复", text):
+            return "ongoing"
+        return "neutral"
+
+    @staticmethod
+    def _daily_task_public_title(value: Any, fallback: str) -> str:
+        title = str(value or "").strip()
+        if not title or re.fullmatch(r"(?:rec|localid)[A-Za-z0-9_-]+", title):
+            return fallback
+        return title
+
+    @classmethod
+    def _daily_task_building_label(
+        cls,
+        value: Any = "",
+        codes: list[str] | tuple[str, ...] | None = None,
+    ) -> str:
+        label = str(value or "").strip()
+        if label:
+            return label
+        normalized_codes = [
+            str(code or "").strip()
+            for code in (codes or [])
+            if str(code or "").strip()
+        ]
+        return cls._building_label_from_codes(normalized_codes)
+
+    def _daily_business_audits(
+        self,
+        *,
+        domain: str,
+        scope: str,
+        date: str,
+    ) -> list[dict[str, Any]]:
+        query_scope = "" if scope == "ALL" else scope
+        audits = self._state_store.list_business_operation_audits(
+            domain=domain,
+            scope=query_scope,
+            limit=1000,
+        )
+        result: list[dict[str, Any]] = []
+        for audit in audits:
+            timestamp = float(
+                audit.get("completed_at")
+                or audit.get("updated_at")
+                or audit.get("started_at")
+                or 0
+            )
+            if timestamp <= 0:
+                continue
+            with suppress(OSError, OverflowError, ValueError):
+                if dt.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d") == date:
+                    result.append(dict(audit))
+        return result
+
+    @staticmethod
+    def _daily_action_summary(
+        labels: list[str],
+        *,
+        prefix: str = "今日",
+    ) -> str:
+        counts: dict[str, int] = {}
+        order: list[str] = []
+        for raw_label in labels:
+            label = str(raw_label or "").strip()
+            if not label:
+                continue
+            if label not in counts:
+                counts[label] = 0
+                order.append(label)
+            counts[label] += 1
+        parts = [
+            f"{label} {counts[label]} 次" if counts[label] > 1 else label
+            for label in order
+        ]
+        return f"{prefix}{'、'.join(parts)}" if parts else ""
+
+    def _daily_notice_tasks(self, *, scope: str, date: str) -> list[dict[str, Any]]:
+        summary = self.get_daily_summary(
+            scope=scope,
+            ongoing_items=[],
+            date=date,
+        )
+        work_type_labels = {
+            WORK_TYPE_MAINTENANCE: "维保通告",
+            WORK_TYPE_CHANGE: "变更通告",
+            WORK_TYPE_REPAIR: "检修通告",
+            WORK_TYPE_POWER: "上/下电通告",
+            WORK_TYPE_POLLING: "轮巡通告",
+            WORK_TYPE_ADJUST: "调整通告",
+        }
+        action_labels = {
+            "start": "开始",
+            "update": "更新",
+            "end": "结束",
+            "delete": "删除",
+        }
+        tasks: list[dict[str, Any]] = []
+        for index, item in enumerate(summary.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            work_type = self._item_work_type(item)
+            if work_type == WORK_TYPE_EVENT:
+                continue
+            actions = [
+                action
+                for action in (item.get("actions") or [])
+                if isinstance(action, dict)
+            ]
+            labels = [
+                action_labels.get(str(action.get("action") or "").strip(), "")
+                for action in actions
+            ]
+            sort_time = self._daily_task_sort_time(
+                *[action.get("time") for action in actions],
+                item.get("ended_at"),
+                item.get("last_updated_at"),
+                item.get("started_at"),
+            )
+            status = str(item.get("status") or "").strip()
+            if any(str(action.get("action") or "") == "end" for action in actions):
+                status = "已结束"
+            elif not status:
+                status = "进行中"
+            raw_key = (
+                item.get("key")
+                or item.get("source_record_id")
+                or f"{item.get('title')}:{index}"
+            )
+            tasks.append(
+                {
+                    "task_id": self._daily_task_id("notice", raw_key),
+                    "category": "notice",
+                    "category_label": "通告",
+                    "type_key": work_type,
+                    "type_label": work_type_labels.get(work_type, "通告"),
+                    "title": self._daily_task_public_title(
+                        item.get("title") or item.get("name"),
+                        "未命名通告",
+                    ),
+                    "status": status,
+                    "status_tone": self._daily_task_status_tone(status),
+                    "time": self._daily_task_time_text(sort_time),
+                    "sort_time": sort_time,
+                    "action_summary": self._daily_action_summary(labels),
+                    "building": self._daily_task_building_label(
+                        item.get("building"),
+                        item.get("building_codes") or item.get("codes") or [],
+                    ),
+                    "specialty": str(item.get("specialty") or "").strip(),
+                    "level": "",
+                    "progress_percent": None,
+                }
+            )
+        return tasks
+
+    def _daily_event_tasks(self, *, scope: str, date: str) -> list[dict[str, Any]]:
+        month = date[:7]
+        snapshot = self.get_event_monthly_snapshot(scope=scope, month=month)
+        tasks: list[dict[str, Any]] = []
+        tasks_by_remote_id: dict[str, dict[str, Any]] = {}
+        tasks_by_signature: dict[tuple[str, str], dict[str, Any]] = {}
+        for record in snapshot.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            actions: list[tuple[str, Any]] = []
+            for label, field_name in (
+                ("新增", "occurrence_time"),
+                ("响应", "response_time"),
+                ("更新", "progress_update"),
+                ("恢复", "recover_time"),
+                ("结束", "end_time"),
+            ):
+                value = record.get(field_name)
+                if date in self._date_keys_from_values(value):
+                    actions.append((label, value))
+            created_time = record.get("created_time")
+            if (
+                not any(label == "新增" for label, _value in actions)
+                and date in self._date_keys_from_values(created_time)
+            ):
+                actions.insert(0, ("新增", created_time))
+            if not actions:
+                continue
+            sort_time = self._daily_task_sort_time(
+                *[value for _label, value in actions]
+            )
+            status = str(record.get("status") or "处理中").strip()
+            raw_key = (
+                record.get("source_record_id")
+                or record.get("record_id")
+                or record.get("title")
+            )
+            title = self._daily_task_public_title(
+                record.get("alarm_desc") or record.get("title"),
+                "未命名事件",
+            )
+            task = {
+                "task_id": self._daily_task_id("event", raw_key),
+                "category": "event",
+                "category_label": "事件",
+                "type_key": "event",
+                "type_label": "事件通告",
+                "title": title,
+                "status": status,
+                "status_tone": self._daily_task_status_tone(status),
+                "time": self._daily_task_time_text(sort_time),
+                "sort_time": sort_time,
+                "action_summary": self._daily_action_summary(
+                    [label for label, _value in actions]
+                ),
+                "building": self._daily_task_building_label(
+                    record.get("building"),
+                    record.get("building_codes") or [],
+                ),
+                "specialty": str(record.get("specialty") or "").strip(),
+                "level": str(record.get("level") or "").strip(),
+                "progress_percent": None,
+                "_daily_actions": [label for label, _value in actions],
+            }
+            tasks.append(task)
+            for remote_id in (
+                record.get("source_record_id"),
+                record.get("record_id"),
+            ):
+                normalized_id = str(remote_id or "").strip()
+                if normalized_id:
+                    tasks_by_remote_id[normalized_id] = task
+            event_time = self._format_source_datetime(
+                record.get("occurrence_time")
+            )
+            tasks_by_signature[
+                (re.sub(r"\s+", "", title), event_time)
+            ] = task
+
+        action_labels = {
+            "start": "新增",
+            "update": "更新",
+            "recover": "恢复",
+            "end": "结束",
+        }
+        daily_summary = self.get_daily_summary(
+            scope=scope,
+            ongoing_items=[],
+            date=date,
+        )
+        for index, item in enumerate(daily_summary.get("items") or []):
+            if not isinstance(item, dict) or self._item_work_type(item) != WORK_TYPE_EVENT:
+                continue
+            actions = [
+                action
+                for action in (item.get("actions") or [])
+                if isinstance(action, dict)
+            ]
+            labels = [
+                action_labels.get(str(action.get("action") or "").strip(), "")
+                for action in actions
+            ]
+            labels = [label for label in labels if label]
+            if not labels:
+                continue
+            remote_ids = [
+                str(item.get(field_name) or "").strip()
+                for field_name in (
+                    "target_record_id",
+                    "source_record_id",
+                    "record_id",
+                )
+                if str(item.get(field_name) or "").strip()
+            ]
+            title = self._daily_task_public_title(
+                item.get("title") or item.get("name"),
+                "未命名事件",
+            )
+            event_time = self._format_source_datetime(
+                item.get("occurrence_time")
+                or item.get("event_time")
+                or item.get("fault_time")
+                or item.get("started_at")
+            )
+            signature = (re.sub(r"\s+", "", title), event_time)
+            task = next(
+                (
+                    tasks_by_remote_id[remote_id]
+                    for remote_id in remote_ids
+                    if remote_id in tasks_by_remote_id
+                ),
+                None,
+            )
+            if task is None:
+                task = tasks_by_signature.get(signature)
+
+            sort_time = self._daily_task_sort_time(
+                *[action.get("time") for action in actions],
+                item.get("ended_at"),
+                item.get("last_updated_at"),
+                item.get("started_at"),
+            )
+            status = str(item.get("status") or "").strip()
+            if any(str(action.get("action") or "") == "end" for action in actions):
+                status = "已结束"
+            elif not status:
+                status = "处理中"
+
+            if task is not None:
+                snapshot_labels = list(task.get("_daily_actions") or [])
+                merged_labels = list(labels)
+                merged_label_set = set(labels)
+                merged_labels.extend(
+                    label
+                    for label in snapshot_labels
+                    if label not in merged_label_set
+                )
+                task["_daily_actions"] = merged_labels
+                task["action_summary"] = self._daily_action_summary(merged_labels)
+                if sort_time >= float(task.get("sort_time") or 0):
+                    task["sort_time"] = sort_time
+                    task["time"] = self._daily_task_time_text(sort_time)
+                    task["status"] = status
+                    task["status_tone"] = self._daily_task_status_tone(status)
+                continue
+
+            raw_key = (
+                next(iter(remote_ids), "")
+                or item.get("key")
+                or f"{title}:{event_time}:{index}"
+            )
+            task = {
+                "task_id": self._daily_task_id("event", raw_key),
+                "category": "event",
+                "category_label": "事件",
+                "type_key": "event",
+                "type_label": "事件通告",
+                "title": title,
+                "status": status,
+                "status_tone": self._daily_task_status_tone(status),
+                "time": self._daily_task_time_text(sort_time),
+                "sort_time": sort_time,
+                "action_summary": self._daily_action_summary(labels),
+                "building": self._daily_task_building_label(
+                    item.get("building"),
+                    item.get("building_codes") or item.get("codes") or [],
+                ),
+                "specialty": str(item.get("specialty") or "").strip(),
+                "level": str(
+                    item.get("level") or item.get("event_level") or ""
+                ).strip(),
+                "progress_percent": None,
+                "_daily_actions": labels,
+            }
+            tasks.append(task)
+            for remote_id in remote_ids:
+                tasks_by_remote_id[remote_id] = task
+            tasks_by_signature[signature] = task
+
+        for task in tasks:
+            task.pop("_daily_actions", None)
+        return tasks
+
+    def _daily_repair_sources(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if bool(getattr(self, "_repair_snapshots_enabled", False)):
+            projects = self._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS
+            ).get("records") or []
+            followups = self._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+            ).get("records") or []
+            return (
+                [dict(item) for item in projects if isinstance(item, dict)],
+                [dict(item) for item in followups if isinstance(item, dict)],
+            )
+        return self._load_repair_management_status_sources()
+
+    def _daily_repair_tasks(self, *, scope: str, date: str) -> list[dict[str, Any]]:
+        projects, followups = self._daily_repair_sources()
+        followups_by_project: dict[str, list[dict[str, Any]]] = {}
+        followup_parent_by_id: dict[str, str] = {}
+        for followup in followups:
+            followup_id = str(followup.get("record_id") or "").strip()
+            for project_id in self._repair_followup_parent_ids(followup):
+                followups_by_project.setdefault(project_id, []).append(followup)
+                if followup_id:
+                    followup_parent_by_id[followup_id] = project_id
+
+        audit_actions: dict[str, list[tuple[str, float, str]]] = {}
+        action_labels = {
+            "create_project": "新建维修单",
+            "update_project": "更新维修单",
+            "delete_project": "删除维修单",
+            "create_followup": "新增跟进",
+            "update_followup": "更新跟进",
+            "delete_followup": "删除跟进",
+            "bind_followups": "绑定跟进",
+        }
+        for audit in self._daily_business_audits(
+            domain="repair",
+            scope=scope,
+            date=date,
+        ):
+            action = str(audit.get("action") or "").strip()
+            project_id = str(audit.get("summary_record_id") or "").strip()
+            target_id = str(audit.get("target_record_id") or "").strip()
+            if not project_id and action.endswith("_project"):
+                project_id = target_id
+            if not project_id and target_id:
+                project_id = followup_parent_by_id.get(target_id, "")
+            if not project_id:
+                continue
+            audit_actions.setdefault(project_id, []).append(
+                (
+                    action_labels.get(action, "维修操作"),
+                    float(
+                        audit.get("completed_at")
+                        or audit.get("updated_at")
+                        or audit.get("started_at")
+                        or 0
+                    ),
+                    str(audit.get("status") or ""),
+                )
+            )
+
+        tasks: list[dict[str, Any]] = []
+        known_project_ids: set[str] = set()
+        for project in projects:
+            if not self._repair_management_record_in_scope(project, scope):
+                continue
+            project_id = str(project.get("record_id") or "").strip()
+            if not project_id:
+                continue
+            known_project_ids.add(project_id)
+            project_fields = (
+                project.get("display_fields")
+                if isinstance(project.get("display_fields"), dict)
+                else {}
+            )
+            project_raw_fields = (
+                project.get("raw_fields")
+                if isinstance(project.get("raw_fields"), dict)
+                else {}
+            )
+            linked = followups_by_project.get(project_id, [])
+            latest_followup = (
+                max(linked, key=self._repair_followup_order_key)
+                if linked
+                else {}
+            )
+            latest_display = (
+                latest_followup.get("display_fields")
+                if isinstance(latest_followup.get("display_fields"), dict)
+                else {}
+            )
+            latest_raw = (
+                latest_followup.get("raw_fields")
+                if isinstance(latest_followup.get("raw_fields"), dict)
+                else {}
+            )
+            latest_progress_value = latest_raw.get("维修进度")
+            if latest_progress_value in (None, "", [], {}):
+                latest_progress_value = latest_display.get("维修进度")
+            progress = round(
+                self._repair_followup_progress_percent(latest_progress_value)
+                or 0
+            )
+            workflow = self._repair_management_effective_workflow(
+                project,
+                has_followup=bool(linked),
+                latest_progress_percent=progress,
+            )
+            actions: list[str] = []
+            action_times: list[Any] = []
+            created_time = (
+                project_fields.get("创建日期")
+                or project_raw_fields.get("创建日期")
+                or project.get("created_time")
+            )
+            if date in self._date_keys_from_values(created_time):
+                actions.append("新建维修单")
+                action_times.append(created_time)
+            matching_followups = []
+            for followup in linked:
+                fields = (
+                    followup.get("display_fields")
+                    if isinstance(followup.get("display_fields"), dict)
+                    else {}
+                )
+                followup_time = (
+                    fields.get("创建时间")
+                    or followup.get("last_modified_time")
+                    or followup.get("created_time")
+                )
+                if date in self._date_keys_from_values(followup_time):
+                    matching_followups.append(followup)
+                    action_times.append(followup_time)
+            if matching_followups:
+                actions.extend(["维修跟进"] * len(matching_followups))
+            completed_time = (
+                project_fields.get("维修结束时间（2026）")
+                or project_raw_fields.get("维修结束时间（2026）")
+            )
+            if (
+                workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+                and date in self._date_keys_from_values(completed_time)
+            ):
+                actions.append("维修完成")
+                action_times.append(completed_time)
+            project_audits = audit_actions.get(project_id, [])
+            for label, timestamp, audit_status in project_audits:
+                actions.append(
+                    "操作失败"
+                    if str(audit_status).lower() == "failed"
+                    else label
+                )
+                action_times.append(timestamp)
+            if not actions:
+                continue
+            status = (
+                "维修完成"
+                if workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+                else "维修中"
+                if workflow == REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
+                else "未开始"
+            )
+            if any(
+                str(audit_status).lower() == "failed"
+                for _label, _timestamp, audit_status in project_audits
+            ):
+                status = "需处理"
+            sort_time = max(
+                [
+                    self._daily_task_sort_time(value)
+                    for value in action_times
+                ],
+                default=0.0,
+            )
+            building_codes = self._repair_record_building_codes(project)
+            tasks.append(
+                {
+                    "task_id": self._daily_task_id("repair", project_id),
+                    "category": "repair",
+                    "category_label": "检修",
+                    "type_key": "repair_project",
+                    "type_label": "维修项目",
+                    "title": self._daily_task_public_title(
+                        self._repair_management_title(project)
+                        or project_fields.get("故障发生现象描述")
+                        or project_fields.get("故障维修原因"),
+                        "未命名维修项目",
+                    ),
+                    "status": status,
+                    "status_tone": self._daily_task_status_tone(status),
+                    "time": self._daily_task_time_text(sort_time),
+                    "sort_time": sort_time,
+                    "action_summary": self._daily_action_summary(actions),
+                    "building": self._daily_task_building_label(
+                        "",
+                        building_codes,
+                    ),
+                    "specialty": self._repair_management_plain_text(
+                        project_fields.get("所属专业")
+                        or project_fields.get("专业（推送消息用）")
+                    ),
+                    "level": "",
+                    "progress_percent": progress,
+                }
+            )
+
+        for project_id, project_audits in audit_actions.items():
+            if project_id in known_project_ids:
+                continue
+            labels = [
+                "操作失败"
+                if str(audit_status).lower() == "failed"
+                else label
+                for label, _timestamp, audit_status in project_audits
+            ]
+            sort_time = max(
+                (timestamp for _label, timestamp, _status in project_audits),
+                default=0.0,
+            )
+            failed = any(
+                str(audit_status).lower() == "failed"
+                for _label, _timestamp, audit_status in project_audits
+            )
+            tasks.append(
+                {
+                    "task_id": self._daily_task_id("repair", project_id),
+                    "category": "repair",
+                    "category_label": "检修",
+                    "type_key": "repair_project",
+                    "type_label": "维修项目",
+                    "title": "维修项目操作",
+                    "status": "需处理" if failed else "已处理",
+                    "status_tone": "error" if failed else "completed",
+                    "time": self._daily_task_time_text(sort_time),
+                    "sort_time": sort_time,
+                    "action_summary": self._daily_action_summary(labels),
+                    "building": self._building_label_from_codes([scope]),
+                    "specialty": "",
+                    "level": "",
+                    "progress_percent": None,
+                }
+            )
+        return tasks
+
+    def _daily_mop_tasks(self, *, scope: str, date: str) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        action_labels = {
+            "write_signatures": "签名写入",
+            "upload_signed": "上传维护单",
+        }
+        for audit in self._daily_business_audits(
+            domain="mop",
+            scope=scope,
+            date=date,
+        ):
+            metadata = (
+                audit.get("metadata")
+                if isinstance(audit.get("metadata"), dict)
+                else {}
+            )
+            file_name = str(metadata.get("file_name") or "").strip()
+            raw_key = (
+                audit.get("source_record_id")
+                or file_name
+                or audit.get("audit_id")
+            )
+            entry = grouped.setdefault(
+                str(raw_key),
+                {
+                    "file_name": file_name,
+                    "labels": [],
+                    "sort_time": 0.0,
+                    "failed": False,
+                    "uploaded": False,
+                    "scope": str(audit.get("scope") or scope),
+                },
+            )
+            action = str(audit.get("action") or "").strip()
+            entry["labels"].append(action_labels.get(action, "维护单操作"))
+            entry["sort_time"] = max(
+                float(entry.get("sort_time") or 0),
+                float(
+                    audit.get("completed_at")
+                    or audit.get("updated_at")
+                    or audit.get("started_at")
+                    or 0
+                ),
+            )
+            if str(audit.get("status") or "").lower() == "failed":
+                entry["failed"] = True
+            if action == "upload_signed" and str(
+                audit.get("status") or ""
+            ).lower() in {"success", "completed"}:
+                entry["uploaded"] = True
+
+        tasks: list[dict[str, Any]] = []
+        for raw_key, entry in grouped.items():
+            status = (
+                "需处理"
+                if entry.get("failed")
+                else "已上传"
+                if entry.get("uploaded")
+                else "签名已写入"
+            )
+            sort_time = float(entry.get("sort_time") or 0)
+            tasks.append(
+                {
+                    "task_id": self._daily_task_id("mop", raw_key),
+                    "category": "mop",
+                    "category_label": "维护单",
+                    "type_key": "mop",
+                    "type_label": "MOP",
+                    "title": self._daily_task_public_title(
+                        entry.get("file_name"),
+                        "维护保养单",
+                    ),
+                    "status": status,
+                    "status_tone": self._daily_task_status_tone(status),
+                    "time": self._daily_task_time_text(sort_time),
+                    "sort_time": sort_time,
+                    "action_summary": self._daily_action_summary(
+                        list(entry.get("labels") or [])
+                    ),
+                    "building": self._building_label_from_codes(
+                        [str(entry.get("scope") or "")]
+                    ),
+                    "specialty": "",
+                    "level": "",
+                    "progress_percent": None,
+                }
+            )
+        return tasks
+
+    def _daily_water_tasks(self, *, scope: str, date: str) -> list[dict[str, Any]]:
+        scope_code = self._water_scope_code(scope)
+        if scope_code not in WATER_CONSUMPTION_SCOPE_CODES:
+            return []
+        records_result = self._state_store.query_water_consumption_records(
+            scope=scope_code,
+            start_date=date,
+            end_date=date,
+            limit=100,
+        )
+        records_by_id = {
+            str(record.get("record_id") or ""): dict(record)
+            for record in (records_result.get("records") or [])
+            if isinstance(record, dict)
+            if str(record.get("record_id") or "").strip()
+        }
+        audit_actions: dict[str, list[tuple[str, float, str]]] = {}
+        for audit in self._daily_business_audits(
+            domain="water_consumption",
+            scope=scope,
+            date=date,
+        ):
+            record_id = str(audit.get("target_record_id") or "").strip()
+            if not record_id:
+                continue
+            if record_id not in records_by_id:
+                record = self._state_store.get_water_consumption_record(record_id)
+                if isinstance(record, dict):
+                    records_by_id[record_id] = dict(record)
+            audit_actions.setdefault(record_id, []).append(
+                (
+                    "新增录入"
+                    if str(audit.get("action") or "") == "create_record"
+                    else "修改记录",
+                    float(
+                        audit.get("completed_at")
+                        or audit.get("updated_at")
+                        or audit.get("started_at")
+                        or 0
+                    ),
+                    str(audit.get("status") or ""),
+                )
+            )
+
+        tasks: list[dict[str, Any]] = []
+        for record_id, record in records_by_id.items():
+            actions = audit_actions.get(record_id, [])
+            labels = [label for label, _timestamp, _status in actions]
+            if not labels:
+                labels = ["水耗录入"]
+            failed = any(
+                str(status).lower() == "failed"
+                for _label, _timestamp, status in actions
+            )
+            sort_time = max(
+                (timestamp for _label, timestamp, _status in actions),
+                default=self._daily_task_sort_time(
+                    record.get("created_time"),
+                    record.get("statistic_date"),
+                ),
+            )
+            amount = record.get("computed_usage")
+            amount_text = (
+                f"{float(amount):g} t"
+                if isinstance(amount, (int, float))
+                else ""
+            )
+            status = "需处理" if failed else "已录入"
+            tasks.append(
+                {
+                    "task_id": self._daily_task_id("water", record_id),
+                    "category": "water",
+                    "category_label": "水耗",
+                    "type_key": "water",
+                    "type_label": "水耗记录",
+                    "title": self._daily_task_public_title(
+                        record.get("title")
+                        or (
+                            f"{record.get('meter')}水耗记录"
+                            if record.get("meter")
+                            else ""
+                        ),
+                        "水耗记录",
+                    ),
+                    "status": status,
+                    "status_tone": self._daily_task_status_tone(status),
+                    "time": self._daily_task_time_text(
+                        sort_time,
+                        all_day=not bool(actions),
+                    ),
+                    "sort_time": sort_time,
+                    "action_summary": self._daily_action_summary(labels),
+                    "building": str(
+                        record.get("building")
+                        or WATER_CONSUMPTION_SCOPE_LABELS.get(scope_code, "")
+                    ),
+                    "specialty": "",
+                    "level": amount_text,
+                    "progress_percent": None,
+                }
+            )
+        return tasks
+
+    def get_daily_task_checklist(
+        self,
+        *,
+        scope: str = "ALL",
+        date: str = "",
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        normalized_date = self._daily_task_date(date)
+        category_specs = (
+            ("notice", "通告", self._daily_notice_tasks),
+            ("event", "事件", self._daily_event_tasks),
+            ("repair", "检修", self._daily_repair_tasks),
+            ("mop", "维护单", self._daily_mop_tasks),
+            ("water", "水耗", self._daily_water_tasks),
+        )
+        groups: list[dict[str, Any]] = []
+        all_tasks: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for category, label, loader in category_specs:
+            try:
+                tasks = loader(scope=normalized_scope, date=normalized_date)
+            except Exception as exc:
+                tasks = []
+                warnings.append(f"{label}数据暂未读取：{exc}")
+            tasks.sort(
+                key=lambda item: (
+                    float(item.get("sort_time") or 0),
+                    str(item.get("title") or ""),
+                ),
+                reverse=True,
+            )
+            groups.append(
+                {
+                    "key": category,
+                    "label": label,
+                    "count": len(tasks),
+                    "tasks": tasks,
+                }
+            )
+            all_tasks.extend(tasks)
+        all_tasks.sort(
+            key=lambda item: (
+                float(item.get("sort_time") or 0),
+                str(item.get("title") or ""),
+            ),
+            reverse=True,
+        )
+        return {
+            "scope": normalized_scope,
+            "date": normalized_date,
+            "generated_at": dt.datetime.now().astimezone().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "stats": {
+                "total": len(all_tasks),
+                "ongoing": sum(
+                    1
+                    for item in all_tasks
+                    if item.get("status_tone") == "ongoing"
+                ),
+                "completed": sum(
+                    1
+                    for item in all_tasks
+                    if item.get("status_tone") == "completed"
+                ),
+                "attention": sum(
+                    1
+                    for item in all_tasks
+                    if item.get("status_tone") in {"warning", "error"}
+                ),
+            },
+            "categories": groups,
+            "tasks": all_tasks,
+            "warnings": list(dict.fromkeys(warnings)),
         }
 
     @staticmethod
@@ -21520,19 +23488,347 @@ class MaintenancePortalService:
         target_exists = self._target_record_exists_for_status_item(item, target_cache)
         return target_exists is False
 
+    def _mark_local_notice_finished_from_target(
+        self,
+        item: dict[str, Any],
+        *,
+        ended_at: str = "",
+    ) -> None:
+        if not isinstance(item, dict):
+            return
+        now = str(ended_at or dt.datetime.now().strftime("%Y-%m-%d %H:%M")).strip()
+        finished = normalize_notice_identity_payload(copy.deepcopy(item))
+        finished["status"] = "已结束"
+        finished["ended_at"] = now
+        identity_keys = self._work_status_identity_keys(finished)
+        with self._summary_lock:
+            self._upsert_work_status_item_locked(
+                finished,
+                action="end",
+                now=now,
+            )
+            if not identity_keys:
+                return
+            for payload in self._iter_day_summary_payloads_locked():
+                rows = payload.get("items")
+                if not isinstance(rows, list):
+                    continue
+                changed = False
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if not (
+                        self._work_status_identity_keys(row) & identity_keys
+                    ):
+                        continue
+                    if self._is_completed_work_status_item(row):
+                        continue
+                    row["status"] = "已结束"
+                    row["ended_at"] = now
+                    row["completed_date"] = self._date_part(now)
+                    row["updated_at"] = now
+                    changed = True
+                if changed:
+                    payload["updated_at"] = now
+                    self._save_day_summary_locked(payload)
+
+    def _mark_local_notice_active_from_target(
+        self,
+        item: dict[str, Any],
+    ) -> None:
+        """Make local work status a projection of one active target record."""
+
+        if not isinstance(item, dict):
+            return
+        projected = normalize_notice_identity_payload(copy.deepcopy(item))
+        projected["status"] = (
+            "更新"
+            if str(projected.get("status") or "").strip() == "更新"
+            else "进行中"
+        )
+        projected.pop("ended_at", None)
+        projected.pop("completed_date", None)
+        identity_keys = self._work_status_identity_keys(projected)
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        matched = False
+        with self._summary_lock:
+            self._backfill_work_status_from_daily_summaries_locked()
+            self._migrate_legacy_work_status_locked()
+            for document in self._state_store.list_documents(
+                STATE_NS_WORK_STATUS
+            ):
+                payload = document.get("payload")
+                rows = (
+                    payload.get("items")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if not isinstance(rows, list):
+                    continue
+                changed = False
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if not (
+                        self._work_status_identity_keys(row) & identity_keys
+                    ):
+                        continue
+                    actions = copy.deepcopy(row.get("actions") or [])
+                    matched = True
+                    replacement = copy.deepcopy(row)
+                    replacement.update(copy.deepcopy(projected))
+                    replacement["actions"] = actions
+                    replacement["status"] = "进行中"
+                    replacement.pop("ended_at", None)
+                    replacement.pop("completed_date", None)
+                    if replacement != row:
+                        replacement["updated_at"] = now
+                        row.clear()
+                        row.update(replacement)
+                        changed = True
+                if changed:
+                    payload["updated_at"] = now
+                    self._state_store.put_document(
+                        STATE_NS_WORK_STATUS,
+                        str(document.get("key") or ""),
+                        payload,
+                    )
+            if not matched:
+                self._upsert_work_status_item_locked(
+                    projected,
+                    action=(
+                        "update"
+                        if str(projected.get("status") or "") == "更新"
+                        else "start"
+                    ),
+                    now=now,
+                )
+            for payload in self._iter_day_summary_payloads_locked():
+                rows = payload.get("items")
+                if not isinstance(rows, list):
+                    continue
+                changed = False
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if not (
+                        self._work_status_identity_keys(row) & identity_keys
+                    ):
+                        continue
+                    replacement = copy.deepcopy(row)
+                    replacement.update(copy.deepcopy(projected))
+                    replacement["status"] = "进行中"
+                    replacement.pop("ended_at", None)
+                    replacement.pop("completed_date", None)
+                    if replacement != row:
+                        replacement["updated_at"] = now
+                        row.clear()
+                        row.update(replacement)
+                        changed = True
+                if changed:
+                    payload["updated_at"] = now
+                    self._save_day_summary_locked(payload)
+            self._work_status_cache_signature = None
+            self._work_status_cache_items = None
+
+    def _reconcile_finished_qt_active_items(
+        self,
+        *,
+        scope: str,
+        ongoing_items: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Remove stale active rows only when their target record is explicitly finished."""
+        scope = self._normalize_scope(scope)
+        candidates: list[dict[str, Any]] = []
+        seen_active_ids: set[str] = set()
+        for raw_item in ongoing_items or []:
+            if not isinstance(raw_item, dict):
+                continue
+            item = normalize_notice_identity_payload(copy.deepcopy(raw_item))
+            if not self._scope_matches_item(scope, item):
+                continue
+            active_item_id = str(item.get("active_item_id") or "").strip()
+            target_record_id = canonical_target_record_id(item)
+            if (
+                not active_item_id
+                or active_item_id in seen_active_ids
+                or not target_record_id.startswith("rec")
+            ):
+                continue
+            work_type = self._item_work_type(item)
+            notice_type = str(
+                item.get("notice_type")
+                or self._notice_type_for_work_type(work_type)
+                or ""
+            ).strip()
+            field_config = get_field_config(notice_type)
+            status_field = str(field_config.get("status") or "").strip()
+            app_token = str(config.app_token or "").strip()
+            table_id = str(config.get_table_id(notice_type) or "").strip()
+            if not status_field or not app_token or not table_id:
+                continue
+            item["work_type"] = work_type
+            item["notice_type"] = notice_type
+            item["target_record_id"] = target_record_id
+            item["record_id"] = target_record_id
+            candidates.append(
+                {
+                    "item": item,
+                    "active_item_id": active_item_id,
+                    "target_record_id": target_record_id,
+                    "work_type": work_type,
+                    "notice_type": notice_type,
+                    "status_field": status_field,
+                    "field_config": field_config,
+                    "app_token": app_token,
+                    "table_id": table_id,
+                }
+            )
+            seen_active_ids.add(active_item_id)
+
+        field_cache: dict[
+            tuple[str, str], tuple[list[FieldMeta], dict[str, FieldMeta]]
+        ] = {}
+        record_cache: dict[
+            tuple[str, str, str], dict[str, Any] | Exception | None
+        ] = {}
+        removed_items: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for candidate in candidates:
+            app_token = str(candidate["app_token"])
+            table_id = str(candidate["table_id"])
+            target_record_id = str(candidate["target_record_id"])
+            table_key = (app_token, table_id)
+            record_key = (app_token, table_id, target_record_id)
+            try:
+                if table_key not in field_cache:
+                    field_cache[table_key] = self._load_table_fields(
+                        app_token=app_token,
+                        table_id=table_id,
+                    )
+                if record_key not in record_cache:
+                    _metas, meta_by_name = field_cache[table_key]
+                    try:
+                        records = self._load_table_records_by_ids(
+                            app_token=app_token,
+                            table_id=table_id,
+                            meta_by_name=meta_by_name,
+                            work_type=str(candidate["work_type"]),
+                            notice_type=str(candidate["notice_type"]),
+                            record_ids=[target_record_id],
+                        )
+                        record_cache[record_key] = records[0] if records else None
+                    except Exception as exc:
+                        record_cache[record_key] = exc
+                target_record = record_cache.get(record_key)
+                if isinstance(target_record, Exception):
+                    raise target_record
+                if not isinstance(target_record, dict):
+                    continue
+                fields = target_record.get("display_fields")
+                fields = fields if isinstance(fields, dict) else {}
+                if not self._target_status_is_finished(
+                    fields.get(str(candidate["status_field"]))
+                ):
+                    continue
+                field_config = candidate["field_config"]
+                ended_at = ""
+                if isinstance(field_config, dict):
+                    for logical_name in (
+                        "actual_end",
+                        "end_time",
+                        "recover_time",
+                    ):
+                        field_name = str(field_config.get(logical_name) or "").strip()
+                        if not field_name:
+                            continue
+                        ended_at = self._format_source_datetime(
+                            fields.get(field_name)
+                        ).strip()
+                        if ended_at:
+                            break
+                item = candidate["item"]
+                removed = self._state_store.delete_qt_active_item(
+                    active_item_id=str(candidate["active_item_id"]),
+                    record_id=target_record_id,
+                )
+                if not removed:
+                    continue
+                identity_payload = copy.deepcopy(item)
+                identity_payload["status"] = "已结束"
+                identity_payload["action"] = "end"
+                self._state_store.upsert_notice_identity(
+                    identity_payload,
+                    origin="target_status_reconcile",
+                )
+                self._mark_local_notice_finished_from_target(
+                    item,
+                    ended_at=ended_at,
+                )
+                with suppress(Exception):
+                    self._state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": str(candidate["active_item_id"]),
+                                "record_id": target_record_id,
+                                "target_record_id": target_record_id,
+                                "source_record_id": canonical_source_record_id(item),
+                                "work_type": str(candidate["work_type"]),
+                                "source": "target_status_reconcile",
+                            },
+                        },
+                    )
+                removed_items.append(
+                    {
+                        "active_item_id": str(candidate["active_item_id"]),
+                        "target_record_id": target_record_id,
+                        "source_record_id": canonical_source_record_id(item),
+                        "work_type": str(candidate["work_type"]),
+                        "notice_type": str(candidate["notice_type"]),
+                    }
+                )
+            except Exception as exc:
+                errors.append(
+                    f"{candidate['notice_type']} {target_record_id}: {exc}"
+                )
+        return {
+            "removed": len(removed_items),
+            "items": removed_items,
+            "errors": errors,
+        }
+
     def reconcile_orphan_started_items(
         self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
+        finished_result = self._reconcile_finished_qt_active_items(
+            scope=scope,
+            ongoing_items=ongoing_items,
+        )
+        finished_identity_keys: set[str] = set()
+        for item in finished_result.get("items") or []:
+            if isinstance(item, dict):
+                finished_identity_keys.update(
+                    self._work_status_identity_keys(item)
+                )
         ongoing_keys: set[str] = set()
         for item in ongoing_items or []:
-            if isinstance(item, dict) and self._scope_matches_item(scope, item):
+            if (
+                isinstance(item, dict)
+                and self._scope_matches_item(scope, item)
+                and not (
+                    self._work_status_identity_keys(item)
+                    & finished_identity_keys
+                )
+            ):
                 ongoing_keys.update(self._work_status_identity_keys(item))
         if not ongoing_keys:
             ongoing_keys = set()
         target_cache: dict[tuple[str, str], set[str] | None] = {}
         removed_keys: set[str] = set()
-        removed_count = 0
+        removed_count = int(finished_result.get("removed") or 0)
         with self._summary_lock:
             self._backfill_work_status_from_daily_summaries_locked()
             self._migrate_legacy_work_status_locked()
@@ -21591,7 +23887,15 @@ class MaintenancePortalService:
                         self._save_day_summary_locked(payload)
                 self._work_status_cache_signature = None
                 self._work_status_cache_items = None
-        return {"removed": removed_count}
+        return {
+            "removed": removed_count,
+            "finished_active_removed": int(
+                finished_result.get("removed") or 0
+            ),
+            "finished_active_errors": list(
+                finished_result.get("errors") or []
+            ),
+        }
 
     def _get_record_memory(self, record: dict[str, Any]) -> dict[str, str]:
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
@@ -23114,7 +25418,38 @@ class MaintenancePortalService:
 
     @staticmethod
     def _target_status_is_finished(status: Any) -> bool:
-        return "结束" in str(status or "").strip()
+        text = re.sub(r"\s+", "", str(status or "").strip())
+        if not text:
+            return False
+        if any(
+            token in text
+            for token in ("未结束", "待结束", "未完成", "待闭环")
+        ):
+            return False
+        return any(token in text for token in ("结束", "已完成", "维修完成", "闭环"))
+
+    @classmethod
+    def _target_status_is_active(cls, status: Any) -> bool:
+        text = re.sub(r"\s+", "", str(status or "").strip())
+        if not text or cls._target_status_is_finished(text):
+            return False
+        if any(
+            token in text
+            for token in ("未开始", "延期未开始", "待发起", "已取消", "取消")
+        ):
+            return False
+        return any(
+            token in text
+            for token in (
+                "开始",
+                "更新",
+                "进行中",
+                "处理中",
+                "未结束",
+                "待结束",
+                "恢复",
+            )
+        )
 
     def _ongoing_hidden_keys(self, item: dict[str, Any]) -> list[str]:
         if not isinstance(item, dict):
@@ -23862,6 +26197,7 @@ class MaintenancePortalService:
                 section=str(qt_snapshot.get("section") or ""),
                 sort_order=int(qt_snapshot.get("sort_order") or 0),
                 origin=str(qt_snapshot.get("origin") or ""),
+                allow_revive=True,
             )
         else:
             removed_active = self._state_store.delete_qt_active_item(
@@ -24007,37 +26343,71 @@ class MaintenancePortalService:
             field_config.get("plan_end", ""),
         ]
 
+    @classmethod
+    def _notice_target_snapshot_source_key(cls, work_type: str) -> str:
+        normalized = cls._normalize_notice_work_type_alias(work_type)
+        return NOTICE_TARGET_SNAPSHOT_SOURCE_BY_WORK_TYPE.get(
+            normalized,
+            f"notice_target.{normalized or WORK_TYPE_MAINTENANCE}",
+        )
+
     def _target_records_for_notice_type(
         self, notice_type: str, work_type: str, *, force_refresh: bool = False
     ) -> list[dict[str, Any]]:
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(
+            notice_type or self._notice_type_for_work_type(work_type)
+        ).strip()
         table_id = str(config.get_table_id(notice_type) or "").strip()
         app_token = str(config.app_token or "").strip()
         if not app_token or not table_id:
             return []
-        cache_key = (notice_type, table_id)
+        cache_key = (notice_type, app_token, table_id)
         with self._refresh_lock:
             cached = self._target_record_cache.get(cache_key) or {}
             if (
                 not force_refresh
-                and
-                cached.get("records") is not None
+                and cached.get("records") is not None
                 and time.time() - float(cached.get("loaded_ts") or 0)
                 < self._source_cache_ttl_seconds()
             ):
                 return list(cached.get("records") or [])
-            _metas, meta_by_name = self._load_table_fields(
-                app_token=app_token, table_id=table_id
-            )
-            records = self._load_table_records(
+            if work_type == WORK_TYPE_REPAIR:
+                _metas, _meta_by_name, records = (
+                    self._load_repair_management_target_records(
+                        force_refresh=force_refresh
+                    )
+                )
+                self._target_record_cache[cache_key] = {
+                    "loaded_ts": time.time(),
+                    "records": list(records),
+                }
+                return list(records)
+
+            def load_remote() -> tuple[list[FieldMeta], list[dict[str, Any]]]:
+                metas, meta_by_name = self._load_table_fields(
+                    app_token=app_token,
+                    table_id=table_id,
+                )
+                records = self._load_table_records(
+                    app_token=app_token,
+                    table_id=table_id,
+                    meta_by_name=meta_by_name,
+                    work_type=work_type,
+                    notice_type=notice_type,
+                )
+                return metas, records
+
+            _metas, _meta_by_name, records = self._load_repair_snapshot_source(
+                source_key=self._notice_target_snapshot_source_key(work_type),
                 app_token=app_token,
                 table_id=table_id,
-                meta_by_name=meta_by_name,
-                work_type=work_type,
-                notice_type=notice_type,
+                loader=load_remote,
+                force_refresh=force_refresh,
             )
             self._target_record_cache[cache_key] = {
                 "loaded_ts": time.time(),
-                "records": records,
+                "records": list(records),
             }
             return list(records)
 
@@ -24243,6 +26613,12 @@ class MaintenancePortalService:
                 "fault_time",
                 fallback_names=("发生故障时间", "发现故障时间"),
             )
+            form_fields["expected_time"] = self._target_form_datetime_value(
+                start_value
+            )
+            form_fields["fault_time"] = self._target_form_datetime_value(
+                end_value
+            )
         elif work_type == WORK_TYPE_EVENT:
             form_fields["level"] = field_value(
                 "level",
@@ -24289,6 +26665,487 @@ class MaintenancePortalService:
             elif "上电" in title:
                 form_fields["notice_type"] = NOTICE_TYPE_POWER_UP
         return form_fields
+
+    @staticmethod
+    def _target_record_fields(
+        target_record: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(target_record, dict):
+            return {}
+        fields = target_record.get("display_fields")
+        return dict(fields) if isinstance(fields, dict) else {}
+
+    def _target_record_lifecycle(
+        self,
+        *,
+        work_type: str,
+        notice_type: str,
+        target_record: dict[str, Any],
+    ) -> dict[str, Any]:
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(
+            notice_type or self._notice_type_for_work_type(work_type)
+        ).strip()
+        fields = self._target_record_fields(target_record)
+        field_config = get_field_config(notice_type)
+
+        def first_field(
+            logical_names: tuple[str, ...],
+            fallback_names: tuple[str, ...],
+        ) -> tuple[str, Any]:
+            names = [
+                str(field_config.get(name) or "").strip()
+                for name in logical_names
+            ]
+            for field_name in (*names, *fallback_names):
+                if not field_name or field_name not in fields:
+                    continue
+                return field_name, fields.get(field_name)
+            return "", None
+
+        _status_field, status_value = first_field(
+            ("status",),
+            (
+                "维保状态",
+                "变更状态",
+                "检修状态",
+                "上电状态",
+                "轮巡状态",
+                "调整状态",
+                "事件状态",
+                "最终状态",
+            ),
+        )
+        _start_field, start_value = first_field(
+            ("actual_start", "start_time", "response_time", "occurrence_time"),
+            (
+                "实际开始时间",
+                "变更开始时间",
+                "事件进展响应时间",
+                "事件发生时间",
+            ),
+        )
+        if work_type == WORK_TYPE_EVENT:
+            _end_field, end_value = first_field(
+                ("end_time",),
+                ("事件结束时间",),
+            )
+        else:
+            _end_field, end_value = first_field(
+                ("actual_end", "end_time"),
+                (
+                    "实际结束时间",
+                    "变更结束时间",
+                ),
+            )
+        status = self._clean_source_text(status_value)
+        started_at = self._format_source_datetime(start_value).strip()
+        ended_at = self._format_source_datetime(end_value).strip()
+        finished = bool(ended_at) or self._target_status_is_finished(status)
+        active = bool(
+            not finished
+            and (
+                self._target_status_is_active(status)
+                or bool(started_at)
+            )
+        )
+        return {
+            "status": status,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "active": active,
+            "finished": finished,
+        }
+
+    @staticmethod
+    def _target_snapshot_payload_changed(
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> bool:
+        return json.dumps(
+            before,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ) != json.dumps(
+            after,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    def _target_snapshot_active_payload(
+        self,
+        *,
+        work_type: str,
+        notice_type: str,
+        target_record: dict[str, Any],
+        current_payload: dict[str, Any] | None = None,
+        identity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(
+            notice_type or self._notice_type_for_work_type(work_type)
+        ).strip()
+        target_record_id = str(target_record.get("record_id") or "").strip()
+        identity_payload = (
+            dict(identity.get("payload") or {})
+            if isinstance(identity, dict)
+            and isinstance(identity.get("payload"), dict)
+            else {}
+        )
+        payload = normalize_notice_identity_payload(identity_payload)
+        payload.update(
+            normalize_notice_identity_payload(
+                copy.deepcopy(current_payload or {})
+            )
+        )
+        payload.update(
+            self._target_record_form_fields(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
+            )
+        )
+        projected_notice_type = str(payload.get("notice_type") or "").strip()
+        if work_type != WORK_TYPE_POWER or projected_notice_type not in {
+            NOTICE_TYPE_POWER_UP,
+            NOTICE_TYPE_POWER_DOWN,
+        }:
+            projected_notice_type = notice_type
+        lifecycle = self._target_record_lifecycle(
+            work_type=work_type,
+            notice_type=projected_notice_type,
+            target_record=target_record,
+        )
+        current_status = str(
+            (current_payload or {}).get("status")
+            or identity_payload.get("status")
+            or ""
+        ).strip()
+        remote_status = str(lifecycle.get("status") or "").strip()
+        action_status = (
+            "更新"
+            if "更新" in remote_status or current_status == "更新"
+            else "开始"
+        )
+        active_item_id = str(
+            payload.get("active_item_id")
+            or (identity or {}).get("active_item_id")
+            or f"target-{work_type}-{target_record_id}"
+        ).strip()
+        payload.update(
+            {
+                "active_item_id": active_item_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "target_app_token": str(config.app_token or "").strip(),
+                "target_table_id": str(
+                    config.get_table_id(projected_notice_type) or ""
+                ).strip(),
+                "work_type": work_type,
+                "notice_type": projected_notice_type,
+                "status": action_status,
+                "target_record_status": remote_status,
+                "target_record_last_modified_time": self._format_source_datetime(
+                    target_record.get("last_modified_time")
+                    or target_record.get("updated_time")
+                    or ""
+                ).strip(),
+                "_is_placeholder_record": False,
+            }
+        )
+        if lifecycle.get("started_at"):
+            payload["started_at"] = lifecycle["started_at"]
+        building_codes = self._building_codes_from_value(
+            payload.get("building")
+            or payload.get("title")
+            or ""
+        )
+        payload["building_codes"] = building_codes
+        if len(building_codes) == 1:
+            payload["building_code"] = building_codes[0]
+        else:
+            payload.pop("building_code", None)
+        payload = normalize_notice_identity_payload(payload)
+        return self._synchronize_prepared_notice_text(payload)
+
+    def _enqueue_target_snapshot_active_upsert(
+        self,
+        *,
+        row: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        self._state_store.enqueue_outbox_event(
+            "qt_action",
+            {
+                "kind": "active_upsert",
+                "payload": {
+                    "item": {
+                        "active_item_id": str(
+                            payload.get("active_item_id") or ""
+                        ),
+                        "record_id": canonical_target_record_id(payload),
+                        "notice_type": str(payload.get("notice_type") or ""),
+                        "section": str(row.get("section") or "other"),
+                        "sort_order": int(row.get("sort_order") or 0),
+                        "origin": "target_snapshot_refresh",
+                        "payload": payload,
+                    },
+                    "source": "target_snapshot_refresh",
+                },
+            },
+        )
+
+    def _enqueue_target_snapshot_active_delete(
+        self,
+        *,
+        payload: dict[str, Any],
+        reason: str,
+    ) -> None:
+        self._state_store.enqueue_outbox_event(
+            "qt_action",
+            {
+                "kind": "active_delete",
+                "payload": {
+                    "active_item_id": str(
+                        payload.get("active_item_id") or ""
+                    ),
+                    "record_id": canonical_target_record_id(payload),
+                    "target_record_id": canonical_target_record_id(payload),
+                    "source_record_id": canonical_source_record_id(payload),
+                    "work_type": self._item_work_type(payload),
+                    "source": reason,
+                },
+            },
+        )
+
+    def _reconcile_notice_target_snapshot(
+        self,
+        *,
+        work_type: str,
+        notice_type: str,
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Project one complete target-table snapshot into Qt/Web runtime state."""
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(
+            notice_type or self._notice_type_for_work_type(work_type)
+        ).strip()
+        remote_by_id = {
+            str(record.get("record_id") or "").strip(): record
+            for record in records
+            if isinstance(record, dict)
+            and str(record.get("record_id") or "").strip()
+        }
+        rows = self._state_store.list_qt_active_items(include_deleted=False)
+        active_target_ids: set[str] = set()
+        updated = 0
+        finished_removed = 0
+        missing_removed = 0
+        restored = 0
+        warnings: list[str] = []
+
+        for row in rows:
+            current = (
+                dict(row.get("payload"))
+                if isinstance(row.get("payload"), dict)
+                else {}
+            )
+            current = normalize_notice_identity_payload(current)
+            if self._item_work_type(current) != work_type:
+                continue
+            target_record_id = (
+                canonical_target_record_id(current)
+                or str(row.get("record_id") or "").strip()
+            )
+            if not target_record_id or is_local_record_id(target_record_id):
+                continue
+            active_target_ids.add(target_record_id)
+            target_record = remote_by_id.get(target_record_id)
+            if target_record is None:
+                if self._state_store.delete_qt_active_item(
+                    active_item_id=str(
+                        current.get("active_item_id")
+                        or row.get("active_item_id")
+                        or ""
+                    ),
+                    record_id=target_record_id,
+                ):
+                    self._state_store.mark_notice_identity_deleted(
+                        work_type=work_type,
+                        active_item_id=str(
+                            current.get("active_item_id")
+                            or row.get("active_item_id")
+                            or ""
+                        ),
+                        source_record_id=canonical_source_record_id(current),
+                        target_record_id=target_record_id,
+                    )
+                    with suppress(Exception):
+                        self._enqueue_target_snapshot_active_delete(
+                            payload=current,
+                            reason="target_snapshot_remote_deleted",
+                        )
+                    with suppress(Exception):
+                        self.discard_deleted_ongoing_state(
+                            current,
+                            scope="ALL",
+                        )
+                    missing_removed += 1
+                continue
+
+            lifecycle = self._target_record_lifecycle(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
+            )
+            if lifecycle.get("finished"):
+                if self._state_store.delete_qt_active_item(
+                    active_item_id=str(
+                        current.get("active_item_id")
+                        or row.get("active_item_id")
+                        or ""
+                    ),
+                    record_id=target_record_id,
+                ):
+                    finished_payload = {
+                        **current,
+                        "status": "已结束",
+                        "action": "end",
+                        "target_record_status": str(
+                            lifecycle.get("status") or ""
+                        ),
+                    }
+                    self._state_store.upsert_notice_identity(
+                        finished_payload,
+                        origin="target_snapshot_refresh",
+                    )
+                    self._mark_local_notice_finished_from_target(
+                        current,
+                        ended_at=str(lifecycle.get("ended_at") or ""),
+                    )
+                    with suppress(Exception):
+                        self._enqueue_target_snapshot_active_delete(
+                            payload=current,
+                            reason="target_snapshot_finished",
+                        )
+                    finished_removed += 1
+                continue
+
+            projected = self._target_snapshot_active_payload(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
+                current_payload=current,
+            )
+            self._mark_local_notice_active_from_target(projected)
+            if not self._target_snapshot_payload_changed(current, projected):
+                continue
+            if self._state_store.upsert_qt_active_item(
+                projected,
+                section=str(row.get("section") or "other"),
+                sort_order=int(row.get("sort_order") or 0),
+                origin=str(row.get("origin") or "target_snapshot_refresh"),
+            ):
+                with suppress(Exception):
+                    self._enqueue_target_snapshot_active_upsert(
+                        row=row,
+                        payload=projected,
+                    )
+                updated += 1
+
+        for target_record_id, target_record in remote_by_id.items():
+            if target_record_id in active_target_ids:
+                continue
+            lifecycle = self._target_record_lifecycle(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
+            )
+            if not lifecycle.get("active"):
+                continue
+            identity = self._state_store.resolve_notice_identity(
+                work_type=work_type,
+                target_record_id=target_record_id,
+            )
+            projected = self._target_snapshot_active_payload(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
+                identity=identity,
+            )
+            if not notice_payload_matches_month(projected):
+                continue
+            if self._is_ongoing_hidden(projected):
+                continue
+            section = "event" if work_type == WORK_TYPE_EVENT else "other"
+            row = {
+                "section": section,
+                "sort_order": 0,
+            }
+            if self._state_store.upsert_qt_active_item(
+                projected,
+                section=section,
+                sort_order=0,
+                origin="target_snapshot_refresh",
+            ):
+                self._mark_local_notice_active_from_target(projected)
+                with suppress(Exception):
+                    self._enqueue_target_snapshot_active_upsert(
+                        row=row,
+                        payload=projected,
+                    )
+                restored += 1
+
+        if updated or finished_removed or missing_removed or restored:
+            self._touch_state_cache_version()
+        return {
+            "remote_count": len(remote_by_id),
+            "updated": updated,
+            "finished_removed": finished_removed,
+            "missing_removed": missing_removed,
+            "restored": restored,
+            "warnings": warnings,
+        }
+
+    def _refresh_notice_target_replica(
+        self,
+        *,
+        work_type: str,
+        notice_type: str = "",
+    ) -> dict[str, Any]:
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(
+            notice_type or self._notice_type_for_work_type(work_type)
+        ).strip()
+        if not str(config.app_token or "").strip() or not str(
+            config.get_table_id(notice_type) or ""
+        ).strip():
+            raise PortalError(
+                f"未配置{notice_type}目标多维 app_token/table_id。"
+            )
+        records = self._target_records_for_notice_type(
+            notice_type,
+            work_type,
+            force_refresh=True,
+        )
+        if self._repair_snapshots_enabled:
+            snapshot_meta = self._state_store.get_repair_snapshot_meta(
+                self._notice_target_snapshot_source_key(work_type)
+            )
+            if str(snapshot_meta.get("status") or "") == "failed":
+                raise PortalError(
+                    str(snapshot_meta.get("error") or "")
+                    or f"{notice_type}目标多维刷新失败，当前仍保留上次成功数据。"
+                )
+        return self._reconcile_notice_target_snapshot(
+            work_type=work_type,
+            notice_type=notice_type,
+            records=records,
+        )
 
     def validate_notice_identity_binding(
         self,
@@ -25172,6 +28029,46 @@ class MaintenancePortalService:
                 return target_record_id
         return fallback
 
+    def _source_record_id_from_work_status(
+        self,
+        *,
+        work_type: str,
+        target_record_id: str = "",
+        active_item_id: str = "",
+    ) -> str:
+        work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
+        target_record_id = str(target_record_id or "").strip()
+        active_item_id = str(active_item_id or "").strip()
+        if not target_record_id and not active_item_id:
+            return ""
+        with self._summary_lock:
+            status_items = self._load_work_status_items_locked("ALL")
+
+        def source_id(item: dict[str, Any]) -> str:
+            value = canonical_source_record_id(item)
+            return "" if is_local_record_id(value) else value
+
+        if active_item_id:
+            for item in status_items:
+                if self._item_work_type(item) != work_type:
+                    continue
+                if (
+                    str(item.get("active_item_id") or "").strip()
+                    == active_item_id
+                ):
+                    resolved = source_id(item)
+                    if resolved:
+                        return resolved
+        if target_record_id:
+            for item in status_items:
+                if self._item_work_type(item) != work_type:
+                    continue
+                if canonical_target_record_id(item) == target_record_id:
+                    resolved = source_id(item)
+                    if resolved:
+                        return resolved
+        return ""
+
     def _target_record_id_from_identity_map(
         self,
         *,
@@ -25306,6 +28203,8 @@ class MaintenancePortalService:
             if not self._scope_matches_item(scope, item):
                 continue
             copied = normalize_notice_identity_payload(copy.deepcopy(item))
+            if not notice_payload_matches_month(copied):
+                continue
             copied["work_type"] = self._item_work_type(copied)
             copied.setdefault(
                 "notice_type",
@@ -25346,7 +28245,7 @@ class MaintenancePortalService:
         scope: str,
         ongoing_items: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        """Project visible Qt active items to the browser without deduping."""
+        """Project the canonical current-month Qt view to the browser."""
         scope = self._normalize_scope(scope)
         projected: list[dict[str, Any]] = []
         for item in ongoing_items or []:
@@ -25366,6 +28265,8 @@ class MaintenancePortalService:
             else:
                 copied = copy.deepcopy(item)
             copied = normalize_notice_identity_payload(copied)
+            if not notice_payload_matches_month(copied):
+                continue
             if not self._scope_matches_item(scope, copied):
                 continue
             copied["work_type"] = self._item_work_type(copied)
@@ -25376,7 +28277,7 @@ class MaintenancePortalService:
             if self._is_ongoing_hidden(copied):
                 continue
             projected.append(copied)
-        return projected
+        return self._merge_ongoing_items(scope, projected)
 
     def _ongoing_identity_conflicts(
         self, existing: dict[str, Any], incoming: dict[str, Any]

@@ -114,6 +114,23 @@
               <strong>{{ waterMetricValue(displayScopeOptions.length) }}</strong>
             </article>
           </template>
+          <template v-else-if="activeMode === 'daily'">
+            <article>
+              <span class="summary-icon pending" aria-hidden="true"></span>
+              <small>日期</small>
+              <strong>今天</strong>
+            </article>
+            <article>
+              <span class="summary-icon ongoing" aria-hidden="true"></span>
+              <small>任务分类</small>
+              <strong>5</strong>
+            </article>
+            <article>
+              <span class="summary-icon coverage" aria-hidden="true"></span>
+              <small>可访问楼栋</small>
+              <strong>{{ displayScopeOptions.length }}</strong>
+            </article>
+          </template>
           <template v-else>
             <article>
               <span class="summary-icon pending" aria-hidden="true"></span>
@@ -184,6 +201,10 @@
               <span>本月记录 {{ waterScopeItem(scope.value).month_record_count || 0 }}</span>
               <span>最近 {{ formatWaterDate(waterScopeItem(scope.value).latest_date_ms) }}</span>
             </template>
+            <template v-else-if="activeMode === 'daily'">
+              <span>今日任务清单</span>
+              <span>通告 · 事件 · 检修</span>
+            </template>
             <template v-else>
               <span>{{ scopePrimaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).pending }}</span>
               <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).ongoing }}</span>
@@ -217,6 +238,13 @@
               @click="$emit('water', scope.value)"
             >
               进入水耗管理
+            </button>
+            <button type="button"
+              v-else-if="activeMode === 'daily'"
+              class="primary"
+              @click="$emit('daily', scope.value)"
+            >
+              查看每日任务
             </button>
             <a
               v-else-if="activeMode === 'handover' && handoverLinks[scope.value]"
@@ -295,6 +323,7 @@ const emit = defineEmits<{
   engineer: [scope: string];
   "repair-management": [scope: string];
   water: [scope: string];
+  daily: [scope: string];
   "request-permission": [];
 }>();
 
@@ -311,11 +340,12 @@ let waterBuildingsPollTimer: number | null = null;
 
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
-const isToolScopeMode = computed(() => ["power", "polling", "adjust", "handover"].includes(activeMode.value));
+const isToolScopeMode = computed(() => ["daily", "power", "polling", "adjust", "handover"].includes(activeMode.value));
 const activeMetricWorkType = computed(() => {
   if (activeMode.value === "maintenance_mop") return "maintenance";
   if (activeMode.value === "repair_management") return "repair";
   if (activeMode.value === "event") return "event";
+  if (activeMode.value === "daily") return "daily";
   if (activeMode.value === "handover") return "handover";
   return activeConfig.value.workType || "maintenance";
 });
@@ -794,6 +824,17 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   height: 14px;
   border-radius: 999px;
   transform: rotate(-35deg);
+}
+
+.tool-icon.daily::before {
+  width: 27px;
+  height: 24px;
+  border-width: 3px;
+  border-radius: 5px;
+  background:
+    linear-gradient(currentColor, currentColor) 50% 7px / 100% 3px no-repeat,
+    radial-gradient(circle, currentColor 0 2px, transparent 2.5px)
+      4px 13px / 9px 8px repeat-x;
 }
 
 .permission-more-card {

@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "tools" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleCard = {
   key: string;
@@ -120,10 +120,11 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "more",
     badge: "辅助入口",
     title: "其他工具",
-    description: "汇总上/下电、轮巡、调整和交接班入口",
-    tags: ["上/下电", "轮巡", "调整", "交接班"],
+    description: "汇总每日任务、上/下电、轮巡、调整和交接班入口",
+    tags: ["每日任务", "上/下电", "轮巡", "交接班"],
     actions: [
-      { key: "power", label: "上/下电", primary: true },
+      { key: "daily", label: "每日任务清单", primary: true },
+      { key: "power", label: "上/下电" },
       { key: "polling", label: "轮巡" },
       { key: "adjust", label: "调整" },
       { key: "handover", label: "交接班" },
@@ -180,8 +181,14 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
   tools: {
     kicker: "其他工具",
     title: "选择辅助工具",
-    description: "选择上/下电、轮巡、调整或交接班审核页。",
+    description: "",
     actionLabel: "选择工具",
+  },
+  daily: {
+    kicker: "每日任务清单",
+    title: "选择楼栋查看每日任务",
+    description: "",
+    actionLabel: "查看每日任务",
   },
   power: {
     kicker: "其他工具",
@@ -213,6 +220,7 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
 };
 
 export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
+  { key: "daily", title: "每日任务清单", description: "汇总当天通告、事件、检修和维护记录", badge: "今日", icon: "daily", tone: "blue" },
   { key: "power", title: "上/下电通告", description: "机柜上电、下电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },

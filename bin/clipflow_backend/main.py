@@ -127,7 +127,9 @@ from lan_bitable_template_portal.portal_auth import (
 from lan_bitable_template_portal.identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
+    current_local_month_key,
     is_local_record_id,
+    notice_payload_matches_month,
     normalize_notice_identity_payload,
 )
 from lan_bitable_template_portal.operation_audit import (
@@ -253,6 +255,10 @@ def _queue_stats() -> dict:
         ) + int(upload_wait_details.get("processing_active") or 0)
     with PortalRuntime.source_refresh_lock:
         source_refresh_inflight = bool(PortalRuntime.source_refresh_inflight)
+    with PortalRuntime.maintenance_refresh_lock:
+        maintenance_refresh_inflight = bool(
+            PortalRuntime.maintenance_refresh_inflight
+        )
     with PortalRuntime.repair_refresh_lock:
         repair_refresh_inflight = bool(PortalRuntime.repair_refresh_inflight)
     with PortalRuntime.change_refresh_lock:
@@ -273,6 +279,7 @@ def _queue_stats() -> dict:
             and PortalRuntime.source_refresh_thread.is_alive()
         ),
         "source_refresh_inflight": source_refresh_inflight,
+        "maintenance_refresh_inflight": maintenance_refresh_inflight,
         "repair_refresh_inflight": repair_refresh_inflight,
         "change_refresh_inflight": change_refresh_inflight,
         "payload_cache_entries": len(PortalRuntime.payload_cache),
@@ -1752,6 +1759,24 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
 
+        @app.get("/api/daily-tasks")
+        async def daily_tasks(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_daily_task_checklist,
+                    scope=scope,
+                    date=str(request.query_params.get("date") or "").strip(),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.get("/api/records")
         @app.get("/api/workbench")
         async def workbench(request: Request):
@@ -2846,6 +2871,20 @@ class FastAPIPortalController:
                 data["source_refresh_triggered"] = refreshed
                 data.update(refresh_result)
                 return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/maintenance-refresh")
+        async def maintenance_refresh(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                refresh_result = PortalRuntime.start_maintenance_source_refresh()
+                return self._json_ok(request, session, refresh_result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -5581,7 +5620,9 @@ class FastAPIPortalController:
             if deny is not None:
                 return deny
             PortalRuntime.restore_live_portal_active_items()
-            active_items = []
+            reconcile_items: list[dict] = []
+            hidden_outside_current_month = 0
+            current_month_rows = 0
             for row in PortalRuntime.state_store.list_qt_active_items():
                 payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
                 info = extract_event_info(str(payload.get("text") or "")) or {}
@@ -5592,7 +5633,37 @@ class FastAPIPortalController:
                         record_id=str(row.get("record_id") or ""),
                     )
                     continue
-                active_items.append(row)
+                reconcile_item = dict(payload)
+                reconcile_item.setdefault(
+                    "active_item_id",
+                    str(row.get("active_item_id") or ""),
+                )
+                reconcile_item.setdefault(
+                    "target_record_id",
+                    str(row.get("record_id") or ""),
+                )
+                reconcile_item.setdefault(
+                    "record_id",
+                    str(row.get("record_id") or ""),
+                )
+                reconcile_item.setdefault("notice_type", row.get("notice_type"))
+                reconcile_items.append(reconcile_item)
+                if notice_payload_matches_month(payload):
+                    current_month_rows += 1
+                else:
+                    hidden_outside_current_month += 1
+            active_items = (
+                PortalRuntime.state_store.list_visible_qt_active_items()
+            )
+            hidden_duplicate_rows = max(
+                0,
+                current_month_rows - len(active_items),
+            )
+            self._reconcile_orphan_started_items(
+                "ALL",
+                reconcile_items,
+                force=True,
+            )
             clipboard_candidates = PortalRuntime.state_store.list_clipboard_candidates(
                 status="pending",
                 limit=100,
@@ -5611,6 +5682,11 @@ class FastAPIPortalController:
                     "runtime_limits": PortalRuntime.runtime_limits(),
                     "runtime_pressure": PortalRuntime.runtime_pressure(),
                     "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
+                    "active_visibility": {
+                        "month": current_local_month_key(),
+                        "hidden_outside_month": hidden_outside_current_month,
+                        "hidden_duplicates": hidden_duplicate_rows,
+                    },
                     "qt_bridge": PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {},
                 },
             }
@@ -6378,6 +6454,14 @@ class FastAPIPortalController:
             PortalRuntime.source_refresh_inflight = False
             PortalRuntime.source_refresh_last_result = {}
             PortalRuntime.source_refresh_last_finished = 0.0
+        with PortalRuntime.maintenance_refresh_lock:
+            PortalRuntime.maintenance_refresh_inflight = False
+            PortalRuntime.maintenance_refresh_event = threading.Event()
+            PortalRuntime.maintenance_refresh_last_result = {}
+            PortalRuntime.maintenance_refresh_last_error = ""
+            PortalRuntime.maintenance_refresh_last_finished = 0.0
+            PortalRuntime.maintenance_refresh_started_at = 0.0
+            PortalRuntime.maintenance_refresh_completed_at = 0.0
         with PortalRuntime.repair_refresh_lock:
             PortalRuntime.repair_refresh_inflight = False
             PortalRuntime.repair_refresh_event = threading.Event()
@@ -6475,7 +6559,9 @@ class FastAPIPortalController:
     @staticmethod
     def _scoped_qt_active_signature(scope: str) -> tuple[str, int]:
         try:
-            active_rows = PortalRuntime.state_store.list_qt_active_items()
+            active_rows = (
+                PortalRuntime.state_store.list_visible_qt_active_items()
+            )
         except Exception:
             active_rows = []
         payloads: list[dict] = []
@@ -7629,6 +7715,8 @@ class FastAPIPortalController:
             rows = PortalRuntime.state_store.list_qt_active_items(include_deleted=False)
             for row in rows:
                 payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if not notice_payload_matches_month(payload):
+                    continue
                 summary = self._diagnostic_summary_from_payload(
                     payload,
                     row=row,
@@ -8004,6 +8092,8 @@ class FastAPIPortalController:
                 return
             if _item_is_ended(item):
                 return
+            if not notice_payload_matches_month(item):
+                return
             # A live qt_active_items row is authoritative. Historical deleted rows
             # may share the same business text and must never suppress a newer live
             # row; deleted identity keys are only used by the legacy snapshot fallback.
@@ -8012,17 +8102,18 @@ class FastAPIPortalController:
             qt_projected_items.append(normalize_notice_identity_payload(dict(item)))
 
         try:
-            active_rows = PortalRuntime.state_store.list_qt_active_items(
+            all_active_rows = PortalRuntime.state_store.list_qt_active_items(
                 include_deleted=True
+            )
+            active_rows = (
+                PortalRuntime.state_store.project_visible_qt_active_items(
+                    all_active_rows
+                )
             )
             active_rows_loaded = True
             for active_item in active_rows:
-                if not isinstance(active_item, dict):
-                    continue
-                if active_item.get("deleted_at") is not None:
-                    continue
                 active_qt_identity_keys.update(_identity_keys(_row_payload(active_item)))
-            for active_item in active_rows:
+            for active_item in all_active_rows:
                 if not isinstance(active_item, dict):
                     continue
                 if active_item.get("deleted_at") is None:
@@ -8038,13 +8129,16 @@ class FastAPIPortalController:
         qt_projected_items: list[dict] = []
         try:
             if not active_rows_loaded:
-                active_rows = PortalRuntime.state_store.list_qt_active_items(
+                all_active_rows = PortalRuntime.state_store.list_qt_active_items(
                     include_deleted=True
+                )
+                active_rows = (
+                    PortalRuntime.state_store.project_visible_qt_active_items(
+                        all_active_rows
+                    )
                 )
                 active_rows_loaded = True
             for active_item in active_rows:
-                if active_item.get("deleted_at") is not None:
-                    continue
                 payload = _row_payload(active_item)
                 if not payload:
                     continue
@@ -8128,6 +8222,7 @@ class FastAPIPortalController:
                     for item in snapshot.get("items", [])
                     if isinstance(item, dict)
                     and not _item_is_ended(item)
+                    and notice_payload_matches_month(item)
                     and not _item_deleted_in_qt_store(item)
                     and PortalRuntime.service._scope_matches_item(scope, item)
                 ]
@@ -8136,8 +8231,8 @@ class FastAPIPortalController:
             log_warning(PortalRuntime.last_ongoing_error)
         return []
 
-    @staticmethod
     def _reconcile_orphan_started_items(
+        self,
         scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
         scope = PortalRuntime.auth_manager.normalize_scope(scope)
@@ -8270,7 +8365,7 @@ class FastAPIPortalController:
             return None
         normalized_title = cls._normalize_clipboard_event_title(title)
         event_title_matches = []
-        for item in PortalRuntime.state_store.list_qt_active_items():
+        for item in PortalRuntime.state_store.list_visible_qt_active_items():
             payload = item.get("payload") if isinstance(item, dict) else {}
             payload = payload if isinstance(payload, dict) else {}
             if str(payload.get("notice_type") or item.get("notice_type") or "").strip() != notice_type:

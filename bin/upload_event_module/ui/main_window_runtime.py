@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtCore import Qt, QTimer, QUrl, QThread, qInstallMessageHandler
 from PyQt6.QtGui import QDesktopServices
 
+from lan_bitable_template_portal.identity_utils import notice_payload_matches_month
 from ..config import config
 from ..logger import log_info, log_error, log_warning, write_crash_trace_message
 from ..utils import BASE_DIR
@@ -486,6 +487,70 @@ class MainWindowRuntimeMixin:
         self._qt_shell_dialog_sessions = filtered[:200]
         return {"ok": True, "session_id": session_id}
 
+    def _canonical_backend_active_payload(self, data: dict) -> dict:
+        """Align one live Qt update with the shared SQLite display projection."""
+
+        cache_store = getattr(self, "cache_store", None)
+        state_store = getattr(cache_store, "_state_store", None)
+        if state_store is None:
+            return dict(data)
+        try:
+            enriched = state_store._enrich_notice_payload_from_text(dict(data))
+            incoming_keys = state_store._identity_keys_for_item(enriched)
+            canonical_rows = state_store.list_visible_qt_active_items()
+            canonical_row = next(
+                (
+                    row
+                    for row in canonical_rows
+                    if incoming_keys
+                    & state_store._identity_keys_for_item(
+                        row.get("payload")
+                        if isinstance(row.get("payload"), dict)
+                        else {}
+                    )
+                ),
+                None,
+            )
+            if not isinstance(canonical_row, dict):
+                return dict(data)
+            canonical_data = (
+                dict(canonical_row.get("payload"))
+                if isinstance(canonical_row.get("payload"), dict)
+                else dict(data)
+            )
+            canonical_active_id = str(
+                canonical_data.get("active_item_id")
+                or canonical_row.get("active_item_id")
+                or ""
+            ).strip()
+            canonical_keys = state_store._identity_keys_for_item(canonical_data)
+            group_keys = incoming_keys | canonical_keys
+            if group_keys and canonical_active_id:
+                for list_widget, item, item_data in list(
+                    self._active_notice_store().entries()
+                ):
+                    if not self._is_valid_list_item(item) or not isinstance(
+                        item_data, dict
+                    ):
+                        continue
+                    item_active_id = str(
+                        item_data.get("active_item_id") or ""
+                    ).strip()
+                    if item_active_id == canonical_active_id:
+                        continue
+                    item_enriched = state_store._enrich_notice_payload_from_text(
+                        dict(item_data)
+                    )
+                    if (
+                        state_store._identity_keys_for_item(item_enriched)
+                        & group_keys
+                    ):
+                        self._remove_active_item_widget_only(list_widget, item)
+            return canonical_data
+        except Exception as exc:
+            log_warning(f"Qt 活动通告权威投影失败，保留当前更新: {exc}")
+            return dict(data)
+
     def _apply_backend_active_upsert(self, payload: dict | None) -> dict:
         payload = payload if isinstance(payload, dict) else {}
         item_payload = payload.get("item") if isinstance(payload.get("item"), dict) else payload
@@ -520,6 +585,27 @@ class MainWindowRuntimeMixin:
         item = None
         if active_item_id:
             list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if (not item or not self._is_valid_list_item(item)) and record_id:
+            list_widget, item = self._find_active_item_by_record_id(record_id)
+        if not notice_payload_matches_month(data):
+            if item and self._is_valid_list_item(item):
+                self._remove_active_item_from_source(list_widget, item)
+            return {
+                "ok": True,
+                "ignored_outside_current_month": True,
+                "removed": bool(item),
+            }
+        data = self._canonical_backend_active_payload(data)
+        active_item_id = str(data.get("active_item_id") or "").strip()
+        record_id = str(
+            data.get("target_record_id") or data.get("record_id") or ""
+        ).strip()
+        list_widget = None
+        item = None
+        if active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(
+                active_item_id
+            )
         if (not item or not self._is_valid_list_item(item)) and record_id:
             list_widget, item = self._find_active_item_by_record_id(record_id)
         if item and self._is_valid_list_item(item):

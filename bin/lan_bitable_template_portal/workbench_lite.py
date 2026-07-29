@@ -2741,6 +2741,7 @@ def render_workbench_lite(
         <div class="refresh-menu" id="refresh-menu">
           <div class="refresh-menu-head"><strong>刷新数据</strong><span>{_e(source_loaded_text)}</span></div>
           <button id="lite-refresh-page" type="button">刷新本页</button>
+          <button id="lite-refresh-maintenance" type="button">刷新维保</button>
           <button id="lite-refresh-repair" type="button">刷新检修</button>
           <button id="lite-refresh-change" type="button">刷新变更</button>
         </div>
@@ -5613,6 +5614,17 @@ def render_workbench_lite(
         try {{ await refreshCurrentLite('正在刷新本页...', ['.status', '.summary', '.workbench-guide', '.workspace']); }}
         catch (error) {{ showLiteError(error && error.message ? error.message : '刷新本页失败'); }}
         finally {{ setButtonBusy(pageRefreshButton, false); }}
+        return;
+      }}
+      const maintenanceButton = target.closest('#lite-refresh-maintenance');
+      if (maintenanceButton) {{
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        setButtonBusy(maintenanceButton, true);
+        setPickerOpen('refresh-picker', 'refresh-open', false);
+        try {{ await liteFetchThenRefresh('/api/maintenance-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新维保', 'maintenance'); }}
+        catch (error) {{ showLiteError(error && error.message ? error.message : '刷新维保失败'); }}
+        finally {{ setButtonBusy(maintenanceButton, false); }}
         return;
       }}
       const repairButton = target.closest('#lite-refresh-repair');

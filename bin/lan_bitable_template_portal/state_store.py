@@ -28,6 +28,7 @@ try:
         canonical_source_record_id,
         canonical_target_record_id,
         is_local_record_id,
+        notice_payload_matches_month,
         normalize_notice_identity_payload,
     )
 except ImportError:
@@ -39,6 +40,7 @@ except ImportError:
         canonical_source_record_id,
         canonical_target_record_id,
         is_local_record_id,
+        notice_payload_matches_month,
         normalize_notice_identity_payload,
     )
 
@@ -6950,6 +6952,139 @@ class LanPortalStateStore:
         items = [self._qt_active_item_from_row(row) for row in rows]
         return items
 
+    def project_visible_qt_active_items(
+        self,
+        rows: list[dict[str, Any]] | None,
+        *,
+        month_key: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return the canonical current-month display projection.
+
+        SQLite keeps remote-derived runtime history. UI readers must use this
+        projection instead of combining every cached row, otherwise an old
+        active ID and its bound remote ID can appear as two notices.
+        """
+
+        candidates: list[dict[str, Any]] = []
+        payloads: list[dict[str, Any]] = []
+        identity_keys: list[set[str]] = []
+        for row in rows or []:
+            if not isinstance(row, dict) or row.get("deleted_at") is not None:
+                continue
+            payload = (
+                dict(row.get("payload"))
+                if isinstance(row.get("payload"), dict)
+                else {}
+            )
+            active_item_id = self._text(
+                payload.get("active_item_id") or row.get("active_item_id")
+            )
+            target_record_id = canonical_target_record_id(payload) or self._text(
+                row.get("record_id")
+            )
+            if active_item_id:
+                payload["active_item_id"] = active_item_id
+            if target_record_id and not is_local_record_id(target_record_id):
+                payload["target_record_id"] = target_record_id
+                payload["record_id"] = target_record_id
+                payload["_is_placeholder_record"] = False
+            if not payload.get("notice_type") and row.get("notice_type"):
+                payload["notice_type"] = row.get("notice_type")
+            if not payload.get("origin") and row.get("origin"):
+                payload["origin"] = row.get("origin")
+            payload = normalize_notice_identity_payload(
+                self._enrich_notice_payload_from_text(payload)
+            )
+            if not notice_payload_matches_month(payload, month_key=month_key):
+                continue
+            candidates.append(dict(row))
+            payloads.append(payload)
+            identity_keys.append(self._identity_keys_for_item(payload))
+
+        count = len(candidates)
+        if count <= 1:
+            if count:
+                candidates[0]["payload"] = payloads[0]
+            return candidates
+
+        parents = list(range(count))
+
+        def find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        owner_by_key: dict[str, int] = {}
+        for index, keys in enumerate(identity_keys):
+            for key in keys:
+                previous = owner_by_key.get(key)
+                if previous is None:
+                    owner_by_key[key] = index
+                    continue
+                union(index, previous)
+
+        groups: dict[int, list[int]] = {}
+        for index in range(count):
+            groups.setdefault(find(index), []).append(index)
+
+        def canonical_score(index: int) -> tuple[int, int, int, float, int]:
+            payload = payloads[index]
+            return (
+                int(bool(canonical_target_record_id(payload))),
+                int(bool(canonical_source_record_id(payload))),
+                self._notice_payload_score(payload),
+                float(candidates[index].get("updated_at") or 0),
+                -index,
+            )
+
+        projected: list[tuple[int, dict[str, Any]]] = []
+        for indexes in groups.values():
+            primary_index = max(indexes, key=canonical_score)
+            primary_row = dict(candidates[primary_index])
+            merged_payload = dict(payloads[primary_index])
+            for supplement_index in sorted(
+                (index for index in indexes if index != primary_index),
+                key=canonical_score,
+                reverse=True,
+            ):
+                for key, value in payloads[supplement_index].items():
+                    if merged_payload.get(key) in (None, "", [], {}):
+                        merged_payload[key] = value
+            merged_payload = normalize_notice_identity_payload(merged_payload)
+            primary_row["payload"] = merged_payload
+            primary_row["active_item_id"] = self._text(
+                merged_payload.get("active_item_id")
+                or primary_row.get("active_item_id")
+            )
+            target_record_id = canonical_target_record_id(merged_payload)
+            if target_record_id:
+                primary_row["record_id"] = target_record_id
+            primary_row["notice_type"] = self._text(
+                merged_payload.get("notice_type")
+                or primary_row.get("notice_type")
+            )
+            projected.append((min(indexes), primary_row))
+
+        projected.sort(key=lambda item: item[0])
+        return [row for _position, row in projected]
+
+    def list_visible_qt_active_items(
+        self,
+        *,
+        month_key: str = "",
+    ) -> list[dict[str, Any]]:
+        return self.project_visible_qt_active_items(
+            self.list_qt_active_items(include_deleted=False),
+            month_key=month_key,
+        )
+
     def upsert_qt_active_item(
         self,
         payload: dict[str, Any] | None,
@@ -6957,6 +7092,7 @@ class LanPortalStateStore:
         section: str = "",
         sort_order: int = 0,
         origin: str = "",
+        allow_revive: bool = False,
     ) -> bool:
         if not isinstance(payload, dict):
             return False
@@ -7005,7 +7141,7 @@ class LanPortalStateStore:
                         normalized["record_id"] = existing_target_record_id
                         normalized["target_record_id"] = existing_target_record_id
                         normalized["_is_placeholder_record"] = False
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO qt_active_items(
                         active_item_id, record_id, notice_type, section, sort_order,
@@ -7021,6 +7157,7 @@ class LanPortalStateStore:
                         payload_json = excluded.payload_json,
                         updated_at = excluded.updated_at,
                         deleted_at = NULL
+                    WHERE qt_active_items.deleted_at IS NULL OR ? = 1
                     """,
                     (
                         active_item_id,
@@ -7031,8 +7168,12 @@ class LanPortalStateStore:
                         origin,
                         self._json(normalized),
                         now,
+                        1 if allow_revive else 0,
                     ),
                 )
+                if int(cursor.rowcount or 0) <= 0:
+                    conn.commit()
+                    return False
                 self._upsert_notice_identity_locked(conn, normalized, origin=origin)
                 conn.commit()
         return True
@@ -7158,6 +7299,7 @@ class LanPortalStateStore:
                           WHERE i2.active_item_id = q.active_item_id
                             AND i2.deleted_at IS NULL
                             AND i2.status IN (?, ?, ?, ?)
+                            AND i2.updated_at > q.deleted_at
                           ORDER BY i2.updated_at DESC
                           LIMIT 1
                       )

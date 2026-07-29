@@ -43,7 +43,7 @@ class ActiveCacheStore:
 
     def _load_payload_unlocked(self) -> dict:
         try:
-            qt_items = self._state_store.list_qt_active_items()
+            qt_items = self._state_store.list_visible_qt_active_items()
         except Exception:
             qt_items = []
         payload = self._default_payload()

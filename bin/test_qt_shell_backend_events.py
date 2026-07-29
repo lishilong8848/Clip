@@ -1,3 +1,4 @@
+import datetime as dt
 import sys
 import tempfile
 import unittest
@@ -115,7 +116,61 @@ class _RecordsHarness(MainWindowRecordsMixin):
     pass
 
 
+class _ActiveUpsertVisibilityHarness(MainWindowRuntimeMixin):
+    def __init__(self):
+        self.added = []
+
+    @staticmethod
+    def _ensure_active_item_identity(data):
+        return dict(data)
+
+    @staticmethod
+    def _find_active_item_by_active_item_id(_active_item_id):
+        return None, None
+
+    @staticmethod
+    def _find_active_item_by_record_id(_record_id):
+        return None, None
+
+    @staticmethod
+    def _is_valid_list_item(_item):
+        return False
+
+    def add_active_item(self, data, **_kwargs):
+        self.added.append(dict(data))
+        return object(), None
+
+
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_runtime_active_upsert_ignores_items_outside_current_month(self):
+        harness = _ActiveUpsertVisibilityHarness()
+        previous_month = (
+            dt.datetime.now().replace(day=1) - dt.timedelta(days=1)
+        ).strftime("%Y-%m")
+        result = harness._apply_backend_active_upsert(
+            {
+                "item": {
+                    "active_item_id": "active-old-runtime",
+                    "record_id": "rec-old-runtime",
+                    "payload": {
+                        "active_item_id": "active-old-runtime",
+                        "record_id": "rec-old-runtime",
+                        "notice_type": "变更通告",
+                        "text": (
+                            "【变更通告】状态：更新\n"
+                            "【名称】旧月份变更\n"
+                            f"【时间】{previous_month}-08 09:00"
+                            f"~{previous_month}-08 18:00"
+                        ),
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["ignored_outside_current_month"])
+        self.assertEqual(harness.added, [])
+
     def test_event_parser_accepts_long_source_and_level_labels(self):
         text = (
             "【事件通告】状态：开始\n"
@@ -295,11 +350,12 @@ class QtShellBackendEventTests(unittest.TestCase):
                     self.assertEqual(fields.get(key), value)
 
     def test_clipboard_projection_keeps_full_change_fields_and_normalizes_heading(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
         text = (
             "【变更通告】状态：开始\n"
             "【名称】EA118机房A楼蓄电池测试变更\n"
             "【等级】I3\n"
-            "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+            f"【时间】{current_month}-18 09:00~{current_month}-18 18:00\n"
             "【位置】A-245配电室\n"
             "【内容】工程师对蓄电池进行测试\n"
             "【原因】容量测试\n"
@@ -321,8 +377,8 @@ class QtShellBackendEventTests(unittest.TestCase):
                 self.assertEqual(payload["reason"], "容量测试")
                 self.assertEqual(payload["impact"], "对IT业务无影响")
                 self.assertEqual(payload["progress"], "准备工作已完成")
-                self.assertEqual(payload["start_time"], "2026-06-18 09:00")
-                self.assertEqual(payload["end_time"], "2026-06-18 18:00")
+                self.assertEqual(payload["start_time"], f"{current_month}-18 09:00")
+                self.assertEqual(payload["end_time"], f"{current_month}-18 18:00")
 
                 ongoing = FastAPIPortalController._get_ongoing("A")
                 self.assertEqual(len(ongoing), 1)
@@ -334,10 +390,11 @@ class QtShellBackendEventTests(unittest.TestCase):
                 PortalRuntime.state_store = original_store
 
     def test_event_clipboard_projection_reuses_existing_target_record_by_event_identity(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (
             "【事件通告】状态：开始\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2"
@@ -345,7 +402,7 @@ class QtShellBackendEventTests(unittest.TestCase):
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2\n"
@@ -387,10 +444,11 @@ class QtShellBackendEventTests(unittest.TestCase):
                 PortalRuntime.state_store = original_store
 
     def test_qt_upload_result_binds_backend_active_item_before_next_update_projection(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (
             "【事件通告】状态：开始\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2"
@@ -398,7 +456,7 @@ class QtShellBackendEventTests(unittest.TestCase):
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2\n"
@@ -471,10 +529,11 @@ class QtShellBackendEventTests(unittest.TestCase):
                 PortalRuntime.service = original_service
 
     def test_local_qt_upload_remember_target_updates_backend_active_item(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (
             "【事件通告】状态：开始\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2"
@@ -482,7 +541,7 @@ class QtShellBackendEventTests(unittest.TestCase):
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2\n"
@@ -536,10 +595,11 @@ class QtShellBackendEventTests(unittest.TestCase):
                 PortalRuntime.state_store = original_store
 
     def test_event_clipboard_projection_recovers_target_from_identity_map(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (
             "【事件通告】状态：新增\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2"
@@ -547,7 +607,7 @@ class QtShellBackendEventTests(unittest.TestCase):
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00\n"
+            f"【时间】{current_month}-24 10:00\n"
             "【机楼】D楼\n"
             "【来源】BMS\n"
             "【等级】I2\n"
@@ -588,10 +648,11 @@ class QtShellBackendEventTests(unittest.TestCase):
         self.assertTrue(PortalRuntime._remote_record_not_found("1254043-RecordldNotFo"))
 
     def test_sparse_qt_active_payload_is_backfilled_from_notice_text(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
         text = (
             "【变更通告】状态：开始\n"
             "【名称】EA118机房A楼冷源设备变更\n"
-            "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+            f"【时间】{current_month}-18 09:00~{current_month}-18 18:00\n"
             "【位置】A-127冷站\n"
             "【内容】调整冷源设备\n"
             "【原因】运行优化\n"
