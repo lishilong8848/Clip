@@ -32018,6 +32018,20 @@ class MaintenancePortalService:
             app_token=SIGNATURE_APP_TOKEN,
             table_id=TEMP_SIGNATURE_TABLE_ID,
         )
+        attachment_meta = meta_by_name.get(TEMP_SIGNATURE_ATTACHMENT_FIELD)
+        if attachment_meta is None or int(attachment_meta.field_type or 0) != 17:
+            raise PortalError(
+                f"临时签名表字段【{TEMP_SIGNATURE_ATTACHMENT_FIELD}】必须是附件字段。"
+            )
+        key_meta = meta_by_name.get(TEMP_SIGNATURE_KEY_FIELD)
+        if (
+            key_meta is None
+            or int(key_meta.field_type or 0) != 1
+            or bool(key_meta.has_formula)
+        ):
+            raise PortalError(
+                f"临时签名表字段【{TEMP_SIGNATURE_KEY_FIELD}】必须是可写文本字段。"
+            )
         payload = session.get("payload") if isinstance(session.get("payload"), dict) else {}
         building_values = self._field_option_write_values(
             meta_by_name,
@@ -32037,6 +32051,7 @@ class MaintenancePortalService:
         if specialty_values:
             fields[TEMP_SIGNATURE_SPECIALTY_FIELD] = specialty_values
         existing_record_id = str(session.get("temporary_record_id") or "").strip()
+        created_new_record = False
         if existing_record_id:
             self._patch_record_fields(
                 app_token=SIGNATURE_APP_TOKEN,
@@ -32056,16 +32071,27 @@ class MaintenancePortalService:
             record_id = str(record.get("record_id") or record.get("id") or "").strip()
             if not record_id:
                 raise PortalError("临时签名保存成功但未返回记录 ID。")
+            created_new_record = True
         safe_name = self._safe_mop_path_part(display_name, "temporary")
-        file_token, metadata = self._save_encrypted_signature_record(
-            table_id=TEMP_SIGNATURE_TABLE_ID,
-            record_id=record_id,
-            attachment_field=TEMP_SIGNATURE_ATTACHMENT_FIELD,
-            key_field=TEMP_SIGNATURE_KEY_FIELD,
-            signature_bytes=signature_bytes,
-            display_name=safe_name,
-            source="temporary",
-        )
+        try:
+            file_token, metadata = self._save_encrypted_signature_record(
+                table_id=TEMP_SIGNATURE_TABLE_ID,
+                record_id=record_id,
+                attachment_field=TEMP_SIGNATURE_ATTACHMENT_FIELD,
+                key_field=TEMP_SIGNATURE_KEY_FIELD,
+                signature_bytes=signature_bytes,
+                display_name=safe_name,
+                source="temporary",
+            )
+        except Exception:
+            if created_new_record:
+                with suppress(Exception):
+                    self._delete_record_fields(
+                        app_token=SIGNATURE_APP_TOKEN,
+                        table_id=TEMP_SIGNATURE_TABLE_ID,
+                        record_id=record_id,
+                    )
+            raise
         updated = self._state_store.update_mop_temporary_signature_session(
             temp_id=str(session.get("temp_id") or ""),
             status="signed",

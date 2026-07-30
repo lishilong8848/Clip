@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -377,6 +378,97 @@ class EngineerMopUploadTests(unittest.TestCase):
 
             self.assertEqual(data["signature"]["display_name"], "张三")
             self.assertIn("临时人员：张三", data["text"])
+
+    def test_temporary_signature_rolls_back_new_record_when_encrypted_save_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            session = service._state_store.create_mop_temporary_signature_session(
+                scope="A",
+                notice_key="notice-rollback",
+                role="implementer",
+                display_name="临时人员1",
+                recipient_open_ids=[],
+                payload={"notice_title": "A楼测试维保", "specialty": "电气"},
+            )
+            deleted: list[dict] = []
+            service._decode_signature_png = lambda _value: b"raw-png"
+            service._transparent_signature_png = lambda value: value
+            service._load_table_fields = lambda **_kwargs: (
+                [],
+                {
+                    "手写签名": SimpleNamespace(
+                        field_type=17,
+                        has_formula=False,
+                        option_names=[],
+                    ),
+                    "密钥": SimpleNamespace(
+                        field_type=1,
+                        has_formula=False,
+                        option_names=[],
+                    ),
+                },
+            )
+            service._create_record_fields = lambda **_kwargs: {
+                "data": {"record": {"record_id": "temporary-record-1"}}
+            }
+            service._delete_record_fields = lambda **kwargs: deleted.append(dict(kwargs)) or {}
+
+            def fail_encrypted_save(**_kwargs):
+                raise PortalError("模拟加密附件保存失败")
+
+            service._save_encrypted_signature_record = fail_encrypted_save
+
+            with self.assertRaisesRegex(PortalError, "模拟加密附件保存失败"):
+                service.save_temporary_signature(
+                    temp_id=session["temp_id"],
+                    token="",
+                    signature_png="data:image/png;base64,ignored",
+                )
+
+            self.assertEqual(
+                [item["record_id"] for item in deleted],
+                ["temporary-record-1"],
+            )
+            persisted = service._state_store.get_mop_temporary_signature_session(
+                temp_id=session["temp_id"],
+            )
+            self.assertNotEqual(persisted.get("status"), "signed")
+            self.assertFalse(persisted.get("temporary_record_id"))
+
+    def test_temporary_signature_rejects_missing_key_field_before_record_creation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            session = service._state_store.create_mop_temporary_signature_session(
+                scope="A",
+                notice_key="notice-missing-key",
+                role="implementer",
+                display_name="临时人员1",
+                recipient_open_ids=[],
+                payload={"notice_title": "A楼测试维保", "specialty": "电气"},
+            )
+            created: list[dict] = []
+            service._decode_signature_png = lambda _value: b"raw-png"
+            service._transparent_signature_png = lambda value: value
+            service._load_table_fields = lambda **_kwargs: (
+                [],
+                {
+                    "手写签名": SimpleNamespace(
+                        field_type=17,
+                        has_formula=False,
+                        option_names=[],
+                    ),
+                },
+            )
+            service._create_record_fields = lambda **kwargs: created.append(dict(kwargs)) or {}
+
+            with self.assertRaisesRegex(PortalError, "字段【密钥】必须是可写文本字段"):
+                service.save_temporary_signature(
+                    temp_id=session["temp_id"],
+                    token="",
+                    signature_png="data:image/png;base64,ignored",
+                )
+
+            self.assertEqual(created, [])
 
     def test_signature_link_prefers_configured_handover_origin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
