@@ -47,7 +47,6 @@ from .identity_utils import (
     normalize_notice_identity_payload,
 )
 from .signature_crypto import (
-    SIGNATURE_ENCRYPTED_MAGIC,
     SignatureCryptoError,
     SignatureCryptoManager,
     encrypted_signature_file_name,
@@ -23263,30 +23262,10 @@ class MaintenancePortalService:
             daily_summary = self.get_daily_summary(
                 scope=scope, ongoing_items=merged_ongoing
             )
-            summary_by_record = self._work_status_by_records(
+            pending_counts = self._pending_work_type_counts(
                 records,
-                scope=scope,
-                daily_items=daily_summary.get("items") or [],
+                merged_ongoing,
             )
-            ongoing_sources = {
-                (
-                    self._item_work_type(item),
-                    str(item.get("source_record_id") or "").strip(),
-                )
-                for item in merged_ongoing
-                if str(item.get("source_record_id") or "").strip()
-            }
-            pending_records = []
-            for record in records:
-                record_id = str(record.get("record_id") or "").strip()
-                work_type = self._record_work_type(record)
-                summary = summary_by_record.get(record_id) or {}
-                if summary.get("started_at"):
-                    continue
-                if (work_type, record_id) in ongoing_sources:
-                    continue
-                pending_records.append(record)
-            pending_counts = self._work_type_counts(pending_records)
             ongoing_counts = self._work_type_counts(merged_ongoing)
             ongoing_titles: list[dict[str, str]] = []
             for index, item in enumerate(merged_ongoing[:30]):
@@ -30481,6 +30460,15 @@ class MaintenancePortalService:
         if self._signature_crypto.is_encrypted_metadata(metadata) and signature_sha:
             cached = self._signature_crypto.read_cache(record_id, signature_sha)
             if cached:
+                if not self._signature_crypto.is_portable_metadata(metadata):
+                    self._maybe_migrate_plain_signature_async(
+                        table_id=table_id,
+                        record_id=record_id,
+                        fields=fields,
+                        signature_bytes=cached,
+                        person=person or {},
+                        source=source,
+                    )
                 return cached
         content, _content_type = self._download_mop_attachment(attachment)
         if self._signature_crypto.is_encrypted_bytes(content):
@@ -30504,6 +30492,15 @@ class MaintenancePortalService:
                 status="encrypted",
                 payload={"source": source},
             )
+            if not self._signature_crypto.is_portable_metadata(metadata):
+                self._maybe_migrate_plain_signature_async(
+                    table_id=table_id,
+                    record_id=record_id,
+                    fields=fields,
+                    signature_bytes=png,
+                    person=person or {},
+                    source=source,
+                )
             return png
 
         png = self._transparent_signature_png(content)
@@ -30534,7 +30531,7 @@ class MaintenancePortalService:
         source: str,
     ) -> None:
         key_field = SIGNATURE_KEY_FIELD if table_id == SIGNATURE_TABLE_ID else TEMP_SIGNATURE_KEY_FIELD
-        if self._signature_crypto.is_encrypted_metadata(
+        if self._signature_crypto.is_portable_metadata(
             self._signature_crypto.metadata_from_field(fields.get(key_field))
         ):
             return
@@ -30667,7 +30664,7 @@ class MaintenancePortalService:
                     continue
                 summary["checked"] += 1
                 metadata = self._signature_crypto.metadata_from_field(fields.get(key_field))
-                if self._signature_crypto.is_encrypted_metadata(metadata):
+                if self._signature_crypto.is_portable_metadata(metadata):
                     self._mark_signature_crypto_migration(
                         table_id=table_id,
                         record_id=record_id,
@@ -30678,9 +30675,12 @@ class MaintenancePortalService:
                     continue
                 try:
                     content, _content_type = self._download_mop_attachment(attachments[0])
-                    if content.startswith(SIGNATURE_ENCRYPTED_MAGIC):
-                        raise PortalError("签名附件已加密但密钥字段缺失，无法迁移。")
-                    signature_bytes = self._transparent_signature_png(content)
+                    if self._signature_crypto.is_encrypted_bytes(content):
+                        signature_bytes = self._transparent_signature_png(
+                            self._signature_crypto.decrypt_signature(content, metadata)
+                        )
+                    else:
+                        signature_bytes = self._transparent_signature_png(content)
                     self._mark_signature_crypto_migration(
                         table_id=table_id,
                         record_id=record_id,

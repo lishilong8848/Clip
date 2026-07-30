@@ -10658,6 +10658,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(result["scopes"]["CAMPUS"]["change_pending"], 1)
             self.assertEqual(result["scopes"]["B"]["change_ongoing"], 0)
 
+    def test_scope_overview_only_counts_startable_source_records_as_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = service._current_month_label()
+            service._records = [
+                _build_record("m1", "E楼", "UPS维护", current_month),
+                _build_record("m2", "E楼", "空调维护", current_month),
+                _build_record("m3", "E楼", "消防维护", current_month),
+                _build_record(
+                    "m4",
+                    "E楼",
+                    "已完成维护",
+                    current_month,
+                    status="正常结束",
+                ),
+                _build_record(
+                    "m5",
+                    "E楼",
+                    "延期完成维护",
+                    current_month,
+                    status="延期结束",
+                ),
+            ]
+            service._change_records = []
+            service._repair_records = []
+
+            result = service.get_scope_overview(
+                scopes=["E"],
+                ongoing_items=[],
+            )
+
+            self.assertEqual(result["scopes"]["E"]["maintenance_pending"], 3)
+            self.assertEqual(result["scopes"]["E"]["maintenance_ongoing"], 0)
+
     def test_scope_overview_can_preload_authorized_workbenches(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))

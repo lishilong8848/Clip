@@ -20,8 +20,10 @@ except ModuleNotFoundError:  # pragma: no cover - handled by runtime dependency 
 from upload_event_module.utils import get_data_file_path
 
 
-SIGNATURE_CRYPTO_VERSION = 1
-SIGNATURE_ENCRYPTED_MAGIC = b"CLIPFLOW_SIGENC_V1\n"
+LEGACY_SIGNATURE_CRYPTO_VERSION = 1
+SIGNATURE_CRYPTO_VERSION = 2
+LEGACY_SIGNATURE_ENCRYPTED_MAGIC = b"CLIPFLOW_SIGENC_V1\n"
+SIGNATURE_ENCRYPTED_MAGIC = b"CLIPFLOW_SIGENC_V2\n"
 SIGNATURE_MASTER_KEY_RELATIVE = Path("secure") / "signature_master.key"
 
 
@@ -180,20 +182,16 @@ class SignatureCryptoManager:
         if not signature_png:
             raise SignatureCryptoError("签名图片为空，无法加密保存。")
         aesgcm_cls = _aesgcm_cls()
-        kek = self.ensure_master_key()
         dek = os.urandom(32)
-        dek_nonce = os.urandom(12)
         file_nonce = os.urandom(12)
         aad = _canonical_json(aad_payload)
         encrypted_png = aesgcm_cls(dek).encrypt(file_nonce, signature_png, aad)
-        encrypted_dek = aesgcm_cls(kek).encrypt(dek_nonce, dek, aad)
         encrypted_file = SIGNATURE_ENCRYPTED_MAGIC + encrypted_png
         metadata = {
             "version": SIGNATURE_CRYPTO_VERSION,
             "alg": "AES-256-GCM",
-            "key_wrap_alg": "AES-256-GCM",
-            "encrypted_dek": _b64(encrypted_dek),
-            "dek_nonce": _b64(dek_nonce),
+            "key_storage": "record_metadata",
+            "portable_dek": _b64(dek),
             "file_nonce": _b64(file_nonce),
             "aad": aad_payload,
             "signature_sha256": hashlib.sha256(signature_png).hexdigest(),
@@ -208,21 +206,44 @@ class SignatureCryptoManager:
         metadata = self.metadata_from_field(metadata_value)
         if not self.is_encrypted_metadata(metadata):
             raise SignatureCryptoError("签名密钥元数据缺失或格式错误。")
+        expected_encrypted = str(metadata.get("encrypted_sha256") or "")
+        if expected_encrypted and hashlib.sha256(encrypted_file).hexdigest() != expected_encrypted:
+            raise SignatureCryptoError("签名加密附件与密钥元数据不匹配。")
         aad = _canonical_json(metadata.get("aad") or {})
         try:
             aesgcm_cls = _aesgcm_cls()
-            dek = aesgcm_cls(self.ensure_master_key()).decrypt(
-                _unb64(metadata.get("dek_nonce")),
-                _unb64(metadata.get("encrypted_dek")),
-                aad,
-            )
+            version = int(metadata.get("version") or 0)
+            if version == SIGNATURE_CRYPTO_VERSION:
+                if not encrypted_file.startswith(SIGNATURE_ENCRYPTED_MAGIC):
+                    raise SignatureCryptoError("签名附件版本与密钥元数据不一致。")
+                dek = _unb64(metadata.get("portable_dek"))
+                if len(dek) != 32:
+                    raise SignatureCryptoError("签名数据密钥长度异常。")
+                encrypted_payload = encrypted_file[len(SIGNATURE_ENCRYPTED_MAGIC) :]
+            elif version == LEGACY_SIGNATURE_CRYPTO_VERSION:
+                if not encrypted_file.startswith(LEGACY_SIGNATURE_ENCRYPTED_MAGIC):
+                    raise SignatureCryptoError("旧签名附件版本与密钥元数据不一致。")
+                dek = aesgcm_cls(self.ensure_master_key()).decrypt(
+                    _unb64(metadata.get("dek_nonce")),
+                    _unb64(metadata.get("encrypted_dek")),
+                    aad,
+                )
+                encrypted_payload = encrypted_file[len(LEGACY_SIGNATURE_ENCRYPTED_MAGIC) :]
+            else:
+                raise SignatureCryptoError(f"不支持的签名加密版本: {version}")
             plain = aesgcm_cls(dek).decrypt(
                 _unb64(metadata.get("file_nonce")),
-                encrypted_file[len(SIGNATURE_ENCRYPTED_MAGIC) :],
+                encrypted_payload,
                 aad,
             )
+        except SignatureCryptoError:
+            raise
         except Exception as exc:
-            raise SignatureCryptoError("签名解密失败，请恢复主密钥备份或重新签名。") from exc
+            if int(metadata.get("version") or 0) == LEGACY_SIGNATURE_CRYPTO_VERSION:
+                message = "旧签名解密失败，请在原加密电脑恢复主密钥后迁移，或重新签名。"
+            else:
+                message = "签名解密失败，附件或密钥文本可能不完整。"
+            raise SignatureCryptoError(message) from exc
         expected = str(metadata.get("signature_sha256") or "")
         if expected and hashlib.sha256(plain).hexdigest() != expected:
             raise SignatureCryptoError("签名解密校验失败，附件内容可能已损坏。")
@@ -230,7 +251,12 @@ class SignatureCryptoManager:
 
     @staticmethod
     def is_encrypted_bytes(data: bytes | bytearray | None) -> bool:
-        return bool(data) and bytes(data).startswith(SIGNATURE_ENCRYPTED_MAGIC)
+        if not data:
+            return False
+        raw = bytes(data)
+        return raw.startswith(SIGNATURE_ENCRYPTED_MAGIC) or raw.startswith(
+            LEGACY_SIGNATURE_ENCRYPTED_MAGIC
+        )
 
     @staticmethod
     def metadata_from_field(value: Any) -> dict[str, Any]:
@@ -271,8 +297,26 @@ class SignatureCryptoManager:
     def is_encrypted_metadata(metadata: Any) -> bool:
         if not isinstance(metadata, dict):
             return False
+        return SignatureCryptoManager.is_portable_metadata(
+            metadata
+        ) or SignatureCryptoManager.is_legacy_metadata(metadata)
+
+    @staticmethod
+    def is_portable_metadata(metadata: Any) -> bool:
+        if not isinstance(metadata, dict):
+            return False
         return (
             metadata.get("version") == SIGNATURE_CRYPTO_VERSION
+            and bool(metadata.get("portable_dek"))
+            and bool(metadata.get("file_nonce"))
+        )
+
+    @staticmethod
+    def is_legacy_metadata(metadata: Any) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return (
+            metadata.get("version") == LEGACY_SIGNATURE_CRYPTO_VERSION
             and bool(metadata.get("encrypted_dek"))
             and bool(metadata.get("dek_nonce"))
             and bool(metadata.get("file_nonce"))
