@@ -23047,6 +23047,32 @@ class MaintenancePortalService:
             counts[work_type] += 1
         return counts
 
+    def _pending_work_type_counts(
+        self,
+        records: list[dict[str, Any]],
+        ongoing_items: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        ongoing_source_keys = {
+            (self._item_work_type(item), canonical_source_record_id(item))
+            for item in ongoing_items or []
+            if canonical_source_record_id(item)
+        }
+        pending_records: list[dict[str, Any]] = []
+        for record in records or []:
+            work_type = self._record_work_type(record)
+            source_record_id = str(record.get("record_id") or "").strip()
+            if (
+                source_record_id
+                and (work_type, source_record_id) in ongoing_source_keys
+            ):
+                continue
+            if not self._source_progress_allows_start(
+                self._source_record_progress(record)
+            ):
+                continue
+            pending_records.append(record)
+        return self._work_type_counts(pending_records)
+
     @staticmethod
     def _item_work_type(item: dict[str, Any] | None) -> str:
         item = item if isinstance(item, dict) else {}
@@ -25364,14 +25390,7 @@ class MaintenancePortalService:
             work_summary = {}
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         source_work_type = self._record_source_work_type(record)
-        if source_work_type == WORK_TYPE_MAINTENANCE:
-            source_progress = self._maintenance_status_value(record)
-        elif source_work_type == WORK_TYPE_CHANGE:
-            source_progress = self._change_progress_value(record)
-        elif source_work_type == WORK_TYPE_REPAIR:
-            source_progress = self._repair_source_status(record)
-        else:
-            source_progress = self._maintenance_status_value(record)
+        source_progress = self._source_record_progress(record)
         local_status = str(work_summary.get("status") or "").strip()
         if local_status == "已结束" or work_summary.get("ended_at"):
             source_progress = "已结束"
@@ -25449,6 +25468,14 @@ class MaintenancePortalService:
             or record.get("work_type")
             or WORK_TYPE_MAINTENANCE
         ).strip()
+
+    def _source_record_progress(self, record: dict[str, Any]) -> str:
+        source_work_type = self._record_source_work_type(record)
+        if source_work_type == WORK_TYPE_CHANGE:
+            return self._change_progress_value(record)
+        if source_work_type == WORK_TYPE_REPAIR:
+            return self._repair_source_status(record)
+        return self._maintenance_status_value(record)
 
     def _maintenance_title(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
@@ -28841,16 +28868,7 @@ class MaintenancePortalService:
         return query in " ".join(terms).lower()
 
     def _source_record_display_priority(self, record: dict[str, Any]) -> int:
-        source_work_type = self._record_source_work_type(record)
-        if source_work_type == WORK_TYPE_MAINTENANCE:
-            progress = self._maintenance_status_value(record)
-        elif source_work_type == WORK_TYPE_CHANGE:
-            progress = self._change_progress_value(record)
-        elif source_work_type == WORK_TYPE_REPAIR:
-            progress = self._repair_source_status(record)
-        else:
-            progress = self._maintenance_status_value(record)
-        text = str(progress or "").strip()
+        text = str(self._source_record_progress(record) or "").strip()
         if "延期未开始" in text:
             return 0
         if "未开始" in text:
@@ -28984,7 +29002,10 @@ class MaintenancePortalService:
             scope=scope,
             daily_items=daily_summary.get("items") or [],
         )
-        record_type_counts = self._work_type_counts(filtered_records)
+        record_type_counts = self._pending_work_type_counts(
+            filtered_records,
+            merged_ongoing,
+        )
         ongoing_type_counts = self._work_type_counts(merged_ongoing)
         return {
             "app_token": self.app_token,
@@ -29093,7 +29114,10 @@ class MaintenancePortalService:
                 for record in scoped_records
                 if str((record.get("display_fields") or {}).get("楼栋") or "") == building
             ]
-        record_type_counts = self._work_type_counts(scoped_records)
+        record_type_counts = self._pending_work_type_counts(
+            scoped_records,
+            merged_ongoing,
+        )
         filtered_records = [
             record
             for record in scoped_records

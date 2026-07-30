@@ -283,6 +283,8 @@
           :saving="mopUploadSaving"
           :disabled="mopUploadSaving || mopFillSaving || mopResetting || Boolean(uploadSignedMopDisabledReason)"
           :disabled-reason="uploadSignedMopDisabledReason"
+          :status-message="mopUploadMessage"
+          :status-tone="mopUploadMessageType"
           @upload="uploadSignedMop"
         />
       </section>
@@ -544,6 +546,8 @@ const activeMopCellOverlayStyle = mopCellSelection.overlayStyle;
 const sheetScrollRef = mopCellSelection.sheetScrollRef;
 const signatureMessage = ref("");
 const signatureMessageType = ref("");
+const mopUploadMessage = ref("");
+const mopUploadMessageType = ref<"info" | "success" | "failed">("info");
 const signatureCanvas = useMopSignatureCanvas();
 const signatureCanvasRef = signatureCanvas.canvasRef;
 const signatureHasInk = signatureCanvas.hasInk;
@@ -1722,6 +1726,8 @@ function fillMaintenanceField(field: Dict, value: string): void {
 
 function clearMopOutputState(): void {
   mopEditing.clearOutputState();
+  mopUploadMessage.value = "";
+  mopUploadMessageType.value = "info";
 }
 
 function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
@@ -1900,6 +1906,12 @@ function buildMopRequestPayload(extra: Dict = {}): Dict {
     signatures: buildMopSignaturePayload(),
     ...extra,
   };
+}
+
+function createMopUploadOperationId(): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (randomUuid) return `mop-upload-${randomUuid}`;
+  return `mop-upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function personHasUsableSignature(person: Dict | null | undefined): boolean {
@@ -2294,6 +2306,8 @@ async function saveMopSignature(): Promise<void> {
 async function fillMopSignatures(): Promise<void> {
   if (!canFillMopSignatures.value || !preview.value?.local_file?.path) return;
   mopFillSaving.value = true;
+  mopUploadMessage.value = "";
+  mopUploadMessageType.value = "info";
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
@@ -2311,12 +2325,20 @@ async function fillMopSignatures(): Promise<void> {
 }
 
 async function uploadSignedMop(): Promise<void> {
-  if (uploadSignedMopDisabledReason.value || !preview.value?.local_file?.path || !selectedNotice.value) return;
+  const disabledReason = uploadSignedMopDisabledReason.value;
+  if (disabledReason || !preview.value?.local_file?.path || !selectedNotice.value) {
+    mopUploadMessage.value = disabledReason || "当前维护单尚未准备完成，请重新打开填写后再试。";
+    mopUploadMessageType.value = "failed";
+    return;
+  }
   mopUploadSaving.value = true;
   signatureMessage.value = "";
   signatureMessageType.value = "";
+  mopUploadMessage.value = "正在生成最新维护单并上传多维，请勿重复点击。";
+  mopUploadMessageType.value = "info";
   try {
     const data = await uploadSignedEngineerMop(buildMopRequestPayload({
+        operation_id: createMopUploadOperationId(),
         source_record_id: selectedNoticeSourceRecordId.value,
         notice_title: selectedNotice.value.title || "",
         notice_key: selectedNotice.value.notice_key || "",
@@ -2342,9 +2364,13 @@ async function uploadSignedMop(): Promise<void> {
       ? `已上传已签名 MOP，并已勾选确认项；${warningsText}`
       : "已上传已签名 MOP，并已勾选工程师确认、主管确认；下次同名 MOP 会自动带出本次填写内容。";
     signatureMessageType.value = "success";
+    mopUploadMessage.value = signatureMessage.value;
+    mopUploadMessageType.value = "success";
   } catch (error) {
     signatureMessage.value = error instanceof Error ? error.message : "上传已签名 MOP 失败";
     signatureMessageType.value = "failed";
+    mopUploadMessage.value = signatureMessage.value;
+    mopUploadMessageType.value = "failed";
   } finally {
     mopUploadSaving.value = false;
   }
@@ -2353,6 +2379,8 @@ async function uploadSignedMop(): Promise<void> {
 async function resetMopSigning(): Promise<void> {
   if (!filledMopResult.value || !preview.value || !selectedMop.value) return;
   mopResetting.value = true;
+  mopUploadMessage.value = "";
+  mopUploadMessageType.value = "info";
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {

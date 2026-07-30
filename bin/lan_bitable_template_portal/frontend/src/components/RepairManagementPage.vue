@@ -111,7 +111,7 @@
           <span>流程状态</span>
           <span>跟进记录</span>
           <span>当前进度</span>
-          <span>最近更新</span>
+          <span>故障发生时间</span>
           <span></span>
         </div>
         <div ref="recordListRef" class="record-list" :aria-busy="loading">
@@ -172,10 +172,10 @@
               </span>
               <span
                 class="record-time"
-                :title="recordLatestTimeLabel(recordAt(virtualRow.index))"
+                :title="recordFaultTimeLabel(recordAt(virtualRow.index))"
               >
                 <Clock3 :size="13" aria-hidden="true" />
-                <span>{{ recordLatestTimeLabel(recordAt(virtualRow.index)) }}</span>
+                <span>{{ recordFaultTimeLabel(recordAt(virtualRow.index)) }}</span>
               </span>
               <ChevronRight :size="18" class="record-open-icon" aria-hidden="true" />
             </article>
@@ -1136,12 +1136,8 @@ function repairRecordIsReadOnly(record: LooseDict): boolean {
   return repairRecordStateLocked(record) || record.read_only === true;
 }
 
-function recordLatestTimeLabel(record: LooseDict): string {
-  return repairDisplayTime(
-    record.latest_followup_time
-    || record.last_modified_time
-    || recordTimeLabel(record)
-  ) || "时间未填";
+function recordFaultTimeLabel(record: LooseDict): string {
+  return recordTimeLabel(record);
 }
 
 function updateSelectedFollowupCount(value: number): void {

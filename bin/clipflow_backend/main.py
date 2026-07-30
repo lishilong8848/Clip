@@ -2105,7 +2105,7 @@ class FastAPIPortalController:
                     audit_actor_open_id=str(user.get("open_id") or ""),
                     audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
                     audit_source_record_id=str(payload.get("source_record_id") or ""),
-                    audit_metadata={"file_name": payload.get("file_name")},
+                    audit_metadata={"file_name": payload.get("mop_file_name")},
                     **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
                 )
                 return self._json_ok(request, session, data)
@@ -2139,7 +2139,7 @@ class FastAPIPortalController:
                     audit_actor_open_id=str(user.get("open_id") or ""),
                     audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
                     audit_source_record_id=str(payload.get("source_record_id") or ""),
-                    audit_metadata={"file_name": payload.get("file_name")},
+                    audit_metadata={"file_name": payload.get("mop_file_name")},
                     audit_remote_written_on_success=True,
                     **engineer_mop_upload_signed_kwargs_from_payload(
                         payload,

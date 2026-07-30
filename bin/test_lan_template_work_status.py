@@ -6516,6 +6516,153 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(payload["records"][0]["display_fields"]["维护周期"], "每月")
             self.assertEqual(payload["last_loaded_at"], "2026-05-20 19:00:00")
 
+    def test_query_record_counts_only_include_startable_unlinked_source_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._records = [
+                _build_record(
+                    "maintenance-pending",
+                    "D楼",
+                    "待发起维护",
+                    _TEST_MONTH_LABEL,
+                    status="未开始",
+                ),
+                _build_record(
+                    "maintenance-linked",
+                    "D楼",
+                    "已在未结束列表中的维护",
+                    _TEST_MONTH_LABEL,
+                    status="延期未开始",
+                ),
+                _build_record(
+                    "maintenance-ended",
+                    "D楼",
+                    "正常结束维护",
+                    _TEST_MONTH_LABEL,
+                    status="正常结束",
+                ),
+                _build_record(
+                    "maintenance-completed",
+                    "D楼",
+                    "已完成维护",
+                    _TEST_MONTH_LABEL,
+                    status="已完成",
+                ),
+            ]
+            ongoing = {
+                "active_item_id": "active-maintenance-linked",
+                "source_record_id": "maintenance-linked",
+                "target_record_id": "target-maintenance-linked",
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "EA118机房D楼已在未结束列表中的维护",
+                "building": "D楼",
+                "building_codes": ["D"],
+                "start_time": _test_datetime(8, "09:00"),
+                "end_time": _test_datetime(8, "18:00"),
+                "status": "进行中",
+            }
+
+            payload = service.query_records(
+                month=_TEST_MONTH_LABEL,
+                scope="D",
+                ongoing_items=[ongoing],
+            )
+
+            self.assertEqual(len(payload["records"]), 4)
+            self.assertEqual(payload["record_type_counts"]["maintenance"], 1)
+            self.assertEqual(payload["ongoing_type_counts"]["maintenance"], 1)
+
+    def test_pending_record_counts_use_source_status_for_every_notice_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            power = _build_record(
+                "power-linked",
+                "D楼",
+                "配电柜上电",
+                _TEST_MONTH_LABEL,
+            )
+            power.update(
+                {
+                    "work_type": "power",
+                    "source_work_type": "maintenance",
+                    "notice_type": "上电通告",
+                }
+            )
+            polling = _build_record(
+                "polling-pending",
+                "D楼",
+                "设备轮巡",
+                _TEST_MONTH_LABEL,
+            )
+            polling.update(
+                {
+                    "work_type": "polling",
+                    "source_work_type": "maintenance",
+                    "notice_type": "设备轮巡",
+                }
+            )
+            adjust = _build_record(
+                "adjust-pending",
+                "D楼",
+                "设备调整",
+                _TEST_MONTH_LABEL,
+            )
+            adjust.update(
+                {
+                    "work_type": "adjust",
+                    "source_work_type": "maintenance",
+                    "notice_type": "设备调整",
+                }
+            )
+            records = [
+                _build_record(
+                    "maintenance-pending",
+                    "D楼",
+                    "维保待发起",
+                    _TEST_MONTH_LABEL,
+                    status="未开始",
+                ),
+                _build_record(
+                    "maintenance-ended",
+                    "D楼",
+                    "维保已结束",
+                    _TEST_MONTH_LABEL,
+                    status="已结束",
+                ),
+                _build_change_record(
+                    "change-pending",
+                    building="D楼",
+                    progress="未开始",
+                ),
+                _build_change_record(
+                    "change-ended",
+                    building="D楼",
+                    progress="正常结束",
+                ),
+                _build_repair_record("repair-pending", building="D楼"),
+                _build_repair_record("repair-ended", building="D楼", ended=True),
+                power,
+                polling,
+                adjust,
+            ]
+            ongoing = [
+                {
+                    "source_record_id": "power-linked",
+                    "work_type": "power",
+                    "notice_type": "上电通告",
+                }
+            ]
+
+            counts = service._pending_work_type_counts(records, ongoing)
+
+            self.assertEqual(counts["maintenance"], 1)
+            self.assertEqual(counts["change"], 1)
+            self.assertEqual(counts["repair"], 1)
+            self.assertEqual(counts["power"], 0)
+            self.assertEqual(counts["polling"], 1)
+            self.assertEqual(counts["adjust"], 1)
+
     def test_obsolete_empty_source_warning_is_not_shown_from_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))

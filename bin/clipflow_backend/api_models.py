@@ -319,6 +319,7 @@ class EngineerMopFillRequest(APIModel):
 
 
 class EngineerMopUploadSignedRequest(EngineerMopFillRequest):
+    operation_id: str = Field(default="", max_length=128)
     source_record_id: str = ""
     notice_title: str = ""
     notice_key: str = ""

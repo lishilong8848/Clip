@@ -134,6 +134,10 @@ export function uploadSignedEngineerMop(payload: Dict): Promise<Dict> {
   return requestJson("/api/engineer/mop/upload-signed", {
     method: "POST",
     body: JSON.stringify(payload),
+    // This request regenerates the workbook, uploads it, verifies the Bitable
+    // record, and sends signer notifications. It is intentionally longer than
+    // ordinary page-data requests.
+    timeoutMs: 300_000,
   }).then((data) => {
     invalidateEngineerMopBootstrap(String(payload.scope || ""));
     return data;

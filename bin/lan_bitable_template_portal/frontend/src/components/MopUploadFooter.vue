@@ -76,8 +76,17 @@
         {{ uploadButtonText }}
       </button>
     </div>
+    <p
+      v-if="statusMessage"
+      class="floating-upload-result"
+      :class="statusTone"
+      role="status"
+      aria-live="polite"
+    >
+      {{ statusMessage }}
+    </p>
     <DisabledReason
-      v-if="disabledReason && !saving && detailsOpen"
+      v-else-if="disabledReason && !saving"
       :text="disabledReason"
       tone="warning"
     />
@@ -94,6 +103,8 @@ const props = defineProps<{
   saving?: boolean;
   disabled?: boolean;
   disabledReason?: string;
+  statusMessage?: string;
+  statusTone?: "info" | "success" | "failed";
 }>();
 
 const readyCount = computed(() => props.items.filter((item) => item.ready).length);
@@ -489,6 +500,32 @@ const emit = defineEmits<{
   background: linear-gradient(135deg, #f8fafc, #eef2f7);
   color: #64748b;
   box-shadow: 0 12px 28px rgba(100, 116, 139, 0.16);
+}
+
+.floating-upload-result {
+  grid-column: 1 / -1;
+  margin: 0;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  padding: 6px 9px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.floating-upload-result.success {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.floating-upload-result.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .floating-upload-box :deep(.control-disabled-reason) {

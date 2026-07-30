@@ -7,6 +7,10 @@ export type ApiClientHooks = {
   onServerError?: (message: string, response: Response, payload: Dict) => void;
 };
 
+export type ApiRequestOptions = RequestInit & {
+  timeoutMs?: number;
+};
+
 export const AUTH_EXPIRED_EVENT = "clipflow-auth-expired";
 const AUTH_REDIRECT_FLAG = "__clipflowAuthRedirecting";
 
@@ -106,16 +110,17 @@ function authExpiredDetail(message: string, payload: Dict): Dict {
 
 export async function requestJson(
   path: string,
-  options: RequestInit = {},
+  options: ApiRequestOptions = {},
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
   let response: Response;
-  const requestSignal = requestSignalWithTimeout(options.signal, 45_000);
+  const { timeoutMs = 45_000, ...fetchOptions } = options;
+  const requestSignal = requestSignalWithTimeout(fetchOptions.signal, timeoutMs);
   try {
     response = await fetch(path, {
-      ...options,
-      credentials: options.credentials || "same-origin",
-      headers: buildHeaders(options),
+      ...fetchOptions,
+      credentials: fetchOptions.credentials || "same-origin",
+      headers: buildHeaders(fetchOptions),
       signal: requestSignal.signal,
     });
     hooks.onOnline?.();

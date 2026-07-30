@@ -257,9 +257,9 @@ export function repairDisplayTime(value: unknown): string {
 }
 
 export function repairRecordTimeLabel(record: LooseDict): string {
-  const fields = record.display_fields || {};
-  const time = fields["故障发生时间"] || fields["维修开始时间"] || fields["维修结束时间"] || record.last_modified_time;
-  return repairDisplayTime(time) || "时间未填";
+  const fields = record.display_fields || record.fields || {};
+  const time = fields["故障发生时间"] || record.fault_time;
+  return repairDisplayTime(time) || "故障时间未填";
 }
 
 export function repairRecordHeaderTitle(record: LooseDict): string {
