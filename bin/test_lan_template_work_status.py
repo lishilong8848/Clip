@@ -702,6 +702,65 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ],
         )
 
+    def test_record_pagination_rejects_missing_or_repeated_page_token(self):
+        with self.assertRaises(PortalError) as missing:
+            MaintenancePortalService._next_record_page_token(
+                {"has_more": True},
+                current_token="",
+                seen_tokens=set(),
+                context="测试源表",
+            )
+        self.assertIn("缺少 page_token", str(missing.exception))
+
+        with self.assertRaises(PortalError) as repeated:
+            MaintenancePortalService._next_record_page_token(
+                {"has_more": True, "page_token": "page-2"},
+                current_token="page-1",
+                seen_tokens={"page-2"},
+                context="测试源表",
+            )
+        self.assertIn("重复的 page_token", str(repeated.exception))
+
+    def test_table_field_loader_rejects_cyclic_page_token(self):
+        service = MaintenancePortalService()
+        responses = iter(
+            [
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [],
+                        "has_more": True,
+                        "page_token": "fields-page-1",
+                    },
+                },
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [],
+                        "has_more": True,
+                        "page_token": "fields-page-2",
+                    },
+                },
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [],
+                        "has_more": True,
+                        "page_token": "fields-page-1",
+                    },
+                },
+            ]
+        )
+        service._request_json = lambda *_args, **_kwargs: next(responses)  # type: ignore[method-assign]
+
+        with self.assertRaises(PortalError) as caught:
+            service._load_raw_table_fields(
+                app_token="app-test",
+                table_id="table-test",
+            )
+
+        self.assertIn("重复的 page_token", str(caught.exception))
+
     def test_repair_management_uses_original_tables_only(self):
         self.assertEqual(REPAIR_SOURCE_TABLE_ID, "tblschT48zXwigUG")
         self.assertEqual(REPAIR_MANAGEMENT_TABLE_ID, "tblschT48zXwigUG")
@@ -1851,6 +1910,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             snapshot = store.get_ongoing_snapshot()
             self.assertTrue(snapshot["exists"])
             self.assertEqual(snapshot["items"], [])
+
+    def test_lan_portal_state_store_creates_verified_daily_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = LanPortalStateStore(root / "lan_portal_state.sqlite3")
+            store.put_document("test", "record", {"value": "ready"})
+
+            health = store.quick_check_database()
+            first = store.backup_database(backup_dir=root / "backups")
+            second = store.backup_database(backup_dir=root / "backups")
+
+            self.assertTrue(health["ok"])
+            self.assertTrue(first["created"])
+            self.assertTrue(Path(first["backup_path"]).exists())
+            self.assertFalse(second["created"])
+            self.assertEqual(second["reason"], "already_exists")
+            backup_store = LanPortalStateStore(Path(first["backup_path"]))
+            self.assertEqual(
+                backup_store.get_document("test", "record"),
+                {"value": "ready"},
+            )
 
     def test_repair_management_operation_ledger_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3253,7 +3333,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(second["real_record_id"], "rec-event-1")
         self.assertTrue(second.get("deduped"))
         create_record.assert_called_once()
-        query_record.assert_not_called()
+        query_record.assert_called_once_with("rec-event-1", "事件通告")
 
     def test_local_event_upload_dedupes_different_local_ids_by_notice_text(self):
         def payload(local_id: str) -> dict:
@@ -3282,9 +3362,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         old_locks = PortalRuntime.local_upload_locks
         old_created_targets = PortalRuntime.local_upload_created_targets
         with tempfile.TemporaryDirectory() as tmp:
-            PortalRuntime.state_store = LanPortalStateStore(
+            store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
+            PortalRuntime.state_store = store
             PortalRuntime.local_upload_locks = {}
             PortalRuntime.local_upload_created_targets = {}
             try:
@@ -3300,6 +3381,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     first = PortalRuntime.execute_local_notice_upload(payload("localid-event-1"))
                     second = PortalRuntime.execute_local_notice_upload(payload("localid-event-2"))
             finally:
+                store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
                 PortalRuntime.local_upload_locks = old_locks
                 PortalRuntime.local_upload_created_targets = old_created_targets
@@ -3310,7 +3392,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(second["real_record_id"], "rec-event-1")
         self.assertTrue(second.get("deduped"))
         create_record.assert_called_once()
-        query_record.assert_not_called()
+        query_record.assert_called_once_with("rec-event-1", "事件通告")
 
     def test_local_event_update_and_end_reuse_created_target_across_new_local_ids(self):
         def event_text(status: str, progress: str = "测试测试测试") -> str:
@@ -6822,6 +6904,80 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("sqlite locked", result["message"])
             self.assertEqual(len(store.list_qt_active_items()), 1)
 
+    def test_notice_delete_remote_failure_preserves_local_active_item(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            PortalRuntime.service = service
+            PortalRuntime.state_store = service._state_store
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-delete-failure",
+                    "record_id": "target-delete-failure",
+                    "target_record_id": "target-delete-failure",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "title": "A楼删除失败保留测试",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                },
+                section="other",
+                origin="web",
+            )
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                "名称": "A楼删除失败保留测试",
+                                "楼栋": "A楼",
+                            },
+                            "record_version": "version-1",
+                        },
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "delete_bitable_record",
+                    return_value=(False, "飞书删除失败"),
+                ):
+                    result = PortalRuntime.execute_local_delete_active_item(
+                        {
+                            "scope": "A",
+                            "work_type": "maintenance",
+                            "notice_type": "维保通告",
+                            "active_item_id": "active-delete-failure",
+                            "target_record_id": "target-delete-failure",
+                            "title": "A楼删除失败保留测试",
+                            "building": "A楼",
+                        }
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["remote_deleted"])
+                self.assertIn("飞书删除失败", result["message"])
+                active_items = service._state_store.list_qt_active_items()
+                self.assertEqual(len(active_items), 1)
+                self.assertEqual(
+                    active_items[0]["active_item_id"],
+                    "active-delete-failure",
+                )
+            finally:
+                service._state_store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
     def test_server_get_ongoing_reads_qt_active_items_before_qt_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -7206,6 +7362,122 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(restored["restart_recovered"])
             self.assertEqual(restarted.recoverable_action_job_ids(), [job_id])
 
+    def test_source_refresh_publishes_successes_and_retains_failed_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._records = [{"record_id": "maintenance-old"}]
+            service._change_records = [{"record_id": "change-old"}]
+            service._zhihang_change_records = [{"record_id": "zhihang-old"}]
+            service._repair_records = [{"record_id": "repair-old"}]
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._zhihang_change_loaded_once = True
+            service._repair_loaded_once = True
+            published = []
+
+            service._load_fields = lambda: None  # type: ignore[method-assign]
+            service._load_change_fields = lambda: None  # type: ignore[method-assign]
+            service._load_zhihang_change_fields = lambda: None  # type: ignore[method-assign]
+            service._load_repair_fields = lambda: None  # type: ignore[method-assign]
+
+            def load_maintenance():
+                service._records = [{"record_id": "maintenance-new"}]
+                return service._records
+
+            def fail_change():
+                service._change_records = [{"record_id": "change-partial"}]
+                raise PortalError("change unavailable")
+
+            def load_zhihang():
+                service._zhihang_change_records = [{"record_id": "zhihang-new"}]
+                return service._zhihang_change_records
+
+            def load_repair():
+                service._repair_records = [{"record_id": "repair-new"}]
+                return service._repair_records
+
+            service._load_records = load_maintenance  # type: ignore[method-assign]
+            service._load_change_records = fail_change  # type: ignore[method-assign]
+            service._load_zhihang_change_records = load_zhihang  # type: ignore[method-assign]
+            service._load_repair_records = load_repair  # type: ignore[method-assign]
+            service._save_source_scope_snapshots = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: published.append(True)
+            )
+
+            MaintenancePortalService.refresh(service)
+
+            self.assertEqual(service._records, [{"record_id": "maintenance-new"}])
+            self.assertEqual(service._change_records, [{"record_id": "change-old"}])
+            self.assertEqual(
+                service._zhihang_change_records,
+                [{"record_id": "zhihang-new"}],
+            )
+            self.assertEqual(service._repair_records, [{"record_id": "repair-new"}])
+            self.assertEqual(service._source_refresh_status["change"]["status"], "retained")
+            self.assertTrue(published)
+
+    def test_cleanup_engineer_mop_local_files_removes_only_managed_upload_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._new_temp_service(root)
+            upload_id = "upload-cleanup"
+            upload_dir = root / "mop_local_uploads" / "A" / "source-1" / upload_id
+            upload_dir.mkdir(parents=True)
+            local_file = upload_dir / "mop.xlsx"
+            local_file.write_bytes(b"test")
+            service._state_store.upsert_engineer_mop_local_file(
+                {
+                    "upload_id": upload_id,
+                    "scope": "A",
+                    "source_record_id": "source-1",
+                    "local_file_path": str(local_file),
+                    "status": "ready",
+                }
+            )
+            with closing(
+                sqlite3.connect(str(service._state_store.db_path))
+            ) as conn:
+                conn.execute(
+                    """
+                    UPDATE engineer_mop_local_files
+                    SET updated_at = ?
+                    WHERE upload_id = ?
+                    """,
+                    (time.time() - 40 * 24 * 60 * 60, upload_id),
+                )
+                conn.commit()
+
+            first = service.cleanup_engineer_mop_local_files(
+                retention_seconds=30 * 24 * 60 * 60,
+                purge_grace_seconds=60,
+            )
+            self.assertEqual(first["marked"], 1)
+            self.assertTrue(upload_dir.exists())
+            with closing(
+                sqlite3.connect(str(service._state_store.db_path))
+            ) as conn:
+                conn.execute(
+                    """
+                    UPDATE engineer_mop_local_files
+                    SET deleted_at = ?
+                    WHERE upload_id = ?
+                    """,
+                    (time.time() - 120, upload_id),
+                )
+                conn.commit()
+
+            second = service.cleanup_engineer_mop_local_files(
+                retention_seconds=30 * 24 * 60 * 60,
+                purge_grace_seconds=60,
+            )
+
+            self.assertEqual(second["removed_directories"], 1)
+            self.assertEqual(second["purged_rows"], 1)
+            self.assertFalse(upload_dir.exists())
+            self.assertIsNone(
+                service._state_store.get_engineer_mop_local_file(upload_id)
+            )
+
     def test_qt_active_cache_uses_target_record_id_without_overwriting_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -7589,6 +7861,22 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 record_id="target-delete-cleanup",
                 active_item_id="active-delete-cleanup",
             )
+            today_key = dt.datetime.now().strftime("%Y-%m-%d")
+            historical_key = (
+                dt.datetime.now() - dt.timedelta(days=2)
+            ).strftime("%Y-%m-%d")
+            historical_summary = copy.deepcopy(
+                service._state_store.get_document(
+                    "notice_daily_summary",
+                    today_key,
+                )
+            )
+            historical_summary["date"] = historical_key
+            service._state_store.put_document(
+                "notice_daily_summary",
+                historical_key,
+                historical_summary,
+            )
 
             removed = service.discard_deleted_ongoing_state(
                 {
@@ -7605,11 +7893,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             result = service.query_records(month=_TEST_MONTH_LABEL, scope="A", ongoing_items=[])
             daily = service.get_daily_summary(scope="A", ongoing_items=[])
+            historical = service._state_store.get_document(
+                "notice_daily_summary",
+                historical_key,
+            )
 
             self.assertEqual(removed["work_status_removed"], 1)
-            self.assertEqual(removed["daily_summary_removed"], 1)
+            self.assertEqual(removed["daily_summary_removed"], 2)
             self.assertEqual(result["records"][0]["work_summary"], {})
             self.assertEqual(daily["items"], [])
+            self.assertEqual(historical["items"], [])
 
     def test_daily_summary_backfills_historical_completion_date(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8148,6 +8441,84 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 pass
             PortalRuntime.service = original_service
             PortalRuntime.state_store = original_state_store
+
+    def test_backend_update_rejects_stale_record_version_before_write(self):
+        prepared = {
+            "job_id": "job-version-conflict",
+            "action": "update",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "scope": "A",
+            "title": "A楼并发测试",
+            "target_record_id": "target-version-conflict",
+            "expected_record_version": "version-old",
+            "text": "【维保通告】状态：更新\n【名称】A楼并发测试",
+        }
+        with patch(
+            "lan_bitable_template_portal.server.external_real_write_guard",
+            return_value={
+                "mock_external": False,
+                "real_write_allowed": True,
+                "reason": "",
+            },
+        ), patch(
+            "lan_bitable_template_portal.server.query_record_by_id",
+            return_value=(
+                True,
+                {
+                    "fields": {"名称": "A楼并发测试"},
+                    "record_version": "version-new",
+                },
+            ),
+        ), patch(
+            "lan_bitable_template_portal.server.update_bitable_record_by_payload",
+        ) as update_record:
+            ok, message, record_id = (
+                PortalRuntime._execute_backend_prepared_upload(prepared)
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(record_id, "target-version-conflict")
+        self.assertIn("已被其他用户修改", message)
+        update_record.assert_not_called()
+
+    def test_qt_update_rejects_stale_record_version_before_media_upload(self):
+        request_payload = {
+            "action_type": "update",
+            "data_dict": {
+                "record_id": "target-qt-version-conflict",
+                "target_record_id": "target-qt-version-conflict",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "A楼Qt并发测试",
+                "expected_record_version": "version-old",
+                "text": "【维保通告】状态：更新\n【名称】A楼Qt并发测试",
+            },
+        }
+        with patch.object(
+            portal_server_module,
+            "query_record_by_id",
+            return_value=(
+                True,
+                {
+                    "fields": {"名称": "A楼Qt并发测试"},
+                    "record_version": "version-new",
+                },
+            ),
+        ), patch.object(
+            portal_server_module,
+            "upload_media_to_feishu",
+        ) as upload_media, patch.object(
+            portal_server_module,
+            "update_bitable_record_by_payload",
+        ) as update_record:
+            result = PortalRuntime.execute_local_notice_upload(request_payload)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["record_version_conflict"])
+        self.assertEqual(result["record_version"], "version-new")
+        upload_media.assert_not_called()
+        update_record.assert_not_called()
 
     def test_change_target_candidates_match_title_without_required_date(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -13892,19 +14263,168 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "message_started_at": time.time(),
                 "request": {"action": "start", "record_id": "m2"},
             }
+            remote_written = {
+                "job_id": "job-remote-written",
+                "phase": "sending_message",
+                "remote_written": True,
+                "remote_record_id": "target-remote-written",
+                "message_sent": False,
+                "prepared": {
+                    "action": "start",
+                    "work_type": "maintenance",
+                    "text": "test",
+                },
+                "request": {"action": "start", "record_id": "m3"},
+            }
+            remote_intent = {
+                "job_id": "job-remote-intent",
+                "phase": "uploading",
+                "remote_intent": True,
+                "remote_operation_id": "notice_action:job-remote-intent",
+                "prepared": {
+                    "action": "update",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "target_record_id": "target-remote-intent",
+                    "text": "test",
+                },
+                "request": {"action": "update", "record_id": "m4"},
+            }
             store.put_document("notice_action_job", "job-accepted", accepted)
             store.put_document("notice_action_job", "job-uploading", uploading)
+            store.put_document(
+                "notice_action_job",
+                "job-remote-written",
+                remote_written,
+            )
+            store.put_document(
+                "notice_action_job",
+                "job-remote-intent",
+                remote_intent,
+            )
             service = _TestMaintenancePortalService()
             service._state_store = store
             service._jobs = service._load_action_jobs_from_state()
 
             self.assertEqual(service.get_job("job-accepted")["phase"], "accepted")
             self.assertTrue(service.get_job("job-accepted")["restart_recovered"])
-            self.assertEqual(service.recoverable_action_job_ids(), ["job-accepted"])
+            self.assertEqual(
+                set(service.recoverable_action_job_ids()),
+                {
+                    "job-accepted",
+                    "job-remote-intent",
+                    "job-remote-written",
+                },
+            )
             failed = service.get_job("job-uploading")
             self.assertEqual(failed["phase"], "failed")
             self.assertEqual(failed["error_category"], "process_restart")
             self.assertFalse(failed["error_retryable"])
+            recovered_remote = service.get_job("job-remote-written")
+            self.assertEqual(recovered_remote["phase"], "remote_written")
+            self.assertTrue(recovered_remote["restart_recovered"])
+            self.assertTrue(recovered_remote["message_delivery_uncertain"])
+            recovered_intent = service.get_job("job-remote-intent")
+            self.assertEqual(recovered_intent["phase"], "remote_intent")
+            self.assertTrue(recovered_intent["restart_recovered"])
+
+    def test_paired_maintenance_remote_write_replays_without_duplicate_upload(self):
+        original_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "state.sqlite3"
+            )
+            prepared = {
+                "sync_maintenance_target": True,
+                "paired_maintenance_upload": {
+                    "action": "start",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "scope": "A",
+                    "active_item_id": "active-paired",
+                    "source_record_id": "source-paired",
+                    "title": "A楼配套维保测试",
+                    "text": "A楼配套维保测试",
+                },
+            }
+            try:
+                with patch.object(
+                    PortalRuntime,
+                    "_execute_backend_prepared_upload",
+                    return_value=(True, "created", "rec-paired"),
+                ) as execute_upload:
+                    first = PortalRuntime._execute_paired_maintenance_upload(
+                        prepared,
+                        operation_id="job-paired",
+                    )
+                    second = PortalRuntime._execute_paired_maintenance_upload(
+                        prepared,
+                        operation_id="job-paired",
+                    )
+            finally:
+                PortalRuntime.state_store = original_store
+
+        self.assertTrue(first[0])
+        self.assertTrue(second[0])
+        self.assertEqual(first[2], "rec-paired")
+        self.assertEqual(second[2], "rec-paired")
+        execute_upload.assert_called_once()
+
+    def test_remote_written_action_job_recovery_does_not_repeat_remote_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "source-remote-recovery",
+                    "operation_id": "remote-recovery",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="remote_written",
+                remote_written=True,
+                remote_record_id="target-remote-recovery",
+                target_record_id="target-remote-recovery",
+                remote_result_message="目标多维已写入",
+                restart_recovered=True,
+                prepared={
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "source_record_id": "source-remote-recovery",
+                    "active_item_id": "active-remote-recovery",
+                    "skip_personal_message": True,
+                    "message_sent": True,
+                    "text": "测试通告",
+                },
+            )
+
+            with (
+                patch.object(PortalRuntime, "service", service),
+                patch.object(PortalRuntime, "state_store", service._state_store),
+                patch.object(
+                    PortalRuntime,
+                    "_execute_backend_prepared_upload",
+                ) as remote_upload,
+                patch.object(
+                    PortalRuntime,
+                    "_upsert_backend_active_notice",
+                    return_value=1,
+                ),
+            ):
+                PortalRuntime._process_maintenance_action_job(job_id)
+
+            remote_upload.assert_not_called()
+            completed = service.get_job(job_id)
+            self.assertEqual(completed["phase"], "success")
+            self.assertEqual(
+                completed["record_id"],
+                "target-remote-recovery",
+            )
 
     def test_cleanup_action_jobs_only_removes_expired_terminal_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14516,26 +15036,49 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             def _load_change_fields(self):
                 raise RuntimeError("change down")
 
+            def _load_zhihang_change_fields(self):
+                self._zhihang_change_field_meta_list = []
+                self._zhihang_change_field_meta_by_name = {}
+                return []
+
+            def _load_zhihang_change_records(self):
+                self._zhihang_change_records = []
+                self._zhihang_change_loaded_once = True
+                return []
+
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp), _FailingChangeRefreshService)
             service._state_store.replace_all_source_scope_snapshots(
                 {
                     "ALL": {
-                        "records": [_build_record("m-old", "A楼", "维护", "5月")],
+                        "records": [
+                            _build_record("m-old", "A楼", "维护", "5月"),
+                            _build_change_record(
+                                "c-old",
+                                building="A楼",
+                                progress="未开始",
+                            ),
+                        ],
                         "zhihang_records": [],
                     }
                 },
                 meta={"last_loaded_at": "old"},
             )
-            before = service._state_store.source_snapshot_stats()["active"]["snapshot_id"]
+            before = service._state_store.active_source_snapshot_meta()[
+                "source_versions"
+            ]["change"]["snapshot_id"]
 
-            with self.assertRaisesRegex(PortalError, "变更源表同步失败"):
-                service.refresh_change_source()
+            result = service.refresh_change_source()
 
-            after = service._state_store.source_snapshot_stats()["active"]["snapshot_id"]
+            after_meta = service._state_store.active_source_snapshot_meta()
+            after = after_meta["source_versions"]["change"]["snapshot_id"]
             snapshot = service._state_store.get_source_scope_snapshot("ALL")
             self.assertEqual(after, before)
-            self.assertEqual(snapshot["records"][0]["record_id"], "m-old")
+            self.assertEqual(result["change_count"], 1)
+            self.assertEqual(
+                {item["record_id"] for item in snapshot["records"]},
+                {"m-old", "c-old"},
+            )
 
     def test_source_refresh_request_is_background_singleflight(self):
         class _SlowSourceRefreshService:
@@ -15191,6 +15734,90 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(auth_headers, ["Bearer stale-token", "Bearer fresh-token"])
         get_token.assert_called_once_with(force_refresh=True)
 
+    def test_qt_field_loader_does_not_cache_partial_pagination(self):
+        response_items = [
+            SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(
+                    items=[SimpleNamespace(field_name="第一页字段")],
+                    has_more=True,
+                    page_token="fields-page-1",
+                ),
+            ),
+            SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(
+                    items=[SimpleNamespace(field_name="第二页字段")],
+                    has_more=True,
+                    page_token="fields-page-1",
+                ),
+            ),
+        ]
+        notice_type = "分页字段测试"
+        request_builder = SimpleNamespace()
+        request_builder.app_token = lambda _value: request_builder
+        request_builder.table_id = lambda _value: request_builder
+        request_builder.page_size = lambda _value: request_builder
+        request_builder.page_token = lambda _value: request_builder
+        request_builder.build = lambda: object()
+        request_type = SimpleNamespace(builder=lambda: request_builder)
+        with feishu_service_module._field_cache_lock:
+            feishu_service_module._field_cache.pop(notice_type, None)
+        with patch.object(
+            feishu_service_module,
+            "_resolve_handler",
+            return_value=(object(), "table-test", ""),
+        ), patch.object(
+            feishu_service_module,
+            "_build_client",
+            return_value=object(),
+        ), patch.object(
+            feishu_service_module,
+            "ListAppTableFieldRequest",
+            request_type,
+        ), patch.object(
+            feishu_service_module,
+            "_with_token_retry",
+            side_effect=response_items,
+        ) as token_retry:
+            fields = feishu_service_module._get_bitable_fields(notice_type)
+
+        self.assertEqual(fields, [])
+        self.assertEqual(token_retry.call_count, 2)
+        with feishu_service_module._field_cache_lock:
+            self.assertNotIn(notice_type, feishu_service_module._field_cache)
+
+    def test_robot_chat_loader_rejects_repeated_page_token(self):
+        from upload_event_module.services import robot_webhook
+
+        responses = [
+            {
+                "code": 0,
+                "data": {
+                    "items": [{"chat_id": "chat-1"}],
+                    "has_more": True,
+                    "page_token": "chat-page-1",
+                },
+            },
+            {
+                "code": 0,
+                "data": {
+                    "items": [{"chat_id": "chat-2"}],
+                    "has_more": True,
+                    "page_token": "chat-page-1",
+                },
+            },
+        ]
+        with patch.object(
+            robot_webhook,
+            "_request_json",
+            side_effect=responses,
+        ):
+            chats, error = robot_webhook._get_bot_chats("tenant-token")
+
+        self.assertEqual(chats, [])
+        self.assertIn("重复", error)
+
     def test_portal_auth_login_exchange_uses_shared_token_manager(self):
         auth = PortalAuthManager()
         with patch.object(
@@ -15391,11 +16018,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "event_thread_alive": True,
                     },
                 )
-                delete = client.post(
-                    "/api/ongoing-items/delete",
-                    headers=headers,
-                    json={"scope": "ALL", "active_item_id": "active1"},
-                )
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                "名称": "原生路由删除测试",
+                                "楼栋": "A楼",
+                            }
+                        },
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "delete_bitable_record",
+                    return_value=(True, "deleted"),
+                ):
+                    delete = client.post(
+                        "/api/ongoing-items/delete",
+                        headers=headers,
+                        json={
+                            "scope": "ALL",
+                            "work_type": "maintenance",
+                            "notice_type": "维保通告",
+                            "active_item_id": "active1",
+                            "record_id": "rec-native-delete",
+                            "target_record_id": "rec-native-delete",
+                            "title": "原生路由删除测试",
+                            "building": "A楼",
+                        },
+                    )
                 save_links = client.post(
                     "/api/handover-links",
                     headers=headers,
@@ -15458,7 +16111,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(delete.status_code, 200)
             self.assertTrue(delete.json().get("ok"))
             self.assertEqual(delete.json()["data"]["qt_event_id"], 1)
-            self.assertFalse(delete.json()["data"]["remote_deleted"])
+            self.assertTrue(delete.json()["data"]["remote_deleted"])
             leased_response = client.get("/api/qt/events?limit=1")
             self.assertEqual(leased_response.status_code, 200)
             leased = leased_response.json()["data"]["items"]
@@ -15732,6 +16385,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
             with patch.object(
                 portal_server_module,
+                "query_record_by_id",
+                return_value=(
+                    True,
+                    {
+                        "fields": {
+                            "名称": "A楼删除测试",
+                            "楼栋": "A楼",
+                        }
+                    },
+                ),
+            ), patch.object(
+                portal_server_module,
                 "delete_bitable_record",
                 return_value=(True, "deleted"),
             ) as delete_record:
@@ -15745,6 +16410,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "active_item_id": "active-del",
                         "record_id": "rec-del",
                         "target_record_id": "rec-del",
+                        "title": "A楼删除测试",
+                        "building": "A楼",
                     },
                 )
             self.assertEqual(response.status_code, 200)
@@ -15795,6 +16462,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         client = TestClient(controller._build_app())
         try:
             with patch.object(
+                portal_server_module,
+                "query_record_by_id",
+                return_value=(
+                    True,
+                    {
+                        "fields": {
+                            "名称": "Qt 删除测试",
+                            "楼栋": "A楼",
+                        }
+                    },
+                ),
+            ), patch.object(
                 portal_server_module,
                 "delete_bitable_record",
                 return_value=(True, "deleted"),
@@ -15885,7 +16564,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(deleted["ok"])
                 self.assertTrue(deleted["remote_deleted"])
                 self.assertTrue(deleted["undo_available"])
-                delete_record.assert_called_once_with("target-delete-undo", "维保通告")
+                delete_record.assert_not_called()
                 self.assertEqual(service._state_store.list_qt_active_items(), [])
 
                 undo_id = deleted["undo_id"]

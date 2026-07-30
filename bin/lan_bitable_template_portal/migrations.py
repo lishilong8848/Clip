@@ -37,6 +37,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (28, "repair_completed_at_and_business_audit"),
     (29, "water_consumption_management"),
     (30, "water_consumption_edit_limits"),
+    (31, "independent_source_snapshots_and_remote_operations"),
 )
 
 

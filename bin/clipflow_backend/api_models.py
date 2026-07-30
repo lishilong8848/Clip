@@ -47,6 +47,8 @@ class OngoingDeleteRequest(APIModel):
     record_id: str = ""
     target_record_id: str = ""
     source_record_id: str = ""
+    operation_id: str = Field(default="", max_length=128)
+    expected_record_version: str = Field(default="", max_length=128)
 
 
 class NoticeUndoApplyRequest(APIModel):

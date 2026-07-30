@@ -8931,6 +8931,13 @@ class FastAPIPortalController:
             PortalRuntime.state_store.cleanup_mop_temporary_signature_sessions()
         )
         try:
+            mop_local_files = (
+                PortalRuntime.service.cleanup_engineer_mop_local_files()
+            )
+        except Exception as exc:
+            mop_local_files = {"failed": 1, "error": str(exc)}
+            log_warning(f"本地 MOP 文件清理失败: {exc}")
+        try:
             cleanup_audits = getattr(
                 PortalRuntime.state_store,
                 "cleanup_business_operation_audits",
@@ -8952,6 +8959,7 @@ class FastAPIPortalController:
             "clipboard_removed": clipboard_removed,
             "dialog_removed": dialog_removed,
             "mop_temp_signature_removed": mop_temp_signature_removed,
+            "mop_local_files": mop_local_files,
             "business_audits_removed": business_audits_removed,
             "cleaned_at": time.time(),
         }
@@ -9025,6 +9033,32 @@ class FastAPIPortalController:
                     )
                 return
             stats = PortalRuntime.state_store.get_database_stats()
+            integrity = PortalRuntime.state_store.quick_check_database()
+            if not integrity.get("ok"):
+                log_warning(
+                    f"SQLite 完整性检查失败: {integrity.get('result') or 'unknown'}"
+                )
+                backup = {
+                    "created": False,
+                    "reason": "integrity_check_failed",
+                    "backup_path": "",
+                    "removed": 0,
+                }
+                cleanup = {}
+            else:
+                backup = PortalRuntime.state_store.backup_database(keep_count=7)
+                now = time.time()
+                cleanup = {
+                    "expired_notice_locks": (
+                        PortalRuntime.state_store.cleanup_event_notice_operation_locks()
+                    ),
+                    "notice_remote_operations": (
+                        PortalRuntime.state_store.cleanup_notice_remote_operations(
+                            completed_before=now - 90 * 24 * 60 * 60,
+                            failed_before=now - 30 * 24 * 60 * 60,
+                        )
+                    ),
+                }
             wal_threshold = int(
                 _env_float(
                     "CLIPFLOW_SQLITE_WAL_CHECKPOINT_BYTES",
@@ -9049,6 +9083,9 @@ class FastAPIPortalController:
                     "checkpointed": False,
                     "wal_bytes": wal_bytes,
                     "freelist_count": freelist_count,
+                    "integrity": integrity,
+                    "backup": backup,
+                    "cleanup": cleanup,
                 }
                 if not PortalRuntime.state_store.put_backend_runtime_async(
                     "sqlite_maintenance",
@@ -9066,6 +9103,9 @@ class FastAPIPortalController:
                 "wal_bytes": wal_bytes,
                 "freelist_count": freelist_count,
                 "result": result,
+                "integrity": integrity,
+                "backup": backup,
+                "cleanup": cleanup,
             }
             if not PortalRuntime.state_store.put_backend_runtime_async(
                 "sqlite_maintenance",

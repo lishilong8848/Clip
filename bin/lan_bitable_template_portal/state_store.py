@@ -57,7 +57,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 30
+    SCHEMA_VERSION = 31
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     _live_portal_restore_last: dict[str, float] = {}
@@ -72,6 +72,12 @@ class LanPortalStateStore:
         "CAMPUS": "source_records_campus",
         "ALL": "source_records_all",
     }
+    SOURCE_TABLE_KEYS = (
+        "maintenance",
+        "change",
+        "zhihang_change",
+        "repair",
+    )
     DOCUMENT_NAMESPACE_TABLES = {
         "notice_memory": "notice_memory",
         "notice_daily_summary": "daily_summary",
@@ -97,6 +103,8 @@ class LanPortalStateStore:
         "repair_link_tasks",
         "source_snapshot_manifest",
         "source_snapshot_records",
+        "source_table_snapshot_manifest",
+        "source_table_snapshot_records",
         "event_month_snapshot_manifest",
         "event_month_snapshot_records",
         "notice_undo_actions",
@@ -111,6 +119,7 @@ class LanPortalStateStore:
         "mop_signature_usage_confirmations",
         "signature_crypto_migrations",
         "event_notice_operation_locks",
+        "notice_remote_operations",
         "repair_management_operations",
         "repair_snapshot_sources",
         "repair_snapshot_records",
@@ -131,6 +140,8 @@ class LanPortalStateStore:
         "idx_qt_active_items_record_id",
         "idx_source_snapshot_manifest_status_time",
         "idx_source_snapshot_records_scope_order",
+        "idx_source_table_snapshot_manifest_source_status",
+        "idx_source_table_snapshot_records_scope_order",
         "idx_event_month_snapshot_manifest_month_status",
         "idx_event_month_snapshot_records_month_order",
         "idx_notice_undo_status_scope",
@@ -156,6 +167,8 @@ class LanPortalStateStore:
         "idx_signature_crypto_migrations_status",
         "idx_signature_crypto_migrations_updated",
         "idx_event_notice_operation_locks_expiry",
+        "idx_notice_remote_operations_status",
+        "idx_notice_remote_operations_target",
         "idx_repair_management_operations_status",
         "idx_repair_management_operations_record",
         "idx_repair_snapshot_records_source_sort",
@@ -470,7 +483,7 @@ class LanPortalStateStore:
                     conn.rollback()
                     return (
                         False,
-                        f"该事件正在处理，请稍后再试。当前动作：{row['action'] or '处理中'}",
+                        f"该通告正在处理，请稍后再试。当前动作：{row['action'] or '处理中'}",
                     )
                 conn.execute(
                     """
@@ -528,6 +541,245 @@ class LanPortalStateStore:
                 cursor = conn.execute(
                     "DELETE FROM event_notice_operation_locks WHERE lease_until<=?",
                     (now,),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
+
+    def acquire_notice_operation_lock(
+        self,
+        lock_key: str,
+        *,
+        owner: str = "",
+        action: str = "",
+        ttl_seconds: float = 180.0,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        return self.acquire_event_notice_operation_lock(
+            lock_key,
+            owner=owner,
+            action=action,
+            ttl_seconds=ttl_seconds,
+            payload=payload,
+        )
+
+    def release_notice_operation_lock(self, lock_key: str, owner: str = "") -> bool:
+        return self.release_event_notice_operation_lock(lock_key, owner)
+
+    @classmethod
+    def _notice_remote_operation_payload(
+        cls, row: sqlite3.Row | None
+    ) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        request_payload = cls._loads(str(row["request_json"] or ""), {})
+        result_payload = cls._loads(str(row["result_json"] or ""), {})
+        return {
+            "operation_id": str(row["operation_id"] or ""),
+            "operation_type": str(row["operation_type"] or ""),
+            "lock_key": str(row["lock_key"] or ""),
+            "status": str(row["status"] or ""),
+            "request_hash": str(row["request_hash"] or ""),
+            "request": request_payload if isinstance(request_payload, dict) else {},
+            "target_record_id": str(row["target_record_id"] or ""),
+            "expected_record_version": str(
+                row["expected_record_version"] or ""
+            ),
+            "observed_record_version": str(
+                row["observed_record_version"] or ""
+            ),
+            "result": result_payload if isinstance(result_payload, dict) else {},
+            "error": str(row["error"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def begin_notice_remote_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_type: str,
+        lock_key: str = "",
+        request: dict[str, Any] | None = None,
+        target_record_id: str = "",
+        expected_record_version: str = "",
+    ) -> dict[str, Any]:
+        normalized_operation_id = self._text(operation_id)
+        if not normalized_operation_id:
+            raise ValueError("notice remote operation_id is required")
+        request_payload = dict(request or {})
+        try:
+            request_json = self._stable_json(request_payload)
+        except (TypeError, ValueError):
+            request_json = self._stable_json(
+                json.loads(json.dumps(request_payload, ensure_ascii=False, default=str))
+            )
+        request_hash = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                existing_row = conn.execute(
+                    "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
+                    (normalized_operation_id,),
+                ).fetchone()
+                existing = self._notice_remote_operation_payload(existing_row)
+                if existing:
+                    if str(existing.get("request_hash") or "") != request_hash:
+                        conn.rollback()
+                        return {
+                            **existing,
+                            "conflict": True,
+                            "replay": False,
+                            "created": False,
+                            "message": "相同操作编号对应了不同内容，已阻止重复执行。",
+                        }
+                    conn.rollback()
+                    return {
+                        **existing,
+                        "conflict": False,
+                        "created": False,
+                        "replay": str(existing.get("status") or "")
+                        in {"remote_written", "completed"},
+                    }
+                conn.execute(
+                    """
+                    INSERT INTO notice_remote_operations(
+                        operation_id, operation_type, lock_key, status,
+                        request_hash, request_json, target_record_id,
+                        expected_record_version, observed_record_version,
+                        result_json, error, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'intent', ?, ?, ?, ?, '', '{}', '', ?, ?)
+                    """,
+                    (
+                        normalized_operation_id,
+                        self._text(operation_type) or "unknown",
+                        self._text(lock_key),
+                        request_hash,
+                        request_json,
+                        self._text(target_record_id),
+                        self._text(expected_record_version),
+                        now,
+                        now,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
+                    (normalized_operation_id,),
+                ).fetchone()
+                conn.commit()
+        payload = self._notice_remote_operation_payload(row) or {}
+        payload.update({"conflict": False, "replay": False, "created": True})
+        return payload
+
+    def mark_notice_remote_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        target_record_id: str | None = None,
+        expected_record_version: str | None = None,
+        observed_record_version: str | None = None,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_operation_id = self._text(operation_id)
+        if not normalized_operation_id:
+            raise ValueError("notice remote operation_id is required")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                existing_row = conn.execute(
+                    "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
+                    (normalized_operation_id,),
+                ).fetchone()
+                if not existing_row:
+                    conn.rollback()
+                    raise KeyError(f"notice remote operation not found: {normalized_operation_id}")
+                existing = self._notice_remote_operation_payload(existing_row) or {}
+                result_payload = dict(existing.get("result") or {})
+                if result is not None:
+                    result_payload.update(dict(result or {}))
+                conn.execute(
+                    """
+                    UPDATE notice_remote_operations
+                    SET status = ?,
+                        target_record_id = ?,
+                        expected_record_version = ?,
+                        observed_record_version = ?,
+                        result_json = ?,
+                        error = ?,
+                        updated_at = ?
+                    WHERE operation_id = ?
+                    """,
+                    (
+                        self._text(status) or "unknown",
+                        self._text(
+                            target_record_id
+                            if target_record_id is not None
+                            else existing.get("target_record_id")
+                        ),
+                        self._text(
+                            expected_record_version
+                            if expected_record_version is not None
+                            else existing.get("expected_record_version")
+                        ),
+                        self._text(
+                            observed_record_version
+                            if observed_record_version is not None
+                            else existing.get("observed_record_version")
+                        ),
+                        self._json(result_payload),
+                        self._text(
+                            error if error is not None else existing.get("error")
+                        ),
+                        now,
+                        normalized_operation_id,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
+                    (normalized_operation_id,),
+                ).fetchone()
+                conn.commit()
+        return self._notice_remote_operation_payload(row) or {}
+
+    def get_notice_remote_operation(
+        self, operation_id: str
+    ) -> dict[str, Any] | None:
+        normalized_operation_id = self._text(operation_id)
+        if not normalized_operation_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
+                    (normalized_operation_id,),
+                ).fetchone()
+        return self._notice_remote_operation_payload(row)
+
+    def cleanup_notice_remote_operations(
+        self,
+        *,
+        completed_before: float,
+        failed_before: float,
+    ) -> int:
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM notice_remote_operations
+                    WHERE (status = 'completed' AND updated_at < ?)
+                       OR (status = 'failed' AND updated_at < ?)
+                    """,
+                    (
+                        float(completed_before or 0),
+                        float(failed_before or 0),
+                    ),
                 )
                 conn.commit()
                 return int(cursor.rowcount or 0)
@@ -979,6 +1231,37 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_event_notice_operation_locks_expiry
             ON event_notice_operation_locks(lease_until)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notice_remote_operations (
+                operation_id TEXT PRIMARY KEY,
+                operation_type TEXT NOT NULL,
+                lock_key TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                target_record_id TEXT NOT NULL DEFAULT '',
+                expected_record_version TEXT NOT NULL DEFAULT '',
+                observed_record_version TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_remote_operations_status
+            ON notice_remote_operations(status, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_remote_operations_target
+            ON notice_remote_operations(target_record_id, updated_at DESC)
             """
         )
         conn.execute(
@@ -1689,6 +1972,60 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS source_table_snapshot_manifest (
+                snapshot_id TEXT PRIMARY KEY,
+                source_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                record_count INTEGER NOT NULL DEFAULT 0,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_table_snapshot_manifest_source_status
+            ON source_table_snapshot_manifest(source_key, status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_table_snapshot_records (
+                snapshot_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                record_key TEXT NOT NULL,
+                record_kind TEXT NOT NULL,
+                work_type TEXT,
+                source_record_id TEXT,
+                payload_json TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(snapshot_id, scope, record_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_table_snapshot_records_scope_order
+            ON source_table_snapshot_records(
+                snapshot_id, scope, record_kind, sort_order
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_table_snapshot_records_work_source
+            ON source_table_snapshot_records(
+                snapshot_id, work_type, source_record_id
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS event_month_snapshot_manifest (
                 snapshot_id TEXT PRIMARY KEY,
                 month TEXT NOT NULL,
@@ -1781,6 +2118,7 @@ class LanPortalStateStore:
         )
         run_schema_migrations(conn, target_version=self.SCHEMA_VERSION)
         self._migrate_legacy_source_snapshot_locked(conn)
+        self._migrate_combined_source_snapshots_locked(conn)
         self._migrate_legacy_change_notice_labels_locked(conn)
         self._repair_notice_identity_map_locked(conn)
         self._cleanup_invalid_notice_identity_targets_locked(conn)
@@ -1802,8 +2140,10 @@ class LanPortalStateStore:
             }
             if column not in columns:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                return
+            raise
 
     def schema_health(self) -> dict[str, Any]:
         with self._lock:
@@ -1927,6 +2267,175 @@ class LanPortalStateStore:
             "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_at', ?)",
             (str(now),),
         )
+
+    @classmethod
+    def _normalize_source_table_key(cls, source_key: Any) -> str:
+        value = str(source_key or "").strip().lower()
+        if value not in cls.SOURCE_TABLE_KEYS:
+            raise ValueError(f"unsupported source snapshot key: {value or '<empty>'}")
+        return value
+
+    @staticmethod
+    def _source_table_active_meta_key(source_key: str) -> str:
+        return f"active_source_table_snapshot:{source_key}"
+
+    @staticmethod
+    def _source_table_key_for_record(
+        *,
+        record_kind: Any = "",
+        work_type: Any = "",
+        item: dict[str, Any] | None = None,
+    ) -> str:
+        kind = str(record_kind or "").strip().lower()
+        normalized_work_type = str(work_type or "").strip().lower()
+        if kind == "zhihang":
+            return "zhihang_change"
+        if normalized_work_type in {"maintenance", "change", "repair"}:
+            return normalized_work_type
+        payload = item if isinstance(item, dict) else {}
+        notice_type = str(payload.get("notice_type") or "").strip()
+        if notice_type == "维保通告":
+            return "maintenance"
+        if notice_type == "变更通告":
+            return "change"
+        if notice_type == "设备检修":
+            return "repair"
+        display_fields = payload.get("display_fields")
+        if not isinstance(display_fields, dict):
+            display_fields = {}
+        field_names = set(display_fields)
+        if field_names & {"计划维护月份", "维护总项", "维护实施状态"}:
+            return "maintenance"
+        if field_names & {"变更简述", "变更进度", "变更楼栋"}:
+            return "change"
+        if field_names & {"检修简述", "检修状态", "维修名称"}:
+            return "repair"
+        return ""
+
+    def _migrate_combined_source_snapshots_locked(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Seed per-source snapshots once from the previous combined snapshot.
+
+        Old tables remain read-only migration inputs. Runtime refreshes only
+        advance the independent source pointers created here.
+        """
+
+        active_row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
+        ).fetchone()
+        active_snapshot_id = (
+            str(active_row["value"] or "").strip() if active_row else ""
+        )
+        if not active_snapshot_id:
+            return
+        manifest_row = conn.execute(
+            """
+            SELECT *
+            FROM source_snapshot_manifest
+            WHERE snapshot_id = ? AND status = 'active'
+            """,
+            (active_snapshot_id,),
+        ).fetchone()
+        if not manifest_row:
+            return
+        rows = conn.execute(
+            """
+            SELECT scope, record_key, record_kind, work_type, source_record_id,
+                   payload_json, sort_order, created_at
+            FROM source_snapshot_records
+            WHERE snapshot_id = ?
+            ORDER BY scope ASC, sort_order ASC, record_key ASC
+            """,
+            (active_snapshot_id,),
+        ).fetchall()
+        if not rows:
+            return
+        grouped: dict[str, list[sqlite3.Row]] = {
+            source_key: [] for source_key in self.SOURCE_TABLE_KEYS
+        }
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            source_key = self._source_table_key_for_record(
+                record_kind=row["record_kind"],
+                work_type=row["work_type"],
+                item=payload if isinstance(payload, dict) else None,
+            )
+            if source_key:
+                grouped[source_key].append(row)
+        old_meta = self._loads(str(manifest_row["meta_json"] or ""), {})
+        if not isinstance(old_meta, dict):
+            old_meta = {}
+        now = time.time()
+        finished_at = float(
+            manifest_row["finished_at"] or manifest_row["updated_at"] or now
+        )
+        for source_key, source_rows in grouped.items():
+            active_meta_key = self._source_table_active_meta_key(source_key)
+            existing = conn.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (active_meta_key,),
+            ).fetchone()
+            if existing and str(existing["value"] or "").strip():
+                continue
+            if not source_rows:
+                continue
+            snapshot_id = uuid.uuid4().hex
+            source_meta = dict(old_meta)
+            source_meta.update(
+                {
+                    "source_key": source_key,
+                    "migrated_from_snapshot_id": active_snapshot_id,
+                    "updated_at": finished_at,
+                }
+            )
+            conn.execute(
+                """
+                INSERT INTO source_table_snapshot_manifest(
+                    snapshot_id, source_key, status, record_count,
+                    started_at, finished_at, meta_json, error,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'active', ?, ?, ?, ?, '', ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    source_key,
+                    len(source_rows),
+                    float(manifest_row["started_at"] or finished_at),
+                    finished_at,
+                    self._json(source_meta),
+                    now,
+                    now,
+                ),
+            )
+            for row in source_rows:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO source_table_snapshot_records(
+                        snapshot_id, scope, record_key, record_kind, work_type,
+                        source_record_id, payload_json, sort_order, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        self._normalize_source_scope(str(row["scope"] or "")),
+                        str(row["record_key"] or ""),
+                        str(row["record_kind"] or ""),
+                        str(row["work_type"] or ""),
+                        str(row["source_record_id"] or ""),
+                        str(row["payload_json"] or "{}"),
+                        int(row["sort_order"] or 0),
+                        float(row["created_at"] or now),
+                    ),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                (active_meta_key, snapshot_id),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                (f"active_source_table_snapshot_at:{source_key}", str(finished_at)),
+            )
 
     @classmethod
     def _canonicalize_legacy_change_notice_text(cls, value: str) -> tuple[str, bool]:
@@ -3201,14 +3710,325 @@ class LanPortalStateStore:
             (scope, self._json(meta_payload), now),
         )
 
+    def replace_source_table_snapshot(
+        self,
+        source_key: str,
+        snapshots_by_scope: dict[str, list[dict[str, Any]]],
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source_key = self._normalize_source_table_key(source_key)
+        normalized: dict[str, list[dict[str, Any]]] = {}
+        for raw_scope, items in (snapshots_by_scope or {}).items():
+            scope = self._normalize_source_scope(raw_scope)
+            normalized[scope] = [
+                dict(item) for item in (items or []) if isinstance(item, dict)
+            ]
+        if not normalized:
+            raise ValueError("source table snapshot payload is empty")
+        snapshot_id = uuid.uuid4().hex
+        started_at = time.time()
+        meta_payload = dict(meta or {})
+        counts = {scope: len(items) for scope, items in normalized.items()}
+        meta_payload.update(
+            {
+                "source_key": source_key,
+                "counts": counts,
+                "record_count": sum(counts.values()),
+            }
+        )
+        record_kind = "zhihang" if source_key == "zhihang_change" else "workbench"
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                now = time.time()
+                conn.execute(
+                    """
+                    INSERT INTO source_table_snapshot_manifest(
+                        snapshot_id, source_key, status, record_count,
+                        started_at, finished_at, meta_json, error,
+                        created_at, updated_at
+                    ) VALUES (?, ?, 'building', ?, ?, NULL, ?, '', ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        source_key,
+                        sum(counts.values()),
+                        started_at,
+                        self._json(meta_payload),
+                        now,
+                        now,
+                    ),
+                )
+                for scope in sorted(normalized):
+                    for order_index, item in enumerate(normalized[scope]):
+                        record_id = self._text(
+                            item.get("record_id") or item.get("source_record_id")
+                        )
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO source_table_snapshot_records(
+                                snapshot_id, scope, record_key, record_kind,
+                                work_type, source_record_id, payload_json,
+                                sort_order, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                snapshot_id,
+                                scope,
+                                self._source_snapshot_record_key(record_kind, item),
+                                record_kind,
+                                self._text(item.get("work_type")),
+                                record_id,
+                                self._json(item),
+                                order_index,
+                                now,
+                            ),
+                        )
+                conn.execute(
+                    """
+                    UPDATE source_table_snapshot_manifest
+                    SET status = 'retained', updated_at = ?
+                    WHERE source_key = ? AND status = 'active'
+                    """,
+                    (now, source_key),
+                )
+                conn.execute(
+                    """
+                    UPDATE source_table_snapshot_manifest
+                    SET status = 'active', finished_at = ?, updated_at = ?
+                    WHERE snapshot_id = ?
+                    """,
+                    (now, now, snapshot_id),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                    (self._source_table_active_meta_key(source_key), snapshot_id),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                    (
+                        f"active_source_table_snapshot_at:{source_key}",
+                        str(now),
+                    ),
+                )
+                conn.commit()
+        self.cleanup_source_table_snapshots(source_key=source_key)
+        return {
+            "snapshot_id": snapshot_id,
+            "source_key": source_key,
+            "status": "active",
+            "counts": counts,
+            "record_count": sum(counts.values()),
+            "updated_at": now,
+        }
+
+    def record_failed_source_table_snapshot(
+        self,
+        source_key: str,
+        *,
+        meta: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        source_key = self._normalize_source_table_key(source_key)
+        snapshot_id = uuid.uuid4().hex
+        now = time.time()
+        meta_payload = dict(meta or {})
+        meta_payload["source_key"] = source_key
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO source_table_snapshot_manifest(
+                        snapshot_id, source_key, status, record_count,
+                        started_at, finished_at, meta_json, error,
+                        created_at, updated_at
+                    ) VALUES (?, ?, 'failed', 0, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        source_key,
+                        now,
+                        now,
+                        self._json(meta_payload),
+                        self._text(error),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        self.cleanup_source_table_snapshots(source_key=source_key)
+        return {
+            "snapshot_id": snapshot_id,
+            "source_key": source_key,
+            "status": "failed",
+            "error": self._text(error),
+            "updated_at": now,
+        }
+
+    def get_source_table_scope_snapshot(
+        self, source_key: str, scope: str
+    ) -> dict[str, Any]:
+        source_key = self._normalize_source_table_key(source_key)
+        scope = self._normalize_source_scope(scope)
+        empty = {
+            "exists": False,
+            "source_key": source_key,
+            "scope": scope,
+            "records": [],
+            "meta": {},
+            "updated_at": 0.0,
+            "snapshot_id": "",
+            "count": 0,
+        }
+        if not self.db_path.exists():
+            return empty
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                active_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    (self._source_table_active_meta_key(source_key),),
+                ).fetchone()
+                snapshot_id = (
+                    str(active_row["value"] or "").strip() if active_row else ""
+                )
+                if not snapshot_id:
+                    return empty
+                manifest = conn.execute(
+                    """
+                    SELECT *
+                    FROM source_table_snapshot_manifest
+                    WHERE snapshot_id = ? AND source_key = ? AND status = 'active'
+                    """,
+                    (snapshot_id, source_key),
+                ).fetchone()
+                if not manifest:
+                    return empty
+                rows = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM source_table_snapshot_records
+                    WHERE snapshot_id = ? AND scope = ?
+                    ORDER BY sort_order ASC, record_key ASC
+                    """,
+                    (snapshot_id, scope),
+                ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if isinstance(payload, dict):
+                records.append(payload)
+        meta = self._loads(str(manifest["meta_json"] or ""), {})
+        if not isinstance(meta, dict):
+            meta = {}
+        updated_at = float(manifest["finished_at"] or manifest["updated_at"] or 0)
+        return {
+            "exists": True,
+            "source_key": source_key,
+            "scope": scope,
+            "records": records,
+            "meta": meta,
+            "updated_at": updated_at,
+            "snapshot_id": snapshot_id,
+            "count": len(records),
+        }
+
+    def get_active_source_table_snapshots(
+        self, scope: str = "ALL"
+    ) -> dict[str, dict[str, Any]]:
+        scope = self._normalize_source_scope(scope)
+        return {
+            source_key: self.get_source_table_scope_snapshot(source_key, scope)
+            for source_key in self.SOURCE_TABLE_KEYS
+        }
+
+    def cleanup_source_table_snapshots(
+        self,
+        *,
+        source_key: str = "",
+        keep_successful: int = 3,
+        keep_failed: int = 3,
+    ) -> int:
+        source_keys = (
+            [self._normalize_source_table_key(source_key)]
+            if str(source_key or "").strip()
+            else list(self.SOURCE_TABLE_KEYS)
+        )
+        deleted = 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                for key in source_keys:
+                    active_row = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (self._source_table_active_meta_key(key),),
+                    ).fetchone()
+                    active_id = (
+                        str(active_row["value"] or "").strip()
+                        if active_row
+                        else ""
+                    )
+                    retained = conn.execute(
+                        """
+                        SELECT snapshot_id
+                        FROM source_table_snapshot_manifest
+                        WHERE source_key = ? AND status IN ('active', 'retained')
+                        ORDER BY updated_at DESC
+                        """,
+                        (key,),
+                    ).fetchall()
+                    failed = conn.execute(
+                        """
+                        SELECT snapshot_id
+                        FROM source_table_snapshot_manifest
+                        WHERE source_key = ? AND status = 'failed'
+                        ORDER BY updated_at DESC
+                        """,
+                        (key,),
+                    ).fetchall()
+                    keep_ids = {active_id} if active_id else set()
+                    keep_ids.update(
+                        str(row["snapshot_id"])
+                        for row in retained[: max(1, int(keep_successful))]
+                    )
+                    keep_ids.update(
+                        str(row["snapshot_id"])
+                        for row in failed[: max(0, int(keep_failed))]
+                    )
+                    all_rows = conn.execute(
+                        """
+                        SELECT snapshot_id
+                        FROM source_table_snapshot_manifest
+                        WHERE source_key = ?
+                        """,
+                        (key,),
+                    ).fetchall()
+                    for row in all_rows:
+                        snapshot_id = str(row["snapshot_id"] or "")
+                        if not snapshot_id or snapshot_id in keep_ids:
+                            continue
+                        conn.execute(
+                            "DELETE FROM source_table_snapshot_records WHERE snapshot_id = ?",
+                            (snapshot_id,),
+                        )
+                        conn.execute(
+                            "DELETE FROM source_table_snapshot_manifest WHERE snapshot_id = ?",
+                            (snapshot_id,),
+                        )
+                        deleted += 1
+                conn.commit()
+        return deleted
+
     def replace_all_source_scope_snapshots(
         self,
         snapshots_by_scope: dict[str, dict[str, Any]],
         *,
         meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        snapshot_id = uuid.uuid4().hex
-        started_at = time.time()
         meta_payload = dict(meta or {})
         normalized: dict[str, dict[str, list[dict[str, Any]]]] = {}
         counts: dict[str, dict[str, int]] = {}
@@ -3235,117 +4055,50 @@ class LanPortalStateStore:
             }
         if not normalized:
             raise ValueError("source snapshot payload is empty")
-        with self._lock:
-            with closing(self._connect()) as conn:
-                self._ensure_schema_locked(conn)
-                conn.execute("BEGIN IMMEDIATE")
-                now = time.time()
-                conn.execute(
-                    """
-                    INSERT INTO source_snapshot_manifest(
-                        snapshot_id,
-                        status,
-                        started_at,
-                        finished_at,
-                        warnings_json,
-                        counts_json,
-                        meta_json,
-                        error,
-                        created_at,
-                        updated_at
-                    ) VALUES (?, 'building', ?, NULL, ?, ?, ?, '', ?, ?)
-                    """,
-                    (
-                        snapshot_id,
-                        started_at,
-                        self._json(meta_payload.get("warnings") or []),
-                        self._json(counts),
-                        self._json(meta_payload),
-                        now,
-                        now,
-                    ),
+        snapshots_by_source: dict[str, dict[str, list[dict[str, Any]]]] = {
+            source_key: {scope: [] for scope in normalized}
+            for source_key in self.SOURCE_TABLE_KEYS
+        }
+        for scope, payload in normalized.items():
+            for item in payload["records"]:
+                source_key = self._source_table_key_for_record(
+                    record_kind="workbench",
+                    work_type=item.get("work_type"),
+                    item=item,
                 )
-                for scope in sorted(normalized):
-                    records = normalized[scope]["records"]
-                    zhihang_records = normalized[scope]["zhihang_records"]
-                    scope_meta = dict(meta_payload)
-                    scope_meta.update(
-                        {
-                            "scope": scope,
-                            "snapshot_id": snapshot_id,
-                            "records_count": len(records),
-                            "zhihang_records_count": len(zhihang_records),
-                            "updated_at": now,
-                        }
-                    )
-                    order_index = 0
-                    for kind, items in (("workbench", records), ("zhihang", zhihang_records)):
-                        for item in items:
-                            record_id = self._text(
-                                item.get("record_id") or item.get("source_record_id")
-                            )
-                            conn.execute(
-                                """
-                                INSERT OR REPLACE INTO source_snapshot_records(
-                                    snapshot_id,
-                                    scope,
-                                    record_key,
-                                    record_kind,
-                                    work_type,
-                                    source_record_id,
-                                    payload_json,
-                                    sort_order,
-                                    created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    snapshot_id,
-                                    scope,
-                                    self._source_snapshot_record_key(kind, item),
-                                    kind,
-                                    self._text(item.get("work_type")),
-                                    record_id,
-                                    self._json(item),
-                                    order_index,
-                                    now,
-                                ),
-                            )
-                            order_index += 1
-                    self._write_legacy_source_scope_locked(
-                        conn,
-                        scope=scope,
-                        records=records,
-                        zhihang_records=zhihang_records,
-                        meta_payload=scope_meta,
-                        now=now,
-                    )
-                conn.execute(
-                    "UPDATE source_snapshot_manifest SET status = 'retained', updated_at = ? WHERE status = 'active'",
-                    (now,),
-                )
-                conn.execute(
-                    """
-                    UPDATE source_snapshot_manifest
-                    SET status = 'active', finished_at = ?, updated_at = ?
-                    WHERE snapshot_id = ?
-                    """,
-                    (now, now, snapshot_id),
-                )
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_id', ?)",
-                    (snapshot_id,),
-                )
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_at', ?)",
-                    (str(now),),
-                )
-                conn.commit()
-        self.cleanup_source_snapshots()
+                if source_key:
+                    snapshots_by_source[source_key][scope].append(item)
+            snapshots_by_source["zhihang_change"][scope].extend(
+                payload["zhihang_records"]
+            )
+        results: dict[str, dict[str, Any]] = {}
+        for source_key in self.SOURCE_TABLE_KEYS:
+            source_meta = dict(meta_payload)
+            source_meta.update(
+                {
+                    "source_key": source_key,
+                    "published_via": "replace_all_source_scope_snapshots",
+                }
+            )
+            results[source_key] = self.replace_source_table_snapshot(
+                source_key,
+                snapshots_by_source[source_key],
+                meta=source_meta,
+            )
+        now = max(
+            (float(item.get("updated_at") or 0) for item in results.values()),
+            default=time.time(),
+        )
+        snapshot_id = "|".join(
+            str(results[source_key].get("snapshot_id") or "")
+            for source_key in self.SOURCE_TABLE_KEYS
+        )
         return {
             "snapshot_id": snapshot_id,
             "status": "active",
             "counts": counts,
             "updated_at": now,
+            "source_snapshots": results,
         }
 
     def record_failed_source_snapshot(
@@ -3398,6 +4151,89 @@ class LanPortalStateStore:
                 "zhihang_records": [],
                 "meta": {},
                 "updated_at": 0.0,
+            }
+        independent = self.get_active_source_table_snapshots(scope)
+        active_sources = {
+            source_key: snapshot
+            for source_key, snapshot in independent.items()
+            if snapshot.get("exists")
+        }
+        if active_sources:
+            records: list[dict[str, Any]] = []
+            zhihang_records: list[dict[str, Any]] = []
+            warnings: list[str] = []
+            refresh_status: dict[str, Any] = {}
+            last_loaded_at = ""
+            updated_at = 0.0
+            source_versions: dict[str, Any] = {}
+            for source_key in self.SOURCE_TABLE_KEYS:
+                snapshot = active_sources.get(source_key)
+                if not snapshot:
+                    continue
+                source_records = [
+                    dict(item)
+                    for item in (snapshot.get("records") or [])
+                    if isinstance(item, dict)
+                ]
+                if source_key == "zhihang_change":
+                    zhihang_records.extend(source_records)
+                else:
+                    records.extend(source_records)
+                source_updated_at = float(snapshot.get("updated_at") or 0)
+                updated_at = max(updated_at, source_updated_at)
+                source_meta = (
+                    snapshot.get("meta")
+                    if isinstance(snapshot.get("meta"), dict)
+                    else {}
+                )
+                source_last_loaded = str(
+                    source_meta.get("last_loaded_at") or ""
+                ).strip()
+                if source_updated_at >= float(
+                    source_versions.get("_latest_updated_at") or 0
+                ):
+                    last_loaded_at = source_last_loaded or last_loaded_at
+                    source_versions["_latest_updated_at"] = source_updated_at
+                for warning in source_meta.get("warnings") or []:
+                    text = self._text(warning)
+                    if text and text not in warnings:
+                        warnings.append(text)
+                status_payload = source_meta.get("source_refresh_status")
+                if isinstance(status_payload, dict):
+                    refresh_status.update(status_payload)
+                source_status = source_meta.get("source_status")
+                if isinstance(source_status, dict):
+                    refresh_status[source_key] = dict(source_status)
+                source_versions[source_key] = {
+                    "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+                    "updated_at": source_updated_at,
+                    "count": len(source_records),
+                    "status": "active",
+                }
+            source_versions.pop("_latest_updated_at", None)
+            meta = {
+                "last_loaded_at": last_loaded_at,
+                "last_loaded_ts": updated_at,
+                "warnings": warnings,
+                "source_refresh_status": refresh_status,
+                "source_versions": source_versions,
+                "snapshot_mode": "per_source",
+            }
+            return {
+                "exists": True,
+                "scope": scope,
+                "records": records,
+                "zhihang_records": zhihang_records,
+                "meta": meta,
+                "updated_at": updated_at,
+                "snapshot_id": "|".join(
+                    source_versions[key]["snapshot_id"]
+                    for key in self.SOURCE_TABLE_KEYS
+                    if key in source_versions
+                ),
+                "count": len(records),
+                "zhihang_count": len(zhihang_records),
+                "source_versions": source_versions,
             }
         with self._lock:
             with closing(self._connect()) as conn:
@@ -3519,17 +4355,29 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 conn.execute("BEGIN IMMEDIATE")
-                active_row = conn.execute(
-                    "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
-                ).fetchone()
-                active_snapshot_id = (
-                    str(active_row["value"] or "").strip() if active_row else ""
+                active_snapshot_ids: list[str] = []
+                source_keys = (
+                    [work_type]
+                    if work_type in self.SOURCE_TABLE_KEYS
+                    else list(self.SOURCE_TABLE_KEYS)
                 )
-                if active_snapshot_id:
+                for source_key in source_keys:
+                    active_row = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (self._source_table_active_meta_key(source_key),),
+                    ).fetchone()
+                    active_snapshot_id = (
+                        str(active_row["value"] or "").strip()
+                        if active_row
+                        else ""
+                    )
+                    if active_snapshot_id:
+                        active_snapshot_ids.append(active_snapshot_id)
+                for active_snapshot_id in dict.fromkeys(active_snapshot_ids):
                     rows = conn.execute(
                         """
                         SELECT snapshot_id, scope, record_key, payload_json
-                        FROM source_snapshot_records
+                        FROM source_table_snapshot_records
                         WHERE snapshot_id = ?
                           AND source_record_id = ?
                           AND (? = '' OR work_type = ?)
@@ -3552,7 +4400,7 @@ class LanPortalStateStore:
                         payload["display_fields"] = display_fields
                         conn.execute(
                             """
-                            UPDATE source_snapshot_records
+                            UPDATE source_table_snapshot_records
                             SET payload_json = ?
                             WHERE snapshot_id = ? AND scope = ? AND record_key = ?
                             """,
@@ -3564,33 +4412,6 @@ class LanPortalStateStore:
                             ),
                         )
                         patched += 1
-                for _scope, table in SOURCE_SCOPE_TABLES.items():
-                    rows = conn.execute(
-                        f"""
-                        SELECT record_key, payload_json
-                        FROM {table}
-                        WHERE source_record_id = ?
-                          AND (? = '' OR work_type = ?)
-                        """,
-                        (source_record_id, work_type, work_type),
-                    ).fetchall()
-                    for row in rows:
-                        payload = self._loads(str(row["payload_json"] or ""), {})
-                        if not isinstance(payload, dict):
-                            continue
-                        display_fields = payload.get("display_fields")
-                        if not isinstance(display_fields, dict):
-                            display_fields = {}
-                        display_fields.update(patch_fields)
-                        payload["display_fields"] = display_fields
-                        conn.execute(
-                            f"""
-                            UPDATE {table}
-                            SET payload_json = ?, updated_at = ?
-                            WHERE record_key = ?
-                            """,
-                            (self._json(payload), time.time(), row["record_key"]),
-                        )
                 conn.commit()
         return patched
 
@@ -3600,6 +4421,43 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                per_source_rows: list[sqlite3.Row] = []
+                for source_key in self.SOURCE_TABLE_KEYS:
+                    pointer = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (self._source_table_active_meta_key(source_key),),
+                    ).fetchone()
+                    snapshot_id = (
+                        str(pointer["value"] or "").strip() if pointer else ""
+                    )
+                    if not snapshot_id:
+                        continue
+                    row = conn.execute(
+                        """
+                        SELECT snapshot_id, source_key, status, record_count,
+                               started_at, finished_at, meta_json, error,
+                               updated_at
+                        FROM source_table_snapshot_manifest
+                        WHERE snapshot_id = ?
+                        """,
+                        (snapshot_id,),
+                    ).fetchone()
+                    if row:
+                        per_source_rows.append(row)
+                per_source_failed = conn.execute(
+                    """
+                    SELECT snapshot_id, source_key, status, record_count,
+                           started_at, finished_at, meta_json, error,
+                           updated_at
+                    FROM source_table_snapshot_manifest
+                    WHERE status = 'failed'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                per_source_total = conn.execute(
+                    "SELECT count(*) AS c FROM source_table_snapshot_manifest"
+                ).fetchone()
                 active_row = conn.execute(
                     "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
                 ).fetchone()
@@ -3630,6 +4488,78 @@ class LanPortalStateStore:
                 total = conn.execute(
                     "SELECT count(*) AS c FROM source_snapshot_manifest"
                 ).fetchone()
+
+        per_source_manifest_count = (
+            int(per_source_total["c"] or 0) if per_source_total else 0
+        )
+        if per_source_rows or per_source_failed or per_source_manifest_count:
+            source_versions: dict[str, dict[str, Any]] = {}
+            counts: dict[str, int] = {}
+            updated_at = 0.0
+            started_at = 0.0
+            finished_at = 0.0
+            for row in per_source_rows:
+                source_key = str(row["source_key"] or "")
+                row_updated_at = float(row["updated_at"] or 0)
+                row_started_at = float(row["started_at"] or 0)
+                row_finished_at = float(row["finished_at"] or 0)
+                record_count = int(row["record_count"] or 0)
+                counts[source_key] = record_count
+                updated_at = max(updated_at, row_updated_at)
+                started_at = (
+                    min(started_at, row_started_at)
+                    if started_at and row_started_at
+                    else max(started_at, row_started_at)
+                )
+                finished_at = max(finished_at, row_finished_at)
+                source_versions[source_key] = {
+                    "snapshot_id": str(row["snapshot_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "record_count": record_count,
+                    "updated_at": row_updated_at,
+                }
+            failed_payload: dict[str, Any] = {}
+            if per_source_failed:
+                failed_meta = self._loads(
+                    str(per_source_failed["meta_json"] or ""), {}
+                )
+                failed_payload = {
+                    "snapshot_id": str(per_source_failed["snapshot_id"] or ""),
+                    "source_key": str(per_source_failed["source_key"] or ""),
+                    "status": str(per_source_failed["status"] or ""),
+                    "started_at": float(per_source_failed["started_at"] or 0),
+                    "finished_at": float(per_source_failed["finished_at"] or 0),
+                    "updated_at": float(per_source_failed["updated_at"] or 0),
+                    "counts": {},
+                    "meta": failed_meta if isinstance(failed_meta, dict) else {},
+                    "error": str(per_source_failed["error"] or ""),
+                }
+            active_payload: dict[str, Any] = {}
+            if per_source_rows:
+                active_payload = {
+                    "snapshot_id": "|".join(
+                        source_versions[key]["snapshot_id"]
+                        for key in self.SOURCE_TABLE_KEYS
+                        if key in source_versions
+                    ),
+                    "status": "active",
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "updated_at": updated_at,
+                    "warnings": [],
+                    "counts": counts,
+                    "meta": {
+                        "snapshot_mode": "per_source",
+                        "source_versions": source_versions,
+                    },
+                    "error": "",
+                }
+            return {
+                "active": active_payload,
+                "last_failed": failed_payload,
+                "manifest_count": per_source_manifest_count,
+                "source_versions": source_versions,
+            }
 
         def row_payload(row: sqlite3.Row | None) -> dict[str, Any]:
             if not row:
@@ -3711,6 +4641,23 @@ class LanPortalStateStore:
             dict(item) for item in (fields or []) if isinstance(item, dict)
         ]
         meta_payload = dict(meta or {})
+        insert_rows = [
+            (
+                source_key,
+                item["record_id"],
+                item["parent_record_id"],
+                self._json(item["scope_codes"]),
+                item["title"],
+                item["status"],
+                item["search_text"],
+                item["sort_time"],
+                self._json(item["payload"]),
+                item["source_updated_at"],
+                now,
+                now,
+            )
+            for item in normalized_records
+        ]
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
@@ -3719,31 +4666,17 @@ class LanPortalStateStore:
                     "DELETE FROM repair_snapshot_records WHERE source_key=?",
                     (source_key,),
                 )
-                for item in normalized_records:
-                    conn.execute(
-                        """
-                        INSERT INTO repair_snapshot_records(
-                            source_key, record_id, parent_record_id,
-                            scope_codes_json, title, status, search_text,
-                            sort_time, payload_json, source_updated_at,
-                            created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            source_key,
-                            item["record_id"],
-                            item["parent_record_id"],
-                            self._json(item["scope_codes"]),
-                            item["title"],
-                            item["status"],
-                            item["search_text"],
-                            item["sort_time"],
-                            self._json(item["payload"]),
-                            item["source_updated_at"],
-                            now,
-                            now,
-                        ),
-                    )
+                conn.executemany(
+                    """
+                    INSERT INTO repair_snapshot_records(
+                        source_key, record_id, parent_record_id,
+                        scope_codes_json, title, status, search_text,
+                        sort_time, payload_json, source_updated_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    insert_rows,
+                )
                 conn.execute(
                     """
                     INSERT INTO repair_snapshot_sources(
@@ -5732,6 +6665,45 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                source_versions: dict[str, dict[str, Any]] = {}
+                for source_key in self.SOURCE_TABLE_KEYS:
+                    pointer = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (self._source_table_active_meta_key(source_key),),
+                    ).fetchone()
+                    snapshot_id = (
+                        str(pointer["value"] or "").strip() if pointer else ""
+                    )
+                    if not snapshot_id:
+                        continue
+                    manifest = conn.execute(
+                        """
+                        SELECT updated_at, record_count
+                        FROM source_table_snapshot_manifest
+                        WHERE snapshot_id = ? AND status = 'active'
+                        """,
+                        (snapshot_id,),
+                    ).fetchone()
+                    if not manifest:
+                        continue
+                    source_versions[source_key] = {
+                        "snapshot_id": snapshot_id,
+                        "updated_at": float(manifest["updated_at"] or 0),
+                        "record_count": int(manifest["record_count"] or 0),
+                    }
+                if source_versions:
+                    return {
+                        "snapshot_id": "|".join(
+                            source_versions[key]["snapshot_id"]
+                            for key in self.SOURCE_TABLE_KEYS
+                            if key in source_versions
+                        ),
+                        "updated_at": max(
+                            item["updated_at"]
+                            for item in source_versions.values()
+                        ),
+                        "source_versions": source_versions,
+                    }
                 rows = conn.execute(
                     """
                     SELECT key, value
@@ -5758,6 +6730,94 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                active_snapshot_ids: dict[str, str] = {}
+                independent_rows: list[tuple[str, sqlite3.Row]] = []
+                for source_key in self.SOURCE_TABLE_KEYS:
+                    active_row = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (self._source_table_active_meta_key(source_key),),
+                    ).fetchone()
+                    snapshot_id = (
+                        str(active_row["value"] or "").strip()
+                        if active_row
+                        else ""
+                    )
+                    if not snapshot_id:
+                        continue
+                    manifest = conn.execute(
+                        """
+                        SELECT snapshot_id
+                        FROM source_table_snapshot_manifest
+                        WHERE snapshot_id = ? AND source_key = ? AND status = 'active'
+                        """,
+                        (snapshot_id, source_key),
+                    ).fetchone()
+                    if not manifest:
+                        continue
+                    active_snapshot_ids[source_key] = snapshot_id
+                    rows = conn.execute(
+                        """
+                        SELECT scope, record_kind,
+                               COALESCE(NULLIF(work_type, ''), ?) AS work_type,
+                               COUNT(*) AS count
+                        FROM source_table_snapshot_records
+                        WHERE snapshot_id = ?
+                        GROUP BY scope, record_kind,
+                                 COALESCE(NULLIF(work_type, ''), ?)
+                        ORDER BY scope, record_kind, work_type
+                        """,
+                        (
+                            "change" if source_key == "zhihang_change" else source_key,
+                            snapshot_id,
+                            "change" if source_key == "zhihang_change" else source_key,
+                        ),
+                    ).fetchall()
+                    independent_rows.extend((source_key, row) for row in rows)
+                if active_snapshot_ids:
+                    scopes: dict[str, dict[str, Any]] = {}
+                    totals: dict[str, int] = {}
+                    source_totals: dict[str, int] = {}
+                    for source_key, row in independent_rows:
+                        scope = str(row["scope"] or "")
+                        record_kind = str(row["record_kind"] or "")
+                        work_type = str(row["work_type"] or "unknown")
+                        count = int(row["count"] or 0)
+                        scope_payload = scopes.setdefault(
+                            scope,
+                            {
+                                "records": {},
+                                "zhihang_records": {},
+                                "total": 0,
+                            },
+                        )
+                        bucket_name = (
+                            "zhihang_records"
+                            if record_kind == "zhihang"
+                            or source_key == "zhihang_change"
+                            else "records"
+                        )
+                        bucket = scope_payload.setdefault(bucket_name, {})
+                        bucket[work_type] = int(bucket.get(work_type) or 0) + count
+                        scope_payload["total"] = (
+                            int(scope_payload.get("total") or 0) + count
+                        )
+                        totals[work_type] = int(totals.get(work_type) or 0) + count
+                        source_totals[source_key] = (
+                            int(source_totals.get(source_key) or 0) + count
+                        )
+                    return {
+                        "snapshot_id": "|".join(
+                            f"{key}:{active_snapshot_ids[key]}"
+                            for key in self.SOURCE_TABLE_KEYS
+                            if key in active_snapshot_ids
+                        ),
+                        "snapshot_ids": active_snapshot_ids,
+                        "source_totals": source_totals,
+                        "scopes": scopes,
+                        "totals": totals,
+                        "scope_count": len(scopes),
+                        "checked_at": time.time(),
+                    }
                 active_row = conn.execute(
                     "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
                 ).fetchone()
@@ -9658,6 +10718,65 @@ class LanPortalStateStore:
                 conn.commit()
                 return int(cursor.rowcount or 0)
 
+    def list_deleted_engineer_mop_local_files(
+        self,
+        *,
+        deleted_before_ts: float,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM engineer_mop_local_files
+                    WHERE deleted_at IS NOT NULL
+                      AND deleted_at <= ?
+                    ORDER BY deleted_at ASC
+                    LIMIT ?
+                    """,
+                    (
+                        float(deleted_before_ts or 0),
+                        max(1, min(2000, int(limit or 200))),
+                    ),
+                ).fetchall()
+        return [
+            item
+            for item in (self._mop_local_file_from_row(row) for row in rows)
+            if item
+        ]
+
+    def purge_engineer_mop_local_file_rows(
+        self,
+        upload_ids: list[str] | tuple[str, ...],
+    ) -> int:
+        normalized = list(
+            dict.fromkeys(
+                self._text(upload_id)
+                for upload_id in (upload_ids or [])
+                if self._text(upload_id)
+            )
+        )
+        if not normalized or not self.db_path.exists():
+            return 0
+        placeholders = ",".join("?" for _ in normalized)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    f"""
+                    DELETE FROM engineer_mop_local_files
+                    WHERE deleted_at IS NOT NULL
+                      AND upload_id IN ({placeholders})
+                    """,
+                    normalized,
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
+
     def put_auth_oauth_state(
         self,
         state_hash: str,
@@ -10489,6 +11608,110 @@ class LanPortalStateStore:
             "repair_snapshot": repair_snapshot,
             "write_worker": write_worker,
             "checked_at": time.time(),
+        }
+
+    def quick_check_database(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {
+                "ok": False,
+                "result": "database_missing",
+                "checked_at": time.time(),
+            }
+        with closing(sqlite3.connect(str(self.db_path), timeout=10.0)) as conn:
+            conn.execute("PRAGMA busy_timeout = 10000")
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        results = [str(row[0] or "") for row in rows]
+        return {
+            "ok": results == ["ok"],
+            "result": results[0] if len(results) == 1 else results,
+            "checked_at": time.time(),
+        }
+
+    def backup_database(
+        self,
+        *,
+        backup_dir: str | Path | None = None,
+        keep_count: int = 7,
+    ) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {
+                "created": False,
+                "reason": "database_missing",
+                "backup_path": "",
+                "removed": 0,
+            }
+        target_dir = Path(backup_dir or (self.db_path.parent / "backups"))
+        target_dir.mkdir(parents=True, exist_ok=True)
+        day_key = time.strftime("%Y%m%d")
+        backup_path = target_dir / f"{self.db_path.stem}_{day_key}.sqlite3"
+        if backup_path.exists() and backup_path.stat().st_size > 0:
+            try:
+                with closing(
+                    sqlite3.connect(str(backup_path), timeout=10.0)
+                ) as existing:
+                    existing_rows = existing.execute("PRAGMA quick_check").fetchall()
+                if [str(row[0] or "") for row in existing_rows] == ["ok"]:
+                    return {
+                        "created": False,
+                        "reason": "already_exists",
+                        "backup_path": str(backup_path),
+                        "removed": 0,
+                    }
+            except sqlite3.Error:
+                pass
+            try:
+                backup_path.unlink()
+            except OSError as exc:
+                raise sqlite3.DatabaseError(
+                    f"损坏的 SQLite 当日备份无法替换: {exc}"
+                ) from exc
+
+        temporary_path = target_dir / (
+            f".{backup_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with closing(sqlite3.connect(str(self.db_path), timeout=10.0)) as source:
+                source.execute("PRAGMA busy_timeout = 10000")
+                with closing(sqlite3.connect(str(temporary_path), timeout=10.0)) as target:
+                    source.backup(target, pages=2048, sleep=0.01)
+                    target.commit()
+            with closing(sqlite3.connect(str(temporary_path), timeout=10.0)) as check:
+                rows = check.execute("PRAGMA quick_check").fetchall()
+            results = [str(row[0] or "") for row in rows]
+            if results != ["ok"]:
+                raise sqlite3.DatabaseError(
+                    f"SQLite 备份完整性检查失败: {results}"
+                )
+            os.replace(temporary_path, backup_path)
+        finally:
+            try:
+                if temporary_path.exists():
+                    temporary_path.unlink()
+            except OSError:
+                pass
+
+        backups = sorted(
+            (
+                path
+                for path in target_dir.glob(f"{self.db_path.stem}_*.sqlite3")
+                if path.is_file()
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        removed = 0
+        for stale_path in backups[max(1, int(keep_count or 7)) :]:
+            try:
+                stale_path.unlink()
+                removed += 1
+            except OSError:
+                continue
+        return {
+            "created": True,
+            "reason": "",
+            "backup_path": str(backup_path),
+            "backup_bytes": int(backup_path.stat().st_size),
+            "removed": removed,
         }
 
     def checkpoint_database(self, *, truncate: bool = True) -> dict[str, Any]:

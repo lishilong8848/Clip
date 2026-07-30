@@ -59,6 +59,7 @@ def _get_bot_chats(
 
     chats: List[Dict[str, Any]] = []
     page_token = ""
+    seen_page_tokens: set[str] = set()
     has_more = True
 
     while has_more:
@@ -85,8 +86,18 @@ def _get_bot_chats(
                 return [], result.get("msg", "unknown error")
             data = result.get("data", {})
             chats.extend(data.get("items", []))
-            has_more = data.get("has_more", False)
-            page_token = data.get("page_token", "")
+            has_more = bool(data.get("has_more", False))
+            if not has_more:
+                continue
+            next_page_token = str(data.get("page_token") or "").strip()
+            if (
+                not next_page_token
+                or next_page_token == page_token
+                or next_page_token in seen_page_tokens
+            ):
+                return [], "飞书群列表分页返回缺失或重复的 page_token"
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
         except FeishuHTTPError as exc:
             return [], str(exc)
 

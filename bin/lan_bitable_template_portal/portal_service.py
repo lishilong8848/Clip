@@ -16,6 +16,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -1201,6 +1202,7 @@ class MaintenancePortalService:
         self._load_warnings: list[str] = []
         self._last_loaded_at = ""
         self._last_loaded_ts = 0.0
+        self._source_refresh_status: dict[str, dict[str, Any]] = {}
         self._refresh_lock = threading.RLock()
         # Legacy JSON paths are read only for one-time migration. Do not create
         # their directories on fresh SQLite-only installs.
@@ -1217,6 +1219,7 @@ class MaintenancePortalService:
         self._work_status_backfilled = False
         self._work_status_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._work_status_cache_items: list[dict[str, Any]] | None = None
+        self._target_record_cache_lock = threading.RLock()
         self._target_record_cache: dict[
             tuple[str, str, str], dict[str, Any]
         ] = {}
@@ -2508,12 +2511,25 @@ class MaintenancePortalService:
                         self._load_repair_management_cmdb_records,
                     ),
                 )
+                now = time.time()
                 for source_key, loader in loaders:
                     if not eager:
                         source_meta = self._state_store.get_repair_snapshot_meta(
                             source_key
                         )
-                        if int(source_meta.get("record_count") or 0) > 0:
+                        ttl = float(
+                            REPAIR_SNAPSHOT_TTL_SECONDS.get(source_key) or 120
+                        )
+                        refreshed_at = float(
+                            source_meta.get("refreshed_at")
+                            or source_meta.get("updated_at")
+                            or 0
+                        )
+                        if (
+                            int(source_meta.get("record_count") or 0) > 0
+                            and refreshed_at > 0
+                            and now - refreshed_at <= ttl
+                        ):
                             continue
                     if source_key == REPAIR_SNAPSHOT_SOURCE_CMDB:
                         self.start_repair_management_cmdb_cache_refresh()
@@ -3751,6 +3767,7 @@ class MaintenancePortalService:
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params: dict[str, Any] = {"page_size": 500}
             if page_token:
@@ -3767,11 +3784,14 @@ class MaintenancePortalService:
             items.extend(
                 item for item in (data.get("items") or []) if isinstance(item, dict)
             )
-            if not data.get("has_more"):
+            next_page_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context=f"多维表 {str(table_id or '').strip() or '字段'} 字段读取",
+            )
+            if next_page_token is None:
                 break
-            next_page_token = str(data.get("page_token") or "").strip()
-            if not next_page_token or next_page_token == page_token:
-                raise PortalError("飞书字段分页缺少有效 page_token，已停止读取。")
             page_token = next_page_token
         return items
 
@@ -4089,9 +4109,32 @@ class MaintenancePortalService:
                     )
         return result
 
+    @staticmethod
+    def _next_record_page_token(
+        data: dict[str, Any],
+        *,
+        current_token: str,
+        seen_tokens: set[str],
+        context: str,
+    ) -> str | None:
+        if not bool(data.get("has_more")):
+            return None
+        next_token = str(data.get("page_token") or "").strip()
+        if not next_token:
+            raise PortalError(
+                f"{context}分页结果不完整：飞书返回仍有下一页，但缺少 page_token。"
+            )
+        if next_token == current_token or next_token in seen_tokens:
+            raise PortalError(
+                f"{context}分页结果不完整：飞书返回了重复的 page_token。"
+            )
+        seen_tokens.add(next_token)
+        return next_token
+
     def _load_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if page_token:
@@ -4109,11 +4152,15 @@ class MaintenancePortalService:
                 )
                 if self._source_record_matches_month_window(normalized):
                     records.append(normalized)
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="维保源表读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
         self._records = records
         self._maintenance_loaded_once = True
         return records
@@ -4121,6 +4168,7 @@ class MaintenancePortalService:
     def _load_change_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if page_token:
@@ -4143,11 +4191,15 @@ class MaintenancePortalService:
                 )
                 if self._source_record_matches_month_window(normalized):
                     records.append(normalized)
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="变更源表读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
         self._change_records = records
         self._change_loaded_once = True
         return records
@@ -4155,6 +4207,7 @@ class MaintenancePortalService:
     def _load_zhihang_change_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if page_token:
@@ -4177,11 +4230,15 @@ class MaintenancePortalService:
                 )
                 if self._source_record_matches_month_window(normalized):
                     records.append(normalized)
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="智航变更源表读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
         self._zhihang_change_records = records
         self._zhihang_change_loaded_once = True
         return records
@@ -4189,6 +4246,7 @@ class MaintenancePortalService:
     def _load_repair_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": REPAIR_SOURCE_PAGE_SIZE}
             if REPAIR_SOURCE_VIEW_ID:
@@ -4213,11 +4271,15 @@ class MaintenancePortalService:
                 )
                 if self._source_record_matches_month_window(normalized):
                     records.append(normalized)
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="检修源表读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
         self._repair_records = records
         self._repair_loaded_once = True
         return records
@@ -4249,6 +4311,7 @@ class MaintenancePortalService:
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if view_id:
@@ -4275,11 +4338,15 @@ class MaintenancePortalService:
                         source_table_id=table_id,
                     )
                 )
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context=f"多维表 {table_id} 记录读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
         return records
 
     def _search_table_records(
@@ -4354,6 +4421,7 @@ class MaintenancePortalService:
 
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while len(records) < max_records:
             page_size = min(500, max_records - len(records))
             payload: dict[str, Any] = {}
@@ -4390,11 +4458,17 @@ class MaintenancePortalService:
                 )
                 if len(records) >= max_records:
                     break
-            if not data.get("has_more"):
+            if len(records) >= max_records:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context=f"多维表 {table_id} 记录搜索",
+            )
+            if next_token is None:
                 break
+            page_token = next_token
         return records
 
     def _load_table_records_by_ids(
@@ -15773,6 +15847,11 @@ class MaintenancePortalService:
         warnings = meta.get("warnings") if isinstance(meta, dict) else []
         if isinstance(warnings, list):
             self._load_warnings = self._clean_load_warnings(warnings)
+        source_refresh_status = (
+            meta.get("source_refresh_status") if isinstance(meta, dict) else {}
+        )
+        if isinstance(source_refresh_status, dict):
+            self._source_refresh_status = copy.deepcopy(source_refresh_status)
         return True
 
     def _snapshot_meta(self) -> dict[str, Any]:
@@ -15781,26 +15860,60 @@ class MaintenancePortalService:
             "last_loaded_ts": self._last_loaded_ts,
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": self._current_load_warnings(),
+            "source_refresh_status": copy.deepcopy(self._source_refresh_status),
         }
 
-    def _save_source_scope_snapshots(self) -> None:
+    def _save_source_scope_snapshots(
+        self, source_keys: list[str] | tuple[str, ...] | None = None
+    ) -> None:
         meta = self._snapshot_meta()
-        snapshots: dict[str, dict[str, Any]] = {}
-        for option in SCOPE_OPTIONS:
-            scope = self._normalize_scope(option.get("value"))
-            records = self._workbench_records_from_memory(
-                month=RECENT_MONTH_FILTER_LABEL,
-                scope=scope,
+        requested = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in (
+                    source_keys
+                    or ("maintenance", "change", "zhihang_change", "repair")
+                )
+                if str(item or "").strip()
             )
-            zhihang_records = self._filter_zhihang_change_records_from_memory(
-                month=RECENT_MONTH_FILTER_LABEL,
-                scope=scope,
+        )
+        source_work_types = {
+            "maintenance": WORK_TYPE_MAINTENANCE,
+            "change": WORK_TYPE_CHANGE,
+            "repair": WORK_TYPE_REPAIR,
+        }
+        for source_key in requested:
+            snapshots: dict[str, list[dict[str, Any]]] = {}
+            for option in SCOPE_OPTIONS:
+                scope = self._normalize_scope(option.get("value"))
+                if source_key == "zhihang_change":
+                    records = self._filter_zhihang_change_records_from_memory(
+                        month=RECENT_MONTH_FILTER_LABEL,
+                        scope=scope,
+                    )
+                else:
+                    expected_work_type = source_work_types.get(source_key)
+                    if not expected_work_type:
+                        continue
+                    records = [
+                        item
+                        for item in self._workbench_records_from_memory(
+                            month=RECENT_MONTH_FILTER_LABEL,
+                            scope=scope,
+                        )
+                        if self._record_work_type(item) == expected_work_type
+                    ]
+                snapshots[scope] = records
+            source_meta = dict(meta)
+            source_meta["source_key"] = source_key
+            source_meta["source_status"] = copy.deepcopy(
+                self._source_refresh_status.get(source_key) or {}
             )
-            snapshots[scope] = {
-                "records": records,
-                "zhihang_records": zhihang_records,
-            }
-        self._state_store.replace_all_source_scope_snapshots(snapshots, meta=meta)
+            self._state_store.replace_source_table_snapshot(
+                source_key,
+                snapshots,
+                meta=source_meta,
+            )
 
     def _source_snapshot_records(self, scope: str) -> list[dict[str, Any]] | None:
         try:
@@ -15872,7 +15985,7 @@ class MaintenancePortalService:
         )
 
     def clear_target_record_cache(self) -> None:
-        with self._refresh_lock:
+        with self._target_record_cache_lock:
             self._target_record_cache.clear()
 
     def clear_engineer_mop_cache(self) -> None:
@@ -15899,34 +16012,34 @@ class MaintenancePortalService:
         results: dict[str, dict[str, Any]] = {}
         skipped: list[str] = []
         warnings: list[str] = []
-        with self._refresh_lock:
+        with self._target_record_cache_lock:
             self._target_record_cache.clear()
-            for requested_work_type in requested_work_types:
-                work_type = self._normalize_notice_work_type_alias(
-                    requested_work_type
+        for requested_work_type in requested_work_types:
+            work_type = self._normalize_notice_work_type_alias(
+                requested_work_type
+            )
+            notice_type = self._notice_type_for_work_type(work_type)
+            if not str(config.app_token or "").strip() or not str(
+                config.get_table_id(notice_type) or ""
+            ).strip():
+                skipped.append(work_type)
+                continue
+            try:
+                results[work_type] = self._refresh_notice_target_replica(
+                    work_type=work_type,
+                    notice_type=notice_type,
                 )
-                notice_type = self._notice_type_for_work_type(work_type)
-                if not str(config.app_token or "").strip() or not str(
-                    config.get_table_id(notice_type) or ""
-                ).strip():
-                    skipped.append(work_type)
-                    continue
-                try:
-                    results[work_type] = self._refresh_notice_target_replica(
-                        work_type=work_type,
-                        notice_type=notice_type,
-                    )
-                except Exception as exc:
-                    warning = self._source_sync_warning(
-                        f"{notice_type}目标表",
-                        exc,
-                    )
-                    warnings.append(warning)
-            for warning in warnings:
-                if warning not in self._load_warnings:
-                    self._load_warnings.append(warning)
-            if results:
-                self._touch_state_cache_version()
+            except Exception as exc:
+                warning = self._source_sync_warning(
+                    f"{notice_type}目标表",
+                    exc,
+                )
+                warnings.append(warning)
+        for warning in warnings:
+            if warning not in self._load_warnings:
+                self._load_warnings.append(warning)
+        if results:
+            self._touch_state_cache_version()
         return {
             "results": results,
             "refreshed_work_types": list(results),
@@ -15936,55 +16049,173 @@ class MaintenancePortalService:
 
     def refresh(self) -> None:
         with self._refresh_lock:
+            if not (
+                self._maintenance_loaded_once
+                and self._change_loaded_once
+                and self._repair_loaded_once
+                and self._zhihang_change_loaded_once
+            ):
+                self._hydrate_source_records_from_sqlite()
             warnings: list[str] = []
-            self._target_record_cache.clear()
-            self._load_fields()
-            self._load_records()
+            refreshed_sources: list[str] = []
+            source_status = copy.deepcopy(self._source_refresh_status)
+            self.clear_target_record_cache()
+
+            previous_field_meta_list = list(self._field_meta_list)
+            previous_field_meta_by_name = dict(self._field_meta_by_name)
+            previous_records = list(self._records)
+            previous_loaded_once = bool(self._maintenance_loaded_once)
+            try:
+                self._load_fields()
+                self._load_records()
+                refreshed_sources.append("maintenance")
+                source_status["maintenance"] = {
+                    "status": "success",
+                    "count": len(self._records),
+                    "refreshed_at": time.time(),
+                    "error": "",
+                }
+            except Exception as exc:
+                self._field_meta_list = previous_field_meta_list
+                self._field_meta_by_name = previous_field_meta_by_name
+                self._records = previous_records
+                self._maintenance_loaded_once = previous_loaded_once
+                warning = self._source_sync_warning("维保源表", exc)
+                warnings.append(warning)
+                source_status["maintenance"] = {
+                    "status": "retained" if previous_loaded_once else "failed",
+                    "count": len(previous_records),
+                    "refreshed_at": float(
+                        (source_status.get("maintenance") or {}).get("refreshed_at")
+                        or 0
+                    ),
+                    "error": warning,
+                }
+
+            previous_field_meta_list = list(self._change_field_meta_list)
+            previous_field_meta_by_name = dict(self._change_field_meta_by_name)
+            previous_records = list(self._change_records)
+            previous_loaded_once = bool(self._change_loaded_once)
             try:
                 self._load_change_fields()
                 self._load_change_records()
+                refreshed_sources.append("change")
+                source_status["change"] = {
+                    "status": "success",
+                    "count": len(self._change_records),
+                    "refreshed_at": time.time(),
+                    "error": "",
+                }
             except Exception as exc:
-                self._change_loaded_once = True
-                if not self._change_field_meta_list:
-                    self._change_field_meta_list = []
-                    self._change_field_meta_by_name = {}
-                if not self._change_records:
-                    self._change_records = []
-                warnings.append(self._source_sync_warning("变更源表", exc))
+                self._change_field_meta_list = previous_field_meta_list
+                self._change_field_meta_by_name = previous_field_meta_by_name
+                self._change_records = previous_records
+                self._change_loaded_once = previous_loaded_once
+                warning = self._source_sync_warning("变更源表", exc)
+                warnings.append(warning)
+                source_status["change"] = {
+                    "status": "retained" if previous_loaded_once else "failed",
+                    "count": len(previous_records),
+                    "refreshed_at": float(
+                        (source_status.get("change") or {}).get("refreshed_at")
+                        or 0
+                    ),
+                    "error": warning,
+                }
+
+            previous_field_meta_list = list(self._zhihang_change_field_meta_list)
+            previous_field_meta_by_name = dict(self._zhihang_change_field_meta_by_name)
+            previous_records = list(self._zhihang_change_records)
+            previous_loaded_once = bool(self._zhihang_change_loaded_once)
             try:
                 self._load_zhihang_change_fields()
                 self._load_zhihang_change_records()
+                refreshed_sources.append("zhihang_change")
+                source_status["zhihang_change"] = {
+                    "status": "success",
+                    "count": len(self._zhihang_change_records),
+                    "refreshed_at": time.time(),
+                    "error": "",
+                }
             except Exception as exc:
-                self._zhihang_change_loaded_once = True
-                if not self._zhihang_change_field_meta_list:
-                    self._zhihang_change_field_meta_list = []
-                    self._zhihang_change_field_meta_by_name = {}
-                if not self._zhihang_change_records:
-                    self._zhihang_change_records = []
-                warnings.append(self._source_sync_warning("智航变更源表", exc))
+                self._zhihang_change_field_meta_list = previous_field_meta_list
+                self._zhihang_change_field_meta_by_name = previous_field_meta_by_name
+                self._zhihang_change_records = previous_records
+                self._zhihang_change_loaded_once = previous_loaded_once
+                warning = self._source_sync_warning("智航变更源表", exc)
+                warnings.append(warning)
+                source_status["zhihang_change"] = {
+                    "status": "retained" if previous_loaded_once else "failed",
+                    "count": len(previous_records),
+                    "refreshed_at": float(
+                        (source_status.get("zhihang_change") or {}).get("refreshed_at")
+                        or 0
+                    ),
+                    "error": warning,
+                }
+
+            previous_field_meta_list = list(self._repair_field_meta_list)
+            previous_field_meta_by_name = dict(self._repair_field_meta_by_name)
+            previous_records = list(self._repair_records)
+            previous_loaded_once = bool(self._repair_loaded_once)
             try:
                 self._load_repair_fields()
                 self._load_repair_records()
+                refreshed_sources.append("repair")
+                source_status["repair"] = {
+                    "status": "success",
+                    "count": len(self._repair_records),
+                    "refreshed_at": time.time(),
+                    "error": "",
+                }
             except Exception as exc:
-                self._repair_loaded_once = True
-                if not self._repair_field_meta_list:
-                    self._repair_field_meta_list = []
-                    self._repair_field_meta_by_name = {}
-                if not self._repair_records:
-                    self._repair_records = []
-                warnings.append(self._source_sync_warning("检修源表", exc))
+                self._repair_field_meta_list = previous_field_meta_list
+                self._repair_field_meta_by_name = previous_field_meta_by_name
+                self._repair_records = previous_records
+                self._repair_loaded_once = previous_loaded_once
+                warning = self._source_sync_warning("检修源表", exc)
+                warnings.append(warning)
+                source_status["repair"] = {
+                    "status": "retained" if previous_loaded_once else "failed",
+                    "count": len(previous_records),
+                    "refreshed_at": float(
+                        (source_status.get("repair") or {}).get("refreshed_at")
+                        or 0
+                    ),
+                    "error": warning,
+                }
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
-            if warnings:
-                self._state_store.record_failed_source_snapshot(
-                    meta=self._snapshot_meta(),
-                    error="；".join(warnings),
+            self._source_refresh_status = source_status
+            for source_key, status_payload in source_status.items():
+                status_payload = (
+                    status_payload if isinstance(status_payload, dict) else {}
                 )
-            else:
-                self._save_source_scope_snapshots()
+                error = str(status_payload.get("error") or "").strip()
+                if source_key in refreshed_sources or not error:
+                    continue
+                self._state_store.record_failed_source_table_snapshot(
+                    source_key,
+                    meta={
+                        **self._snapshot_meta(),
+                        "refreshed_sources": refreshed_sources,
+                    },
+                    error=error,
+                )
+            if refreshed_sources:
+                self._save_source_scope_snapshots(refreshed_sources)
                 self._touch_state_cache_version()
+            elif not any(
+                (
+                    self._maintenance_loaded_once,
+                    self._change_loaded_once,
+                    self._repair_loaded_once,
+                    self._zhihang_change_loaded_once,
+                )
+            ):
+                raise PortalError("所有源表刷新均失败，且本地没有可用的历史快照。")
 
     def refresh_maintenance_source(self) -> dict[str, Any]:
         """Refresh only maintenance plans while preserving every local work state."""
@@ -16018,6 +16249,11 @@ class MaintenancePortalService:
                 if warning not in warnings:
                     warnings.append(warning)
                 self._load_warnings = warnings
+                self._state_store.record_failed_source_table_snapshot(
+                    "maintenance",
+                    meta=self._snapshot_meta(),
+                    error=warning,
+                )
                 raise PortalError(warning) from exc
             target_result: dict[str, Any] = {}
             target_warning = ""
@@ -16038,7 +16274,13 @@ class MaintenancePortalService:
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
-            self._save_source_scope_snapshots()
+            self._source_refresh_status["maintenance"] = {
+                "status": "success",
+                "count": len(self._records),
+                "refreshed_at": self._last_loaded_ts,
+                "error": "",
+            }
+            self._save_source_scope_snapshots(["maintenance"])
             self.clear_engineer_mop_cache()
             self._touch_state_cache_version()
             return {
@@ -16089,6 +16331,11 @@ class MaintenancePortalService:
                 if warning not in warnings:
                     warnings.append(warning)
                 self._load_warnings = warnings
+                self._state_store.record_failed_source_table_snapshot(
+                    "repair",
+                    meta=self._snapshot_meta(),
+                    error=warning,
+                )
                 raise PortalError(warning) from exc
 
             self._repair_field_meta_list = list(metas)
@@ -16174,7 +16421,13 @@ class MaintenancePortalService:
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
-            self._save_source_scope_snapshots()
+            self._source_refresh_status["repair"] = {
+                "status": "success",
+                "count": len(self._repair_records),
+                "refreshed_at": self._last_loaded_ts,
+                "error": "",
+            }
+            self._save_source_scope_snapshots(["repair"])
             self._invalidate_repair_management_target_cache()
             self._invalidate_repair_management_status_cache()
             self._invalidate_repair_followup_catalog_cache()
@@ -16219,24 +16472,61 @@ class MaintenancePortalService:
                     or str(item or "").startswith("变更目标表同步失败")
                 )
             ]
+            refreshed_sources: list[str] = []
+            previous_change_metas = list(self._change_field_meta_list)
+            previous_change_meta_by_name = dict(self._change_field_meta_by_name)
+            previous_change_records = list(self._change_records)
+            previous_change_loaded = bool(self._change_loaded_once)
             try:
                 self._load_change_fields()
                 self._load_change_records()
+                refreshed_sources.append("change")
             except Exception as exc:
+                self._change_field_meta_list = previous_change_metas
+                self._change_field_meta_by_name = previous_change_meta_by_name
+                self._change_records = previous_change_records
+                self._change_loaded_once = previous_change_loaded
                 warning = self._source_sync_warning("变更源表", exc)
                 if warning not in warnings:
                     warnings.append(warning)
-                self._load_warnings = warnings
-                raise PortalError(warning) from exc
+                self._state_store.record_failed_source_table_snapshot(
+                    "change",
+                    meta=self._snapshot_meta(),
+                    error=warning,
+                )
+            previous_zhihang_metas = list(
+                self._zhihang_change_field_meta_list
+            )
+            previous_zhihang_meta_by_name = dict(
+                self._zhihang_change_field_meta_by_name
+            )
+            previous_zhihang_records = list(self._zhihang_change_records)
+            previous_zhihang_loaded = bool(self._zhihang_change_loaded_once)
             try:
                 self._load_zhihang_change_fields()
                 self._load_zhihang_change_records()
+                refreshed_sources.append("zhihang_change")
             except Exception as exc:
+                self._zhihang_change_field_meta_list = previous_zhihang_metas
+                self._zhihang_change_field_meta_by_name = (
+                    previous_zhihang_meta_by_name
+                )
+                self._zhihang_change_records = previous_zhihang_records
+                self._zhihang_change_loaded_once = previous_zhihang_loaded
                 warning = self._source_sync_warning("智航变更源表", exc)
                 if warning not in warnings:
                     warnings.append(warning)
+                self._state_store.record_failed_source_table_snapshot(
+                    "zhihang_change",
+                    meta=self._snapshot_meta(),
+                    error=warning,
+                )
+            if not refreshed_sources:
                 self._load_warnings = warnings
-                raise PortalError(warning) from exc
+                raise PortalError(
+                    "；".join(warnings)
+                    or "变更源表刷新失败，当前仍显示上次成功数据。"
+                )
             target_result: dict[str, Any] = {}
             target_warning = ""
             if self._repair_snapshots_enabled:
@@ -16256,7 +16546,18 @@ class MaintenancePortalService:
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
-            self._save_source_scope_snapshots()
+            for source_key, count in (
+                ("change", len(self._change_records)),
+                ("zhihang_change", len(self._zhihang_change_records)),
+            ):
+                if source_key in refreshed_sources:
+                    self._source_refresh_status[source_key] = {
+                        "status": "success",
+                        "count": count,
+                        "refreshed_at": self._last_loaded_ts,
+                        "error": "",
+                    }
+            self._save_source_scope_snapshots(refreshed_sources)
             self._touch_state_cache_version()
             return {
                 "change_refreshed_at": now,
@@ -25583,9 +25884,15 @@ class MaintenancePortalService:
                         STATE_NS_WORK_STATUS, str(document.get("key") or ""), payload
                     )
 
-            summary_payload = self._load_day_summary_locked()
-            summary_items = summary_payload.get("items")
-            if isinstance(summary_items, list):
+            for document in self._state_store.list_documents(
+                STATE_NS_DAILY_SUMMARY
+            ):
+                summary_payload = document.get("payload")
+                if not isinstance(summary_payload, dict):
+                    continue
+                summary_items = summary_payload.get("items")
+                if not isinstance(summary_items, list):
+                    continue
                 kept_summary: list[dict[str, Any]] = []
                 changed = False
                 for summary_item in summary_items:
@@ -25601,7 +25908,10 @@ class MaintenancePortalService:
                 if changed:
                     summary_payload["items"] = kept_summary
                     summary_payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    self._save_day_summary_locked(summary_payload)
+                    self._save_day_summary_locked(
+                        summary_payload,
+                        day=str(document.get("key") or ""),
+                    )
             self._work_status_cache_signature = None
             self._work_status_cache_items = None
         return {
@@ -26363,7 +26673,7 @@ class MaintenancePortalService:
         if not app_token or not table_id:
             return []
         cache_key = (notice_type, app_token, table_id)
-        with self._refresh_lock:
+        with self._target_record_cache_lock:
             cached = self._target_record_cache.get(cache_key) or {}
             if (
                 not force_refresh
@@ -26372,44 +26682,46 @@ class MaintenancePortalService:
                 < self._source_cache_ttl_seconds()
             ):
                 return list(cached.get("records") or [])
-            if work_type == WORK_TYPE_REPAIR:
-                _metas, _meta_by_name, records = (
-                    self._load_repair_management_target_records(
-                        force_refresh=force_refresh
-                    )
+        if work_type == WORK_TYPE_REPAIR:
+            _metas, _meta_by_name, records = (
+                self._load_repair_management_target_records(
+                    force_refresh=force_refresh
                 )
+            )
+            with self._target_record_cache_lock:
                 self._target_record_cache[cache_key] = {
                     "loaded_ts": time.time(),
                     "records": list(records),
                 }
-                return list(records)
+            return list(records)
 
-            def load_remote() -> tuple[list[FieldMeta], list[dict[str, Any]]]:
-                metas, meta_by_name = self._load_table_fields(
-                    app_token=app_token,
-                    table_id=table_id,
-                )
-                records = self._load_table_records(
-                    app_token=app_token,
-                    table_id=table_id,
-                    meta_by_name=meta_by_name,
-                    work_type=work_type,
-                    notice_type=notice_type,
-                )
-                return metas, records
-
-            _metas, _meta_by_name, records = self._load_repair_snapshot_source(
-                source_key=self._notice_target_snapshot_source_key(work_type),
+        def load_remote() -> tuple[list[FieldMeta], list[dict[str, Any]]]:
+            metas, meta_by_name = self._load_table_fields(
                 app_token=app_token,
                 table_id=table_id,
-                loader=load_remote,
-                force_refresh=force_refresh,
             )
+            records = self._load_table_records(
+                app_token=app_token,
+                table_id=table_id,
+                meta_by_name=meta_by_name,
+                work_type=work_type,
+                notice_type=notice_type,
+            )
+            return metas, records
+
+        _metas, _meta_by_name, records = self._load_repair_snapshot_source(
+            source_key=self._notice_target_snapshot_source_key(work_type),
+            app_token=app_token,
+            table_id=table_id,
+            loader=load_remote,
+            force_refresh=force_refresh,
+        )
+        with self._target_record_cache_lock:
             self._target_record_cache[cache_key] = {
                 "loaded_ts": time.time(),
                 "records": list(records),
             }
-            return list(records)
+        return list(records)
 
     @classmethod
     def _normalize_notice_work_type_alias(cls, work_type: Any) -> str:
@@ -29604,6 +29916,7 @@ class MaintenancePortalService:
         )
         records: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if settings.get("view_id"):
@@ -29625,11 +29938,15 @@ class MaintenancePortalService:
                         "display_fields": fields,
                     }
                 )
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="MOP 文件库读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
         candidates: list[dict[str, Any]] = []
         title_names = [
             settings["title_field"],
@@ -30434,6 +30751,7 @@ class MaintenancePortalService:
 
         people: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if SIGNATURE_VIEW_ID:
@@ -30513,11 +30831,15 @@ class MaintenancePortalService:
                     "raw_fields": fields,
                 }
                 people.append(person)
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="公司签名人员读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
 
         people.sort(
             key=lambda item: (
@@ -30662,6 +30984,7 @@ class MaintenancePortalService:
 
         people: list[dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         while True:
             params = {"page_size": 500}
             if page_token:
@@ -30722,11 +31045,15 @@ class MaintenancePortalService:
                         "raw_fields": fields,
                     }
                 )
-            if not data.get("has_more"):
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="临时签名人员读取",
+            )
+            if next_token is None:
                 break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
+            page_token = next_token
 
         people.sort(
             key=lambda item: (
@@ -34580,7 +34907,37 @@ class MaintenancePortalService:
                 continue
             job["job_id"] = job_id
             phase = str(job.get("phase") or "").strip()
-            if phase in {"accepted", "queued"} and not float(job.get("message_started_at") or 0):
+            remote_written = bool(job.get("remote_written")) and bool(
+                str(
+                    job.get("remote_record_id")
+                    or job.get("target_record_id")
+                    or job.get("record_id")
+                    or ""
+                ).strip()
+            )
+            if remote_written and phase not in {"success", "failed"}:
+                if phase == "sending_message" and not bool(job.get("message_sent")):
+                    job["message_delivery_uncertain"] = True
+                job["phase"] = "remote_written"
+                job["error"] = ""
+                job["error_category"] = ""
+                job["error_retryable"] = False
+                job["restart_recovered"] = True
+                job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+            elif (
+                phase in {"remote_intent", "uploading"}
+                and bool(job.get("remote_intent"))
+                and str(job.get("remote_operation_id") or "").strip()
+            ):
+                job["phase"] = "remote_intent"
+                job["error"] = ""
+                job["error_category"] = ""
+                job["error_retryable"] = False
+                job["restart_recovered"] = True
+                job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+            elif phase in {"accepted", "queued"} and not float(job.get("message_started_at") or 0):
                 job["phase"] = "accepted"
                 job["error"] = ""
                 job["error_category"] = ""
@@ -34632,7 +34989,8 @@ class MaintenancePortalService:
                 str(job.get("job_id") or "")
                 for job in self._jobs.values()
                 if isinstance(job, dict)
-                and str(job.get("phase") or "") == "accepted"
+                and str(job.get("phase") or "")
+                in {"accepted", "remote_intent", "remote_written"}
                 and bool(job.get("restart_recovered"))
                 and str(job.get("job_id") or "")
             ]
@@ -35204,6 +35562,62 @@ class MaintenancePortalService:
             "removed_success": removed_success,
             "removed_failed": removed_failed,
             "removed_total": removed_success + removed_failed,
+        }
+
+    def cleanup_engineer_mop_local_files(
+        self,
+        *,
+        retention_seconds: int = 30 * 24 * 60 * 60,
+        purge_grace_seconds: int = 24 * 60 * 60,
+        max_delete: int = 200,
+    ) -> dict[str, int]:
+        now = time.time()
+        marked = self._state_store.mark_old_engineer_mop_local_files_deleted(
+            older_than_ts=now - max(24 * 60 * 60, int(retention_seconds or 0))
+        )
+        rows = self._state_store.list_deleted_engineer_mop_local_files(
+            deleted_before_ts=now - max(60, int(purge_grace_seconds or 0)),
+            limit=max(1, min(1000, int(max_delete or 200))),
+        )
+        base_dir = Path(get_data_file_path("mop_local_uploads")).resolve()
+        purge_ids: list[str] = []
+        removed_directories = 0
+        skipped_unsafe = 0
+        failed = 0
+        for row in rows:
+            upload_id = str(row.get("upload_id") or "").strip()
+            local_file_path = str(row.get("local_file_path") or "").strip()
+            if not upload_id or not local_file_path:
+                skipped_unsafe += 1
+                continue
+            try:
+                upload_dir = Path(local_file_path).resolve().parent
+            except (OSError, RuntimeError, ValueError):
+                skipped_unsafe += 1
+                continue
+            if (
+                upload_dir.name != upload_id
+                or upload_dir == base_dir
+                or not upload_dir.is_relative_to(base_dir)
+            ):
+                skipped_unsafe += 1
+                continue
+            try:
+                if upload_dir.exists():
+                    shutil.rmtree(upload_dir)
+                    removed_directories += 1
+                purge_ids.append(upload_id)
+            except OSError:
+                failed += 1
+        purged_rows = self._state_store.purge_engineer_mop_local_file_rows(
+            purge_ids
+        )
+        return {
+            "marked": int(marked or 0),
+            "removed_directories": removed_directories,
+            "purged_rows": int(purged_rows or 0),
+            "skipped_unsafe": skipped_unsafe,
+            "failed": failed,
         }
 
     @staticmethod

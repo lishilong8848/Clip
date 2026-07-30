@@ -1853,6 +1853,9 @@ class MainWindowWorkflowMixin:
 
     def _submit_delete_active_item_to_backend(self, data_dict) -> tuple[bool, str, dict]:
         data_dict = dict(data_dict or {})
+        data_dict["operation_id"] = str(
+            data_dict.get("operation_id") or f"qt-delete:{uuid.uuid4().hex}"
+        )
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，Qt 不再直接执行多维删除。", {}
@@ -2059,6 +2062,7 @@ class MainWindowWorkflowMixin:
 
     def _delete_active_item(self, data_dict):
         """删除活动列表项，并同步删除对应多维记录。"""
+        data_dict = dict(data_dict or {})
         if self._is_screenshot_dialog_active():
             record_id = (data_dict or {}).get("record_id")
             list_widget, item = self._find_active_item_by_record_id(record_id)
@@ -2073,6 +2077,11 @@ class MainWindowWorkflowMixin:
         record_id = str((data_dict or {}).get("record_id") or "").strip()
         list_widget, item = self._find_active_item_by_record_id(record_id)
         widget = self._safe_item_widget(list_widget, item)
+        data_dict["operation_id"] = str(
+            data_dict.get("operation_id") or f"qt-delete:{uuid.uuid4().hex}"
+        )
+        if item and self._is_valid_list_item(item):
+            item.setData(Qt.ItemDataRole.UserRole, dict(data_dict))
 
         def _finish(success: bool, error: str = "", result: dict | None = None) -> None:
             if not success:

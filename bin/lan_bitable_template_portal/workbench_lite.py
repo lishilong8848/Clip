@@ -3449,7 +3449,7 @@ def render_workbench_lite(
       }}
       return compact;
     }}
-    function ongoingDeletePayload(form) {{
+    function ongoingDeletePayload(form, operationId = '') {{
       const fd = new FormData(form);
       const patch = Object.fromEntries(fd.entries());
       const targetRecordId = String(patch.target_record_id || '').trim();
@@ -3464,6 +3464,10 @@ def render_workbench_lite(
         source_record_id: sourceRecordId,
         target_record_id: targetRecordId,
         record_id: recordId,
+        operation_id: String(operationId || '').trim(),
+        expected_record_version: String(
+          patch.expected_record_version || patch.record_version || ''
+        ).trim(),
       }};
     }}
     function workbenchBaseUrl(scope, workType) {{
@@ -3494,7 +3498,20 @@ def render_workbench_lite(
         }}, 4200);
         return;
       }}
-      const payload = ongoingDeletePayload(form);
+      const operationId = isLocalRemove
+        ? ''
+        : String(
+            button.getAttribute('data-delete-operation-id')
+            || `delete:${{Date.now()}}:${{
+              (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function')
+                ? globalThis.crypto.randomUUID()
+                : Math.random().toString(36).slice(2)
+            }}`
+          );
+      if (!isLocalRemove) {{
+        button.setAttribute('data-delete-operation-id', operationId);
+      }}
+      const payload = ongoingDeletePayload(form, operationId);
       const endpoint = isLocalRemove ? '/api/ongoing-items/remove-local' : '/api/ongoing-items/delete';
       clearLiteHtmlCache();
       setLiteFormDirty(false);
@@ -3518,6 +3535,7 @@ def render_workbench_lite(
         const message = isLocalRemove
           ? '已移除显示，Qt 和前端将同步消失，多维未删除。'
           : (result.remote_deleted ? '已删除通告，并同步删除对应多维记录。' : '已删除通告，本地显示已同步。');
+        button.removeAttribute('data-delete-operation-id');
         setLiteStatus(message);
         await navigateLite(workbenchBaseUrl(payload.scope, currentViewWorkType() || payload.work_type), {{
           push: true,

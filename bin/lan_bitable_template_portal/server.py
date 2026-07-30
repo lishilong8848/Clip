@@ -41,7 +41,7 @@ from .identity_utils import (
 )
 from .state_store import LanPortalStateStore
 from upload_event_module.config import EVENT_NOTICE_FIELDS, get_field_config
-from upload_event_module.services.handlers import NoticePayload
+from upload_event_module.services.handlers import NoticePayload, get_notice_handler
 from upload_event_module.services.service_registry import (
     create_bitable_record_fields,
     create_bitable_record_by_payload,
@@ -3573,10 +3573,45 @@ class PortalRuntime:
                         if hasattr(cls.service, "_snapshot_meta")
                         else {"warnings": [warning]}
                     )
-                    cls.state_store.record_failed_source_snapshot(
-                        meta=meta,
-                        error=warning,
+                    source_statuses = getattr(
+                        cls.service,
+                        "_source_refresh_status",
+                        {},
                     )
+                    recorded_failure = False
+                    for source_key in getattr(
+                        cls.state_store,
+                        "SOURCE_TABLE_KEYS",
+                        (),
+                    ):
+                        source_status = (
+                            source_statuses.get(source_key)
+                            if isinstance(source_statuses, dict)
+                            else {}
+                        )
+                        source_error = (
+                            str((source_status or {}).get("error") or "").strip()
+                            if isinstance(source_status, dict)
+                            else ""
+                        )
+                        if source_error:
+                            cls.state_store.record_failed_source_table_snapshot(
+                                source_key,
+                                meta=meta,
+                                error=source_error,
+                            )
+                            recorded_failure = True
+                    if not recorded_failure:
+                        for source_key in getattr(
+                            cls.state_store,
+                            "SOURCE_TABLE_KEYS",
+                            (),
+                        ):
+                            cls.state_store.record_failed_source_table_snapshot(
+                                source_key,
+                                meta=meta,
+                                error=warning,
+                            )
                 except Exception:
                     pass
                 logging.warning(warning)
@@ -4956,16 +4991,56 @@ class PortalRuntime:
         target_record_id: str = "",
         record_id: str = "",
     ) -> tuple[str, str, str]:
-        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
-            return "", "", ""
-        lock_key = cls._event_operation_lock_key(
-            data,
-            target_record_id=target_record_id,
-            record_id=record_id,
-        )
+        data = data if isinstance(data, dict) else {}
+        notice_type = str(data.get("notice_type") or "").strip()
+        if notice_type == "事件通告":
+            lock_key = cls._event_operation_lock_key(
+                data,
+                target_record_id=target_record_id,
+                record_id=record_id,
+            )
+        else:
+            work_type = str(
+                data.get("work_type")
+                or cls._notice_work_type_from_notice_type(notice_type)
+                or "notice"
+            ).strip()
+            target_id = str(
+                target_record_id
+                or data.get("target_record_id")
+                or record_id
+                or data.get("record_id")
+                or ""
+            ).strip()
+            if target_id and not is_local_record_id(target_id):
+                lock_key = f"{work_type}:target:{target_id}"
+            else:
+                active_item_id = str(data.get("active_item_id") or "").strip()
+                source_record_id = str(data.get("source_record_id") or "").strip()
+                if active_item_id:
+                    lock_key = f"{work_type}:active:{active_item_id}"
+                elif source_record_id and not is_local_record_id(source_record_id):
+                    lock_key = f"{work_type}:source:{source_record_id}"
+                else:
+                    identity_text = "\n".join(
+                        (
+                            notice_type,
+                            str(data.get("text") or data.get("content") or ""),
+                        )
+                    )
+                    digest = hashlib.sha256(
+                        identity_text.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    lock_key = f"{work_type}:payload:{digest}"
         if not lock_key:
             return "", "", ""
-        acquire_lock = getattr(cls.state_store, "acquire_event_notice_operation_lock", None)
+        acquire_lock = getattr(cls.state_store, "acquire_notice_operation_lock", None)
+        if not callable(acquire_lock):
+            acquire_lock = getattr(
+                cls.state_store,
+                "acquire_event_notice_operation_lock",
+                None,
+            )
         if not callable(acquire_lock):
             return "", "", ""
         owner = uuid.uuid4().hex
@@ -4985,7 +5060,7 @@ class PortalRuntime:
             },
         )
         if not ok:
-            return lock_key, "", str(result or "该事件正在处理，请稍后再试。")
+            return lock_key, "", str(result or "该通告正在处理，请稍后再试。")
         return lock_key, result, ""
 
     @classmethod
@@ -4993,9 +5068,75 @@ class PortalRuntime:
         if not lock_key or not owner:
             return
         try:
-            cls.state_store.release_event_notice_operation_lock(lock_key, owner)
+            release_lock = getattr(
+                cls.state_store,
+                "release_notice_operation_lock",
+                None,
+            )
+            if not callable(release_lock):
+                release_lock = getattr(
+                    cls.state_store,
+                    "release_event_notice_operation_lock",
+                    None,
+                )
+            if callable(release_lock):
+                release_lock(lock_key, owner)
         except Exception as exc:
-            log_warning(f"事件操作锁释放失败: {exc}")
+            log_warning(f"通告操作锁释放失败: {exc}")
+
+    @classmethod
+    def _begin_notice_remote_operation(cls, **kwargs: Any) -> dict[str, Any]:
+        begin = getattr(
+            cls.state_store,
+            "begin_notice_remote_operation",
+            None,
+        )
+        if callable(begin):
+            return begin(**kwargs)
+        return {
+            "operation_id": str(kwargs.get("operation_id") or ""),
+            "operation_type": str(kwargs.get("operation_type") or ""),
+            "status": "intent",
+            "target_record_id": str(kwargs.get("target_record_id") or ""),
+            "expected_record_version": str(
+                kwargs.get("expected_record_version") or ""
+            ),
+            "result": {},
+            "conflict": False,
+            "replay": False,
+            "created": True,
+        }
+
+    @classmethod
+    def _mark_notice_remote_operation(
+        cls, operation_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        mark = getattr(
+            cls.state_store,
+            "mark_notice_remote_operation",
+            None,
+        )
+        if callable(mark):
+            return mark(operation_id, **kwargs)
+        return {
+            "operation_id": str(operation_id or ""),
+            "status": str(kwargs.get("status") or ""),
+            "target_record_id": str(kwargs.get("target_record_id") or ""),
+            "result": dict(kwargs.get("result") or {}),
+        }
+
+    @classmethod
+    def _get_notice_remote_operation(
+        cls, operation_id: str
+    ) -> dict[str, Any] | None:
+        get_operation = getattr(
+            cls.state_store,
+            "get_notice_remote_operation",
+            None,
+        )
+        if callable(get_operation):
+            return get_operation(operation_id)
+        return None
 
     @staticmethod
     def _robot_result_from_notice_payload(payload: NoticePayload) -> dict:
@@ -5238,6 +5379,71 @@ class PortalRuntime:
                 return False, f"已阻止删除：目标多维记录缺少{label}，不能确认删除对象。"
             if local_fields.get(key) != remote_fields_for_match.get(key):
                 return False, f"已阻止删除：当前事件与目标多维记录的{label}不一致，请先核对绑定记录。"
+        return True, ""
+
+    @classmethod
+    def _validate_notice_delete_target(
+        cls, payload: dict, remote_fields: dict | None
+    ) -> tuple[bool, str]:
+        notice_type = str((payload or {}).get("notice_type") or "").strip()
+        if notice_type == "事件通告":
+            return cls._validate_event_delete_target(payload, remote_fields)
+        if not notice_type or not isinstance(remote_fields, dict) or not remote_fields:
+            return (
+                False,
+                "已阻止删除：无法核对目标多维记录。请刷新后重试，"
+                "或由管理员使用“移除显示，不删除多维”。",
+            )
+        prepared = cls._enrich_prepared_notice_lookup_fields(dict(payload or {}))
+        field_config = get_field_config(notice_type)
+        title_field = str(
+            field_config.get("title") or field_config.get("name") or ""
+        ).strip()
+        local_title = str(prepared.get("title") or "").strip()
+        remote_title_value = remote_fields.get(title_field) if title_field else ""
+        remote_title = cls._remote_compare_value(remote_title_value)
+        if isinstance(remote_title, list):
+            remote_title = "".join(str(item or "") for item in remote_title)
+
+        def normalized_title(value: Any) -> str:
+            return re.sub(
+                r"[\s，,。；;：:（）()【】\[\]_\-]+",
+                "",
+                str(value or "").strip().lower(),
+            )
+
+        if not local_title or not remote_title:
+            return (
+                False,
+                "已阻止删除：当前通告或目标记录缺少名称，无法确认删除对象。",
+            )
+        if normalized_title(local_title) != normalized_title(remote_title):
+            return (
+                False,
+                "已阻止删除：当前通告与目标多维记录的名称不一致，"
+                "请先核对绑定记录。",
+            )
+        building_field = str(field_config.get("building") or "").strip()
+        local_buildings = (
+            prepared.get("building_codes")
+            or prepared.get("buildings")
+            or prepared.get("building")
+            or prepared.get("scope")
+            or ""
+        )
+        remote_buildings = remote_fields.get(building_field) if building_field else ""
+        local_codes = set(
+            MaintenancePortalService._building_codes_from_value(local_buildings)
+        )
+        remote_codes = set(
+            MaintenancePortalService._building_codes_from_value(remote_buildings)
+        )
+        if local_codes and remote_codes and not (local_codes & remote_codes):
+            return (
+                False,
+                "已阻止删除：当前通告与目标多维记录的楼栋不一致，"
+                "请先核对绑定记录。",
+            )
         return True, ""
 
     @classmethod
@@ -5845,6 +6051,160 @@ class PortalRuntime:
             **(local_result if isinstance(local_result, dict) else {}),
         }
 
+    @staticmethod
+    def _notice_remote_operation_request(prepared: dict) -> dict:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        text = str(prepared.get("text") or prepared.get("content") or "")
+        action = str(prepared.get("action") or "").strip().lower()
+        return {
+            "action": action,
+            "notice_type": str(prepared.get("notice_type") or "").strip(),
+            "work_type": str(prepared.get("work_type") or "").strip(),
+            "scope": str(prepared.get("scope") or "").strip(),
+            "active_item_id": str(prepared.get("active_item_id") or "").strip(),
+            "source_record_id": str(prepared.get("source_record_id") or "").strip(),
+            "target_record_id": (
+                ""
+                if action == "start"
+                else str(
+                    prepared.get("target_record_id")
+                    or prepared.get("record_id")
+                    or ""
+                ).strip()
+            ),
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "title": str(prepared.get("title") or "").strip(),
+            "start_time": str(prepared.get("start_time") or "").strip(),
+            "end_time": str(prepared.get("end_time") or "").strip(),
+            "specialty": str(prepared.get("specialty") or "").strip(),
+            "buildings": list(prepared.get("buildings") or []),
+        }
+
+    @staticmethod
+    def _remote_compare_value(value: Any) -> Any:
+        if isinstance(value, list):
+            if any(
+                isinstance(item, dict) and item.get("file_token")
+                for item in value
+            ):
+                return None
+            if value and all(
+                isinstance(item, dict) and "text" in item for item in value
+            ):
+                return "".join(
+                    str(item.get("text") or "") for item in value
+                ).strip()
+            parts: list[Any] = []
+            for item in value:
+                if isinstance(item, dict):
+                    if "text" in item:
+                        parts.append(str(item.get("text") or "").strip())
+                    elif "name" in item:
+                        parts.append(str(item.get("name") or "").strip())
+                    else:
+                        parts.append(
+                            json.dumps(
+                                item,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                default=str,
+                            )
+                        )
+                else:
+                    parts.append(item)
+            return parts
+        if isinstance(value, dict):
+            if value.get("file_token"):
+                return None
+            if "text" in value:
+                return str(value.get("text") or "").strip()
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @classmethod
+    def _remote_record_matches_prepared(
+        cls, prepared: dict, query_result: dict
+    ) -> bool:
+        notice_type = str(prepared.get("notice_type") or "").strip()
+        action = str(prepared.get("action") or "").strip().lower()
+        remote_fields = (
+            query_result.get("fields")
+            if isinstance(query_result, dict)
+            and isinstance(query_result.get("fields"), dict)
+            else {}
+        )
+        if not notice_type or not remote_fields:
+            return False
+        try:
+            handler = get_notice_handler(notice_type)
+            payload = cls._prepared_to_notice_payload(prepared)
+            desired_fields = (
+                handler.build_create_fields(payload)
+                if action == "start"
+                else handler.build_update_fields(payload)
+            )
+        except Exception:
+            return False
+        compared = 0
+        for field_name, desired_value in (desired_fields or {}).items():
+            normalized_desired = cls._remote_compare_value(desired_value)
+            if normalized_desired in (None, "", [], {}):
+                continue
+            if field_name not in remote_fields:
+                continue
+            normalized_remote = cls._remote_compare_value(
+                remote_fields.get(field_name)
+            )
+            if normalized_remote != normalized_desired:
+                return False
+            compared += 1
+        return compared >= 2
+
+    @classmethod
+    def _reconcile_notice_remote_intent(
+        cls, prepared: dict, operation: dict
+    ) -> tuple[bool, str, str]:
+        notice_type = str(prepared.get("notice_type") or "").strip()
+        action = str(prepared.get("action") or "").strip().lower()
+        target_record_id = str(
+            operation.get("target_record_id")
+            or prepared.get("target_record_id")
+            or prepared.get("record_id")
+            or ""
+        ).strip()
+        if action == "start" and not target_record_id:
+            target_record_id = cls._existing_target_for_prepared_start(
+                prepared,
+                notice_type,
+            )
+        if not target_record_id or is_local_record_id(target_record_id):
+            return False, "", ""
+        guard = external_real_write_guard()
+        if guard.get("mock_external"):
+            return True, target_record_id, "测试环境已确认远端写入。"
+        ok_query, query_result = query_record_by_id(
+            target_record_id,
+            notice_type,
+        )
+        if not ok_query or not isinstance(query_result, dict):
+            return False, "", str(query_result or "")
+        if not cls._remote_record_matches_prepared(prepared, query_result):
+            return False, "", "远端记录存在，但内容尚未达到本次操作目标。"
+        prepared["record_version"] = str(
+            query_result.get("record_version") or ""
+        ).strip()
+        prepared["remote_last_modified_time"] = str(
+            query_result.get("last_modified_time") or ""
+        ).strip()
+        return True, target_record_id, "已核对远端记录，本次操作不再重复提交。"
+
     @classmethod
     def _execute_backend_prepared_upload(
         cls, prepared: dict
@@ -5891,6 +6251,15 @@ class PortalRuntime:
             record_id = str(result or "").strip() if ok else ""
             if ok and not record_id:
                 return False, "多维创建未返回 record_id，已阻止标记上传成功。", ""
+            if ok and record_id:
+                ok_created, created_result = query_record_by_id(record_id, notice_type)
+                if ok_created and isinstance(created_result, dict):
+                    prepared["record_version"] = str(
+                        created_result.get("record_version") or ""
+                    ).strip()
+                    prepared["remote_last_modified_time"] = str(
+                        created_result.get("last_modified_time") or ""
+                    ).strip()
             return bool(ok), str(result or ""), record_id
 
         record_id = str(
@@ -5918,6 +6287,27 @@ class PortalRuntime:
                 return False, rebound_error, record_id
         if not ok_query:
             return False, f"查询失败: {query_result}", record_id
+        current_record_version = str(
+            (query_result or {}).get("record_version") or ""
+        ).strip()
+        expected_record_version = str(
+            prepared.get("expected_record_version")
+            or prepared.get("record_version")
+            or ""
+        ).strip()
+        if (
+            expected_record_version
+            and current_record_version
+            and expected_record_version != current_record_version
+        ):
+            return (
+                False,
+                "目标多维记录已被其他用户修改，请刷新后重新提交。",
+                record_id,
+            )
+        prepared["expected_record_version"] = (
+            expected_record_version or current_record_version
+        )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
         checkpoint_id = cls._create_backend_undo_checkpoint(
             "end" if action == "end" else "update",
@@ -5952,11 +6342,146 @@ class PortalRuntime:
                 "failed",
                 error=str(result or "多维更新失败。"),
             )
+        if ok and bool(prepared.get("expected_record_version")):
+            ok_updated, updated_result = query_record_by_id(record_id, notice_type)
+            if ok_updated and isinstance(updated_result, dict):
+                prepared["record_version"] = str(
+                    updated_result.get("record_version") or ""
+                ).strip()
+                prepared["remote_last_modified_time"] = str(
+                    updated_result.get("last_modified_time") or ""
+                ).strip()
         return bool(ok), str(result or ""), record_id
 
     @classmethod
+    def _execute_durable_prepared_upload(
+        cls,
+        prepared: dict,
+        *,
+        operation_id: str,
+        operation_type: str,
+    ) -> tuple[bool, str, str]:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            return False, "远端写入缺少操作编号。", ""
+        target_record_id = str(
+            prepared.get("target_record_id")
+            or (
+                prepared.get("record_id")
+                if str(prepared.get("action") or "").strip().lower() != "start"
+                else ""
+            )
+            or ""
+        ).strip()
+        lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
+            prepared,
+            action_type=operation_type,
+            target_record_id=target_record_id,
+            record_id=target_record_id,
+        )
+        if lock_error:
+            return False, lock_error, target_record_id
+        try:
+            operation = cls._begin_notice_remote_operation(
+                operation_id=operation_id,
+                operation_type=operation_type,
+                lock_key=lock_key,
+                request=cls._notice_remote_operation_request(prepared),
+                target_record_id=target_record_id,
+                expected_record_version=str(
+                    prepared.get("expected_record_version")
+                    or prepared.get("record_version")
+                    or ""
+                ),
+            )
+            if operation.get("conflict"):
+                return (
+                    False,
+                    str(operation.get("message") or "远端操作编号冲突。"),
+                    target_record_id,
+                )
+            operation_status = str(operation.get("status") or "")
+            operation_result = (
+                operation.get("result")
+                if isinstance(operation.get("result"), dict)
+                else {}
+            )
+            operation_record_id = str(
+                operation.get("target_record_id")
+                or operation_result.get("record_id")
+                or target_record_id
+                or ""
+            ).strip()
+            if operation_status in {"remote_written", "completed"}:
+                return (
+                    True,
+                    str(
+                        operation_result.get("message")
+                        or operation_record_id
+                        or "远端写入已完成。"
+                    ),
+                    operation_record_id,
+                )
+            if not operation.get("created"):
+                reconciled, reconciled_record_id, reconciled_message = (
+                    cls._reconcile_notice_remote_intent(prepared, operation)
+                )
+                if reconciled:
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="completed",
+                        target_record_id=reconciled_record_id,
+                        observed_record_version=str(
+                            prepared.get("record_version") or ""
+                        ),
+                        result={
+                            "record_id": reconciled_record_id,
+                            "message": reconciled_message,
+                            "reconciled": True,
+                        },
+                        error="",
+                    )
+                    return True, reconciled_message, reconciled_record_id
+            cls._mark_notice_remote_operation(
+                operation_id,
+                status="executing",
+                error="",
+            )
+            ok, message, record_id = cls._execute_backend_prepared_upload(
+                prepared
+            )
+            if not ok:
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="failed",
+                    target_record_id=record_id or target_record_id,
+                    error=str(message or "远端写入失败。"),
+                )
+                return False, message, record_id
+            cls._mark_notice_remote_operation(
+                operation_id,
+                status="completed",
+                target_record_id=record_id,
+                observed_record_version=str(
+                    prepared.get("record_version") or ""
+                ),
+                result={
+                    "record_id": record_id,
+                    "message": str(message or ""),
+                },
+                error="",
+            )
+            return True, message, record_id
+        finally:
+            cls._release_event_operation_lock(lock_key, lock_owner)
+
+    @classmethod
     def _execute_paired_maintenance_upload(
-        cls, prepared: dict
+        cls,
+        prepared: dict,
+        *,
+        operation_id: str,
     ) -> tuple[bool, str, str]:
         prepared = prepared if isinstance(prepared, dict) else {}
         if not prepared.get("sync_maintenance_target"):
@@ -5975,10 +6500,18 @@ class PortalRuntime:
         ).strip()
         paired["target_record_id"] = target_record_id
         if action == "start":
-            return cls._execute_backend_prepared_upload(paired)
+            return cls._execute_durable_prepared_upload(
+                paired,
+                operation_id=f"{operation_id}:start",
+                operation_type="paired_maintenance_start",
+            )
         if target_record_id:
             ok_existing, message_existing, record_existing = (
-                cls._execute_backend_prepared_upload(paired)
+                cls._execute_durable_prepared_upload(
+                    paired,
+                    operation_id=f"{operation_id}:{action}",
+                    operation_type=f"paired_maintenance_{action}",
+                )
             )
             if ok_existing or not cls._remote_record_not_found(message_existing):
                 return ok_existing, message_existing, record_existing
@@ -5996,7 +6529,11 @@ class PortalRuntime:
             "record_id": str(paired.get("source_record_id") or paired.get("record_id") or ""),
             "response_time": actual_start_time or str(paired.get("response_time") or ""),
         }
-        ok, message, created_record_id = cls._execute_backend_prepared_upload(create_prepared)
+        ok, message, created_record_id = cls._execute_durable_prepared_upload(
+            create_prepared,
+            operation_id=f"{operation_id}:recovery-start",
+            operation_type="paired_maintenance_recovery_start",
+        )
         if not ok:
             return ok, message, created_record_id
         if action != "end":
@@ -6008,7 +6545,11 @@ class PortalRuntime:
             "target_record_id": created_record_id,
             "record_id": created_record_id,
         }
-        ok_end, message_end, end_record_id = cls._execute_backend_prepared_upload(end_prepared)
+        ok_end, message_end, end_record_id = cls._execute_durable_prepared_upload(
+            end_prepared,
+            operation_id=f"{operation_id}:recovery-end",
+            operation_type="paired_maintenance_recovery_end",
+        )
         return ok_end, message_end, end_record_id or created_record_id
 
     @classmethod
@@ -6441,6 +6982,39 @@ class PortalRuntime:
                         }
                 if action_type != "upload":
                     prequery_result = query_result if isinstance(query_result, dict) else {}
+        if (
+            action_type in {"update", "end", "upload_replace"}
+            and isinstance(prequery_result, dict)
+            and prequery_result
+        ):
+            current_record_version = str(
+                prequery_result.get("record_version") or ""
+            ).strip()
+            expected_record_version = str(
+                payload.get("expected_record_version")
+                or data.get("expected_record_version")
+                or data.get("record_version")
+                or ""
+            ).strip()
+            if (
+                expected_record_version
+                and current_record_version
+                and expected_record_version != current_record_version
+            ):
+                return {
+                    "ok": False,
+                    "name": "结束" if action_type == "end" else "更新",
+                    "message": (
+                        "目标多维记录已被其他用户修改，请刷新当前通告后重新提交。"
+                    ),
+                    "record_id": target_record_id or record_id,
+                    "real_record_id": "",
+                    "record_version_conflict": True,
+                    "record_version": current_record_version,
+                }
+            data["expected_record_version"] = (
+                expected_record_version or current_record_version
+            )
 
         extra_images = payload.get("extra_images")
         if not isinstance(extra_images, list):
@@ -6573,6 +7147,114 @@ class PortalRuntime:
             lock = cls._local_upload_lock_for_key(dedupe_key) if dedupe_key else None
 
             def _run_create_once() -> dict:
+                operation_prepared = {
+                    **data,
+                    "action": "start",
+                    "notice_type": notice_type,
+                }
+                fallback_operation_key = hashlib.sha256(
+                    json.dumps(
+                        cls._notice_remote_operation_request(operation_prepared),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                operation_id = str(
+                    payload.get("operation_id")
+                    or data.get("operation_id")
+                    or f"qt_upload:{fallback_operation_key}"
+                ).strip()
+                operation = cls._begin_notice_remote_operation(
+                    operation_id=operation_id,
+                    operation_type="start",
+                    lock_key=str(
+                        data.get("active_item_id")
+                        or data.get("source_record_id")
+                        or fallback_operation_key
+                    ),
+                    request=cls._notice_remote_operation_request(
+                        operation_prepared
+                    ),
+                )
+                if operation.get("conflict"):
+                    return {
+                        "ok": False,
+                        "name": "上传",
+                        "message": str(
+                            operation.get("message") or "上传操作编号冲突。"
+                        ),
+                        "record_id": record_id,
+                        "real_record_id": "",
+                    }
+                operation_target = str(
+                    operation.get("target_record_id")
+                    or (operation.get("result") or {}).get("record_id")
+                    or ""
+                ).strip()
+                if (
+                    str(operation.get("status") or "")
+                    in {"remote_written", "completed"}
+                    and operation_target
+                ):
+                    cls._remember_local_upload_target(
+                        data,
+                        notice_type=notice_type,
+                        target_record_id=operation_target,
+                    )
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="completed",
+                        target_record_id=operation_target,
+                        result={
+                            "record_id": operation_target,
+                            "deduped": True,
+                        },
+                    )
+                    return {
+                        "ok": True,
+                        "name": "上传",
+                        "message": operation_target,
+                        "record_id": record_id,
+                        "real_record_id": operation_target,
+                        "deduped": True,
+                    }
+                reconciled = False
+                reconciled_record_id = ""
+                reconcile_message = ""
+                if not operation.get("created"):
+                    reconciled, reconciled_record_id, reconcile_message = (
+                        cls._reconcile_notice_remote_intent(
+                            operation_prepared,
+                            operation,
+                        )
+                    )
+                if reconciled:
+                    cls._remember_local_upload_target(
+                        data,
+                        notice_type=notice_type,
+                        target_record_id=reconciled_record_id,
+                    )
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="completed",
+                        target_record_id=reconciled_record_id,
+                        observed_record_version=str(
+                            operation_prepared.get("record_version") or ""
+                        ),
+                        result={
+                            "record_id": reconciled_record_id,
+                            "message": reconcile_message,
+                            "reconciled": True,
+                        },
+                    )
+                    return {
+                        "ok": True,
+                        "name": "上传",
+                        "message": reconcile_message,
+                        "record_id": record_id,
+                        "real_record_id": reconciled_record_id,
+                        "deduped": True,
+                    }
                 if dedupe_key:
                     cached_target = str(
                         cls.local_upload_created_targets.get(dedupe_key) or ""
@@ -6582,6 +7264,15 @@ class PortalRuntime:
                             data,
                             notice_type=notice_type,
                             target_record_id=cached_target,
+                        )
+                        cls._mark_notice_remote_operation(
+                            operation_id,
+                            status="completed",
+                            target_record_id=cached_target,
+                            result={
+                                "record_id": cached_target,
+                                "deduped": True,
+                            },
                         )
                         return {
                             "ok": True,
@@ -6600,6 +7291,15 @@ class PortalRuntime:
                         notice_type=notice_type,
                         target_record_id=existing_target,
                     )
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="completed",
+                        target_record_id=existing_target,
+                        result={
+                            "record_id": existing_target,
+                            "deduped": True,
+                        },
+                    )
                     return {
                         "ok": True,
                         "name": "上传",
@@ -6608,6 +7308,10 @@ class PortalRuntime:
                         "real_record_id": existing_target,
                         "deduped": True,
                     }
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="executing",
+                )
                 success, result = create_bitable_record_by_payload(
                     notice_type,
                     notice_payload,
@@ -6617,12 +7321,38 @@ class PortalRuntime:
                     success = False
                     result = "多维创建未返回 record_id，已阻止标记上传成功。"
                 if success:
+                    ok_created, created_query = query_record_by_id(
+                        real_record_id,
+                        notice_type,
+                    )
+                    if ok_created and isinstance(created_query, dict):
+                        data["record_version"] = str(
+                            created_query.get("record_version") or ""
+                        ).strip()
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = real_record_id
                     cls._remember_local_upload_target(
                         data,
                         notice_type=notice_type,
                         target_record_id=real_record_id,
+                    )
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="completed",
+                        target_record_id=real_record_id,
+                        observed_record_version=str(
+                            data.get("record_version") or ""
+                        ),
+                        result={
+                            "record_id": real_record_id,
+                            "message": str(result or ""),
+                        },
+                    )
+                else:
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="failed",
+                        error=str(result or "多维创建失败。"),
                     )
                 robot_result = (
                     cls._robot_result_from_notice_payload(notice_payload)
@@ -6771,6 +7501,50 @@ class PortalRuntime:
             }
 
         action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
+        operation_prepared = {
+            **data,
+            "action": "end" if action_type == "end" else "update",
+            "notice_type": notice_type,
+            "target_record_id": target_record_id,
+            "record_id": target_record_id,
+        }
+        operation_request = cls._notice_remote_operation_request(
+            operation_prepared
+        )
+        fallback_operation_key = hashlib.sha256(
+            json.dumps(
+                operation_request,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        operation_id = str(
+            payload.get("operation_id")
+            or data.get("operation_id")
+            or f"qt_{action_type}:{fallback_operation_key}"
+        ).strip()
+        operation = cls._begin_notice_remote_operation(
+            operation_id=operation_id,
+            operation_type=action_type,
+            lock_key=str(target_record_id or fallback_operation_key),
+            request=operation_request,
+            target_record_id=target_record_id,
+            expected_record_version=str(
+                data.get("expected_record_version")
+                or data.get("record_version")
+                or ""
+            ),
+        )
+        if operation.get("conflict"):
+            return {
+                "ok": False,
+                "name": action_name,
+                "message": str(
+                    operation.get("message") or "通告操作编号冲突。"
+                ),
+                "record_id": target_record_id or record_id,
+                "real_record_id": "",
+            }
         event_lock_key, event_lock_owner, event_lock_error = cls._acquire_event_operation_lock(
             data,
             action_type=action_type,
@@ -6785,14 +7559,79 @@ class PortalRuntime:
                 "record_id": target_record_id or record_id,
                 "real_record_id": "",
             }
-        try:
-            success, result = update_bitable_record_by_payload(
-                target_record_id,
-                notice_type,
-                notice_payload,
+        operation_status = str(operation.get("status") or "")
+        if operation_status in {"remote_written", "completed"}:
+            success, result = True, str(
+                (operation.get("result") or {}).get("message")
+                or target_record_id
             )
-        finally:
-            cls._release_event_operation_lock(event_lock_key, event_lock_owner)
+        else:
+            reconciled = False
+            reconciled_record_id = ""
+            reconcile_message = ""
+            if not operation.get("created"):
+                reconciled, reconciled_record_id, reconcile_message = (
+                    cls._reconcile_notice_remote_intent(
+                        operation_prepared,
+                        operation,
+                    )
+                )
+            if reconciled:
+                success, result = True, reconcile_message
+                target_record_id = reconciled_record_id
+                data["target_record_id"] = target_record_id
+                data["record_id"] = target_record_id
+                data["record_version"] = str(
+                    operation_prepared.get("record_version") or ""
+                )
+            else:
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="executing",
+                )
+                try:
+                    success, result = update_bitable_record_by_payload(
+                        target_record_id,
+                        notice_type,
+                        notice_payload,
+                    )
+                finally:
+                    cls._release_event_operation_lock(
+                        event_lock_key,
+                        event_lock_owner,
+                    )
+                event_lock_key = ""
+                event_lock_owner = ""
+        cls._release_event_operation_lock(event_lock_key, event_lock_owner)
+        updated_record_version = ""
+        if success:
+            if bool(data.get("expected_record_version")):
+                ok_updated, updated_query = query_record_by_id(
+                    target_record_id,
+                    notice_type,
+                )
+                if ok_updated and isinstance(updated_query, dict):
+                    updated_record_version = str(
+                        updated_query.get("record_version") or ""
+                    ).strip()
+                    data["record_version"] = updated_record_version
+            cls._mark_notice_remote_operation(
+                operation_id,
+                status="completed",
+                target_record_id=target_record_id,
+                observed_record_version=updated_record_version,
+                result={
+                    "record_id": target_record_id,
+                    "message": str(result or ""),
+                },
+            )
+        else:
+            cls._mark_notice_remote_operation(
+                operation_id,
+                status="failed",
+                target_record_id=target_record_id,
+                error=str(result or "多维更新失败。"),
+            )
         if not success and checkpoint_id:
             cls.state_store.mark_notice_undo_action(
                 checkpoint_id,
@@ -6920,6 +7759,7 @@ class PortalRuntime:
                 else "failed" if repair_project_warning else "not_requested"
             ),
             "repair_project_warning": repair_project_warning,
+            "record_version": updated_record_version,
             **robot_result,
         }
 
@@ -6933,189 +7773,365 @@ class PortalRuntime:
             payload = dict(payload.get("data") or {})
         payload = normalize_notice_identity_payload(payload)
         target_record_id = canonical_target_record_id(payload)
-        record_id = target_record_id
         source_record_id = str(payload.get("source_record_id") or "").strip()
         active_item_id = str(payload.get("active_item_id") or "").strip()
         work_type = str(payload.get("work_type") or "").strip()
-        if not target_record_id:
-            try:
-                identity = cls.state_store.resolve_notice_identity(
-                    work_type=work_type,
-                    active_item_id=active_item_id,
-                    source_record_id=source_record_id,
-                    target_record_id=record_id,
-                )
-            except Exception:
-                identity = None
-            if isinstance(identity, dict):
-                resolved_target = str(identity.get("target_record_id") or "").strip()
-                if resolved_target:
-                    target_record_id = resolved_target
-                    record_id = resolved_target
+        try:
+            identity = cls.state_store.resolve_notice_identity(
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
+                target_record_id=(
+                    target_record_id
+                    if target_record_id and not is_local_record_id(target_record_id)
+                    else ""
+                ),
+            )
+        except Exception:
+            identity = None
+        if isinstance(identity, dict):
+            identity_payload = (
+                identity.get("payload")
+                if isinstance(identity.get("payload"), dict)
+                else {}
+            )
+            for key, value in identity_payload.items():
+                current = payload.get(key)
+                if current in (None, "", [], {}):
+                    payload[key] = copy.deepcopy(value)
+            resolved_target = str(identity.get("target_record_id") or "").strip()
+            if resolved_target:
+                target_record_id = resolved_target
+            active_item_id = active_item_id or str(
+                identity.get("active_item_id") or ""
+            ).strip()
+            source_record_id = source_record_id or str(
+                identity.get("source_record_id") or ""
+            ).strip()
+            work_type = work_type or str(identity.get("work_type") or "").strip()
+        payload = normalize_notice_identity_payload(payload)
+        target_record_id = (
+            target_record_id or canonical_target_record_id(payload)
+        )
+        source_record_id = (
+            source_record_id
+            or str(payload.get("source_record_id") or "").strip()
+        )
+        active_item_id = (
+            active_item_id
+            or str(payload.get("active_item_id") or "").strip()
+        )
+        work_type = work_type or str(payload.get("work_type") or "").strip()
         notice_type = str(payload.get("notice_type") or "").strip()
         if not target_record_id and notice_type == "事件通告":
             target_record_id = cls._event_target_from_identity_map(payload)
             if target_record_id:
-                record_id = target_record_id
                 payload["target_record_id"] = target_record_id
                 payload["record_id"] = target_record_id
-        is_placeholder = bool(payload.get("_is_placeholder_record"))
-        remote_deleted = False
-        remote_missing_delete_warning = ""
-        checkpoint_fields: dict = {}
-        checkpoint_remote_missing = True
+        if (
+            not notice_type
+            or not target_record_id
+            or is_local_record_id(target_record_id)
+            or bool(payload.get("_is_placeholder_record"))
+        ):
+            return {
+                "ok": False,
+                "message": (
+                    "当前通告没有可核验的目标多维记录，已保留本地显示。"
+                    "如只需清理页面，请由管理员使用“移除显示，不删除多维”。"
+                ),
+                "record_id": target_record_id,
+                "active_item_id": active_item_id,
+                "remote_deleted": False,
+            }
+        payload["target_record_id"] = target_record_id
+        payload["record_id"] = target_record_id
+        operation_id = str(
+            payload.get("operation_id")
+            or payload.get("job_id")
+            or f"delete:{uuid.uuid4().hex}"
+        ).strip()
+        lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
+            payload,
+            action_type="delete",
+            target_record_id=target_record_id,
+            record_id=target_record_id,
+        )
+        if lock_error:
+            return {
+                "ok": False,
+                "message": lock_error,
+                "record_id": target_record_id,
+                "active_item_id": active_item_id,
+                "remote_deleted": False,
+            }
         supports_undo = callable(
             getattr(cls.service, "create_notice_undo_checkpoint", None)
         )
-        if supports_undo and record_id and notice_type and not is_placeholder:
-            guard = external_real_write_guard()
-            if guard.get("mock_external"):
-                checkpoint_remote_missing = False
-            else:
-                ok_query, query_result = query_record_by_id(record_id, notice_type)
-                if ok_query and isinstance(query_result, dict):
-                    checkpoint_fields = query_result.get("fields", {}) if isinstance(query_result.get("fields"), dict) else {}
-                    checkpoint_remote_missing = False
-        if (
-            record_id
-            and notice_type == "事件通告"
-            and not is_placeholder
-            and checkpoint_remote_missing
-            and not external_real_write_guard().get("mock_external")
-        ):
-            ok_query, query_result = query_record_by_id(record_id, notice_type)
-            if ok_query and isinstance(query_result, dict):
-                checkpoint_fields = (
-                    query_result.get("fields", {})
-                    if isinstance(query_result.get("fields"), dict)
+        checkpoint_id = ""
+        remote_deleted = False
+        try:
+            operation = cls._begin_notice_remote_operation(
+                operation_id=operation_id,
+                operation_type="delete",
+                lock_key=lock_key,
+                request={
+                    "notice_type": notice_type,
+                    "work_type": work_type,
+                    "active_item_id": active_item_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                },
+                target_record_id=target_record_id,
+                expected_record_version=str(
+                    payload.get("expected_record_version")
+                    or payload.get("record_version")
+                    or ""
+                ),
+            )
+            if operation.get("conflict"):
+                return {
+                    "ok": False,
+                    "message": str(
+                        operation.get("message") or "删除操作编号冲突。"
+                    ),
+                    "record_id": target_record_id,
+                    "active_item_id": active_item_id,
+                    "remote_deleted": False,
+                }
+            operation_status = str(operation.get("status") or "")
+            if operation_status == "completed":
+                result_payload = (
+                    operation.get("result")
+                    if isinstance(operation.get("result"), dict)
                     else {}
                 )
-                checkpoint_remote_missing = False
-            elif cls._remote_record_not_found(query_result):
-                remote_missing_delete_warning = (
-                    "目标多维记录已不存在，已仅移除本地显示；未执行远端删除。"
+                return {
+                    "ok": True,
+                    "message": str(result_payload.get("message") or ""),
+                    "record_id": target_record_id,
+                    "active_item_id": active_item_id,
+                    "remote_deleted": True,
+                    "undo_id": str(result_payload.get("undo_id") or ""),
+                    "undo_available": bool(result_payload.get("undo_id")),
+                    "deduped": True,
+                }
+            if operation_status == "remote_written":
+                remote_deleted = True
+                checkpoint_id = str(
+                    (operation.get("result") or {}).get("undo_id") or ""
                 )
             else:
-                return {
-                    "ok": False,
-                    "message": f"已阻止删除：无法读取目标多维记录，不能确认该记录就是当前事件。查询结果：{query_result}",
-                    "record_id": record_id,
-                }
-        checkpoint_id = ""
-        if supports_undo:
-            checkpoint_id = cls._create_backend_undo_checkpoint(
-                "delete",
-                {
-                    **payload,
-                    "target_record_id": record_id,
-                },
-                remote_fields=checkpoint_fields,
-                remote_missing=checkpoint_remote_missing,
-                job_id=str(payload.get("job_id") or ""),
-            )
-        if (
-            record_id
-            and notice_type == "事件通告"
-            and not is_placeholder
-            and not remote_missing_delete_warning
-            and not external_real_write_guard().get("mock_external")
-        ):
-            delete_allowed, delete_guard_message = cls._validate_event_delete_target(
-                payload,
-                checkpoint_fields,
-            )
-            if not delete_allowed:
-                if checkpoint_id:
-                    cls.state_store.mark_notice_undo_action(
-                        checkpoint_id,
-                        "failed",
-                        error=delete_guard_message,
+                guard = external_real_write_guard()
+                checkpoint_fields: dict[str, Any] = {}
+                query_result: dict[str, Any] = {}
+                if guard.get("mock_external"):
+                    current_record_version = ""
+                else:
+                    ok_query, raw_query_result = query_record_by_id(
+                        target_record_id,
+                        notice_type,
                     )
-                return {
-                    "ok": False,
-                    "message": delete_guard_message,
-                    "record_id": record_id,
-                }
-        if (
-            record_id
-            and notice_type
-            and not is_placeholder
-            and not remote_missing_delete_warning
-        ):
-            event_lock_key, event_lock_owner, event_lock_error = cls._acquire_event_operation_lock(
-                payload,
-                action_type="delete",
-                target_record_id=record_id,
-                record_id=record_id,
-            )
-            if event_lock_error:
-                if checkpoint_id:
-                    cls.state_store.mark_notice_undo_action(
-                        checkpoint_id,
-                        "failed",
-                        error=event_lock_error,
+                    if not ok_query or not isinstance(raw_query_result, dict):
+                        message = (
+                            "已阻止删除：无法读取目标多维记录，"
+                            f"本地显示已保留。查询结果：{raw_query_result}"
+                        )
+                        cls._mark_notice_remote_operation(
+                            operation_id,
+                            status="failed",
+                            error=message,
+                        )
+                        return {
+                            "ok": False,
+                            "message": message,
+                            "record_id": target_record_id,
+                            "active_item_id": active_item_id,
+                            "remote_deleted": False,
+                        }
+                    query_result = raw_query_result
+                    checkpoint_fields = (
+                        query_result.get("fields")
+                        if isinstance(query_result.get("fields"), dict)
+                        else {}
                     )
-                return {
-                    "ok": False,
-                    "message": event_lock_error,
-                    "record_id": record_id,
-                }
-            try:
-                ok, result = delete_bitable_record(record_id, notice_type)
-            finally:
-                cls._release_event_operation_lock(event_lock_key, event_lock_owner)
-            if not ok:
-                if checkpoint_id:
-                    cls.state_store.mark_notice_undo_action(
-                        checkpoint_id,
-                        "failed",
+                    current_record_version = str(
+                        query_result.get("record_version") or ""
+                    ).strip()
+                    expected_record_version = str(
+                        payload.get("expected_record_version")
+                        or payload.get("record_version")
+                        or operation.get("expected_record_version")
+                        or ""
+                    ).strip()
+                    if (
+                        expected_record_version
+                        and current_record_version
+                        and expected_record_version != current_record_version
+                    ):
+                        message = (
+                            "目标多维记录已被其他用户修改，已保留本地显示。"
+                            "请刷新后重新确认删除。"
+                        )
+                        cls._mark_notice_remote_operation(
+                            operation_id,
+                            status="failed",
+                            observed_record_version=current_record_version,
+                            error=message,
+                        )
+                        return {
+                            "ok": False,
+                            "message": message,
+                            "record_id": target_record_id,
+                            "active_item_id": active_item_id,
+                            "remote_deleted": False,
+                        }
+                    delete_allowed, delete_guard_message = (
+                        cls._validate_notice_delete_target(
+                            payload,
+                            checkpoint_fields,
+                        )
+                    )
+                    if not delete_allowed:
+                        cls._mark_notice_remote_operation(
+                            operation_id,
+                            status="failed",
+                            observed_record_version=current_record_version,
+                            error=delete_guard_message,
+                        )
+                        return {
+                            "ok": False,
+                            "message": delete_guard_message,
+                            "record_id": target_record_id,
+                            "active_item_id": active_item_id,
+                            "remote_deleted": False,
+                        }
+                if supports_undo:
+                    checkpoint_payload = dict(payload)
+                    checkpoint_payload.pop("operation_id", None)
+                    checkpoint_payload.pop("expected_record_version", None)
+                    checkpoint_id = cls._create_backend_undo_checkpoint(
+                        "delete",
+                        checkpoint_payload,
+                        remote_fields=checkpoint_fields,
+                        remote_missing=False,
+                        job_id=str(payload.get("job_id") or operation_id),
+                    )
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="verified",
+                    observed_record_version=current_record_version,
+                    result={"undo_id": checkpoint_id},
+                )
+                if guard.get("mock_external"):
+                    ok, result = True, target_record_id
+                else:
+                    ok, result = delete_bitable_record(
+                        target_record_id,
+                        notice_type,
+                    )
+                if not ok:
+                    if checkpoint_id:
+                        cls.state_store.mark_notice_undo_action(
+                            checkpoint_id,
+                            "failed",
+                            error=str(result or "多维记录删除失败。"),
+                        )
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="failed",
                         error=str(result or "多维记录删除失败。"),
                     )
+                    cls._record_event_notice_operation_result(
+                        payload,
+                        action_type="delete",
+                        success=False,
+                        record_id=target_record_id,
+                        message=str(result or "多维记录删除失败。"),
+                    )
+                    return {
+                        "ok": False,
+                        "message": str(result or "多维记录删除失败。"),
+                        "record_id": target_record_id,
+                        "active_item_id": active_item_id,
+                        "remote_deleted": False,
+                    }
+                remote_deleted = True
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="remote_written",
+                    target_record_id=target_record_id,
+                    observed_record_version=current_record_version,
+                    result={
+                        "undo_id": checkpoint_id,
+                        "remote_deleted": True,
+                    },
+                )
                 cls._record_event_notice_operation_result(
                     payload,
                     action_type="delete",
-                    success=False,
-                    record_id=record_id,
-                    message=str(result or "多维记录删除失败。"),
+                    success=True,
+                    record_id=target_record_id,
+                    message="远端记录已删除。",
+                )
+            try:
+                cls.state_store.delete_qt_active_item(
+                    active_item_id=active_item_id,
+                    record_id=target_record_id,
+                )
+                cls.state_store.mark_notice_identity_deleted(
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=target_record_id,
+                )
+            except Exception as exc:
+                message = (
+                    "目标多维记录已删除，但本地显示清理失败；"
+                    f"请再次点击删除完成本地清理：{exc}"
+                )
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="remote_written",
+                    target_record_id=target_record_id,
+                    result={
+                        "undo_id": checkpoint_id,
+                        "remote_deleted": True,
+                        "local_cleanup_error": str(exc),
+                    },
+                    error=str(exc),
                 )
                 return {
                     "ok": False,
-                    "message": str(result or "多维记录删除失败。"),
-                    "record_id": record_id,
+                    "message": message,
+                    "record_id": target_record_id,
+                    "active_item_id": active_item_id,
+                    "remote_deleted": True,
+                    "undo_id": checkpoint_id,
+                    "undo_available": bool(checkpoint_id),
                 }
-            remote_deleted = True
-            cls._record_event_notice_operation_result(
-                payload,
-                action_type="delete",
-                success=True,
-                record_id=record_id,
-                message="远端记录已删除。",
+            cls._mark_notice_remote_operation(
+                operation_id,
+                status="completed",
+                target_record_id=target_record_id,
+                result={
+                    "undo_id": checkpoint_id,
+                    "remote_deleted": True,
+                    "message": "",
+                },
+                error="",
             )
-        try:
-            cls.state_store.delete_qt_active_item(
-                active_item_id=active_item_id,
-                record_id=record_id,
-            )
-        except Exception:
-            pass
-        try:
-            cls.state_store.mark_notice_identity_deleted(
-                work_type=work_type,
-                active_item_id=active_item_id,
-                source_record_id=source_record_id,
-                target_record_id=record_id,
-            )
-        except Exception:
-            pass
-        return {
-            "ok": True,
-            "message": remote_missing_delete_warning,
-            "record_id": record_id,
-            "active_item_id": active_item_id,
-            "remote_deleted": remote_deleted,
-            "undo_id": checkpoint_id,
-            "undo_available": bool(checkpoint_id),
-        }
+            return {
+                "ok": True,
+                "message": "",
+                "record_id": target_record_id,
+                "active_item_id": active_item_id,
+                "remote_deleted": remote_deleted,
+                "undo_id": checkpoint_id,
+                "undo_available": bool(checkpoint_id),
+            }
+        finally:
+            cls._release_event_operation_lock(lock_key, lock_owner)
 
     @classmethod
     def execute_local_remove_active_item(cls, payload: dict) -> dict:
@@ -7335,42 +8351,263 @@ class PortalRuntime:
 
     @classmethod
     def _process_maintenance_action_job(cls, job_id: str) -> None:
+        remote_operation_id = f"notice_action:{job_id}"
         try:
-            prepared = cls.service.prepare_action_job(job_id)
-            if prepared.get("skip_personal_message"):
-                cls.service.mark_job(
-                    job_id,
-                    phase="qt_queued",
-                    qt_phase="queued",
-                    queue_position=0,
-                    message_sent=True,
-                    message_signature=str(prepared.get("message_signature") or ""),
-                )
-            else:
-                cls.service.mark_job(
-                    job_id,
-                    phase="qt_queued",
-                    qt_phase="queued",
-                    queue_position=0,
-                )
-            if not prepared.get("skip_personal_message"):
-                cls.service.mark_job(
-                    job_id,
-                    phase="upload_waiting",
-                    qt_phase="backend_upload",
-                    message_sent=bool(prepared.get("message_sent")),
-                    message_signature=str(prepared.get("message_signature") or ""),
-                )
-            cls.service.mark_job(
-                job_id,
-                phase="uploading",
-                qt_phase="backend_upload",
-                qt_queue_position=0,
-                qt_queue_size=0,
-                upload_queue_position=0,
-                upload_queue_size=0,
+            current_job = cls.service.get_job(job_id) or {}
+            remote_record_id = str(
+                current_job.get("remote_record_id")
+                or current_job.get("target_record_id")
+                or current_job.get("record_id")
+                or ""
+            ).strip()
+            remote_already_written = bool(current_job.get("remote_written")) and bool(
+                remote_record_id
             )
-            ok, result_message, remote_record_id = cls._execute_backend_prepared_upload(prepared)
+            if remote_already_written:
+                stored_prepared = current_job.get("prepared")
+                if not isinstance(stored_prepared, dict) or not stored_prepared:
+                    raise RuntimeError(
+                        "远端写入已完成，但本地缺少可重放的通告参数，请联系管理员核对。"
+                    )
+                prepared = dict(stored_prepared)
+                prepared["message_sent"] = bool(
+                    current_job.get("message_sent")
+                    or prepared.get("message_sent")
+                )
+                existing_operation = cls._begin_notice_remote_operation(
+                    operation_id=remote_operation_id,
+                    operation_type=str(prepared.get("action") or "notice_action"),
+                    lock_key=str(
+                        remote_record_id
+                        or prepared.get("active_item_id")
+                        or job_id
+                    ),
+                    request=cls._notice_remote_operation_request(prepared),
+                    target_record_id=remote_record_id,
+                    expected_record_version=str(
+                        prepared.get("expected_record_version")
+                        or prepared.get("record_version")
+                        or ""
+                    ),
+                )
+                if existing_operation.get("conflict"):
+                    raise RuntimeError(
+                        str(
+                            existing_operation.get("message")
+                            or "通告远端操作记录冲突。"
+                        )
+                    )
+                if str(existing_operation.get("status") or "") not in {
+                    "remote_written",
+                    "completed",
+                }:
+                    cls._mark_notice_remote_operation(
+                        remote_operation_id,
+                        status="remote_written",
+                        target_record_id=remote_record_id,
+                        observed_record_version=str(
+                            prepared.get("record_version") or ""
+                        ),
+                        result={
+                            "record_id": remote_record_id,
+                            "message": str(
+                                current_job.get("remote_result_message") or ""
+                            ),
+                            "recovered_from_job": True,
+                        },
+                    )
+                result_message = str(
+                    current_job.get("remote_result_message")
+                    or "多维已写入，正在恢复本地状态。"
+                )
+                ok = True
+            else:
+                prepared = cls.service.prepare_action_job(job_id)
+                operation_request = cls._notice_remote_operation_request(prepared)
+                operation_lock_key = str(
+                    prepared.get("target_record_id")
+                    or prepared.get("active_item_id")
+                    or prepared.get("source_record_id")
+                    or job_id
+                ).strip()
+                operation = cls._begin_notice_remote_operation(
+                    operation_id=remote_operation_id,
+                    operation_type=str(prepared.get("action") or "notice_action"),
+                    lock_key=operation_lock_key,
+                    request=operation_request,
+                    target_record_id=str(
+                        prepared.get("target_record_id")
+                        or prepared.get("record_id")
+                        or ""
+                    ),
+                    expected_record_version=str(
+                        prepared.get("expected_record_version")
+                        or prepared.get("record_version")
+                        or ""
+                    ),
+                )
+                if operation.get("conflict"):
+                    raise RuntimeError(
+                        str(operation.get("message") or "通告操作编号冲突。")
+                    )
+                if prepared.get("skip_personal_message"):
+                    cls.service.mark_job(
+                        job_id,
+                        phase="qt_queued",
+                        qt_phase="queued",
+                        queue_position=0,
+                        message_sent=True,
+                        message_signature=str(prepared.get("message_signature") or ""),
+                    )
+                else:
+                    cls.service.mark_job(
+                        job_id,
+                        phase="qt_queued",
+                        qt_phase="queued",
+                        queue_position=0,
+                    )
+                if not prepared.get("skip_personal_message"):
+                    cls.service.mark_job(
+                        job_id,
+                        phase="upload_waiting",
+                        qt_phase="backend_upload",
+                        message_sent=bool(prepared.get("message_sent")),
+                        message_signature=str(prepared.get("message_signature") or ""),
+                    )
+                cls.service.mark_job(
+                    job_id,
+                    phase="remote_intent",
+                    qt_phase="backend_upload",
+                    qt_queue_position=0,
+                    qt_queue_size=0,
+                    upload_queue_position=0,
+                    upload_queue_size=0,
+                    remote_operation_id=remote_operation_id,
+                    remote_intent=True,
+                    remote_intent_at=time.time(),
+                    prepared=prepared,
+                )
+                operation_status = str(operation.get("status") or "")
+                operation_target_id = str(
+                    operation.get("target_record_id")
+                    or (operation.get("result") or {}).get("record_id")
+                    or ""
+                ).strip()
+                if (
+                    operation_status in {"remote_written", "completed"}
+                    and operation_target_id
+                ):
+                    ok = True
+                    remote_record_id = operation_target_id
+                    result_message = str(
+                        (operation.get("result") or {}).get("message")
+                        or "远端写入已完成，正在恢复本地状态。"
+                    )
+                    remote_already_written = True
+                else:
+                    reconciled = False
+                    reconciled_record_id = ""
+                    reconcile_message = ""
+                    if not operation.get("created"):
+                        (
+                            reconciled,
+                            reconciled_record_id,
+                            reconcile_message,
+                        ) = cls._reconcile_notice_remote_intent(
+                            prepared,
+                            operation,
+                        )
+                    if reconciled:
+                        ok = True
+                        remote_record_id = reconciled_record_id
+                        result_message = reconcile_message
+                        remote_already_written = True
+                        cls._mark_notice_remote_operation(
+                            remote_operation_id,
+                            status="remote_written",
+                            target_record_id=remote_record_id,
+                            observed_record_version=str(
+                                prepared.get("record_version") or ""
+                            ),
+                            result={
+                                "record_id": remote_record_id,
+                                "message": result_message,
+                                "reconciled": True,
+                            },
+                        )
+                    else:
+                        cls._mark_notice_remote_operation(
+                            remote_operation_id,
+                            status="executing",
+                        )
+                        cls.service.mark_job(
+                            job_id,
+                            phase="uploading",
+                            qt_phase="backend_upload",
+                        )
+                        (
+                            operation_lock_key,
+                            operation_lock_owner,
+                            operation_lock_error,
+                        ) = cls._acquire_event_operation_lock(
+                            prepared,
+                            action_type=str(prepared.get("action") or ""),
+                            target_record_id=str(
+                                prepared.get("target_record_id") or ""
+                            ),
+                            record_id=str(prepared.get("record_id") or ""),
+                        )
+                        if operation_lock_error:
+                            ok = False
+                            result_message = operation_lock_error
+                            remote_record_id = str(
+                                prepared.get("target_record_id")
+                                or prepared.get("record_id")
+                                or ""
+                            )
+                        else:
+                            try:
+                                ok, result_message, remote_record_id = (
+                                    cls._execute_backend_prepared_upload(prepared)
+                                )
+                            finally:
+                                cls._release_event_operation_lock(
+                                    operation_lock_key,
+                                    operation_lock_owner,
+                                )
+                        if ok:
+                            cls._mark_notice_remote_operation(
+                                remote_operation_id,
+                                status="remote_written",
+                                target_record_id=str(remote_record_id or ""),
+                                observed_record_version=str(
+                                    prepared.get("record_version") or ""
+                                ),
+                                result={
+                                    "record_id": str(remote_record_id or ""),
+                                    "message": str(result_message or ""),
+                                },
+                            )
+                        else:
+                            cls._mark_notice_remote_operation(
+                                remote_operation_id,
+                                status="failed",
+                                target_record_id=str(remote_record_id or ""),
+                                error=str(result_message or ""),
+                            )
+                if remote_already_written:
+                    cls.service.mark_job(
+                        job_id,
+                        phase="remote_written",
+                        remote_written=True,
+                        remote_record_id=str(remote_record_id or ""),
+                        target_record_id=str(remote_record_id or ""),
+                        remote_result_message=str(result_message or ""),
+                        remote_operation_id=remote_operation_id,
+                        remote_intent=False,
+                        prepared=prepared,
+                        restart_recovered=True,
+                    )
             if not ok:
                 target_selection = None
                 if cls._remote_record_not_found(result_message) or (
@@ -7412,11 +8649,46 @@ class PortalRuntime:
                     )
                 except Exception:
                     pass
+                try:
+                    cls._mark_notice_remote_operation(
+                        remote_operation_id,
+                        status="failed",
+                        target_record_id=str(remote_record_id or ""),
+                        error=str(result_message or ""),
+                    )
+                except Exception:
+                    pass
                 return
+            resolved_remote_record_id = str(
+                remote_record_id
+                or prepared.get("target_record_id")
+                or prepared.get("record_id")
+                or ""
+            ).strip()
+            if not resolved_remote_record_id:
+                raise RuntimeError(
+                    "多维接口返回成功，但未返回目标记录 ID，已停止后续本地投影。"
+                )
+            if not remote_already_written:
+                cls.service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=resolved_remote_record_id,
+                    target_record_id=resolved_remote_record_id,
+                    remote_result_message=str(result_message or ""),
+                    prepared=prepared,
+                    restart_recovered=False,
+                )
+                current_job = cls.service.get_job(job_id) or {}
             paired_warning = ""
-            if prepared.get("sync_maintenance_target"):
+            paired_upload_completed = bool(current_job.get("paired_upload_completed"))
+            if prepared.get("sync_maintenance_target") and not paired_upload_completed:
                 paired_ok, paired_message, paired_record_id = (
-                    cls._execute_paired_maintenance_upload(prepared)
+                    cls._execute_paired_maintenance_upload(
+                        prepared,
+                        operation_id=f"{remote_operation_id}:paired-maintenance",
+                    )
                 )
                 prepared = cls._apply_paired_maintenance_upload_result(
                     prepared,
@@ -7426,11 +8698,26 @@ class PortalRuntime:
                 )
                 if not paired_ok:
                     paired_warning = f"维保多维同步失败：{paired_message}"
+                cls.service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    prepared=prepared,
+                    paired_upload_completed=True,
+                    paired_upload_status=str(prepared.get("paired_upload_status") or ""),
+                    paired_upload_warning=str(prepared.get("paired_upload_warning") or ""),
+                    paired_maintenance_target_record_id=str(
+                        prepared.get("paired_maintenance_target_record_id") or ""
+                    ),
+                )
+            elif paired_upload_completed:
+                stored_prepared = current_job.get("prepared")
+                if isinstance(stored_prepared, dict) and stored_prepared:
+                    prepared = dict(stored_prepared)
+                paired_warning = str(
+                    current_job.get("paired_upload_warning") or ""
+                ).strip()
 
             action = str(prepared.get("action") or "").strip().lower()
-            resolved_remote_record_id = str(
-                remote_record_id or prepared.get("target_record_id") or ""
-            ).strip()
             if action in {"start", "update"} and resolved_remote_record_id:
                 prepared["target_record_id"] = resolved_remote_record_id
                 if not str(prepared.get("active_item_id") or "").strip():
@@ -7454,7 +8741,28 @@ class PortalRuntime:
                         f"通告远端已成功，但本地进行中状态同步失败: "
                         f"job_id={job_id}, error={exc}"
                     )
-            if not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
+            message_delivery_uncertain = bool(
+                current_job.get("message_delivery_uncertain")
+            )
+            if (
+                message_delivery_uncertain
+                and not prepared.get("skip_personal_message")
+                and not prepared.get("message_sent")
+            ):
+                warning = (
+                    "多维上传成功；程序重启前个人消息发送结果无法确认，"
+                    "为避免重复通知未自动重发，可复制通告文本。"
+                )
+                cls.service.mark_job(
+                    job_id,
+                    message_warning=warning,
+                    message_failed=True,
+                    message_failed_continue=True,
+                    message_sent=False,
+                    message_queue_position=0,
+                    queue_position=0,
+                )
+            elif not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
                 cls.service.mark_job(
                     job_id,
                     phase="sending_message",
@@ -7546,6 +8854,19 @@ class PortalRuntime:
                 record_id=resolved_remote_record_id,
                 active_item_id=str(prepared.get("active_item_id") or ""),
             )
+            cls._mark_notice_remote_operation(
+                remote_operation_id,
+                status="completed",
+                target_record_id=resolved_remote_record_id,
+                observed_record_version=str(
+                    prepared.get("record_version") or ""
+                ),
+                result={
+                    "record_id": resolved_remote_record_id,
+                    "message": str(result_message or ""),
+                    "action": str(prepared.get("action") or ""),
+                },
+            )
             if action == "end":
                 try:
                     event_id = cls._enqueue_active_delete_for_ended_notice(
@@ -7573,6 +8894,21 @@ class PortalRuntime:
                 pass
         except Exception as exc:
             cls.service.mark_job(job_id, phase="failed", error=str(exc))
+            try:
+                operation = cls._get_notice_remote_operation(
+                    remote_operation_id
+                )
+                if operation and str(operation.get("status") or "") not in {
+                    "remote_written",
+                    "completed",
+                }:
+                    cls._mark_notice_remote_operation(
+                        remote_operation_id,
+                        status="failed",
+                        error=str(exc),
+                    )
+            except Exception:
+                pass
             try:
                 cls.state_store.mark_runtime_queue_item(
                     "qt_action",

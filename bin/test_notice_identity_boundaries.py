@@ -1338,14 +1338,11 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             ) as delete_record:
                 result = PortalRuntime.execute_local_delete_active_item(payload)
 
-            self.assertTrue(result.get("ok"))
+            self.assertFalse(result.get("ok"))
             self.assertFalse(result.get("remote_deleted"))
-            self.assertIn("仅移除本地显示", result.get("message", ""))
-            self.assertEqual(fake_state.deleted, [("active-event-1", "recMissingEvent")])
-            self.assertEqual(
-                fake_state.identity_deleted[0]["target_record_id"],
-                "recMissingEvent",
-            )
+            self.assertIn("本地显示已保留", result.get("message", ""))
+            self.assertEqual(fake_state.deleted, [])
+            self.assertEqual(fake_state.identity_deleted, [])
             delete_record.assert_not_called()
         finally:
             PortalRuntime.state_store = old_state_store

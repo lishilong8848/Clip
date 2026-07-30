@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -84,6 +85,172 @@ class StateStoreLightweightMetaTests(unittest.TestCase):
             self.assertEqual(deleted_meta["active"], 0)
             self.assertEqual(deleted_meta["deleted"], 1)
             self.assertGreaterEqual(deleted_meta["updated_at"], qt_meta["updated_at"])
+
+    def test_source_table_snapshots_advance_independently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            maintenance_v1 = store.replace_source_table_snapshot(
+                "maintenance",
+                {
+                    "A": [
+                        {
+                            "record_id": "maintenance-v1",
+                            "work_type": "maintenance",
+                        }
+                    ]
+                },
+            )
+            change_v1 = store.replace_source_table_snapshot(
+                "change",
+                {
+                    "A": [
+                        {
+                            "record_id": "change-v1",
+                            "work_type": "change",
+                        }
+                    ]
+                },
+            )
+            maintenance_v2 = store.replace_source_table_snapshot(
+                "maintenance",
+                {
+                    "A": [
+                        {
+                            "record_id": "maintenance-v2",
+                            "work_type": "maintenance",
+                        }
+                    ]
+                },
+            )
+            store.record_failed_source_table_snapshot(
+                "change",
+                error="change unavailable",
+            )
+
+            maintenance = store.get_source_table_scope_snapshot(
+                "maintenance", "A"
+            )
+            change = store.get_source_table_scope_snapshot("change", "A")
+            combined = store.get_source_scope_snapshot("A")
+            active_meta = store.active_source_snapshot_meta()
+            work_type_stats = store.source_snapshot_work_type_stats()
+
+            self.assertNotEqual(
+                maintenance_v1["snapshot_id"],
+                maintenance_v2["snapshot_id"],
+            )
+            self.assertEqual(
+                maintenance["snapshot_id"],
+                maintenance_v2["snapshot_id"],
+            )
+            self.assertEqual(change["snapshot_id"], change_v1["snapshot_id"])
+            self.assertEqual(
+                {item["record_id"] for item in combined["records"]},
+                {"maintenance-v2", "change-v1"},
+            )
+            self.assertEqual(
+                active_meta["source_versions"]["change"]["snapshot_id"],
+                change_v1["snapshot_id"],
+            )
+            self.assertEqual(
+                work_type_stats["snapshot_ids"]["maintenance"],
+                maintenance_v2["snapshot_id"],
+            )
+            self.assertEqual(
+                work_type_stats["snapshot_ids"]["change"],
+                change_v1["snapshot_id"],
+            )
+            self.assertEqual(work_type_stats["totals"]["maintenance"], 1)
+            self.assertEqual(work_type_stats["totals"]["change"], 1)
+
+    def test_notice_remote_operation_replays_across_store_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.sqlite3"
+            store = LanPortalStateStore(db_path)
+            created = store.begin_notice_remote_operation(
+                operation_id="operation-1",
+                operation_type="update",
+                lock_key="maintenance:target:rec-1",
+                request={"action": "update", "target_record_id": "rec-1"},
+                target_record_id="rec-1",
+                expected_record_version="version-1",
+            )
+            self.assertTrue(created["created"])
+            store.mark_notice_remote_operation(
+                "operation-1",
+                status="remote_written",
+                target_record_id="rec-1",
+                observed_record_version="version-2",
+                result={"record_id": "rec-1"},
+            )
+
+            reopened = LanPortalStateStore(db_path)
+            replay = reopened.begin_notice_remote_operation(
+                operation_id="operation-1",
+                operation_type="update",
+                lock_key="maintenance:target:rec-1",
+                request={"action": "update", "target_record_id": "rec-1"},
+                target_record_id="rec-1",
+                expected_record_version="version-1",
+            )
+            conflict = reopened.begin_notice_remote_operation(
+                operation_id="operation-1",
+                operation_type="update",
+                lock_key="maintenance:target:rec-1",
+                request={"action": "end", "target_record_id": "rec-1"},
+                target_record_id="rec-1",
+            )
+
+            self.assertFalse(replay["created"])
+            self.assertTrue(replay["replay"])
+            self.assertEqual(replay["status"], "remote_written")
+            self.assertEqual(replay["observed_record_version"], "version-2")
+            self.assertTrue(conflict["conflict"])
+
+    def test_notice_remote_operation_cleanup_preserves_recoverable_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            for operation_id in (
+                "operation-completed",
+                "operation-failed",
+                "operation-executing",
+            ):
+                store.begin_notice_remote_operation(
+                    operation_id=operation_id,
+                    operation_type="update",
+                    request={"operation_id": operation_id},
+                )
+            store.mark_notice_remote_operation(
+                "operation-completed",
+                status="completed",
+            )
+            store.mark_notice_remote_operation(
+                "operation-failed",
+                status="failed",
+            )
+            store.mark_notice_remote_operation(
+                "operation-executing",
+                status="executing",
+            )
+
+            removed = store.cleanup_notice_remote_operations(
+                completed_before=time.time() + 1,
+                failed_before=time.time() + 1,
+            )
+
+            self.assertEqual(removed, 2)
+            self.assertIsNone(
+                store.get_notice_remote_operation("operation-completed")
+            )
+            self.assertIsNone(
+                store.get_notice_remote_operation("operation-failed")
+            )
+            self.assertEqual(
+                store.get_notice_remote_operation("operation-executing")[
+                    "status"
+                ],
+                "executing",
+            )
 
     def test_repair_snapshot_page_filters_before_decoding_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:

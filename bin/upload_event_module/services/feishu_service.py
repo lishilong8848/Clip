@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 import os
 import tempfile
@@ -180,6 +181,7 @@ def _get_bitable_fields(notice_type: str) -> list:
         client = _build_client()
         field_names = []
         page_token = ""
+        seen_page_tokens: set[str] = set()
 
         while True:
             builder = (
@@ -207,9 +209,20 @@ def _get_bitable_fields(notice_type: str) -> list:
 
             if not bool(getattr(data, "has_more", False)):
                 break
-            page_token = str(getattr(data, "page_token", "") or "").strip()
-            if not page_token:
-                break
+            next_page_token = str(
+                getattr(data, "page_token", "") or ""
+            ).strip()
+            if (
+                not next_page_token
+                or next_page_token == page_token
+                or next_page_token in seen_page_tokens
+            ):
+                log_error(
+                    "获取多维表格字段失败: 飞书字段分页返回缺失或重复的 page_token"
+                )
+                return []
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
 
         with _field_cache_lock:
             _field_cache[notice_key] = list(field_names)
@@ -819,7 +832,28 @@ def query_record_by_id(record_id, notice_type):
         return False, error_msg
 
     record = response.data.record
-    record_data = {"record_id": record.record_id, "fields": record.fields}
+    fields = record.fields if isinstance(record.fields, dict) else {}
+    stable_fields = json.dumps(
+        fields,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    last_modified_time = str(
+        getattr(record, "last_modified_time", "")
+        or getattr(record, "updated_at", "")
+        or ""
+    ).strip()
+    version_source = f"{last_modified_time}\n{stable_fields}"
+    record_data = {
+        "record_id": record.record_id,
+        "fields": fields,
+        "last_modified_time": last_modified_time,
+        "record_version": hashlib.sha256(
+            version_source.encode("utf-8")
+        ).hexdigest(),
+    }
     log_info(f"飞书查询记录: 成功, record_id={record.record_id}")
     return True, record_data
 

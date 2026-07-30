@@ -1331,6 +1331,10 @@ class MainWindowRuntimeMixin:
             return {"ok": False, "error": "该条目正在上传，请等待完成后再删除。"}
         remote_deleted = False
         remote_message = ""
+        data["operation_id"] = str(
+            data.get("operation_id") or f"qt-delete:{uuid.uuid4().hex}"
+        )
+        item.setData(Qt.ItemDataRole.UserRole, dict(data))
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return {"ok": False, "error": "本机后端未连接，Qt 不再直接执行多维删除。"}
