@@ -6978,6 +6978,147 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.service = original_service
                 PortalRuntime.state_store = original_state_store
 
+    def test_notice_delete_recovers_after_remote_deleted_before_ledger_update(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            item = {
+                "active_item_id": "active-delete-recovery",
+                "record_id": "target-delete-recovery",
+                "target_record_id": "target-delete-recovery",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "A楼删除中断恢复测试",
+                "building": "A楼",
+                "building_codes": ["A"],
+            }
+            store.upsert_qt_active_item(item, section="other", origin="web")
+            operation_id = "delete-recovery-operation"
+            store.begin_notice_remote_operation(
+                operation_id=operation_id,
+                operation_type="delete",
+                lock_key="maintenance:target:target-delete-recovery",
+                request={
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "active_item_id": "active-delete-recovery",
+                    "source_record_id": "",
+                    "target_record_id": "target-delete-recovery",
+                },
+                target_record_id="target-delete-recovery",
+            )
+            store.mark_notice_remote_operation(
+                operation_id,
+                status="verified",
+                target_record_id="target-delete-recovery",
+                result={"undo_id": "undo-delete-recovery"},
+            )
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        False,
+                        "查询记录失败:1254043-RecordIdNotFound",
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "delete_bitable_record",
+                ) as delete_record:
+                    result = PortalRuntime.execute_local_delete_active_item(
+                        {
+                            **item,
+                            "scope": "A",
+                            "operation_id": "delete-recovery-after-page-reload",
+                        }
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["remote_deleted"])
+                self.assertEqual(result["operation_id"], operation_id)
+                self.assertEqual(result["undo_id"], "undo-delete-recovery")
+                self.assertEqual(store.list_qt_active_items(), [])
+                self.assertEqual(
+                    store.get_notice_remote_operation(operation_id)["status"],
+                    "completed",
+                )
+                delete_record.assert_not_called()
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
+    def test_notice_delete_keeps_qt_item_when_identity_cleanup_fails(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            item = {
+                "active_item_id": "active-delete-cleanup-failure",
+                "record_id": "target-delete-cleanup-failure",
+                "target_record_id": "target-delete-cleanup-failure",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "A楼删除本地清理失败测试",
+                "building": "A楼",
+                "building_codes": ["A"],
+            }
+            store.upsert_qt_active_item(item, section="other", origin="web")
+            operation_id = "delete-cleanup-failure-operation"
+            store.begin_notice_remote_operation(
+                operation_id=operation_id,
+                operation_type="delete",
+                request={"target_record_id": item["target_record_id"]},
+                target_record_id=item["target_record_id"],
+            )
+            store.mark_notice_remote_operation(
+                operation_id,
+                status="remote_written",
+                result={"remote_deleted": True},
+            )
+            try:
+                with patch.object(
+                    store,
+                    "mark_notice_identity_deleted",
+                    side_effect=RuntimeError("sqlite identity locked"),
+                ):
+                    result = PortalRuntime._finalize_local_delete_after_remote(
+                        operation_id=operation_id,
+                        work_type="maintenance",
+                        active_item_id=item["active_item_id"],
+                        source_record_id="",
+                        target_record_id=item["target_record_id"],
+                        checkpoint_id="",
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["remote_deleted"])
+                self.assertIn("sqlite identity locked", result["message"])
+                self.assertEqual(len(store.list_qt_active_items()), 1)
+                self.assertEqual(
+                    store.get_notice_remote_operation(operation_id)["status"],
+                    "remote_written",
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
     def test_server_get_ongoing_reads_qt_active_items_before_qt_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -14369,6 +14510,231 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(first[2], "rec-paired")
         self.assertEqual(second[2], "rec-paired")
         execute_upload.assert_called_once()
+
+    def test_remote_reconcile_accepts_appended_change_update_time(self):
+        prepared = {
+            "action": "update",
+            "notice_type": "变更通告",
+            "work_type": "change",
+            "scope": "A",
+            "title": "EA118机房A楼变更重放测试",
+            "specialty": "电气",
+            "buildings": ["A楼"],
+            "response_time": "2026-07-30 10:00",
+            "text": (
+                "【变更通告】状态：更新\n"
+                "【名称】EA118机房A楼变更重放测试\n"
+                "【等级】低风险\n"
+                "【时间】2026-07-30 09:00~2026-07-30 18:00\n"
+                "【位置】A楼\n"
+                "【内容】测试\n"
+                "【原因】测试\n"
+                "【影响】无\n"
+                "【进度】执行中"
+            ),
+        }
+        desired = ChangeNoticeHandler().build_update_fields(
+            PortalRuntime._prepared_to_notice_payload(prepared)
+        )
+        desired[CHANGE_NOTICE_FIELDS["update_time"]] = (
+            "1、2026/07/29 10:00   2、2026/07/30 10:00"
+        )
+
+        self.assertTrue(
+            PortalRuntime._remote_record_matches_prepared(
+                prepared,
+                {"fields": desired},
+            )
+        )
+
+    def test_durable_start_reconciles_unique_remote_candidate(self):
+        original_service = PortalRuntime.service
+        original_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            prepared = {
+                "action": "start",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "scope": "A",
+                "active_item_id": "active-replayed-start",
+                "source_record_id": "source-replayed-start",
+                "title": "EA118机房A楼维保重放测试",
+                "specialty": "电气",
+                "buildings": ["A楼"],
+                "text": (
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房A楼维保重放测试\n"
+                    "【时间】2026-07-30 09:00~2026-07-30 18:00\n"
+                    "【位置】A楼\n"
+                    "【内容】测试\n"
+                    "【原因】测试\n"
+                    "【影响】无\n"
+                    "【进度】准备完成"
+                ),
+            }
+            operation_id = "replayed-start-operation"
+            store.begin_notice_remote_operation(
+                operation_id=operation_id,
+                operation_type="start",
+                request=PortalRuntime._notice_remote_operation_request(prepared),
+            )
+            store.mark_notice_remote_operation(
+                operation_id,
+                status="executing",
+            )
+            remote_fields = MaintenanceNoticeHandler().build_create_fields(
+                PortalRuntime._prepared_to_notice_payload(prepared)
+            )
+            try:
+                with (
+                    patch.object(
+                        service,
+                        "lookup_notice_target_candidates",
+                        return_value={
+                            "candidates": [
+                                {
+                                    "record_id": "rec-replayed-start",
+                                    "title_matched": True,
+                                    "date_matched": True,
+                                }
+                            ],
+                            "limited": False,
+                        },
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "external_real_write_guard",
+                        return_value={
+                            "mock_external": False,
+                            "real_write_allowed": True,
+                            "reason": "",
+                        },
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        return_value=(
+                            True,
+                            {
+                                "fields": remote_fields,
+                                "record_version": "version-replayed",
+                            },
+                        ),
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_execute_backend_prepared_upload",
+                    ) as execute_upload,
+                ):
+                    result = PortalRuntime._execute_durable_prepared_upload(
+                        prepared,
+                        operation_id=operation_id,
+                        operation_type="start",
+                    )
+
+                self.assertTrue(result[0])
+                self.assertEqual(result[2], "rec-replayed-start")
+                execute_upload.assert_not_called()
+                self.assertEqual(
+                    store.get_notice_remote_operation(operation_id)["status"],
+                    "completed",
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_store
+
+    def test_durable_start_blocks_ambiguous_remote_replay(self):
+        original_service = PortalRuntime.service
+        original_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            prepared = {
+                "action": "start",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "scope": "A",
+                "active_item_id": "active-ambiguous-start",
+                "source_record_id": "source-ambiguous-start",
+                "title": "EA118机房A楼维保重放冲突",
+                "specialty": "电气",
+                "buildings": ["A楼"],
+                "text": (
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房A楼维保重放冲突\n"
+                    "【时间】2026-07-30 09:00~2026-07-30 18:00\n"
+                    "【位置】A楼\n"
+                    "【内容】测试\n"
+                    "【原因】测试\n"
+                    "【影响】无\n"
+                    "【进度】准备完成"
+                ),
+            }
+            operation_id = "ambiguous-start-operation"
+            store.begin_notice_remote_operation(
+                operation_id=operation_id,
+                operation_type="start",
+                request=PortalRuntime._notice_remote_operation_request(prepared),
+            )
+            store.mark_notice_remote_operation(
+                operation_id,
+                status="executing",
+            )
+            remote_fields = MaintenanceNoticeHandler().build_create_fields(
+                PortalRuntime._prepared_to_notice_payload(prepared)
+            )
+            try:
+                with (
+                    patch.object(
+                        service,
+                        "lookup_notice_target_candidates",
+                        return_value={
+                            "candidates": [
+                                {"record_id": "rec-ambiguous-1"},
+                                {"record_id": "rec-ambiguous-2"},
+                            ],
+                            "limited": False,
+                        },
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "external_real_write_guard",
+                        return_value={
+                            "mock_external": False,
+                            "real_write_allowed": True,
+                            "reason": "",
+                        },
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        return_value=(True, {"fields": remote_fields}),
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_execute_backend_prepared_upload",
+                    ) as execute_upload,
+                ):
+                    result = PortalRuntime._execute_durable_prepared_upload(
+                        prepared,
+                        operation_id=operation_id,
+                        operation_type="start",
+                    )
+
+                self.assertFalse(result[0])
+                self.assertIn("多条完全匹配", result[1])
+                execute_upload.assert_not_called()
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_store
 
     def test_remote_written_action_job_recovery_does_not_repeat_remote_upload(self):
         with tempfile.TemporaryDirectory() as tmp:

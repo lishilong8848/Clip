@@ -18,7 +18,10 @@ from lan_bitable_template_portal.identity_utils import (  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from lan_bitable_template_portal import workbench_lite  # noqa: E402
-from upload_event_module.config import EVENT_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.config import (  # noqa: E402
+    EVENT_NOTICE_FIELDS,
+    MAINTENANCE_NOTICE_FIELDS,
+)
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.event_notice import EventNoticeHandler  # noqa: E402
@@ -1062,6 +1065,39 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
 
         self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
 
+    def test_notice_delete_blocks_same_title_with_different_start_time(self) -> None:
+        payload = {
+            "notice_type": "维保通告",
+            "title": "EA118机房A楼同名维保",
+            "building": "A楼",
+            "buildings": ["A楼"],
+            "specialty": "电气",
+            "start_time": "2026-07-30 09:00",
+        }
+        matching_fields = {
+            MAINTENANCE_NOTICE_FIELDS["name"]: "EA118机房A楼同名维保",
+            MAINTENANCE_NOTICE_FIELDS["building"]: "A楼",
+            MAINTENANCE_NOTICE_FIELDS["specialty"]: "电气",
+            MAINTENANCE_NOTICE_FIELDS["plan_start"]: "2026-07-30 09:00",
+        }
+        other_time_fields = {
+            **matching_fields,
+            MAINTENANCE_NOTICE_FIELDS["plan_start"]: "2026-07-30 10:00",
+        }
+
+        self.assertTrue(
+            PortalRuntime._validate_notice_delete_target(
+                payload,
+                matching_fields,
+            )[0]
+        )
+        allowed, message = PortalRuntime._validate_notice_delete_target(
+            payload,
+            other_time_fields,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("开始时间不一致", message)
+
     def test_event_existing_target_requires_same_event_time(self) -> None:
         class FakeStateStore:
             def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
@@ -1290,7 +1326,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             PortalRuntime.service = old_service
             PortalRuntime.local_upload_created_targets = old_created_targets
 
-    def test_event_delete_missing_remote_only_removes_local_item(self) -> None:
+    def test_event_delete_missing_remote_preserves_local_item(self) -> None:
         class FakeStateStore:
             def __init__(self) -> None:
                 self.deleted = []

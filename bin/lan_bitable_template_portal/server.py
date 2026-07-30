@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime as dt
 import hashlib
 import html
 import json
@@ -40,7 +41,11 @@ from .identity_utils import (
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
-from upload_event_module.config import EVENT_NOTICE_FIELDS, get_field_config
+from upload_event_module.config import (
+    CHANGE_NOTICE_FIELDS,
+    EVENT_NOTICE_FIELDS,
+    get_field_config,
+)
 from upload_event_module.services.handlers import NoticePayload, get_notice_handler
 from upload_event_module.services.service_registry import (
     create_bitable_record_fields,
@@ -2965,14 +2970,26 @@ class PortalRuntime:
                     return self._send_json(500, {"ok": False, "error": str(exc)})
                 if isinstance(accepted, dict):
                     qt_deleted = bool(accepted.get("ok"))
-                    error = str(accepted.get("error") or "").strip()
+                    error = str(
+                        accepted.get("error")
+                        or accepted.get("message")
+                        or ""
+                    ).strip()
                 else:
                     qt_deleted = bool(accepted)
                     error = ""
                 if not qt_deleted:
                     return self._send_json(
                         409,
-                        {"ok": False, "error": error or "Qt 主界面拒绝删除该条目。"},
+                        {
+                            "ok": False,
+                            "error": error or "Qt 主界面拒绝删除该条目。",
+                            "data": (
+                                dict(accepted)
+                                if isinstance(accepted, dict)
+                                else {}
+                            ),
+                        },
                     )
                 data = self.service.hide_ongoing_item(
                     payload,
@@ -5444,6 +5461,76 @@ class PortalRuntime:
                 "已阻止删除：当前通告与目标多维记录的楼栋不一致，"
                 "请先核对绑定记录。",
             )
+        local_specialty = str(prepared.get("specialty") or "").strip()
+        specialty_field = str(field_config.get("specialty") or "").strip()
+        remote_specialty = cls._remote_compare_value(
+            remote_fields.get(specialty_field)
+            if specialty_field
+            else ""
+        )
+        if isinstance(remote_specialty, list):
+            remote_specialty = "、".join(
+                str(item or "").strip()
+                for item in remote_specialty
+                if str(item or "").strip()
+            )
+        if (
+            local_specialty
+            and str(remote_specialty or "").strip()
+            and local_specialty not in str(remote_specialty)
+            and str(remote_specialty) not in local_specialty
+        ):
+            return (
+                False,
+                "已阻止删除：当前通告与目标多维记录的专业不一致，"
+                "请先核对绑定记录。",
+            )
+
+        if notice_type == "设备检修":
+            time_pairs = (
+                (
+                    prepared.get("fault_time") or prepared.get("end_time"),
+                    field_config.get("fault_time"),
+                    "发生故障时间",
+                ),
+                (
+                    prepared.get("expected_time") or prepared.get("start_time"),
+                    field_config.get("expected_time"),
+                    "期望完成时间",
+                ),
+            )
+        else:
+            time_pairs = (
+                (
+                    prepared.get("start_time"),
+                    field_config.get("start_time")
+                    or field_config.get("plan_start"),
+                    "开始时间",
+                ),
+                (
+                    prepared.get("end_time"),
+                    field_config.get("plan_end"),
+                    "结束时间",
+                ),
+            )
+        for local_time, remote_field_name, label in time_pairs:
+            remote_field_name = str(remote_field_name or "").strip()
+            if not local_time or not remote_field_name:
+                continue
+            local_time_keys = cls._remote_datetime_minute_keys(local_time)
+            remote_time_keys = cls._remote_datetime_minute_keys(
+                remote_fields.get(remote_field_name)
+            )
+            if (
+                local_time_keys
+                and remote_time_keys
+                and not (local_time_keys & remote_time_keys)
+            ):
+                return (
+                    False,
+                    f"已阻止删除：当前通告与目标多维记录的{label}不一致，"
+                    "请先核对绑定记录。",
+                )
         return True, ""
 
     @classmethod
@@ -6128,6 +6215,79 @@ class PortalRuntime:
             return value.strip()
         return value
 
+    @staticmethod
+    def _remote_datetime_minute_keys(value: Any) -> set[str]:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000.0
+            with suppress(ValueError, OSError, OverflowError):
+                return {dt.datetime.fromtimestamp(timestamp).strftime("%Y%m%d%H%M")}
+        text = str(value or "")
+        stripped = text.strip()
+        if stripped.isdigit():
+            timestamp = float(stripped)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000.0
+            with suppress(ValueError, OSError, OverflowError):
+                return {dt.datetime.fromtimestamp(timestamp).strftime("%Y%m%d%H%M")}
+        keys: set[str] = set()
+        for match in re.finditer(
+            r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})"
+            r"\D+(\d{1,2})\D+(\d{1,2})",
+            text,
+        ):
+            try:
+                parsed = dt.datetime(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                    int(match.group(4)),
+                    int(match.group(5)),
+                )
+            except (TypeError, ValueError):
+                continue
+            keys.add(parsed.strftime("%Y%m%d%H%M"))
+        return keys
+
+    @classmethod
+    def _remote_append_field_matches(
+        cls,
+        field_name: str,
+        desired_value: Any,
+        remote_value: Any,
+    ) -> bool | None:
+        append_fields = {
+            str(CHANGE_NOTICE_FIELDS.get("update_time") or "").strip(),
+            str(EVENT_NOTICE_FIELDS.get("progress_update") or "").strip(),
+        }
+        if str(field_name or "").strip() not in append_fields:
+            return None
+        desired_keys = cls._remote_datetime_minute_keys(desired_value)
+        remote_keys = cls._remote_datetime_minute_keys(remote_value)
+        if desired_keys:
+            return bool(desired_keys & remote_keys)
+        desired_text = re.sub(r"^\s*\d+\s*[、.．]\s*", "", str(desired_value or ""))
+        desired_text = re.sub(r"\s+", "", desired_text)
+        remote_text = re.sub(r"\s+", "", str(remote_value or ""))
+        return bool(desired_text and desired_text in remote_text)
+
+    @staticmethod
+    def _remote_values_equal(desired_value: Any, remote_value: Any) -> bool:
+        if isinstance(desired_value, list) and isinstance(remote_value, list):
+            desired_items = sorted(str(item or "").strip() for item in desired_value)
+            remote_items = sorted(str(item or "").strip() for item in remote_value)
+            return desired_items == remote_items
+        if isinstance(desired_value, list) and len(desired_value) == 1:
+            return str(desired_value[0] or "").strip() == str(
+                remote_value or ""
+            ).strip()
+        if isinstance(remote_value, list) and len(remote_value) == 1:
+            return str(desired_value or "").strip() == str(
+                remote_value[0] or ""
+            ).strip()
+        return desired_value == remote_value
+
     @classmethod
     def _remote_record_matches_prepared(
         cls, prepared: dict, query_result: dict
@@ -6162,17 +6322,121 @@ class PortalRuntime:
             normalized_remote = cls._remote_compare_value(
                 remote_fields.get(field_name)
             )
-            if normalized_remote != normalized_desired:
+            append_match = cls._remote_append_field_matches(
+                field_name,
+                normalized_desired,
+                normalized_remote,
+            )
+            if append_match is not None:
+                if not append_match:
+                    return False
+                compared += 1
+                continue
+            if not cls._remote_values_equal(
+                normalized_desired,
+                normalized_remote,
+            ):
                 return False
             compared += 1
         return compared >= 2
 
+    @staticmethod
+    def _remote_operation_outcome_uncertain(operation: dict) -> bool:
+        status = str((operation or {}).get("status") or "").strip().lower()
+        if status == "executing":
+            return True
+        if status != "failed":
+            return False
+        error = str((operation or {}).get("error") or "").strip().lower()
+        if not error:
+            return True
+        uncertain_markers = (
+            "timeout",
+            "timed out",
+            "超时",
+            "connection",
+            "network",
+            "handshake",
+            "连接",
+            "网络",
+            "ssl",
+            "eof",
+            "reset",
+            "502",
+            "503",
+            "504",
+        )
+        return any(marker in error for marker in uncertain_markers)
+
+    @classmethod
+    def _find_replayed_start_target(
+        cls,
+        prepared: dict,
+        notice_type: str,
+    ) -> tuple[str, str]:
+        prepared = cls._enrich_prepared_notice_lookup_fields(prepared)
+        title = str(prepared.get("title") or "").strip()
+        if not title:
+            return "", "开始通告重放时缺少标题，无法安全核对远端记录。"
+        work_type = str(prepared.get("work_type") or "").strip()
+        if not work_type:
+            work_type = cls._notice_work_type_from_notice_type(notice_type)
+        try:
+            result = cls.service.lookup_notice_target_candidates(
+                work_type=work_type,
+                scope=str(prepared.get("scope") or "ALL").strip() or "ALL",
+                title=title,
+                start_time=str(prepared.get("start_time") or ""),
+                end_time=str(prepared.get("end_time") or ""),
+                action="start",
+                content=str(prepared.get("content") or ""),
+                reason=str(prepared.get("reason") or ""),
+                impact=str(prepared.get("impact") or ""),
+                progress=str(prepared.get("progress") or ""),
+                text=str(prepared.get("text") or ""),
+                limit=80,
+            )
+        except Exception as exc:
+            return "", f"开始通告远端结果核对失败：{exc}"
+        matched_ids: list[str] = []
+        query_errors: list[str] = []
+        for candidate in result.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            record_id = cls._candidate_target_record_id(candidate)
+            if not record_id or record_id in matched_ids:
+                continue
+            ok_query, query_result = query_record_by_id(record_id, notice_type)
+            if not ok_query or not isinstance(query_result, dict):
+                query_errors.append(str(query_result or record_id))
+                continue
+            if cls._remote_record_matches_prepared(prepared, query_result):
+                matched_ids.append(record_id)
+        if len(matched_ids) == 1:
+            return matched_ids[0], ""
+        if len(matched_ids) > 1:
+            return (
+                "",
+                "开始通告远端结果存在多条完全匹配记录，"
+                "已停止自动重写，避免重复创建。",
+            )
+        if query_errors:
+            return "", f"开始通告候选记录核对失败：{query_errors[0]}"
+        if bool(result.get("limited")):
+            return (
+                "",
+                "开始通告候选记录超过安全核对范围，"
+                "已停止自动重写，避免重复创建。",
+            )
+        return "", ""
+
     @classmethod
     def _reconcile_notice_remote_intent(
         cls, prepared: dict, operation: dict
-    ) -> tuple[bool, str, str]:
+    ) -> tuple[bool, str, str, bool]:
         notice_type = str(prepared.get("notice_type") or "").strip()
         action = str(prepared.get("action") or "").strip().lower()
+        outcome_uncertain = cls._remote_operation_outcome_uncertain(operation)
         target_record_id = str(
             operation.get("target_record_id")
             or prepared.get("target_record_id")
@@ -6184,26 +6448,56 @@ class PortalRuntime:
                 prepared,
                 notice_type,
             )
+            if not target_record_id and outcome_uncertain:
+                target_record_id, replay_error = cls._find_replayed_start_target(
+                    prepared,
+                    notice_type,
+                )
+                if replay_error:
+                    return False, "", replay_error, True
+                if not target_record_id:
+                    return (
+                        False,
+                        "",
+                        "开始通告的远端写入结果暂时无法确认，"
+                        "已停止自动重写，避免重复创建；请稍后重试。",
+                        True,
+                    )
         if not target_record_id or is_local_record_id(target_record_id):
-            return False, "", ""
+            return False, "", "", False
         guard = external_real_write_guard()
         if guard.get("mock_external"):
-            return True, target_record_id, "测试环境已确认远端写入。"
+            return True, target_record_id, "测试环境已确认远端写入。", False
         ok_query, query_result = query_record_by_id(
             target_record_id,
             notice_type,
         )
         if not ok_query or not isinstance(query_result, dict):
-            return False, "", str(query_result or "")
+            return (
+                False,
+                "",
+                str(query_result or ""),
+                outcome_uncertain,
+            )
         if not cls._remote_record_matches_prepared(prepared, query_result):
-            return False, "", "远端记录存在，但内容尚未达到本次操作目标。"
+            return (
+                False,
+                "",
+                "远端记录存在，但内容尚未达到本次操作目标。",
+                False,
+            )
         prepared["record_version"] = str(
             query_result.get("record_version") or ""
         ).strip()
         prepared["remote_last_modified_time"] = str(
             query_result.get("last_modified_time") or ""
         ).strip()
-        return True, target_record_id, "已核对远端记录，本次操作不再重复提交。"
+        return (
+            True,
+            target_record_id,
+            "已核对远端记录，本次操作不再重复提交。",
+            False,
+        )
 
     @classmethod
     def _execute_backend_prepared_upload(
@@ -6424,7 +6718,12 @@ class PortalRuntime:
                     operation_record_id,
                 )
             if not operation.get("created"):
-                reconciled, reconciled_record_id, reconciled_message = (
+                (
+                    reconciled,
+                    reconciled_record_id,
+                    reconciled_message,
+                    reconcile_blocked,
+                ) = (
                     cls._reconcile_notice_remote_intent(prepared, operation)
                 )
                 if reconciled:
@@ -6443,6 +6742,14 @@ class PortalRuntime:
                         error="",
                     )
                     return True, reconciled_message, reconciled_record_id
+                if reconcile_blocked:
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="failed",
+                        target_record_id=operation_record_id,
+                        error=reconciled_message,
+                    )
+                    return False, reconciled_message, operation_record_id
             cls._mark_notice_remote_operation(
                 operation_id,
                 status="executing",
@@ -7221,8 +7528,14 @@ class PortalRuntime:
                 reconciled = False
                 reconciled_record_id = ""
                 reconcile_message = ""
+                reconcile_blocked = False
                 if not operation.get("created"):
-                    reconciled, reconciled_record_id, reconcile_message = (
+                    (
+                        reconciled,
+                        reconciled_record_id,
+                        reconcile_message,
+                        reconcile_blocked,
+                    ) = (
                         cls._reconcile_notice_remote_intent(
                             operation_prepared,
                             operation,
@@ -7254,6 +7567,21 @@ class PortalRuntime:
                         "record_id": record_id,
                         "real_record_id": reconciled_record_id,
                         "deduped": True,
+                    }
+                if reconcile_blocked:
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="failed",
+                        target_record_id=operation_target,
+                        error=reconcile_message,
+                    )
+                    return {
+                        "ok": False,
+                        "name": "上传",
+                        "message": reconcile_message,
+                        "record_id": record_id,
+                        "real_record_id": operation_target,
+                        "remote_result_uncertain": True,
                     }
                 if dedupe_key:
                     cached_target = str(
@@ -7569,8 +7897,14 @@ class PortalRuntime:
             reconciled = False
             reconciled_record_id = ""
             reconcile_message = ""
+            reconcile_blocked = False
             if not operation.get("created"):
-                reconciled, reconciled_record_id, reconcile_message = (
+                (
+                    reconciled,
+                    reconciled_record_id,
+                    reconcile_message,
+                    reconcile_blocked,
+                ) = (
                     cls._reconcile_notice_remote_intent(
                         operation_prepared,
                         operation,
@@ -7583,6 +7917,11 @@ class PortalRuntime:
                 data["record_id"] = target_record_id
                 data["record_version"] = str(
                     operation_prepared.get("record_version") or ""
+                )
+            elif reconcile_blocked:
+                success, result = False, (
+                    reconcile_message
+                    or "远端写入结果暂时无法确认，已停止重复提交。"
                 )
             else:
                 cls._mark_notice_remote_operation(
@@ -7764,6 +8103,76 @@ class PortalRuntime:
         }
 
     @classmethod
+    def _finalize_local_delete_after_remote(
+        cls,
+        *,
+        operation_id: str,
+        work_type: str,
+        active_item_id: str,
+        source_record_id: str,
+        target_record_id: str,
+        checkpoint_id: str,
+    ) -> dict:
+        try:
+            cls.state_store.mark_notice_identity_deleted(
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+            )
+            cls.state_store.delete_qt_active_item(
+                active_item_id=active_item_id,
+                record_id=target_record_id,
+            )
+        except Exception as exc:
+            message = (
+                "目标多维记录已删除，但本地显示清理失败；"
+                f"请再次点击删除完成本地清理：{exc}"
+            )
+            cls._mark_notice_remote_operation(
+                operation_id,
+                status="remote_written",
+                target_record_id=target_record_id,
+                result={
+                    "undo_id": checkpoint_id,
+                    "remote_deleted": True,
+                    "local_cleanup_error": str(exc),
+                },
+                error=str(exc),
+            )
+            return {
+                "ok": False,
+                "message": message,
+                "operation_id": operation_id,
+                "record_id": target_record_id,
+                "active_item_id": active_item_id,
+                "remote_deleted": True,
+                "undo_id": checkpoint_id,
+                "undo_available": bool(checkpoint_id),
+            }
+        cls._mark_notice_remote_operation(
+            operation_id,
+            status="completed",
+            target_record_id=target_record_id,
+            result={
+                "undo_id": checkpoint_id,
+                "remote_deleted": True,
+                "message": "",
+            },
+            error="",
+        )
+        return {
+            "ok": True,
+            "message": "",
+            "operation_id": operation_id,
+            "record_id": target_record_id,
+            "active_item_id": active_item_id,
+            "remote_deleted": True,
+            "undo_id": checkpoint_id,
+            "undo_available": bool(checkpoint_id),
+        }
+
+    @classmethod
     def execute_local_delete_active_item(cls, payload: dict) -> dict:
         payload = dict(payload or {})
         nested = payload.get("data_dict")
@@ -7851,6 +8260,25 @@ class PortalRuntime:
             or payload.get("job_id")
             or f"delete:{uuid.uuid4().hex}"
         ).strip()
+        recoverable_lookup = getattr(
+            cls.state_store,
+            "find_recoverable_notice_remote_operation",
+            None,
+        )
+        recoverable_operation = (
+            recoverable_lookup(
+                operation_type="delete",
+                target_record_id=target_record_id,
+            )
+            if callable(recoverable_lookup)
+            else None
+        )
+        if isinstance(recoverable_operation, dict):
+            recoverable_operation_id = str(
+                recoverable_operation.get("operation_id") or ""
+            ).strip()
+            if recoverable_operation_id:
+                operation_id = recoverable_operation_id
         lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
             payload,
             action_type="delete",
@@ -7933,6 +8361,56 @@ class PortalRuntime:
                         notice_type,
                     )
                     if not ok_query or not isinstance(raw_query_result, dict):
+                        prior_result = (
+                            operation.get("result")
+                            if isinstance(operation.get("result"), dict)
+                            else {}
+                        )
+                        prior_verified = (
+                            not bool(operation.get("created"))
+                            and operation_status
+                            in {"verified", "executing", "failed"}
+                            and (
+                                operation_status in {"verified", "executing"}
+                                or bool(prior_result.get("undo_id"))
+                            )
+                        )
+                        if (
+                            prior_verified
+                            and cls._remote_record_not_found(raw_query_result)
+                        ):
+                            checkpoint_id = str(
+                                prior_result.get("undo_id") or ""
+                            )
+                            cls._mark_notice_remote_operation(
+                                operation_id,
+                                status="remote_written",
+                                target_record_id=target_record_id,
+                                result={
+                                    "undo_id": checkpoint_id,
+                                    "remote_deleted": True,
+                                    "reconciled_missing_remote": True,
+                                },
+                                error="",
+                            )
+                            cls._record_event_notice_operation_result(
+                                payload,
+                                action_type="delete",
+                                success=True,
+                                record_id=target_record_id,
+                                message=(
+                                    "远端记录已不存在，已按持久化删除意图"
+                                    "继续清理本地显示。"
+                                ),
+                            )
+                            return cls._finalize_local_delete_after_remote(
+                                operation_id=operation_id,
+                                work_type=work_type,
+                                active_item_id=active_item_id,
+                                source_record_id=source_record_id,
+                                target_record_id=target_record_id,
+                                checkpoint_id=checkpoint_id,
+                            )
                         message = (
                             "已阻止删除：无法读取目标多维记录，"
                             f"本地显示已保留。查询结果：{raw_query_result}"
@@ -8074,62 +8552,14 @@ class PortalRuntime:
                     record_id=target_record_id,
                     message="远端记录已删除。",
                 )
-            try:
-                cls.state_store.delete_qt_active_item(
-                    active_item_id=active_item_id,
-                    record_id=target_record_id,
-                )
-                cls.state_store.mark_notice_identity_deleted(
-                    work_type=work_type,
-                    active_item_id=active_item_id,
-                    source_record_id=source_record_id,
-                    target_record_id=target_record_id,
-                )
-            except Exception as exc:
-                message = (
-                    "目标多维记录已删除，但本地显示清理失败；"
-                    f"请再次点击删除完成本地清理：{exc}"
-                )
-                cls._mark_notice_remote_operation(
-                    operation_id,
-                    status="remote_written",
-                    target_record_id=target_record_id,
-                    result={
-                        "undo_id": checkpoint_id,
-                        "remote_deleted": True,
-                        "local_cleanup_error": str(exc),
-                    },
-                    error=str(exc),
-                )
-                return {
-                    "ok": False,
-                    "message": message,
-                    "record_id": target_record_id,
-                    "active_item_id": active_item_id,
-                    "remote_deleted": True,
-                    "undo_id": checkpoint_id,
-                    "undo_available": bool(checkpoint_id),
-                }
-            cls._mark_notice_remote_operation(
-                operation_id,
-                status="completed",
+            return cls._finalize_local_delete_after_remote(
+                operation_id=operation_id,
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
                 target_record_id=target_record_id,
-                result={
-                    "undo_id": checkpoint_id,
-                    "remote_deleted": True,
-                    "message": "",
-                },
-                error="",
+                checkpoint_id=checkpoint_id,
             )
-            return {
-                "ok": True,
-                "message": "",
-                "record_id": target_record_id,
-                "active_item_id": active_item_id,
-                "remote_deleted": remote_deleted,
-                "undo_id": checkpoint_id,
-                "undo_available": bool(checkpoint_id),
-            }
         finally:
             cls._release_event_operation_lock(lock_key, lock_owner)
 
@@ -8508,11 +8938,13 @@ class PortalRuntime:
                     reconciled = False
                     reconciled_record_id = ""
                     reconcile_message = ""
+                    reconcile_blocked = False
                     if not operation.get("created"):
                         (
                             reconciled,
                             reconciled_record_id,
                             reconcile_message,
+                            reconcile_blocked,
                         ) = cls._reconcile_notice_remote_intent(
                             prepared,
                             operation,
@@ -8534,6 +8966,24 @@ class PortalRuntime:
                                 "message": result_message,
                                 "reconciled": True,
                             },
+                        )
+                    elif reconcile_blocked:
+                        ok = False
+                        remote_record_id = str(
+                            operation_target_id
+                            or prepared.get("target_record_id")
+                            or prepared.get("record_id")
+                            or ""
+                        ).strip()
+                        result_message = (
+                            reconcile_message
+                            or "远端写入结果暂时无法确认，已停止重复提交。"
+                        )
+                        cls._mark_notice_remote_operation(
+                            remote_operation_id,
+                            status="failed",
+                            target_record_id=remote_record_id,
+                            error=result_message,
                         )
                     else:
                         cls._mark_notice_remote_operation(

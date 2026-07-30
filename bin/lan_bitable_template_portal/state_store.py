@@ -761,6 +761,37 @@ class LanPortalStateStore:
                 ).fetchone()
         return self._notice_remote_operation_payload(row)
 
+    def find_recoverable_notice_remote_operation(
+        self,
+        *,
+        operation_type: str,
+        target_record_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_type = self._text(operation_type)
+        normalized_target = self._text(target_record_id)
+        if (
+            not normalized_type
+            or not normalized_target
+            or not self.db_path.exists()
+        ):
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM notice_remote_operations
+                    WHERE operation_type = ?
+                      AND target_record_id = ?
+                      AND status IN ('verified', 'executing', 'remote_written')
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (normalized_type, normalized_target),
+                ).fetchone()
+        return self._notice_remote_operation_payload(row)
+
     def cleanup_notice_remote_operations(
         self,
         *,

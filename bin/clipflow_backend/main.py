@@ -4835,6 +4835,11 @@ class FastAPIPortalController:
                         {
                             "ok": False,
                             "error": str((delete_result or {}).get("message") or "多维记录删除失败。"),
+                            "data": (
+                                dict(delete_result)
+                                if isinstance(delete_result, dict)
+                                else {}
+                            ),
                         },
                         status_code=500,
                     )
