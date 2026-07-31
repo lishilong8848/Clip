@@ -17,11 +17,13 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal import portal_service as portal_service_module
 from lan_bitable_template_portal.portal_service import (
-    BUILDING_OPEN_ID_MAP,
     FieldMeta,
+    MA_JINYU_OPEN_ID,
     MaintenancePortalService,
     PortalConfirmationRequiredError,
     PortalError,
+    WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD,
+    WATER_CONSUMPTION_SUPERVISOR_FALLBACKS,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
@@ -284,8 +286,22 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         )
         self.service = MaintenancePortalService.__new__(MaintenancePortalService)
         self.service._state_store = self.store
+        abnormal_meta = FieldMeta(
+            field_id="fld_abnormal_note",
+            field_name=WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD,
+            ui_type="Text",
+            field_type=1,
+            is_primary=False,
+            options_map={},
+            option_names=[],
+            has_formula=False,
+        )
         self.service._water_consumption_fields = Mock(
-            return_value=([], {}, {})
+            return_value=(
+                [abnormal_meta],
+                {WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD: abnormal_meta},
+                {},
+            )
         )
         self.service.start_water_consumption_refresh_async = Mock()
 
@@ -431,6 +447,9 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 {"file_token": "photo-token-new"},
             ],
         )
+        self.assertIsNone(
+            written[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD]
+        )
 
     def test_large_change_requires_confirmation_then_notifies(self) -> None:
         existing = _record("rec_large", "A", "2026-07-28")
@@ -458,8 +477,9 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 "sent": True,
                 "message": "发送成功",
                 "recipients": [
-                    BUILDING_OPEN_ID_MAP["H"],
                     "ou_operator",
+                    WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"]["open_id"],
+                    MA_JINYU_OPEN_ID,
                 ],
                 "results": [],
             }
@@ -505,8 +525,30 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         self.assertEqual(result["edit_policy"]["remaining_edits"], 1)
         self.service._patch_record_fields_exact.assert_called_once()
         self.service._notify_water_large_change.assert_called_once()
+        written = self.service._patch_record_fields_exact.call_args.kwargs["fields"]
+        self.assertEqual(
+            written[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD],
+            "水耗每日录入：统计日期：2026-07-28；上次数值：100；"
+            "当前录入数值：180；变化率：+80.00%。请关注并核查。",
+        )
+        self.assertEqual(
+            self.service._notify_water_large_change.call_args.kwargs[
+                "abnormal_note"
+            ],
+            written[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD],
+        )
 
-    def test_large_change_notification_targets_h_and_operator(self) -> None:
+    def test_large_change_notification_targets_operator_supervisor_and_ma_jinyu(
+        self,
+    ) -> None:
+        self.service._water_supervisor_recipient = Mock(
+            return_value={
+                "name": "施小东",
+                "open_id": WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"][
+                    "open_id"
+                ],
+            }
+        )
         with patch.object(
             portal_service_module,
             "send_text_to_open_ids",
@@ -532,8 +574,102 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         recipients = sender.call_args.args[1]
         self.assertEqual(
             recipients,
-            [BUILDING_OPEN_ID_MAP["H"], "ou_operator"],
+            [
+                "ou_operator",
+                WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"]["open_id"],
+                MA_JINYU_OPEN_ID,
+            ],
         )
+        sent_text = sender.call_args.args[0]
+        self.assertIn("【水耗每日录入异常提醒】", sent_text)
+        self.assertIn("水耗每日录入：", sent_text)
+        self.assertIn("统计日期：2026-07-28", sent_text)
+        self.assertIn("上次数值：100", sent_text)
+        self.assertIn("当前录入数值：180", sent_text)
+        self.assertIn("变化率：+80.00%", sent_text)
+        self.assertNotIn("变化率超过±50%", sent_text)
+        self.assertEqual(sent_text.count("统计日期：2026-07-28"), 1)
+        self.assertNotIn("记录标识", sent_text)
+        self.assertNotIn("操作人 openid", sent_text)
+
+    def test_supervisor_resolution_requires_matching_scope_and_position(
+        self,
+    ) -> None:
+        self.service.get_permission_directory_people = Mock(
+            return_value={
+                "items": [
+                    {
+                        "name": "A楼工程师",
+                        "position": "电气工程师",
+                        "open_id": "ou_engineer",
+                        "scopes": ["A"],
+                        "selectable": True,
+                    },
+                    {
+                        "name": "B楼主管",
+                        "position": "设施运维主管",
+                        "open_id": "ou_b_supervisor",
+                        "scopes": ["B"],
+                        "selectable": True,
+                    },
+                    {
+                        "name": "A楼主管",
+                        "position": "设施运维主管",
+                        "open_id": "ou_a_supervisor",
+                        "scopes": ["A"],
+                        "selectable": True,
+                    },
+                ]
+            }
+        )
+
+        recipient = self.service._water_supervisor_recipient("A")
+
+        self.assertEqual(
+            recipient,
+            {"name": "A楼主管", "open_id": "ou_a_supervisor"},
+        )
+
+    def test_missing_abnormal_note_field_stops_before_upload_and_remote_write(
+        self,
+    ) -> None:
+        existing = _record("rec_missing_note", "A", "2026-07-28")
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[existing],
+        )
+        self.service._water_consumption_fields = Mock(
+            return_value=([], {}, {})
+        )
+        self.service._water_remote_record = Mock(return_value=existing)
+        self.service._water_upload_staged_images = Mock()
+        self.service._patch_record_fields_exact = Mock()
+
+        with self.assertRaisesRegex(PortalError, "异常备注"):
+            self.service._update_water_consumption_record_unlocked(
+                "rec_missing_note",
+                scope="A",
+                meter="东区水表-总",
+                frequency="日",
+                shift="白",
+                statistic_date="2026-07-28",
+                meter_value="180",
+                corrected_usage=None,
+                retained_image_ids=["image_rec_missing_note"],
+                upload_ids=["upload-should-not-run"],
+                expected_version="1",
+                operation_id="water-missing-note-op",
+                operator_open_id="ou_operator",
+                operator_name="测试用户",
+                operator_is_admin=False,
+                large_change_confirmed=True,
+            )
+
+        self.service._water_upload_staged_images.assert_not_called()
+        self.service._patch_record_fields_exact.assert_not_called()
 
     def test_remote_write_failure_does_not_consume_non_admin_edit(self) -> None:
         existing = _record("rec_remote_fail", "A", "2026-07-28")
@@ -602,7 +738,11 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             return_value={
                 "sent": False,
                 "message": "模拟消息发送失败",
-                "recipients": [BUILDING_OPEN_ID_MAP["H"], "ou_operator"],
+                "recipients": [
+                    "ou_operator",
+                    WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"]["open_id"],
+                    MA_JINYU_OPEN_ID,
+                ],
                 "results": [],
             }
         )

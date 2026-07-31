@@ -1069,7 +1069,9 @@ function requestLargeChangeConfirmation(change: Dict, messageText = ""): void {
     open: true,
     tone: "warning",
     title: "确认大幅修改水表数值？",
-    message: messageText || "变化率超过 ±50%。确认后将更新记录，并通知 H 楼和当前操作人。",
+    message:
+      messageText
+      || "当前录入数值变化幅度较大。确认后将更新记录，并通知当前操作人、当前楼栋主管和马进宇。",
     details: [
       `原水表数值：${formatNullableNumber(change.oldValue)}`,
       `修改后数值：${formatNullableNumber(change.newValue)}`,

@@ -124,6 +124,41 @@ WATER_CONSUMPTION_SNAPSHOT_TTL_SECONDS = 30 * 60
 WATER_CONSUMPTION_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT = 2
 WATER_CONSUMPTION_LARGE_CHANGE_THRESHOLD = 0.5
+WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD = "异常备注"
+WATER_CONSUMPTION_SUPERVISOR_POSITIONS = {
+    "A": "设施运维主管",
+    "B": "设施运维主管",
+    "C": "设施运维主管",
+    "D": "设施运维主管",
+    "E": "设施运维主管",
+    "H": "H楼值班主管",
+}
+WATER_CONSUMPTION_SUPERVISOR_FALLBACKS = {
+    "A": {
+        "name": "施小东",
+        "open_id": "ou_32ff59c86bbadabb6c22c21f0ad249ec",
+    },
+    "B": {
+        "name": "陈继猛",
+        "open_id": "ou_0c3cee3752565ff30bc38a1ddb20a1aa",
+    },
+    "C": {
+        "name": "孙婷婷",
+        "open_id": "ou_1b45c51fec99162ce1e78bd2f06aeedf",
+    },
+    "D": {
+        "name": "陶必亮",
+        "open_id": "ou_6e9ab06be2174a56908c289a4c4926fa",
+    },
+    "E": {
+        "name": "陈凯",
+        "open_id": "ou_ed5a06724bca67ebe08aa94e5505c882",
+    },
+    "H": {
+        "name": "周庆庆",
+        "open_id": "ou_31b9b88b491da8ef0cfa18ee4599288c",
+    },
+}
 REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES = frozenset(
     {
         "维修名称",
@@ -17503,6 +17538,70 @@ class MaintenancePortalService:
             return "无法计算"
         return f"{float(ratio_percent):+.2f}%"
 
+    @staticmethod
+    def _water_change_value_text(value: Any) -> str:
+        number = MaintenancePortalService._water_number(value)
+        if number is None:
+            return "未填写"
+        if float(number).is_integer():
+            return str(int(number))
+        return f"{float(number):.6f}".rstrip("0").rstrip(".")
+
+    @classmethod
+    def _water_abnormal_note(
+        cls,
+        change: dict[str, Any],
+        *,
+        statistic_date: str,
+    ) -> str:
+        return (
+            "水耗每日录入："
+            f"统计日期：{str(statistic_date or '').strip() or '未填写'}；"
+            f"上次数值：{cls._water_change_value_text(change.get('old_value'))}；"
+            f"当前录入数值：{cls._water_change_value_text(change.get('new_value'))}；"
+            f"变化率：{cls._water_change_ratio_text(change)}。"
+            "请关注并核查。"
+        )
+
+    def _water_supervisor_recipient(self, scope: str) -> dict[str, str]:
+        scope_code = self._water_scope_code(scope)
+        expected_position = WATER_CONSUMPTION_SUPERVISOR_POSITIONS.get(
+            scope_code,
+            "",
+        )
+        try:
+            directory = self.get_permission_directory_people()
+            candidates = [
+                item
+                for item in directory.get("items") or []
+                if item.get("selectable")
+                and str(item.get("open_id") or "").strip()
+                and scope_code in (item.get("scopes") or [])
+                and str(item.get("position") or "").strip() == expected_position
+            ]
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                return {
+                    "name": str(candidate.get("name") or "").strip(),
+                    "open_id": str(candidate.get("open_id") or "").strip(),
+                }
+            if len(candidates) > 1:
+                logging.getLogger(__name__).warning(
+                    "水耗提醒匹配到多个楼栋主管: scope=%s position=%s names=%s",
+                    scope_code,
+                    expected_position,
+                    [str(item.get("name") or "") for item in candidates],
+                )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "水耗提醒读取楼栋主管失败，使用已核验兜底映射: scope=%s error=%s",
+                scope_code,
+                exc,
+            )
+        return dict(
+            WATER_CONSUMPTION_SUPERVISOR_FALLBACKS.get(scope_code) or {}
+        )
+
     def _notify_water_large_change(
         self,
         *,
@@ -17513,31 +17612,31 @@ class MaintenancePortalService:
         change: dict[str, Any],
         operator_open_id: str,
         operator_name: str,
+        abnormal_note: str = "",
     ) -> dict[str, Any]:
+        supervisor = self._water_supervisor_recipient(scope)
         recipients = [
             item
             for item in dict.fromkeys(
                 [
-                    BUILDING_OPEN_ID_MAP.get("H", ""),
                     str(operator_open_id or "").strip(),
+                    str(supervisor.get("open_id") or "").strip(),
+                    MA_JINYU_OPEN_ID,
                 ]
             )
             if item
         ]
+        note = str(abnormal_note or "").strip() or self._water_abnormal_note(
+            change,
+            statistic_date=statistic_date,
+        )
         text = "\n".join(
             [
-                "【水耗记录大幅变化提醒】",
+                "【水耗每日录入异常提醒】",
                 f"楼栋：{WATER_CONSUMPTION_SCOPE_LABELS.get(self._water_scope_code(scope), scope)}",
-                f"统计日期：{statistic_date}",
                 f"水表：{meter}",
-                (
-                    "水表数值："
-                    f"{change.get('old_value')} → {change.get('new_value')}"
-                ),
-                f"变化率：{self._water_change_ratio_text(change)}",
+                note,
                 f"操作人：{operator_name or '当前登录用户'}",
-                f"操作人 openid：{operator_open_id or '未获取'}",
-                f"记录标识：{record_id}",
                 f"操作时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ]
         )
@@ -17547,6 +17646,8 @@ class MaintenancePortalService:
             "message": str(message or ""),
             "recipients": recipients,
             "results": results,
+            "supervisor": supervisor,
+            "abnormal_note": note,
         }
 
     @staticmethod
@@ -17997,6 +18098,7 @@ class MaintenancePortalService:
                 remote_record.get("meter_value"),
                 meter_value,
             )
+            abnormal_note = ""
             if (
                 meter_change.get("requires_confirmation")
                 and not large_change_confirmed
@@ -18011,6 +18113,22 @@ class MaintenancePortalService:
                         "kind": "water_large_change",
                         **meter_change,
                     },
+                )
+            if meter_change.get("requires_confirmation"):
+                abnormal_meta = meta_by_name.get(
+                    WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD
+                )
+                if (
+                    not abnormal_meta
+                    or abnormal_meta.has_formula
+                    or abnormal_meta.field_type != 1
+                ):
+                    raise PortalError(
+                        "水耗表缺少可写的“异常备注”文本字段，请检查多维表结构。"
+                    )
+                abnormal_note = self._water_abnormal_note(
+                    meter_change,
+                    statistic_date=statistic_date,
                 )
             if not operator_is_admin:
                 edit_reservation = (
@@ -18071,6 +18189,10 @@ class MaintenancePortalService:
             )
             if self._water_number(corrected_usage) is None:
                 fields["当期耗水量（修正）"] = None
+            if abnormal_note:
+                fields[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD] = abnormal_note
+            elif WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD in meta_by_name:
+                fields[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD] = None
             self._patch_record_fields_exact(
                 app_token=WATER_CONSUMPTION_APP_TOKEN,
                 table_id=WATER_CONSUMPTION_TABLE_ID,
@@ -18143,6 +18265,7 @@ class MaintenancePortalService:
                         change=meter_change,
                         operator_open_id=operator_open_id,
                         operator_name=operator_name,
+                        abnormal_note=abnormal_note,
                     )
                     if not notification.get("sent"):
                         warnings.append(
