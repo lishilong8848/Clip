@@ -718,6 +718,15 @@ class MainWindowWorkflowMixin:
         real_record_id = str(result.get("real_record_id") or "").strip()
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id
+        updated_record_version = str(result.get("record_version") or "").strip()
+        if success and updated_record_version:
+            version_record_id = real_record_id or record_id
+            self._enqueue_ui_mutation(
+                "remote_record_version",
+                lambda record_id=version_record_id, version=updated_record_version: (
+                    self._apply_qt_remote_record_version(record_id, version)
+                ),
+            )
         message_warning = str(
             result.get("message_warning")
             or result.get("last_robot_error")
@@ -2900,6 +2909,30 @@ class MainWindowWorkflowMixin:
             except Exception:
                 pass
         return True
+
+    def _apply_qt_remote_record_version(self, record_id: str, version: str) -> None:
+        record_id = str(record_id or "").strip()
+        version = str(version or "").strip()
+        if not record_id or not version:
+            return
+        list_widget, item, _matched = self._find_active_item_by_upload_completion_id(
+            record_id
+        )
+        if item and not self._is_valid_list_item(item):
+            item = None
+            list_widget = None
+        if list_widget is None or item is None:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        if not isinstance(data, dict):
+            return
+        data = dict(data)
+        data["record_version"] = version
+        data["expected_record_version"] = version
+        self._update_active_item_data(
+            str(data.get("record_id") or record_id),
+            data,
+        )
 
     def on_request_finished(self, name, success, msg, record_id=None):
         self._set_last_ui_op(

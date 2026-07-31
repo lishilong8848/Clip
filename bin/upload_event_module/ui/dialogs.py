@@ -1,3 +1,5 @@
+import copy
+
 import re
 
 import io
@@ -3286,7 +3288,9 @@ class ScreenshotConfirmDialog(QDialog):
 
     def set_data(self, data_dict, action_type="upload", is_mandatory=False):
 
-        self.data_dict = data_dict
+        # The dialog may prefill and normalize several selections.  Work on a
+        # copy so opening the dialog and closing it with X is a neutral action.
+        self.data_dict = copy.deepcopy(data_dict or {})
 
         self.action_type = action_type
 

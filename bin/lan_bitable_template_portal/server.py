@@ -37,7 +37,6 @@ from .portal_service import (
 from .identity_utils import (
     canonical_target_record_id,
     is_local_record_id,
-    notice_payload_matches_month,
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
@@ -3412,7 +3411,6 @@ class PortalRuntime:
                 for item in items
                 if isinstance(item, dict)
                 and not _is_ended(item)
-                and notice_payload_matches_month(item)
                 and _not_deleted_by_qt(item, deleted_keys)
                 and self.service._scope_matches_item(scope, item)
             ]
@@ -3457,7 +3455,6 @@ class PortalRuntime:
             for item in result
             if isinstance(item, dict)
             and not _is_ended(item)
-            and notice_payload_matches_month(item)
             and self.service._scope_matches_item(scope, item)
         ]
         return filtered
@@ -5124,6 +5121,45 @@ class PortalRuntime:
             "created": True,
         }
 
+    @staticmethod
+    def _expected_remote_record_version(
+        data: dict | None,
+        *,
+        request: dict | None = None,
+        operation: dict | None = None,
+    ) -> str:
+        """Return the latest version observed by this client.
+
+        ``expected_record_version`` is the version used by the previous write.
+        After a successful write ``record_version`` is newer, so it must win
+        when both are present.  A top-level request value remains an explicit
+        caller override.
+        """
+        request = request if isinstance(request, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        operation = operation if isinstance(operation, dict) else {}
+        return str(
+            request.get("expected_record_version")
+            or data.get("record_version")
+            or data.get("expected_record_version")
+            or operation.get("observed_record_version")
+            or operation.get("expected_record_version")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _rebase_remote_record_version(data: dict | None, version: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        normalized = str(version or "").strip()
+        if normalized:
+            data["record_version"] = normalized
+            data["expected_record_version"] = normalized
+        else:
+            data.pop("record_version", None)
+            data.pop("expected_record_version", None)
+        return normalized
+
     @classmethod
     def _mark_notice_remote_operation(
         cls, operation_id: str, **kwargs: Any
@@ -5590,10 +5626,10 @@ class PortalRuntime:
         *,
         notice_type: str,
         target_record_id: str,
-    ) -> None:
+    ) -> str:
         target_record_id = str(target_record_id or "").strip()
         if not target_record_id:
-            return
+            return ""
         payload = normalize_notice_identity_payload(
             {
                 **dict(data or {}),
@@ -5606,6 +5642,22 @@ class PortalRuntime:
                 "binding_status": "bound",
             },
             action="update",
+        )
+        record_version = cls._expected_remote_record_version(payload)
+        if not record_version and not is_local_record_id(target_record_id):
+            guard = external_real_write_guard()
+            if not guard.get("mock_external"):
+                ok_query, query_result = query_record_by_id(
+                    target_record_id,
+                    notice_type,
+                )
+                if ok_query and isinstance(query_result, dict):
+                    record_version = str(
+                        query_result.get("record_version") or ""
+                    ).strip()
+        cls._rebase_remote_record_version(
+            payload,
+            record_version,
         )
         if str(notice_type or "").strip() == "事件通告":
             event_identity_key = (
@@ -5633,7 +5685,7 @@ class PortalRuntime:
             log_warning(f"Qt 上传目标 ID 写入身份表失败: {exc}")
         active_item_id = str(payload.get("active_item_id") or "").strip()
         if not active_item_id:
-            return
+            return record_version
         try:
             cls.state_store.upsert_qt_active_item(
                 payload,
@@ -5661,6 +5713,7 @@ class PortalRuntime:
             )
         except Exception as exc:
             log_warning(f"Qt 上传目标 ID 回写 active item 失败: {exc}")
+        return record_version
 
     @classmethod
     def _source_record_id_from_prepared_start(cls, prepared: dict) -> str:
@@ -6584,11 +6637,7 @@ class PortalRuntime:
         current_record_version = str(
             (query_result or {}).get("record_version") or ""
         ).strip()
-        expected_record_version = str(
-            prepared.get("expected_record_version")
-            or prepared.get("record_version")
-            or ""
-        ).strip()
+        expected_record_version = cls._expected_remote_record_version(prepared)
         if (
             expected_record_version
             and current_record_version
@@ -6599,8 +6648,9 @@ class PortalRuntime:
                 "目标多维记录已被其他用户修改，请刷新后重新提交。",
                 record_id,
             )
-        prepared["expected_record_version"] = (
-            expected_record_version or current_record_version
+        cls._rebase_remote_record_version(
+            prepared,
+            current_record_version or expected_record_version,
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
         checkpoint_id = cls._create_backend_undo_checkpoint(
@@ -6639,12 +6689,15 @@ class PortalRuntime:
         if ok and bool(prepared.get("expected_record_version")):
             ok_updated, updated_result = query_record_by_id(record_id, notice_type)
             if ok_updated and isinstance(updated_result, dict):
-                prepared["record_version"] = str(
-                    updated_result.get("record_version") or ""
-                ).strip()
+                cls._rebase_remote_record_version(
+                    prepared,
+                    updated_result.get("record_version"),
+                )
                 prepared["remote_last_modified_time"] = str(
                     updated_result.get("last_modified_time") or ""
                 ).strip()
+            else:
+                cls._rebase_remote_record_version(prepared, "")
         return bool(ok), str(result or ""), record_id
 
     @classmethod
@@ -6683,10 +6736,8 @@ class PortalRuntime:
                 lock_key=lock_key,
                 request=cls._notice_remote_operation_request(prepared),
                 target_record_id=target_record_id,
-                expected_record_version=str(
-                    prepared.get("expected_record_version")
-                    or prepared.get("record_version")
-                    or ""
+                expected_record_version=cls._expected_remote_record_version(
+                    prepared
                 ),
             )
             if operation.get("conflict"):
@@ -7297,30 +7348,24 @@ class PortalRuntime:
             current_record_version = str(
                 prequery_result.get("record_version") or ""
             ).strip()
-            expected_record_version = str(
-                payload.get("expected_record_version")
-                or data.get("expected_record_version")
-                or data.get("record_version")
-                or ""
-            ).strip()
+            expected_record_version = cls._expected_remote_record_version(
+                data,
+                request=payload,
+            )
             if (
                 expected_record_version
                 and current_record_version
                 and expected_record_version != current_record_version
             ):
-                return {
-                    "ok": False,
-                    "name": "结束" if action_type == "end" else "更新",
-                    "message": (
-                        "目标多维记录已被其他用户修改，请刷新当前通告后重新提交。"
-                    ),
-                    "record_id": target_record_id or record_id,
-                    "real_record_id": "",
-                    "record_version_conflict": True,
-                    "record_version": current_record_version,
-                }
-            data["expected_record_version"] = (
-                expected_record_version or current_record_version
+                log_warning(
+                    "Qt 通告携带的本地记录版本已过期，已按目标 record_id "
+                    "自动采用远端当前版本继续执行: "
+                    f"record_id={query_record_id_for_action}"
+                )
+                data["_record_version_rebased"] = True
+            cls._rebase_remote_record_version(
+                data,
+                current_record_version or expected_record_version,
             )
 
         extra_images = payload.get("extra_images")
@@ -7503,7 +7548,7 @@ class PortalRuntime:
                     in {"remote_written", "completed"}
                     and operation_target
                 ):
-                    cls._remember_local_upload_target(
+                    record_version = cls._remember_local_upload_target(
                         data,
                         notice_type=notice_type,
                         target_record_id=operation_target,
@@ -7524,6 +7569,7 @@ class PortalRuntime:
                         "record_id": record_id,
                         "real_record_id": operation_target,
                         "deduped": True,
+                        "record_version": record_version,
                     }
                 reconciled = False
                 reconciled_record_id = ""
@@ -7542,7 +7588,11 @@ class PortalRuntime:
                         )
                     )
                 if reconciled:
-                    cls._remember_local_upload_target(
+                    cls._rebase_remote_record_version(
+                        data,
+                        operation_prepared.get("record_version"),
+                    )
+                    record_version = cls._remember_local_upload_target(
                         data,
                         notice_type=notice_type,
                         target_record_id=reconciled_record_id,
@@ -7567,6 +7617,7 @@ class PortalRuntime:
                         "record_id": record_id,
                         "real_record_id": reconciled_record_id,
                         "deduped": True,
+                        "record_version": record_version,
                     }
                 if reconcile_blocked:
                     cls._mark_notice_remote_operation(
@@ -7588,7 +7639,7 @@ class PortalRuntime:
                         cls.local_upload_created_targets.get(dedupe_key) or ""
                     ).strip()
                     if cached_target:
-                        cls._remember_local_upload_target(
+                        record_version = cls._remember_local_upload_target(
                             data,
                             notice_type=notice_type,
                             target_record_id=cached_target,
@@ -7609,12 +7660,13 @@ class PortalRuntime:
                             "record_id": record_id,
                             "real_record_id": cached_target,
                             "deduped": True,
+                            "record_version": record_version,
                         }
                 existing_target = cls._existing_target_for_local_upload(data, notice_type)
                 if existing_target:
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = existing_target
-                    cls._remember_local_upload_target(
+                    record_version = cls._remember_local_upload_target(
                         data,
                         notice_type=notice_type,
                         target_record_id=existing_target,
@@ -7635,6 +7687,7 @@ class PortalRuntime:
                         "record_id": record_id,
                         "real_record_id": existing_target,
                         "deduped": True,
+                        "record_version": record_version,
                     }
                 cls._mark_notice_remote_operation(
                     operation_id,
@@ -7659,7 +7712,7 @@ class PortalRuntime:
                         ).strip()
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = real_record_id
-                    cls._remember_local_upload_target(
+                    record_version = cls._remember_local_upload_target(
                         data,
                         notice_type=notice_type,
                         target_record_id=real_record_id,
@@ -7701,6 +7754,9 @@ class PortalRuntime:
                     "message": str(result or ""),
                     "record_id": record_id,
                     "real_record_id": real_record_id,
+                    "record_version": (
+                        record_version if success else ""
+                    ),
                     **robot_result,
                 }
 
@@ -7857,11 +7913,7 @@ class PortalRuntime:
             lock_key=str(target_record_id or fallback_operation_key),
             request=operation_request,
             target_record_id=target_record_id,
-            expected_record_version=str(
-                data.get("expected_record_version")
-                or data.get("record_version")
-                or ""
-            ),
+            expected_record_version=cls._expected_remote_record_version(data),
         )
         if operation.get("conflict"):
             return {
@@ -7944,16 +7996,20 @@ class PortalRuntime:
         cls._release_event_operation_lock(event_lock_key, event_lock_owner)
         updated_record_version = ""
         if success:
-            if bool(data.get("expected_record_version")):
-                ok_updated, updated_query = query_record_by_id(
-                    target_record_id,
-                    notice_type,
+            ok_updated, updated_query = query_record_by_id(
+                target_record_id,
+                notice_type,
+            )
+            if ok_updated and isinstance(updated_query, dict):
+                updated_record_version = str(
+                    updated_query.get("record_version") or ""
+                ).strip()
+                cls._rebase_remote_record_version(
+                    data,
+                    updated_record_version,
                 )
-                if ok_updated and isinstance(updated_query, dict):
-                    updated_record_version = str(
-                        updated_query.get("record_version") or ""
-                    ).strip()
-                    data["record_version"] = updated_record_version
+            else:
+                cls._rebase_remote_record_version(data, "")
             cls._mark_notice_remote_operation(
                 operation_id,
                 status="completed",
@@ -8311,11 +8367,7 @@ class PortalRuntime:
                     "target_record_id": target_record_id,
                 },
                 target_record_id=target_record_id,
-                expected_record_version=str(
-                    payload.get("expected_record_version")
-                    or payload.get("record_version")
-                    or ""
-                ),
+                expected_record_version=cls._expected_remote_record_version(payload),
             )
             if operation.get("conflict"):
                 return {
@@ -8436,34 +8488,25 @@ class PortalRuntime:
                     current_record_version = str(
                         query_result.get("record_version") or ""
                     ).strip()
-                    expected_record_version = str(
-                        payload.get("expected_record_version")
-                        or payload.get("record_version")
-                        or operation.get("expected_record_version")
-                        or ""
-                    ).strip()
+                    expected_record_version = cls._expected_remote_record_version(
+                        payload,
+                        operation=operation,
+                    )
                     if (
                         expected_record_version
                         and current_record_version
                         and expected_record_version != current_record_version
                     ):
-                        message = (
-                            "目标多维记录已被其他用户修改，已保留本地显示。"
-                            "请刷新后重新确认删除。"
+                        log_warning(
+                            "删除请求携带的本地记录版本已过期，已先按业务身份"
+                            "核对目标记录，再采用远端当前版本继续执行: "
+                            f"record_id={target_record_id}"
                         )
-                        cls._mark_notice_remote_operation(
-                            operation_id,
-                            status="failed",
-                            observed_record_version=current_record_version,
-                            error=message,
-                        )
-                        return {
-                            "ok": False,
-                            "message": message,
-                            "record_id": target_record_id,
-                            "active_item_id": active_item_id,
-                            "remote_deleted": False,
-                        }
+                        payload["_record_version_rebased"] = True
+                    cls._rebase_remote_record_version(
+                        payload,
+                        current_record_version or expected_record_version,
+                    )
                     delete_allowed, delete_guard_message = (
                         cls._validate_notice_delete_target(
                             payload,
@@ -8814,10 +8857,8 @@ class PortalRuntime:
                     ),
                     request=cls._notice_remote_operation_request(prepared),
                     target_record_id=remote_record_id,
-                    expected_record_version=str(
-                        prepared.get("expected_record_version")
-                        or prepared.get("record_version")
-                        or ""
+                    expected_record_version=cls._expected_remote_record_version(
+                        prepared
                     ),
                 )
                 if existing_operation.get("conflict"):
@@ -8870,10 +8911,8 @@ class PortalRuntime:
                         or prepared.get("record_id")
                         or ""
                     ),
-                    expected_record_version=str(
-                        prepared.get("expected_record_version")
-                        or prepared.get("record_version")
-                        or ""
+                    expected_record_version=cls._expected_remote_record_version(
+                        prepared
                     ),
                 )
                 if operation.get("conflict"):

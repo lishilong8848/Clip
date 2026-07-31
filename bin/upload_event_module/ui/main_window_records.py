@@ -13,7 +13,6 @@ from PyQt6 import sip
 from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
     is_local_record_id,
-    notice_payload_matches_month,
 )
 from ..config import get_field_config
 from ..logger import LOG_FILE, log_error, log_info, log_warning
@@ -330,23 +329,6 @@ class MainWindowRecordsMixin:
 
         return stats
 
-    def _prune_active_items_outside_current_month(self) -> dict[str, int]:
-        hidden = 0
-        try:
-            entries = list(self._active_notice_store().entries())
-        except Exception:
-            entries = []
-        for list_widget, item, data in entries:
-            if not self._is_valid_list_item(item) or not isinstance(data, dict):
-                continue
-            if notice_payload_matches_month(data):
-                continue
-            if self._upload_state_is_busy(data):
-                continue
-            if self._remove_active_item_from_source(list_widget, item):
-                hidden += 1
-        return {"outside_current_month_hidden": hidden}
-
     def _log_runtime_health_snapshot(self, reason: str):
         try:
             log_size = (
@@ -386,10 +368,6 @@ class MainWindowRecordsMixin:
 
     def _run_runtime_maintenance(self):
         stats = {}
-        try:
-            stats.update(self._prune_active_items_outside_current_month())
-        except Exception as exc:
-            log_warning(f"运行态维护: 跨月条目清理失败 error={exc}")
         try:
             stats.update(self._trim_runtime_state_sets())
         except Exception as exc:
@@ -3996,6 +3974,9 @@ class MainWindowRecordsMixin:
                             pending_upload_hash=None,
                             has_unuploaded_changes=True,
                         )
+                observed_version = str(data.get("record_version") or "").strip()
+                if observed_version:
+                    data["expected_record_version"] = observed_version
                 if not success:
                     data["_has_unuploaded_changes"] = True
                     if mark_failed:

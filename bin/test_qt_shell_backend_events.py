@@ -312,7 +312,7 @@ class QtShellBackendEventTests(unittest.TestCase):
         self.assertTrue(harness.backend_finished.wait(1.0))
         self.assertEqual(harness.cache_delete_count, 1)
 
-    def test_runtime_active_upsert_ignores_items_outside_current_month(self):
+    def test_runtime_active_upsert_keeps_cross_month_ongoing_item(self):
         harness = _ActiveUpsertVisibilityHarness()
         previous_month = (
             dt.datetime.now().replace(day=1) - dt.timedelta(days=1)
@@ -338,8 +338,12 @@ class QtShellBackendEventTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["ignored_outside_current_month"])
-        self.assertEqual(harness.added, [])
+        self.assertTrue(result["created"])
+        self.assertEqual(len(harness.added), 1)
+        self.assertEqual(
+            harness.added[0]["active_item_id"],
+            "active-old-runtime",
+        )
 
     def test_event_parser_accepts_long_source_and_level_labels(self):
         text = (

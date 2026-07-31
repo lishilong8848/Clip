@@ -28,7 +28,6 @@ try:
         canonical_source_record_id,
         canonical_target_record_id,
         is_local_record_id,
-        notice_payload_matches_month,
         normalize_notice_identity_payload,
     )
 except ImportError:
@@ -40,7 +39,6 @@ except ImportError:
         canonical_source_record_id,
         canonical_target_record_id,
         is_local_record_id,
-        notice_payload_matches_month,
         normalize_notice_identity_payload,
     )
 
@@ -8049,11 +8047,15 @@ class LanPortalStateStore:
         *,
         month_key: str = "",
     ) -> list[dict[str, Any]]:
-        """Return the canonical current-month display projection.
+        """Return the canonical display projection for every active notice.
 
         SQLite keeps remote-derived runtime history. UI readers must use this
         projection instead of combining every cached row, otherwise an old
         active ID and its bound remote ID can appear as two notices.
+
+        ``month_key`` remains accepted for existing callers, but active notices
+        are intentionally not month-scoped. They stay visible until their
+        lifecycle is ended or the row is explicitly removed.
         """
 
         candidates: list[dict[str, Any]] = []
@@ -8086,8 +8088,6 @@ class LanPortalStateStore:
             payload = normalize_notice_identity_payload(
                 self._enrich_notice_payload_from_text(payload)
             )
-            if not notice_payload_matches_month(payload, month_key=month_key):
-                continue
             candidates.append(dict(row))
             payloads.append(payload)
             identity_keys.append(self._identity_keys_for_item(payload))

@@ -8,7 +8,6 @@ from PyQt6.QtCore import Qt, QTimer
 
 from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
-    notice_payload_matches_month,
 )
 from ..core.parser import extract_event_info
 from ..utils import ACTIVE_CACHE_FILE
@@ -36,8 +35,6 @@ class ActiveCacheMixin:
             for entry in active_items:
                 data = entry.get("payload") if isinstance(entry, dict) else {}
                 if not isinstance(data, dict):
-                    continue
-                if not notice_payload_matches_month(data):
                     continue
                 self.add_active_item(
                     normalize_active_item_data(dict(data)),
@@ -356,8 +353,6 @@ class ActiveCacheMixin:
             return False
         data = normalize_active_item_data(data)
         if self._is_ended_active_cache_record(data):
-            return True
-        if not notice_payload_matches_month(data):
             return True
         if "_has_unuploaded_changes" not in data and "has_unuploaded_changes" in meta:
             data["_has_unuploaded_changes"] = bool(meta.get("has_unuploaded_changes"))

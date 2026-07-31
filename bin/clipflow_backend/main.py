@@ -129,7 +129,6 @@ from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
     current_local_month_key,
     is_local_record_id,
-    notice_payload_matches_month,
     normalize_notice_identity_payload,
 )
 from lan_bitable_template_portal.operation_audit import (
@@ -5632,8 +5631,7 @@ class FastAPIPortalController:
                 return deny
             PortalRuntime.restore_live_portal_active_items()
             reconcile_items: list[dict] = []
-            hidden_outside_current_month = 0
-            current_month_rows = 0
+            visible_candidate_rows = 0
             for row in PortalRuntime.state_store.list_qt_active_items():
                 payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
                 info = extract_event_info(str(payload.get("text") or "")) or {}
@@ -5659,16 +5657,13 @@ class FastAPIPortalController:
                 )
                 reconcile_item.setdefault("notice_type", row.get("notice_type"))
                 reconcile_items.append(reconcile_item)
-                if notice_payload_matches_month(payload):
-                    current_month_rows += 1
-                else:
-                    hidden_outside_current_month += 1
+                visible_candidate_rows += 1
             active_items = (
                 PortalRuntime.state_store.list_visible_qt_active_items()
             )
             hidden_duplicate_rows = max(
                 0,
-                current_month_rows - len(active_items),
+                visible_candidate_rows - len(active_items),
             )
             self._reconcile_orphan_started_items(
                 "ALL",
@@ -5695,8 +5690,9 @@ class FastAPIPortalController:
                     "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                     "active_visibility": {
                         "month": current_local_month_key(),
-                        "hidden_outside_month": hidden_outside_current_month,
+                        "hidden_outside_month": 0,
                         "hidden_duplicates": hidden_duplicate_rows,
+                        "mode": "all_active",
                     },
                     "qt_bridge": PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {},
                 },
@@ -7853,8 +7849,6 @@ class FastAPIPortalController:
             rows = PortalRuntime.state_store.list_qt_active_items(include_deleted=False)
             for row in rows:
                 payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-                if not notice_payload_matches_month(payload):
-                    continue
                 summary = self._diagnostic_summary_from_payload(
                     payload,
                     row=row,
@@ -8230,8 +8224,6 @@ class FastAPIPortalController:
                 return
             if _item_is_ended(item):
                 return
-            if not notice_payload_matches_month(item):
-                return
             # A live qt_active_items row is authoritative. Historical deleted rows
             # may share the same business text and must never suppress a newer live
             # row; deleted identity keys are only used by the legacy snapshot fallback.
@@ -8360,7 +8352,6 @@ class FastAPIPortalController:
                     for item in snapshot.get("items", [])
                     if isinstance(item, dict)
                     and not _item_is_ended(item)
-                    and notice_payload_matches_month(item)
                     and not _item_deleted_in_qt_store(item)
                     and PortalRuntime.service._scope_matches_item(scope, item)
                 ]

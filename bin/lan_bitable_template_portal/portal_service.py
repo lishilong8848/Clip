@@ -43,7 +43,6 @@ from .identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
     is_local_record_id,
-    notice_payload_matches_month,
     normalize_notice_identity_payload,
 )
 from .signature_crypto import (
@@ -16380,7 +16379,6 @@ class MaintenancePortalService:
                 dict(item)
                 for item in project_records
                 if isinstance(item, dict)
-                and self._source_record_matches_month_window(item)
             ]
             self._repair_loaded_once = True
 
@@ -20374,7 +20372,7 @@ class MaintenancePortalService:
                 self._repair_specialty(record)
                 for record in repair_records
                 if self._is_valid_repair_record(record)
-                and self._source_record_matches_month_window(record)
+                and not self._repair_has_ended(record)
             }
         )
         return sorted([value for value in values if value])
@@ -20886,8 +20884,6 @@ class MaintenancePortalService:
             if include_started is not None and self._repair_has_started(record) != bool(include_started):
                 continue
             if self._repair_source_status(record) not in WORKBENCH_SOURCE_STATUSES:
-                continue
-            if not self._source_record_matches_month_window(record, month):
                 continue
             if specialty and specialty != self._repair_specialty(record):
                 continue
@@ -27518,8 +27514,6 @@ class MaintenancePortalService:
                 target_record=target_record,
                 identity=identity,
             )
-            if not notice_payload_matches_month(projected):
-                continue
             if self._is_ongoing_hidden(projected):
                 continue
             section = "event" if work_type == WORK_TYPE_EVENT else "other"
@@ -28644,8 +28638,6 @@ class MaintenancePortalService:
             if not self._scope_matches_item(scope, item):
                 continue
             copied = normalize_notice_identity_payload(copy.deepcopy(item))
-            if not notice_payload_matches_month(copied):
-                continue
             copied["work_type"] = self._item_work_type(copied)
             copied.setdefault(
                 "notice_type",
@@ -28686,7 +28678,7 @@ class MaintenancePortalService:
         scope: str,
         ongoing_items: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        """Project the canonical current-month Qt view to the browser."""
+        """Project the canonical active Qt view to the browser."""
         scope = self._normalize_scope(scope)
         projected: list[dict[str, Any]] = []
         for item in ongoing_items or []:
@@ -28706,8 +28698,6 @@ class MaintenancePortalService:
             else:
                 copied = copy.deepcopy(item)
             copied = normalize_notice_identity_payload(copied)
-            if not notice_payload_matches_month(copied):
-                continue
             if not self._scope_matches_item(scope, copied):
                 continue
             copied["work_type"] = self._item_work_type(copied)
@@ -28930,7 +28920,10 @@ class MaintenancePortalService:
                 return False
             if self._repair_source_status(record) not in WORKBENCH_SOURCE_STATUSES:
                 return False
-        if not self._source_record_matches_month_window(record, month):
+        if (
+            work_type != WORK_TYPE_REPAIR
+            and not self._source_record_matches_month_window(record, month)
+        ):
             return False
         specialty = str(specialty or "").strip()
         if not specialty:

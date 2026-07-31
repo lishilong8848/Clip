@@ -5136,7 +5136,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(payload["other"][0]["data"]["record_id"], "current-record")
             self.assertEqual([item["active_item_id"] for item in qt_items], ["current-active"])
 
-    def test_active_cache_store_hides_old_month_without_deleting_sqlite_history(self):
+    def test_active_cache_store_keeps_cross_month_ongoing_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "active_cache.json"
             state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -5172,13 +5172,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 row["active_item_id"] for row in state_store.list_qt_active_items()
             }
 
-            self.assertEqual(visible_ids, {"active-current-month"})
+            self.assertEqual(
+                visible_ids,
+                {"active-current-month", "active-previous-month"},
+            )
             self.assertEqual(
                 persisted_ids,
                 {"active-current-month", "active-previous-month"},
             )
 
-    def test_qt_and_web_share_canonical_current_month_projection(self):
+    def test_qt_and_web_share_canonical_cross_month_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -5279,34 +5282,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
 
                 self.assertEqual(len(raw_items), 3)
-                self.assertEqual(len(visible_items), 1)
+                self.assertEqual(len(visible_items), 2)
                 self.assertEqual(
-                    visible_items[0]["active_item_id"],
-                    "active-current-canonical",
+                    {
+                        item["active_item_id"]
+                        for item in visible_items
+                    },
+                    {"active-current-canonical", "active-previous-month"},
                 )
                 self.assertEqual(
-                    [
+                    {
                         entry["data"]["active_item_id"]
                         for entry in qt_payload["other"]
-                    ],
-                    ["active-current-canonical"],
+                    },
+                    {"active-current-canonical", "active-previous-month"},
                 )
                 self.assertEqual(
-                    [
+                    {
                         item["active_item_id"]
                         for item in web_ongoing
-                    ],
-                    ["active-current-canonical"],
+                    },
+                    {"active-current-canonical", "active-previous-month"},
                 )
-                self.assertEqual(len(service_projection), 1)
+                self.assertEqual(len(service_projection), 2)
                 self.assertEqual(
-                    service_projection[0]["active_item_id"],
-                    "active-current-canonical",
+                    {
+                        item["active_item_id"]
+                        for item in service_projection
+                    },
+                    {"active-current-canonical", "active-previous-month"},
                 )
             finally:
                 PortalRuntime.state_store = previous_store
 
-    def test_web_ongoing_and_qt_cache_share_current_month_visibility(self):
+    def test_web_ongoing_and_qt_cache_share_cross_month_visibility(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -5355,7 +5364,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     str(item.get("active_item_id") or "") for item in web_ongoing
                 }
 
-                self.assertEqual(qt_visible_ids, {"active-current-shared"})
+                self.assertEqual(
+                    qt_visible_ids,
+                    {"active-current-shared", "active-old-shared"},
+                )
                 self.assertEqual(web_visible_ids, qt_visible_ids)
                 self.assertEqual(len(store.list_qt_active_items()), 2)
             finally:
@@ -5543,6 +5555,53 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(payload["work_type"], "maintenance")
                 self.assertIsNotNone(identity)
                 self.assertEqual(identity["target_record_id"], "recvnexkknTrwz")
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_backend_manual_event_update_remains_visible_across_month_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                previous_month = (
+                    dt.datetime.now().replace(day=1) - dt.timedelta(days=1)
+                ).strftime("%Y-%m")
+                entry = controller._clipboard_entry_from_content(
+                    "【事件通告】状态：更新\n"
+                    "【标题】EA118机房B楼I3级事件通报\n"
+                    "【来源】BMS系统\n"
+                    f"【时间】{previous_month}-28 23:33\n"
+                    "【概述】B楼支路功率过高报警\n"
+                    "【影响】IT业务不会受到影响\n"
+                    "【进展】值班工程师正在现场排查",
+                    source="manual_add",
+                )
+                self.assertIsNotNone(entry)
+                entry["target_record_id"] = "recvqXV62LUkuK"
+
+                result = controller._project_clipboard_entry_to_active(entry)
+                persisted = PortalRuntime.state_store.list_qt_active_items()
+                visible = PortalRuntime.state_store.list_visible_qt_active_items()
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    web_ongoing = controller._get_ongoing("ALL")
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["record_id"], "recvqXV62LUkuK")
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(len(visible), 1)
+                self.assertEqual(visible[0]["record_id"], "recvqXV62LUkuK")
+                self.assertEqual(len(web_ongoing), 1)
+                self.assertEqual(
+                    web_ongoing[0]["target_record_id"],
+                    "recvqXV62LUkuK",
+                )
             finally:
                 PortalRuntime.state_store = previous_store
 
@@ -6226,7 +6285,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
-    def test_qt_shell_bootstrap_only_returns_current_month_items(self):
+    def test_qt_shell_bootstrap_returns_all_cross_month_ongoing_items(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_state_store = PortalRuntime.state_store
         temp_dir = tempfile.TemporaryDirectory()
@@ -6270,13 +6329,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()["data"]
             self.assertEqual(
-                [item["active_item_id"] for item in data["active_items"]],
-                ["active-current-bootstrap"],
+                {
+                    item["active_item_id"]
+                    for item in data["active_items"]
+                },
+                {"active-current-bootstrap", "active-old-bootstrap"},
             )
             self.assertEqual(
                 data["active_visibility"]["hidden_outside_month"],
-                1,
+                0,
             )
+            self.assertEqual(data["active_visibility"]["mode"], "all_active")
             self.assertEqual(len(store.list_qt_active_items()), 2)
         finally:
             PortalRuntime.state_store = original_state_store
@@ -7143,6 +7206,133 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             finally:
                 service._state_store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
+    def test_notice_delete_prefers_latest_record_version_over_stale_expected(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            item = {
+                "active_item_id": "active-delete-version-rebase",
+                "record_id": "target-delete-version-rebase",
+                "target_record_id": "target-delete-version-rebase",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "A楼删除版本回填测试",
+                "building": "A楼",
+                "building_codes": ["A"],
+                "expected_record_version": "version-before-own-write",
+                "record_version": "version-current",
+            }
+            store.upsert_qt_active_item(item, section="other", origin="qt")
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                "名称": "A楼删除版本回填测试",
+                                "楼栋": "A楼",
+                            },
+                            "record_version": "version-current",
+                        },
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "delete_bitable_record",
+                    return_value=(True, "删除成功"),
+                ) as delete_record:
+                    result = PortalRuntime.execute_local_delete_active_item(
+                        {**item, "scope": "A"}
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["remote_deleted"])
+                delete_record.assert_called_once_with(
+                    "target-delete-version-rebase",
+                    "维保通告",
+                )
+                self.assertEqual(store.list_qt_active_items(), [])
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
+    def test_notice_delete_rebases_stale_ui_version_after_identity_check(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            item = {
+                "active_item_id": "active-delete-real-conflict",
+                "record_id": "target-delete-real-conflict",
+                "target_record_id": "target-delete-real-conflict",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "A楼真实删除冲突测试",
+                "building": "A楼",
+                "building_codes": ["A"],
+                "expected_record_version": "version-before-external-write",
+            }
+            store.upsert_qt_active_item(item, section="other", origin="qt")
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                "名称": "A楼真实删除冲突测试",
+                                "楼栋": "A楼",
+                            },
+                            "record_version": "version-after-external-write",
+                        },
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "delete_bitable_record",
+                    return_value=(True, ""),
+                ) as delete_record:
+                    result = PortalRuntime.execute_local_delete_active_item(
+                        {**item, "scope": "A"}
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["remote_deleted"])
+                delete_record.assert_called_once_with(
+                    "target-delete-real-conflict",
+                    "维保通告",
+                )
+                self.assertEqual(store.list_qt_active_items(), [])
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.service = original_service
                 PortalRuntime.state_store = original_state_store
 
@@ -8402,7 +8592,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ["m1", "c1", "c2", "c3"],
             )
 
-    def test_workbench_records_are_limited_to_current_and_previous_month(self):
+    def test_workbench_month_filter_keeps_all_unfinished_repair_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             current_start, previous_start = service._recent_month_starts()
@@ -8445,6 +8635,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 _build_repair_record("r-current", building="A楼", fault_time=f"{current_key}-08 08:20"),
                 _build_repair_record("r-previous", building="A楼", fault_time=f"{previous_key}-08 08:20"),
                 _build_repair_record("r-old", building="A楼", fault_time=f"{old_key}-08 08:20"),
+                _build_repair_record(
+                    "r-old-ended",
+                    building="A楼",
+                    fault_time=f"{old_key}-07 08:20",
+                    ended=True,
+                ),
             ]
 
             result = service.query_records(month=RECENT_MONTH_FILTER_LABEL, scope="A")
@@ -8457,6 +8653,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "c-previous",
                     "r-current",
                     "r-previous",
+                    "r-old",
                 ],
             )
 
@@ -8479,7 +8676,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertEqual(
                 [item["record_id"] for item in current["records"]],
-                ["m-current", "c-current", "r-current"],
+                [
+                    "m-current",
+                    "c-current",
+                    "r-current",
+                    "r-previous",
+                    "r-old",
+                ],
             )
             self.assertEqual(
                 current["filters"]["default_month"],
@@ -8493,7 +8696,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             previous = service.query_records(month=previous_label, scope="A")
             self.assertEqual(
                 [item["record_id"] for item in previous["records"]],
-                ["m-previous", "c-previous", "r-previous"],
+                [
+                    "m-previous",
+                    "c-previous",
+                    "r-current",
+                    "r-previous",
+                    "r-old",
+                ],
             )
 
     def test_change_source_ongoing_can_start_without_active_item(self):
@@ -8791,43 +9000,266 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("已被其他用户修改", message)
         update_record.assert_not_called()
 
-    def test_qt_update_rejects_stale_record_version_before_media_upload(self):
-        request_payload = {
-            "action_type": "update",
-            "data_dict": {
-                "record_id": "target-qt-version-conflict",
-                "target_record_id": "target-qt-version-conflict",
-                "notice_type": "维保通告",
-                "work_type": "maintenance",
-                "title": "A楼Qt并发测试",
-                "expected_record_version": "version-old",
-                "text": "【维保通告】状态：更新\n【名称】A楼Qt并发测试",
-            },
-        }
-        with patch.object(
-            portal_server_module,
-            "query_record_by_id",
-            return_value=(
-                True,
-                {
-                    "fields": {"名称": "A楼Qt并发测试"},
-                    "record_version": "version-new",
+    def test_qt_update_rebases_stale_ui_record_version_before_write(self):
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            screenshot = store.put_notice_upload_attachment(
+                open_id="qt-version-stale",
+                file_name="maintenance-update.png",
+                mime_type="image/png",
+                content=b"maintenance-update-bytes",
+            )
+            request_payload = {
+                "action_type": "update",
+                "screenshot_upload_id": screenshot["upload_id"],
+                "data_dict": {
+                    "active_item_id": "active-qt-version-stale",
+                    "record_id": "target-qt-version-conflict",
+                    "target_record_id": "target-qt-version-conflict",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "scope": "A",
+                    "title": "A楼Qt并发测试",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "record_version": "version-old",
+                    "expected_record_version": "version-old",
+                    "text": "【维保通告】状态：更新\n【名称】A楼Qt并发测试",
                 },
-            ),
-        ), patch.object(
-            portal_server_module,
-            "upload_media_to_feishu",
-        ) as upload_media, patch.object(
-            portal_server_module,
-            "update_bitable_record_by_payload",
-        ) as update_record:
-            result = PortalRuntime.execute_local_notice_upload(request_payload)
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    side_effect=[
+                        (
+                            True,
+                            {
+                                "fields": {"名称": "A楼Qt并发测试"},
+                                "record_version": "version-current",
+                            },
+                        ),
+                        (
+                            True,
+                            {
+                                "fields": {"名称": "A楼Qt并发测试"},
+                                "record_version": "version-after-write",
+                            },
+                        ),
+                    ],
+                ), patch.object(
+                    portal_server_module,
+                    "upload_media_to_feishu",
+                    return_value=(True, "maintenance-update-token"),
+                ) as upload_media, patch.object(
+                    portal_server_module,
+                    "update_bitable_record_by_payload",
+                    return_value=(True, "更新成功"),
+                ) as update_record:
+                    result = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
 
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["record_version_conflict"])
-        self.assertEqual(result["record_version"], "version-new")
-        upload_media.assert_not_called()
-        update_record.assert_not_called()
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["record_version"], "version-after-write")
+                upload_media.assert_called_once()
+                update_record.assert_called_once()
+                active_payload = store.list_qt_active_items()[0]["payload"]
+                self.assertEqual(
+                    active_payload["record_version"],
+                    "version-after-write",
+                )
+                self.assertEqual(
+                    active_payload["expected_record_version"],
+                    "version-after-write",
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.state_store = old_store
+
+    def test_qt_update_prefers_latest_record_version_and_rebases_after_write(self):
+        old_store = PortalRuntime.state_store
+        old_locks = PortalRuntime.local_upload_locks
+        old_created_targets = PortalRuntime.local_upload_created_targets
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            PortalRuntime.local_upload_locks = {}
+            PortalRuntime.local_upload_created_targets = {}
+            screenshot = store.put_notice_upload_attachment(
+                open_id="qt-version-test",
+                file_name="event-update.png",
+                mime_type="image/png",
+                content=b"event-update-bytes",
+            )
+            request_payload = {
+                "action_type": "update",
+                "screenshot_upload_id": screenshot["upload_id"],
+                "data_dict": {
+                    "active_item_id": "active-qt-version-rebase",
+                    "record_id": "target-qt-version-rebase",
+                    "target_record_id": "target-qt-version-rebase",
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "scope": "A",
+                    "title": "A楼Qt版本回填测试",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "event_source": "BMS",
+                    "level": "I3",
+                    "time_str": "2026-07-31 09:30",
+                    "expected_record_version": "version-before-own-write",
+                    "record_version": "version-current",
+                    "text": (
+                        "【事件通告】状态：更新\n"
+                        "【标题】A楼Qt版本回填测试\n"
+                        "【事件发生时间】2026-07-31 09:30\n"
+                        "【机楼】A楼\n"
+                        "【来源】BMS\n"
+                        "【等级】I3\n"
+                        "【概述】版本回填测试\n"
+                        "【进展】继续处理"
+                    ),
+                },
+                "response_time": "2026-07-31 09:35",
+                "recover_selected": False,
+                "robot_group_choice": "auto",
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    side_effect=[
+                        (
+                            True,
+                            {
+                                "fields": {"标题": "A楼Qt版本回填测试"},
+                                "record_version": "version-current",
+                            },
+                        ),
+                        (
+                            True,
+                            {
+                                "fields": {"标题": "A楼Qt版本回填测试"},
+                                "record_version": "version-after-write",
+                            },
+                        ),
+                    ],
+                ), patch.object(
+                    portal_server_module,
+                    "upload_media_to_feishu",
+                    return_value=(True, "event-update-token"),
+                ), patch.object(
+                    portal_server_module,
+                    "update_bitable_record_by_payload",
+                    return_value=(True, "更新成功"),
+                ) as update_record:
+                    result = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["record_version"], "version-after-write")
+                update_record.assert_called_once()
+                active_rows = store.list_qt_active_items()
+                self.assertEqual(len(active_rows), 1)
+                active_payload = active_rows[0]["payload"]
+                self.assertEqual(
+                    active_payload["record_version"],
+                    "version-after-write",
+                )
+                self.assertEqual(
+                    active_payload["expected_record_version"],
+                    "version-after-write",
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.state_store = old_store
+                PortalRuntime.local_upload_locks = old_locks
+                PortalRuntime.local_upload_created_targets = old_created_targets
+
+    def test_qt_first_upload_returns_and_persists_created_record_version(self):
+        old_store = PortalRuntime.state_store
+        old_locks = PortalRuntime.local_upload_locks
+        old_created_targets = PortalRuntime.local_upload_created_targets
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            PortalRuntime.local_upload_locks = {}
+            PortalRuntime.local_upload_created_targets = {}
+            request_payload = {
+                "action_type": "upload",
+                "data_dict": {
+                    "active_item_id": "active-event-first-version",
+                    "record_id": "local_event_first_version",
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "scope": "A",
+                    "title": "A楼事件首次上传版本测试",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "event_source": "BMS系统",
+                    "level": "I3",
+                    "time_str": "2026-08-01 09:30",
+                    "text": (
+                        "【事件通告】状态：新增\n"
+                        "【标题】A楼事件首次上传版本测试\n"
+                        "【来源】BMS系统\n"
+                        "【时间】2026-08-01 09:30\n"
+                        "【概述】首次上传版本测试\n"
+                        "【影响】无\n"
+                        "【进展】正在处理"
+                    ),
+                },
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "create_bitable_record_by_payload",
+                    return_value=(True, "target-event-first-version"),
+                ) as create_record, patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {"告警描述": "A楼事件首次上传版本测试"},
+                            "record_version": "version-created-final",
+                        },
+                    ),
+                ):
+                    result = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(
+                    result["real_record_id"],
+                    "target-event-first-version",
+                )
+                self.assertEqual(
+                    result["record_version"],
+                    "version-created-final",
+                )
+                create_record.assert_called_once()
+                rows = store.list_qt_active_items()
+                self.assertEqual(len(rows), 1)
+                active_payload = rows[0]["payload"]
+                self.assertEqual(
+                    active_payload["record_version"],
+                    "version-created-final",
+                )
+                self.assertEqual(
+                    active_payload["expected_record_version"],
+                    "version-created-final",
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.state_store = old_store
+                PortalRuntime.local_upload_locks = old_locks
+                PortalRuntime.local_upload_created_targets = old_created_targets
 
     def test_change_target_candidates_match_title_without_required_date(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14481,6 +14913,92 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             dialog.deleteLater()
             app.processEvents()
 
+    def test_qt_screenshot_dialog_does_not_mutate_active_item_before_confirm(self):
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        dialog = ScreenshotConfirmDialog(theme="dark")
+        original = {
+            "record_id": "event-dialog-copy",
+            "notice_type": "事件通告",
+            "record_version": "version-current",
+            "expected_record_version": "version-current",
+            "buildings": ["A楼"],
+            "event_source": "BMS",
+            "level": "I3",
+            "text": "【事件通告】状态：更新\n【标题】A楼弹窗副本测试",
+        }
+        snapshot = copy.deepcopy(original)
+        try:
+            dialog.set_data(original, action_type="update")
+            dialog.data_dict["record_version"] = "dialog-only-version"
+            dialog.data_dict["buildings"].append("B楼")
+
+            self.assertEqual(original, snapshot)
+            self.assertIsNot(dialog.data_dict, original)
+            self.assertIsNot(dialog.data_dict["buildings"], original["buildings"])
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            app.processEvents()
+
+    def test_qt_screenshot_cancel_rebases_rolled_back_record_version(self):
+        class _Item:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def data(self, _role):
+                return self.payload
+
+            def setData(self, _role, value):
+                self.payload = value
+
+        item = _Item(
+            {
+                "record_id": "event-cancel-version",
+                "record_version": "version-current",
+                "expected_record_version": "version-before-own-write",
+            }
+        )
+        rollback_data = copy.deepcopy(item.payload)
+        dummy = SimpleNamespace(
+            _closing=False,
+            pending_action_record_ids={"event-cancel-version"},
+            pending_action_types={"event-cancel-version": "update"},
+            pending_upload_rollback_by_record_id={
+                "event-cancel-version": {"old_data": rollback_data}
+            },
+            current_screenshot_record_id="event-cancel-version",
+            current_screenshot_action_type="update",
+            _set_last_ui_op=lambda *_args, **_kwargs: None,
+            _upload_completion_record_id_candidates=lambda _record_id: [
+                "event-cancel-version"
+            ],
+            _find_active_item_by_upload_completion_id=lambda _record_id: (
+                object(),
+                item,
+                "event-cancel-version",
+            ),
+            _is_valid_list_item=lambda _item: True,
+            _rebuild_active_item_widget=lambda *_args, **_kwargs: None,
+            request_active_cache_save=lambda *_args, **_kwargs: None,
+        )
+
+        MainWindowRecordsMixin.restore_button_state(
+            dummy,
+            success=False,
+            record_id="event-cancel-version",
+            mark_failed=False,
+        )
+
+        self.assertEqual(item.payload["record_version"], "version-current")
+        self.assertEqual(
+            item.payload["expected_record_version"],
+            "version-current",
+        )
+        self.assertNotIn("_last_upload_error", item.payload)
+        self.assertFalse(item.payload["_upload_in_progress"])
+
     def test_outbox_events_are_leased_and_acknowledged(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
@@ -15500,8 +16018,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_refresh_repair_source_updates_projects_followups_and_workbench_snapshot(self):
         class _RepairRefreshService(_TestMaintenancePortalService):
             def _load_repair_management_project_records_remote(self):
+                old_fault_time = (
+                    dt.datetime.now() - dt.timedelta(days=120)
+                ).strftime("%Y-%m-%d 08:20")
                 return [], [
                     _build_repair_record("r-new", building="A楼"),
+                    _build_repair_record(
+                        "r-old-active",
+                        building="A楼",
+                        title="历史未结束检修",
+                        fault_time=old_fault_time,
+                    ),
+                    _build_repair_record(
+                        "r-old-ended",
+                        building="A楼",
+                        title="历史已结束检修",
+                        fault_time=(
+                            dt.datetime.now() - dt.timedelta(days=121)
+                        ).strftime("%Y-%m-%d 08:20"),
+                        ended=True,
+                    ),
                 ]
 
             def _load_repair_followup_records_remote(self):
@@ -15554,17 +16090,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 for item in project_listing.get("records") or []
             }
 
-            self.assertEqual(result["repair_project_count"], 1)
+            self.assertEqual(result["repair_project_count"], 3)
             self.assertEqual(result["repair_followup_count"], 1)
             self.assertEqual(
                 [item["record_id"] for item in project_snapshot["records"]],
-                ["r-new"],
+                ["r-new", "r-old-active", "r-old-ended"],
             )
             self.assertEqual(
                 [item["record_id"] for item in followup_snapshot["records"]],
                 ["followup-new"],
             )
             self.assertIn("r-new", workbench_record_ids)
+            self.assertIn("r-old-active", workbench_record_ids)
+            self.assertNotIn("r-old-ended", workbench_record_ids)
             self.assertIn("r-new", project_listing_ids)
 
     def test_change_source_month_window_accepts_plan_date_aliases(self):

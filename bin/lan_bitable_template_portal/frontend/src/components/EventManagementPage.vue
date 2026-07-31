@@ -283,7 +283,12 @@ const emit = defineEmits<{
   "switch-scope": [scope: string, detail?: boolean];
 }>();
 
-const selectedMonth = ref(new Date().toISOString().slice(0, 7));
+function currentLocalMonth(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+const selectedMonth = ref(currentLocalMonth());
 const loading = ref(false);
 const refreshing = ref(false);
 let sourceRefreshAbortController: AbortController | null = null;

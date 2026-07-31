@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtCore import Qt, QTimer, QUrl, QThread, qInstallMessageHandler
 from PyQt6.QtGui import QDesktopServices
 
-from lan_bitable_template_portal.identity_utils import notice_payload_matches_month
 from ..config import config
 from ..logger import log_info, log_error, log_warning, write_crash_trace_message
 from ..utils import BASE_DIR
@@ -587,14 +586,6 @@ class MainWindowRuntimeMixin:
             list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
         if (not item or not self._is_valid_list_item(item)) and record_id:
             list_widget, item = self._find_active_item_by_record_id(record_id)
-        if not notice_payload_matches_month(data):
-            if item and self._is_valid_list_item(item):
-                self._remove_active_item_from_source(list_widget, item)
-            return {
-                "ok": True,
-                "ignored_outside_current_month": True,
-                "removed": bool(item),
-            }
         data = self._canonical_backend_active_payload(data)
         active_item_id = str(data.get("active_item_id") or "").strip()
         record_id = str(

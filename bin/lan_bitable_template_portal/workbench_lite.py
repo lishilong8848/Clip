@@ -3675,8 +3675,9 @@ def render_workbench_lite(
         target_record_id: targetRecordId,
         record_id: recordId,
         operation_id: String(operationId || '').trim(),
+        record_version: String(patch.record_version || '').trim(),
         expected_record_version: String(
-          patch.expected_record_version || patch.record_version || ''
+          patch.record_version || patch.expected_record_version || ''
         ).trim(),
       }};
     }}
