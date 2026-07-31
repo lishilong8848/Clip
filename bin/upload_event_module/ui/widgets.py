@@ -24,6 +24,8 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6 import sip
 from PyQt6.QtGui import QAction
 
+from lan_bitable_template_portal.identity_utils import canonical_target_record_id
+
 from ..core.speech import speech_manager
 from ..time_parser import parse_single_datetime, parse_time_only
 from .display_state import build_notice_display_snapshot
@@ -557,12 +559,12 @@ class ClipboardItemWidget(QWidget):
 
 
 
-        self.delete_btn = QPushButton("移")
+        self.delete_btn = QPushButton(self._delete_button_text())
 
         self.delete_btn.setFixedSize(50, 50)
 
         self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.delete_btn.setToolTip("删除通告，并删除对应多维记录")
+        self.delete_btn.setToolTip(self._delete_default_tooltip())
 
         self.delete_btn.setStyleSheet("""
 
@@ -983,6 +985,18 @@ class ClipboardItemWidget(QWidget):
 
 
 
+    def _delete_has_remote_target(self):
+        data = self.data if isinstance(self.data, dict) else {}
+        return bool(canonical_target_record_id(data))
+
+    def _delete_button_text(self):
+        return "删" if self._delete_has_remote_target() else "移"
+
+    def _delete_default_tooltip(self):
+        if self._delete_has_remote_target():
+            return "删除通告，并删除对应多维记录"
+        return "移除未上传通告的本地显示"
+
     def _on_delete_clicked(self):
         """处理删除点击：第一次确认，第二次才真正删除。"""
         if not self._delete_interaction_enabled:
@@ -991,8 +1005,12 @@ class ClipboardItemWidget(QWidget):
             return
         if not self._delete_confirm_pending:
             self._delete_confirm_pending = True
-            self.delete_btn.setText("确认删")
-            self.delete_btn.setToolTip("再次点击确认删除通告和多维记录")
+            if self._delete_has_remote_target():
+                self.delete_btn.setText("确认删")
+                self.delete_btn.setToolTip("再次点击确认删除通告和多维记录")
+            else:
+                self.delete_btn.setText("确认移")
+                self.delete_btn.setToolTip("再次点击确认仅移除本地显示")
             self._auto_collapse_timer.start(3000)
             return
 
@@ -1072,8 +1090,8 @@ class ClipboardItemWidget(QWidget):
                 return
         except Exception:
             return
-        btn.setText("删")
-        btn.setToolTip("删除通告，并删除对应多维记录")
+        btn.setText(self._delete_button_text())
+        btn.setToolTip(self._delete_default_tooltip())
 
     def _reset_swipe_visual(self):
         if self._slide_anim:
@@ -1152,11 +1170,13 @@ class ClipboardItemWidget(QWidget):
     def set_record_id(self, new_record_id):
         self.data["record_id"] = new_record_id
         self.data["_is_placeholder_record"] = False
+        self._reset_delete_confirm_visual()
         self._refresh_today_progress_button()
 
 
     def refresh_data(self, new_data_dict):
         self.data = new_data_dict
+        self._reset_delete_confirm_visual()
         self.today_in_progress_state = self._coerce_today_progress_state(
             new_data_dict.get("today_in_progress_state")
         )

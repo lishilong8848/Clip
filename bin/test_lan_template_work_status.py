@@ -5871,8 +5871,29 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertIn('data-work-type="event"', all_rows)
         self.assertIn('data-direct-navigation="1"', all_rows)
+        self.assertIn('data-local-only="0"', all_rows)
         self.assertIn('mode=events', all_rows)
         self.assertEqual(maintenance_rows, '<div class="empty">当前没有未结束通告</div>')
+
+        local_item = {
+            **item,
+            "active_item_id": "active-local-event-b",
+            "record_id": "localid-event-b",
+            "target_record_id": "",
+        }
+        local_rows = _ongoing_rows(
+            [local_item],
+            scope="B",
+            work_type="all",
+            month="2026-07",
+            selected_id="",
+            pending_page=1,
+            ongoing_page=1,
+        )
+        self.assertIn('data-local-only="1"', local_rows)
+        self.assertNotIn('data-direct-navigation="1"', local_rows)
+        self.assertNotIn("mode=events", local_rows)
+        self.assertIn("/workbench-lite?", local_rows)
 
     def test_qt_failed_end_rollback_persists_the_restored_active_item(self):
         workflow_text = (
@@ -17056,6 +17077,77 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
+    def test_fastapi_qt_command_delete_local_event_only_removes_local_state(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        PortalRuntime.service = _NativeFastAPIRouteService()
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalRuntime.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        PortalRuntime.state_store.upsert_qt_active_item(
+            {
+                "active_item_id": "active-local-event-delete",
+                "record_id": "localid-event-update",
+                "target_record_id": "localid-event-update",
+                "notice_type": "事件通告",
+                "work_type": "event",
+                "title": "未上传事件删除测试",
+                "building_codes": ["110"],
+            },
+            section="event",
+            origin="qt",
+        )
+        controller._read_cache_put(("health",), {"ok": True})
+        client = TestClient(controller._build_app())
+        try:
+            with patch.object(
+                portal_server_module,
+                "query_record_by_id",
+            ) as query_record, patch.object(
+                portal_server_module,
+                "delete_bitable_record",
+            ) as delete_record:
+                response = client.post(
+                    "/api/qt/commands",
+                    json={
+                        "command": "delete_active_item",
+                        "payload": {
+                            "data_dict": {
+                                "scope": "110",
+                                "work_type": "event",
+                                "notice_type": "事件通告",
+                                "active_item_id": "active-local-event-delete",
+                                "record_id": "localid-event-update",
+                                "target_record_id": "localid-event-update",
+                            }
+                        },
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertTrue(body.get("ok"))
+            self.assertTrue(body.get("data", {}).get("local_only_removed"))
+            self.assertFalse(body.get("data", {}).get("remote_deleted"))
+            query_record.assert_not_called()
+            delete_record.assert_not_called()
+            self.assertEqual(PortalRuntime.state_store.list_qt_active_items(), [])
+            self.assertEqual(controller._read_cache_stats()["entries"], 0)
+            leased = PortalRuntime.state_store.lease_outbox_events(
+                "qt_action", limit=1, lease_seconds=5
+            )
+            self.assertEqual(leased[0]["payload"]["kind"], "active_delete")
+            self.assertEqual(
+                leased[0]["payload"]["payload"]["active_item_id"],
+                "active-local-event-delete",
+            )
+        finally:
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            temp_dir.cleanup()
+
     def test_delete_creates_undo_and_restore_reprojects_qt_active_item(self):
         original_service = PortalRuntime.service
         original_state_store = PortalRuntime.state_store
@@ -18473,6 +18565,35 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn('data-ongoing-delete-mode="local"', user_html)
         self.assertIn('data-ongoing-delete-mode="local"', admin_html)
         self.assertIn("移除显示", admin_html)
+
+    def test_workbench_lite_local_event_detail_only_exposes_local_remove(self):
+        from lan_bitable_template_portal.workbench_lite import _detail_form
+
+        local_event = {
+            "active_item_id": "active-local-event",
+            "record_id": "localid-event-update",
+            "target_record_id": "",
+            "work_type": "event",
+            "notice_type": "事件通告",
+            "title": "未上传事件",
+            "text": "【事件通告】状态：更新\n【标题】未上传事件",
+        }
+
+        admin_html = _detail_form(
+            record=None,
+            ongoing_item=local_event,
+            scope="110",
+            work_type="event",
+            manual=False,
+            is_admin=True,
+        )
+
+        self.assertIn('data-local-only="1"', admin_html)
+        self.assertIn('name="record_id" value="localid-event-update"', admin_html)
+        self.assertIn('data-ongoing-delete-mode="local"', admin_html)
+        self.assertNotIn('data-ongoing-delete-mode="remote"', admin_html)
+        self.assertNotIn('name="submit_action"', admin_html)
+        self.assertIn("未上传", admin_html)
 
     def test_workbench_lite_clears_only_the_completed_current_notice(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite

@@ -2061,7 +2061,7 @@ class MainWindowWorkflowMixin:
         return True, ""
 
     def _delete_active_item(self, data_dict):
-        """删除活动列表项，并同步删除对应多维记录。"""
+        """删除活动列表项；未上传条目只移除本地显示。"""
         data_dict = dict(data_dict or {})
         if self._is_screenshot_dialog_active():
             record_id = (data_dict or {}).get("record_id")
@@ -2118,7 +2118,10 @@ class MainWindowWorkflowMixin:
                 self._delete_active_cache_record(data_dict)
             self.request_active_cache_save()
             self._remember_delete_undo(data_dict, result or {})
-            log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
+            if bool((result or {}).get("remote_deleted")):
+                log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
+            else:
+                log_info(f"UI操作: 移除未上传本地事件, Record ID: {record_id}")
 
         def _worker() -> None:
             success, error, result = self._submit_delete_active_item_to_backend(data_dict)

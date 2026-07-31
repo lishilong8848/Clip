@@ -5836,11 +5836,32 @@ class FastAPIPortalController:
                     return {"ok": True, "data": data}
                 if command == "delete_active_item":
                     command_payload = dict(payload.get("payload") or {})
-                    command_payload = normalize_notice_identity_payload(command_payload)
-                    data = await asyncio.to_thread(
-                        PortalRuntime.execute_local_delete_active_item,
-                        command_payload,
+                    raw_delete_payload = command_payload
+                    if isinstance(command_payload.get("data_dict"), dict):
+                        raw_delete_payload = command_payload.get("data_dict") or {}
+                    elif isinstance(command_payload.get("data"), dict):
+                        raw_delete_payload = command_payload.get("data") or {}
+                    raw_target_record_id = str(
+                        raw_delete_payload.get("target_record_id") or ""
+                    ).strip()
+                    local_only_candidate = (
+                        not raw_target_record_id
+                        or is_local_record_id(raw_target_record_id)
                     )
+                    command_payload = normalize_notice_identity_payload(command_payload)
+                    if local_only_candidate:
+                        data = await asyncio.to_thread(
+                            PortalRuntime.execute_local_remove_active_item,
+                            command_payload,
+                        )
+                        if bool((data or {}).get("ok")):
+                            data["local_only_removed"] = True
+                            data["message"] = "未上传通告已从本地显示中移除。"
+                    else:
+                        data = await asyncio.to_thread(
+                            PortalRuntime.execute_local_delete_active_item,
+                            command_payload,
+                        )
                     if not bool((data or {}).get("ok")):
                         return {"ok": True, "data": data}
                     delete_payload = command_payload

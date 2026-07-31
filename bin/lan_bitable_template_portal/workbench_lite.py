@@ -9,6 +9,8 @@ from contextlib import suppress
 from typing import Any
 from urllib.parse import urlencode
 
+from lan_bitable_template_portal.identity_utils import is_local_record_id
+
 
 WORK_TYPE_LABELS: dict[str, str] = {
     "maintenance": "维保",
@@ -371,6 +373,15 @@ def _item_work_type(item: dict[str, Any] | None) -> str:
     if re.search(r"事件通告", text):
         return "event"
     return "maintenance"
+
+
+def _remote_target_record_id(item: dict[str, Any] | None) -> str:
+    item = item if isinstance(item, dict) else {}
+    for key in ("target_record_id", "record_id"):
+        candidate = str(item.get(key) or "").strip()
+        if candidate and not is_local_record_id(candidate):
+            return candidate
+    return ""
 
 
 def _record_key(record: dict[str, Any]) -> str:
@@ -1448,7 +1459,9 @@ def _ongoing_rows(
     for item in filtered:
         active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
         row_work_type = _item_work_type(item)
-        direct_navigation = row_work_type == "event"
+        remote_target_record_id = _remote_target_record_id(item)
+        local_only_event = row_work_type == "event" and not remote_target_record_id
+        direct_navigation = row_work_type == "event" and bool(remote_target_record_id)
         if direct_navigation:
             event_scope = _record_building_code(item) or scope
             url = _query_url(
@@ -1467,7 +1480,7 @@ def _ongoing_rows(
         active = " active" if active_id == selected_id else ""
         title = _record_display_title(item)
         draft = _draft_from_record(item, work_type=row_work_type)
-        target_record_id = str(item.get("target_record_id") or item.get("record_id") or "")
+        target_record_id = remote_target_record_id
         source_record_id = _explicit_source_id(item)
         source_event_id = _first(
             item.get("source_event_id"),
@@ -1488,6 +1501,7 @@ def _ongoing_rows(
         f" aria-current=\"{'true' if active else 'false'}\""
         f" data-row-kind=\"ongoing\""
         f" data-direct-navigation=\"{'1' if direct_navigation else ''}\""
+        f" data-local-only=\"{'1' if local_only_event else '0'}\""
         f" data-work-type=\"{_e(row_work_type)}\""
         f" data-active-item-id=\"{_e(str(item.get('active_item_id') or ''))}\""
         f" data-record-id=\"{_e(str(item.get('record_id') or ''))}\""
@@ -1860,6 +1874,58 @@ def _detail_mode_note(
     return "待选择"
 
 
+def _local_event_ongoing_detail(
+    item: dict[str, Any],
+    *,
+    scope: str,
+    source_month: str,
+    is_admin: bool,
+) -> str:
+    title = _record_display_title(item)
+    active_item_id = str(item.get("active_item_id") or "").strip()
+    record_id = str(item.get("record_id") or active_item_id).strip()
+    source_record_id = _explicit_source_id(item)
+    notice_text = str(item.get("text") or item.get("content") or "").strip()
+    remove_action = (
+        '<button class="btn danger-ghost" type="button" '
+        'data-ongoing-delete-mode="local">移除显示</button>'
+        if is_admin
+        else '<span class="action-reason">请在 Qt 中移除该未上传通告</span>'
+    )
+    notice_text_html = (
+        f'<pre class="local-event-text">{_e(notice_text)}</pre>'
+        if notice_text
+        else ""
+    )
+    return f"""
+      <form id="lite-notice-form" class="detail-form local-event-detail"
+            data-action="" data-detail-mode="ongoing" data-work-type="event"
+            data-local-only="1">
+        <input type="hidden" name="scope" value="{_e(scope)}">
+        <input type="hidden" name="source_month" value="{_e(source_month)}">
+        <input type="hidden" name="work_type" value="event">
+        <input type="hidden" name="notice_type" value="事件通告">
+        <input type="hidden" name="manual" value="">
+        <input type="hidden" name="manual_id" value="">
+        <input type="hidden" name="record_id" value="{_e(record_id)}">
+        <input type="hidden" name="source_record_id" value="{_e(source_record_id)}">
+        <input type="hidden" name="target_record_id" value="">
+        <input type="hidden" name="active_item_id" value="{_e(active_item_id)}">
+        <input type="hidden" name="title" value="{_e(title)}">
+        <header class="detail-head">
+          <span>事件</span>
+          <strong>{_e(title)}</strong>
+          <small class="detail-mode-note">未上传</small>
+        </header>
+        {notice_text_html}
+        <div class="form-actions">
+          <span id="lite-job-status" class="job-status" aria-live="polite">仅本地显示</span>
+          {remove_action}
+        </div>
+      </form>
+    """
+
+
 def _detail_form(
     *,
     record: dict[str, Any] | None,
@@ -1879,6 +1945,17 @@ def _detail_form(
     prefill_context_id: str = "",
 ) -> str:
     source = ongoing_item or record or {}
+    if (
+        ongoing_item
+        and _item_work_type(source) == "event"
+        and not _remote_target_record_id(source)
+    ):
+        return _local_event_ongoing_detail(
+            source,
+            scope=scope,
+            source_month=source_month,
+            is_admin=is_admin,
+        )
     work = _work_type(work_type) if work_type else _item_work_type(source)
     explicit_prefill_source_id = str(prefill_source_record_id or "").strip()
     effective_manual = bool(
@@ -2557,8 +2634,10 @@ def render_workbench_lite(
     .detail-head span {{ width:max-content; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:900; }}
     .detail-head strong {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; line-height:1.22; }}
     .detail-head em {{ color:#64748b; font-style:normal; }}
+    .detail-head small {{ color:#c2410c; font-size:11px; font-weight:900; }}
     .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:10px; font-weight:900; line-height:1.25; }}
     .detail-form {{ display:grid; gap:6px; }}
+    .local-event-text {{ margin:0; max-height:360px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; border:1px solid #d8e5f7; border-radius:10px; padding:10px 12px; color:#18345f; background:#fff; font:12px/1.65 "Microsoft YaHei",Arial,sans-serif; }}
     .current-notice-empty {{ min-height:180px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
@@ -5094,6 +5173,20 @@ def render_workbench_lite(
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
       actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change],button[data-revert-to-maintenance]').forEach(node => node.remove());
+      if (form.dataset.localOnly === '1') {{
+        if (liteIsAdmin) {{
+          const localRemoveButton = document.createElement('button');
+          localRemoveButton.className = 'btn danger-ghost';
+          localRemoveButton.type = 'button';
+          localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
+          localRemoveButton.textContent = '移除显示';
+          actions.appendChild(localRemoveButton);
+        }}
+        setLiteStatus(liteIsAdmin
+          ? '该事件尚未上传，可仅移除前端和 Qt 显示'
+          : '该事件尚未上传，请在 Qt 中移除');
+        return;
+      }}
       const updateButton = document.createElement('button');
       updateButton.className = 'btn primary';
       updateButton.type = 'submit';
@@ -5136,6 +5229,7 @@ def render_workbench_lite(
       const title = link.getAttribute('data-title') || draft.title || '选择左侧事项';
       form.dataset.action = action;
       form.dataset.detailMode = linkedOngoing ? 'ongoing' : 'source';
+      form.dataset.localOnly = '';
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
@@ -5183,17 +5277,20 @@ def render_workbench_lite(
       if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
       const draft = draftFromRow(link);
       const title = link.getAttribute('data-title') || draft.title || '未结束通告';
+      const localOnly = link.getAttribute('data-local-only') === '1';
       form.dataset.action = 'update';
       form.dataset.detailMode = 'ongoing';
+      form.dataset.localOnly = localOnly ? '1' : '';
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
       const sourceId = link.getAttribute('data-source-record-id') || '';
-      const targetId = link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '';
+      const rowRecordId = link.getAttribute('data-record-id') || '';
+      const targetId = link.getAttribute('data-target-record-id') || (localOnly ? '' : rowRecordId);
       const sourceEventId = link.getAttribute('data-source-event-id') || '';
       const sourceEventTitle = link.getAttribute('data-source-event-title') || '';
       resetRepairEventSelection(form, workType === 'repair', sourceId);
-      setFormValue(form, 'record_id', targetId);
+      setFormValue(form, 'record_id', targetId || rowRecordId);
       setFormValue(form, 'source_record_id', sourceId);
       setFormValue(form, 'repair_management_record_id', sourceId);
       setFormValue(form, 'related_event_record_id', sourceEventId);
@@ -5212,14 +5309,17 @@ def render_workbench_lite(
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       const hint = form.querySelector('.detail-head em');
       if (hint) hint.textContent = '';
-      setDetailModeNote(sourceId && targetId
-        ? ''
-        : (targetId ? '' : '需绑定目标')
+      setDetailModeNote(localOnly
+        ? '未上传'
+        : (sourceId && targetId ? '' : (targetId ? '' : '需绑定目标'))
       );
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
       setOngoingSubmitButtons(form);
       updateNoticePreview(form);
-      setLiteStatus('已选择未结束通告，可发送更新或结束');
+      setLiteStatus(localOnly
+        ? (liteIsAdmin ? '该事件尚未上传，可移除显示' : '该事件尚未上传，请在 Qt 中移除')
+        : '已选择未结束通告，可发送更新或结束'
+      );
       openNoticeDrawer(title, link);
       return true;
     }}
