@@ -361,6 +361,10 @@ class FastAPIPortalController:
         self._sse_lock = threading.RLock()
         self._sse_connections: dict[tuple, int] = {}
         self._sse_connection_seq = 0
+        self._qt_active_stream_wake_lock = threading.RLock()
+        self._qt_active_stream_wakers: dict[
+            int, tuple[asyncio.AbstractEventLoop, asyncio.Event]
+        ] = {}
         self._background_executor = ThreadPoolExecutor(
             max_workers=int(
                 _env_float("CLIPFLOW_BACKEND_BG_WORKERS", 6, minimum=2, maximum=24)
@@ -4855,6 +4859,7 @@ class FastAPIPortalController:
                 )
                 PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
+                self._notify_qt_active_streams()
                 event_id = PortalRuntime.state_store.enqueue_outbox_event(
                     "qt_action",
                     {
@@ -4923,6 +4928,7 @@ class FastAPIPortalController:
                 )
                 PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
+                self._notify_qt_active_streams()
                 event_id = PortalRuntime.state_store.enqueue_outbox_event(
                     "qt_action",
                     {
@@ -5888,6 +5894,7 @@ class FastAPIPortalController:
                         data["cleanup_warning"] = str(cleanup_exc)
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
+                    self._notify_qt_active_streams()
                     PortalRuntime.state_store.enqueue_outbox_event(
                         "qt_action",
                         {
@@ -6221,6 +6228,7 @@ class FastAPIPortalController:
                 items if isinstance(items, list) else []
             )
             PortalRuntime.clear_payload_cache()
+            self._notify_qt_active_streams()
             return {"ok": True, "data": result}
 
         @app.post("/api/qt/active-items/delta")
@@ -6271,6 +6279,7 @@ class FastAPIPortalController:
             if upserted or deleted:
                 PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
+                self._notify_qt_active_streams()
             return {
                 "ok": True,
                 "data": {
@@ -6583,10 +6592,89 @@ class FastAPIPortalController:
         return hashlib.sha1(raw.encode("utf-8")).hexdigest(), len(compact)
 
     @staticmethod
-    def _scoped_qt_active_signature(scope: str) -> tuple[str, int]:
+    def _scoped_qt_active_identities(
+        scope: str,
+        *,
+        month_key: str = "",
+    ) -> list[dict[str, Any]]:
         try:
             active_rows = (
-                PortalRuntime.state_store.list_visible_qt_active_items()
+                PortalRuntime.state_store.list_visible_qt_active_items(
+                    month_key=month_key
+                )
+            )
+        except Exception:
+            active_rows = []
+        identities: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for row in active_rows:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            item = normalize_notice_identity_payload(dict(payload))
+            item.setdefault("active_item_id", str(row.get("active_item_id") or ""))
+            item.setdefault("target_record_id", str(row.get("record_id") or ""))
+            if not str(item.get("record_id") or "").strip():
+                item["record_id"] = str(row.get("record_id") or "")
+            item.setdefault("notice_type", str(row.get("notice_type") or ""))
+            status = str(item.get("status") or "").strip()
+            if status == "结束":
+                continue
+            text = str(item.get("text") or item.get("content") or "").strip()
+            if text:
+                info = extract_event_info(text) or {}
+                if str(info.get("status") or "").strip() == "结束":
+                    continue
+            try:
+                if not PortalRuntime.service._scope_matches_item(scope, item):
+                    continue
+            except Exception:
+                continue
+            active_item_id = str(item.get("active_item_id") or "").strip()
+            record_id = str(item.get("record_id") or "").strip()
+            target_record_id = canonical_target_record_id(item)
+            source_record_id = canonical_source_record_id(item)
+            identity_key = (
+                active_item_id,
+                target_record_id,
+                record_id,
+                source_record_id,
+            )
+            if not any(identity_key) or identity_key in seen:
+                continue
+            seen.add(identity_key)
+            identities.append(
+                {
+                    "active_item_id": active_item_id,
+                    "target_record_id": target_record_id,
+                    "record_id": record_id,
+                    "source_record_id": source_record_id,
+                    "local_only": not bool(target_record_id),
+                }
+            )
+        identities.sort(
+            key=lambda item: (
+                str(item.get("active_item_id") or ""),
+                str(item.get("target_record_id") or ""),
+                str(item.get("record_id") or ""),
+                str(item.get("source_record_id") or ""),
+            )
+        )
+        return identities
+
+    @staticmethod
+    def _scoped_qt_active_signature(
+        scope: str,
+        *,
+        month_key: str = "",
+    ) -> tuple[str, int]:
+        try:
+            active_rows = (
+                PortalRuntime.state_store.list_visible_qt_active_items(
+                    month_key=month_key
+                )
             )
         except Exception:
             active_rows = []
@@ -7036,6 +7124,30 @@ class FastAPIPortalController:
             connection_id = self._sse_connection_seq
             self._sse_connections[key] = connection_id
             return key, connection_id
+
+    def _register_qt_active_stream_waker(
+        self,
+        connection_id: int,
+    ) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        with self._qt_active_stream_wake_lock:
+            self._qt_active_stream_wakers[int(connection_id)] = (loop, event)
+        return event
+
+    def _unregister_qt_active_stream_waker(self, connection_id: int) -> None:
+        with self._qt_active_stream_wake_lock:
+            self._qt_active_stream_wakers.pop(int(connection_id), None)
+
+    def _notify_qt_active_streams(self) -> None:
+        with self._qt_active_stream_wake_lock:
+            wakers = list(self._qt_active_stream_wakers.values())
+        for loop, event in wakers:
+            try:
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(event.set)
+            except Exception:
+                continue
 
     def _sse_active(self, key: tuple, connection_id: int) -> bool:
         with self._sse_lock:
@@ -9547,11 +9659,12 @@ class FastAPIPortalController:
             )
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
+        month_key = str(request.query_params.get("month") or "").strip()
         last_payload = ""
         active_interval = _env_float(
             "CLIPFLOW_QT_ACTIVE_SSE_ACTIVE_SECONDS",
             3.0,
-            minimum=1.0,
+            minimum=0.2,
             maximum=30.0,
         )
         idle_interval = _env_float(
@@ -9560,8 +9673,26 @@ class FastAPIPortalController:
             minimum=3.0,
             maximum=60.0,
         )
-        sse_key, sse_id = self._register_sse(request, "qt_active_items", scope)
+        stream_scope = f"{scope}:{month_key}" if month_key else scope
+        sse_key, sse_id = self._register_sse(
+            request,
+            "qt_active_items",
+            stream_scope,
+        )
+        wake_event = self._register_qt_active_stream_waker(sse_id)
         last_version_signature = ""
+
+        async def _wait_for_change(delay_seconds: float) -> None:
+            try:
+                await asyncio.wait_for(
+                    wake_event.wait(),
+                    timeout=max(0.2, float(delay_seconds or 0.2)),
+                )
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                wake_event.clear()
+
         try:
             while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
                 ongoing_meta = PortalRuntime.state_store.get_ongoing_snapshot_meta()
@@ -9577,6 +9708,7 @@ class FastAPIPortalController:
                     "|".join(
                         [
                             str(scope),
+                            month_key,
                             str(ongoing_meta.get("snapshot_id") or ""),
                             str(ongoing_meta.get("updated_at") or ""),
                             str(ongoing_meta.get("count") or 0),
@@ -9589,14 +9721,19 @@ class FastAPIPortalController:
                     ).encode("utf-8")
                 ).hexdigest()
                 if last_payload and version_signature == last_version_signature:
-                    await asyncio.sleep(idle_interval)
+                    await _wait_for_change(idle_interval)
                     continue
                 snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
                 scoped_signature, scoped_count = self._scoped_ongoing_signature(
                     scope, list(snapshot.get("items") or [])
                 )
                 qt_scoped_signature, qt_scoped_count = self._scoped_qt_active_signature(
-                    scope
+                    scope,
+                    month_key=month_key,
+                )
+                active_identities = self._scoped_qt_active_identities(
+                    scope,
+                    month_key=month_key,
                 )
                 qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
                 qt_active_items.pop("checked_at", None)
@@ -9612,6 +9749,7 @@ class FastAPIPortalController:
                         "qt_scope_count": qt_scoped_count,
                         "scope_signature": scoped_signature,
                         "qt_scope_signature": qt_scoped_signature,
+                        "active_identities": active_identities,
                         "display_signature": display_signature,
                         "source_snapshot_id": source_active.get("snapshot_id", ""),
                         "source_snapshot_updated_at": source_active.get("updated_at", 0),
@@ -9628,11 +9766,12 @@ class FastAPIPortalController:
                     ).encode("utf-8")
                     last_payload = payload
                     last_version_signature = version_signature
-                    await asyncio.sleep(active_interval)
+                    await _wait_for_change(active_interval)
                 else:
                     last_version_signature = version_signature
-                    await asyncio.sleep(idle_interval)
+                    await _wait_for_change(idle_interval)
         finally:
+            self._unregister_qt_active_stream_waker(sse_id)
             self._unregister_sse(sse_key, sse_id)
 
     async def _proxy_request(self, path: str, request: Request) -> Response:

@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from lan_bitable_template_portal.identity_utils import canonical_target_record_id
+
 from ..logger import log_info, log_error, log_warning
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
@@ -2083,15 +2085,9 @@ class MainWindowWorkflowMixin:
         if item and self._is_valid_list_item(item):
             item.setData(Qt.ItemDataRole.UserRole, dict(data_dict))
 
-        def _finish(success: bool, error: str = "", result: dict | None = None) -> None:
-            if not success:
-                if widget and hasattr(widget, "cancel_delete_visual"):
-                    try:
-                        widget.cancel_delete_visual()
-                    except Exception:
-                        pass
-                self.show_message(error or "删除失败。")
-                return
+        local_only_remove = not bool(canonical_target_record_id(data_dict))
+
+        def _remove_from_qt() -> None:
             active_item_id = str((data_dict or {}).get("active_item_id") or "").strip()
             self._clear_upload_queue(record_id)
             self._today_in_progress_pending_record_ids.discard(record_id)
@@ -2111,12 +2107,49 @@ class MainWindowWorkflowMixin:
                     pass
             list_widget_now, item_now = self._find_active_item_by_record_id(record_id)
             if (not item_now or not self._is_valid_list_item(item_now)) and active_item_id:
-                list_widget_now, item_now = self._find_active_item_by_active_item_id(active_item_id)
+                list_widget_now, item_now = self._find_active_item_by_active_item_id(
+                    active_item_id
+                )
             if item_now and self._is_valid_list_item(item_now):
                 self._remove_active_item_widget_only(list_widget_now, item_now)
+            cache_deleted = False
             if hasattr(self, "_delete_active_cache_record"):
-                self._delete_active_cache_record(data_dict)
+                cache_deleted = bool(self._delete_active_cache_record(data_dict))
+            if (
+                local_only_remove
+                and not cache_deleted
+                and hasattr(self, "_post_qt_active_items_delta")
+            ):
+                self._post_qt_active_items_delta(
+                    deletes=[
+                        {
+                            "record_id": record_id,
+                            "active_item_id": active_item_id,
+                        }
+                    ]
+                )
             self.request_active_cache_save()
+
+        def _finish(success: bool, error: str = "", result: dict | None = None) -> None:
+            if not success:
+                if (
+                    not local_only_remove
+                    and widget
+                    and hasattr(widget, "cancel_delete_visual")
+                ):
+                    try:
+                        widget.cancel_delete_visual()
+                    except Exception:
+                        pass
+                if local_only_remove:
+                    self.show_message(
+                        f"本地已移除，网页同步失败：{error or '本机后端未响应。'}"
+                    )
+                else:
+                    self.show_message(error or "删除失败。")
+                return
+            if not local_only_remove:
+                _remove_from_qt()
             self._remember_delete_undo(data_dict, result or {})
             if bool((result or {}).get("remote_deleted")):
                 log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
@@ -2134,6 +2167,9 @@ class MainWindowWorkflowMixin:
             else:
                 QTimer.singleShot(0, lambda s=success, e=error, r=result: _finish(s, e, r))
 
+        if local_only_remove:
+            _remove_from_qt()
+            self.show_message("未上传通告已移除，网页正在同步。")
         threading.Thread(
             target=_worker,
             name="ClipFlowDeleteActiveItem",

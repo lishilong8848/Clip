@@ -3309,13 +3309,141 @@ def render_workbench_lite(
         }});
       }});
     }}
+    let liteQtActiveStream = null;
+    let liteQtActiveStreamKey = '';
+    function closeLiteQtActiveStream() {{
+      if (liteQtActiveStream) {{
+        try {{ liteQtActiveStream.close(); }} catch {{}}
+      }}
+      liteQtActiveStream = null;
+      liteQtActiveStreamKey = '';
+    }}
+    function liteQtActiveIdentitySets(items) {{
+      const sets = {{
+        active: new Set(),
+        target: new Set(),
+        record: new Set(),
+        source: new Set(),
+      }};
+      for (const item of Array.isArray(items) ? items : []) {{
+        if (!item || typeof item !== 'object') continue;
+        const values = {{
+          active: item.active_item_id,
+          target: item.target_record_id,
+          record: item.record_id,
+          source: item.source_record_id,
+        }};
+        for (const [key, value] of Object.entries(values)) {{
+          const normalized = String(value || '').trim();
+          if (normalized) sets[key].add(normalized);
+        }}
+      }}
+      return sets;
+    }}
+    function liteOngoingRowIsLive(row, identities) {{
+      const values = {{
+        active: row.getAttribute('data-active-item-id'),
+        target: row.getAttribute('data-target-record-id'),
+        record: row.getAttribute('data-record-id'),
+        source: row.getAttribute('data-source-record-id'),
+      }};
+      let hasIdentity = false;
+      for (const [key, value] of Object.entries(values)) {{
+        const normalized = String(value || '').trim();
+        if (!normalized) continue;
+        hasIdentity = true;
+        if (identities[key].has(normalized)) return true;
+      }}
+      return !hasIdentity;
+    }}
+    function applyQtActiveIdentitySnapshot(payload) {{
+      const items = payload && Array.isArray(payload.active_identities)
+        ? payload.active_identities
+        : null;
+      if (!items) return;
+      const identities = liteQtActiveIdentitySets(items);
+      let removedCount = 0;
+      let selectedRemoved = false;
+      document.querySelectorAll(
+        '.ongoing-row[data-local-only="1"]:not(.optimistic)'
+      ).forEach(row => {{
+        if (liteOngoingRowIsLive(row, identities)) return;
+        selectedRemoved = selectedRemoved || row.classList.contains('active');
+        removeOngoingRow(row);
+        removedCount += 1;
+      }});
+      if (!removedCount) return;
+      if (selectedRemoved) {{
+        setLiteFormDirty(false);
+        closeNoticeDrawer();
+      }}
+      setLiteStatus(
+        removedCount > 1
+          ? `Qt 已移除 ${{removedCount}} 条未上传通告，网页已同步。`
+          : '该未上传通告已从 Qt 和网页同步移除。'
+      );
+    }}
+    function ensureLiteQtActiveStream() {{
+      if (typeof EventSource === 'undefined') return;
+      if (document.hidden) {{
+        closeLiteQtActiveStream();
+        return;
+      }}
+      const params = new URLSearchParams(location.search);
+      const scope = getCurrentScope();
+      const month = params.get('month') || '';
+      const key = `${{scope}}|${{month}}`;
+      if (
+        liteQtActiveStream
+        && liteQtActiveStreamKey === key
+        && liteQtActiveStream.readyState !== EventSource.CLOSED
+      ) {{
+        return;
+      }}
+      closeLiteQtActiveStream();
+      const streamUrl = new URL('/api/qt-active-items/stream', location.origin);
+      streamUrl.searchParams.set('scope', scope);
+      if (month) streamUrl.searchParams.set('month', month);
+      const stream = new EventSource(streamUrl.pathname + streamUrl.search);
+      liteQtActiveStream = stream;
+      liteQtActiveStreamKey = key;
+      stream.addEventListener('qt_active_items', event => {{
+        if (stream !== liteQtActiveStream) return;
+        try {{
+          applyQtActiveIdentitySnapshot(JSON.parse(String(event.data || '{{}}')));
+        }} catch {{
+          // Ignore one malformed stream event; EventSource keeps the next update.
+        }}
+      }});
+      stream.addEventListener('error', event => {{
+        if (stream !== liteQtActiveStream) return;
+        const raw = typeof event.data === 'string' ? event.data : '';
+        if (!raw) return;
+        try {{
+          const data = JSON.parse(raw);
+          if (data && data.auth_required) {{
+            closeLiteQtActiveStream();
+            redirectLiteAuthRequiredOnce();
+          }}
+        }} catch {{
+          // Native EventSource handles reconnects after transient failures.
+        }}
+      }});
+    }}
+    document.addEventListener('visibilitychange', () => {{
+      if (document.hidden) closeLiteQtActiveStream();
+      else ensureLiteQtActiveStream();
+    }});
     function applyLiteDocument(nextDoc, url, push, selectors) {{
       const replaceSelectors = selectors || ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'];
       for (const selector of replaceSelectors) {{
         replaceFromDocument(nextDoc, selector);
       }}
       if (push && url) history.pushState({{ lite: true }}, '', url);
-      requestAnimationFrame(hydrateLitePreview);
+      requestAnimationFrame(() => {{
+        hydrateLitePreview();
+        ensureLiteQtActiveStream();
+      }});
     }}
     function applyLiteHtml(html, url, push, selectors) {{
       const nextDoc = new DOMParser().parseFromString(html, 'text/html');
@@ -3391,7 +3519,10 @@ def render_workbench_lite(
       const canonicalUrl = String(data?.canonical_url || fallbackUrl || '');
       if (push && canonicalUrl) history.pushState({{ lite: true }}, '', canonicalUrl);
       syncLiteTopbar(canonicalUrl || fallbackUrl);
-      requestAnimationFrame(hydrateLitePreview);
+      requestAnimationFrame(() => {{
+        hydrateLitePreview();
+        ensureLiteQtActiveStream();
+      }});
     }}
     function clearLiteHtmlCache() {{
       // Workbench navigation intentionally avoids visible stale HTML caches.
@@ -6595,6 +6726,7 @@ def render_workbench_lite(
       }}
     }});
     hydrateLitePreview();
+    ensureLiteQtActiveStream();
   </script>
 </body>
 </html>"""

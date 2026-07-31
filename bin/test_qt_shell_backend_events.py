@@ -1,6 +1,7 @@
 import datetime as dt
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,7 @@ if str(BIN_DIR) not in sys.path:
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin  # noqa: E402
 from upload_event_module.ui.main_window_clipboard import MainWindowClipboardMixin  # noqa: E402
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  # noqa: E402
+from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.core.parser import extract_notice_info  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
@@ -112,6 +114,60 @@ class _ClipboardHarness(MainWindowClipboardMixin):
         self.failures.append(reason)
 
 
+class _ImmediateDeleteHarness(MainWindowWorkflowMixin):
+    def __init__(self, *, remote_deleted: bool):
+        self.remote_deleted = remote_deleted
+        self.backend_started = threading.Event()
+        self.backend_release = threading.Event()
+        self.backend_finished = threading.Event()
+        self.cache_delete_count = 0
+        self.messages = []
+        self._today_in_progress_pending_record_ids = set()
+        self._today_in_progress_synced_record_ids = set()
+        self.pending_new_by_record_id = {}
+        self.pending_replace_by_record_id = {}
+        self.pending_update_after_upload = {}
+        self.pending_action_record_ids = set()
+        self.pending_action_types = {}
+
+    def _is_screenshot_dialog_active(self):
+        return False
+
+    def _find_active_item_by_record_id(self, _record_id):
+        return None, None
+
+    def _find_active_item_by_active_item_id(self, _active_item_id):
+        return None, None
+
+    def _safe_item_widget(self, _list_widget, _item):
+        return None
+
+    def _clear_upload_queue(self, _record_id):
+        return None
+
+    def _delete_active_cache_record(self, _data_dict):
+        self.cache_delete_count += 1
+        return True
+
+    def request_active_cache_save(self, *args, **kwargs):
+        return None
+
+    def _submit_delete_active_item_to_backend(self, _data_dict):
+        self.backend_started.set()
+        self.backend_release.wait(2.0)
+        return True, "", {"remote_deleted": self.remote_deleted}
+
+    def _enqueue_ui_mutation(self, _name, callback):
+        callback()
+        self.backend_finished.set()
+
+    def _remember_delete_undo(self, _data_dict, _result):
+        return None
+
+    def show_message(self, message):
+        self.messages.append(str(message))
+
+
 class _RecordsHarness(MainWindowRecordsMixin):
     pass
 
@@ -142,6 +198,120 @@ class _ActiveUpsertVisibilityHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_scoped_qt_active_identities_drop_deleted_local_event(self):
+        previous_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                month = dt.datetime.now().strftime("%Y-%m")
+                payload = {
+                    "active_item_id": "active-local-event-e",
+                    "record_id": "localid-event-e",
+                    "target_record_id": "localid-event-e",
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "scope": "E",
+                    "building_codes": ["E"],
+                    "status": "更新",
+                    "title": "E楼未上传事件",
+                    "text": (
+                        "【事件通告】状态：更新\n"
+                        "【标题】E楼未上传事件\n"
+                        f"【时间】{month}-15 09:35"
+                    ),
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        payload,
+                        section="event",
+                        origin="qt",
+                    )
+                )
+
+                identities = FastAPIPortalController._scoped_qt_active_identities(
+                    "E",
+                    month_key=month,
+                )
+
+                self.assertEqual(len(identities), 1)
+                self.assertEqual(
+                    identities[0]["active_item_id"],
+                    "active-local-event-e",
+                )
+                self.assertTrue(identities[0]["local_only"])
+                self.assertTrue(
+                    store.delete_qt_active_item(
+                        active_item_id="active-local-event-e",
+                    )
+                )
+                self.assertEqual(
+                    FastAPIPortalController._scoped_qt_active_identities(
+                        "E",
+                        month_key=month,
+                    ),
+                    [],
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_lite_workbench_subscribes_to_immediate_qt_delete_updates(self):
+        workbench_text = (
+            BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
+        ).read_text(encoding="utf-8")
+        backend_text = (
+            BIN_DIR / "clipflow_backend" / "main.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "new EventSource(streamUrl.pathname + streamUrl.search)",
+            workbench_text,
+        )
+        self.assertIn("applyQtActiveIdentitySnapshot", workbench_text)
+        self.assertIn(
+            '.ongoing-row[data-local-only="1"]:not(.optimistic)',
+            workbench_text,
+        )
+        self.assertIn('"active_identities": active_identities', backend_text)
+        self.assertIn("self._notify_qt_active_streams()", backend_text)
+
+    def test_local_only_delete_removes_qt_cache_before_backend_finishes(self):
+        harness = _ImmediateDeleteHarness(remote_deleted=False)
+        payload = {
+            "active_item_id": "active-local-delete",
+            "record_id": "localid-event-update",
+            "target_record_id": "localid-event-update",
+            "notice_type": "事件通告",
+            "work_type": "event",
+        }
+
+        harness._delete_active_item(payload)
+
+        self.assertTrue(harness.backend_started.wait(1.0))
+        self.assertEqual(harness.cache_delete_count, 1)
+        self.assertIn("未上传通告已移除", harness.messages[0])
+        harness.backend_release.set()
+        self.assertTrue(harness.backend_finished.wait(1.0))
+        self.assertEqual(harness.cache_delete_count, 1)
+
+    def test_remote_delete_waits_for_backend_before_removing_qt_cache(self):
+        harness = _ImmediateDeleteHarness(remote_deleted=True)
+        payload = {
+            "active_item_id": "active-remote-delete",
+            "record_id": "rec-event-update",
+            "target_record_id": "rec-event-update",
+            "notice_type": "事件通告",
+            "work_type": "event",
+        }
+
+        harness._delete_active_item(payload)
+
+        self.assertTrue(harness.backend_started.wait(1.0))
+        self.assertEqual(harness.cache_delete_count, 0)
+        harness.backend_release.set()
+        self.assertTrue(harness.backend_finished.wait(1.0))
+        self.assertEqual(harness.cache_delete_count, 1)
+
     def test_runtime_active_upsert_ignores_items_outside_current_month(self):
         harness = _ActiveUpsertVisibilityHarness()
         previous_month = (
