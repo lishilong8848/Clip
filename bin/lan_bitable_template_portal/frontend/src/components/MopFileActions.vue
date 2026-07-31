@@ -4,7 +4,6 @@
       {{ message || roleHint }}
     </span>
     <div class="file-action-group">
-      <strong>本地写入</strong>
       <div>
         <button type="button"
           class="btn ghost local-fill"
@@ -51,7 +50,9 @@ const emit = defineEmits<{
 <style scoped>
 .sign-actions {
   display: grid;
-  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
 }
 
 .sign-status {
@@ -85,28 +86,9 @@ const emit = defineEmits<{
 
 .file-action-group {
   display: grid;
-  grid-template-columns: minmax(54px, auto) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 5px 7px;
-  padding: 6px;
-  border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(239, 246, 255, 0.88), rgba(255, 255, 255, 0.86));
-}
-
-.file-action-group strong {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: fit-content;
-  min-height: 24px;
-  border-radius: 999px;
-  padding: 0 6px;
-  background: #eff6ff;
-  color: #0757d7;
-  font-size: 10px;
-  font-weight: 900;
-  white-space: nowrap;
+  gap: 4px;
 }
 
 .file-action-group > div {
@@ -119,7 +101,8 @@ const emit = defineEmits<{
 }
 
 .file-action-group small {
-  grid-column: 1 / -1;
+  justify-self: end;
+  max-width: 320px;
   color: #64748b;
   font-size: 10px;
   font-weight: 850;
@@ -154,7 +137,8 @@ const emit = defineEmits<{
   color: #ffffff;
   background: linear-gradient(135deg, #1e63ff, #005bd8);
   box-shadow: 0 12px 22px rgba(30, 99, 255, 0.16);
-  min-width: 104px;
+  min-width: 130px;
+  min-height: 34px;
 }
 
 .reset-clean {
@@ -181,6 +165,7 @@ const emit = defineEmits<{
 }
 
 @media (max-width: 720px) {
+  .sign-actions,
   .file-action-group {
     grid-template-columns: 1fr;
   }
@@ -193,6 +178,10 @@ const emit = defineEmits<{
   .btn,
   .file-action-group > div {
     width: 100%;
+  }
+
+  .btn {
+    min-height: 44px;
   }
 }
 </style>

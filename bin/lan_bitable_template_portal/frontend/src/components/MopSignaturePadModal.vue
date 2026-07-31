@@ -1,11 +1,11 @@
 <template>
-  <div v-if="open" class="signature-pad-backdrop" @click.self="emit('close')">
-    <section class="signature-pad-modal" role="dialog" aria-modal="true" aria-label="手写签名">
+  <div v-if="open" class="signature-pad-backdrop" @click.self="requestClose">
+    <section ref="modalRef" class="signature-pad-modal" role="dialog" aria-modal="true" aria-label="手写签名" tabindex="-1">
       <header>
         <div>
           <strong>{{ title || "手写签名" }}</strong>
         </div>
-        <button type="button" class="btn ghost" :disabled="saving" @click="emit('close')">关闭</button>
+        <button type="button" class="btn ghost" :disabled="saving" @click="requestClose">关闭</button>
       </header>
       <slot />
       <footer>
@@ -29,7 +29,9 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
+
+const props = defineProps<{
   open: boolean;
   title: string;
   roleLabel: string;
@@ -44,6 +46,63 @@ const emit = defineEmits<{
   clear: [];
   save: [];
 }>();
+
+const modalRef = ref<HTMLElement | null>(null);
+let returnFocusElement: HTMLElement | null = null;
+
+function requestClose(): void {
+  if (!props.saving) emit("close");
+}
+
+function handleKeydown(event: KeyboardEvent): void {
+  if (!props.open) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    requestClose();
+    return;
+  }
+  if (event.key !== "Tab" || !modalRef.value) return;
+  const focusable = Array.from(modalRef.value.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => element.offsetParent !== null);
+  if (!focusable.length) {
+    event.preventDefault();
+    modalRef.value.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || active === modalRef.value)) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && (active === last || active === modalRef.value)) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+}
+
+watch(() => props.open, (open) => {
+  if (open) {
+    returnFocusElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    window.addEventListener("keydown", handleKeydown);
+    void nextTick(() => modalRef.value?.focus({ preventScroll: true }));
+    return;
+  }
+  window.removeEventListener("keydown", handleKeydown);
+  const returnFocus = returnFocusElement;
+  returnFocusElement = null;
+  void nextTick(() => {
+    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+  });
+}, { immediate: true });
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleKeydown);
+  returnFocusElement = null;
+});
 </script>
 
 <style scoped>
@@ -195,6 +254,10 @@ const emit = defineEmits<{
     width: 100%;
     display: grid;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .btn {
+    min-height: 44px;
   }
 }
 </style>

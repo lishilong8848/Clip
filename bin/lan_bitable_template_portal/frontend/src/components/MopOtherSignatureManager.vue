@@ -1,171 +1,137 @@
 <template>
   <section class="other-signature-panel">
-    <div class="other-signature-head">
+    <header class="other-signature-head">
       <div>
-        <strong>临时/外部人员</strong>
+        <strong>当前临时/外部人员</strong>
         <small :class="summaryTone">{{ summaryText }}</small>
       </div>
       <button type="button"
-        class="btn ghost"
+        class="add-person-button"
         :disabled="Boolean(addDisabledReason)"
         :title="addDisabledReason"
         @click="emit('add-other')"
       >
-        添加人员
+        添加临时人员
       </button>
-    </div>
+    </header>
+
     <p v-if="addDisabledReason" class="other-signature-disabled">{{ addDisabledReason }}</p>
-    <div v-if="displayRows.length" class="other-signature-list">
-      <div class="other-signature-summary">
-        <template v-if="previewRow">
-          <span
-            :class="['other-signature-row', 'summary-chip', previewRow.signed ? 'signed' : 'pending']"
-          >
-            <img
-              v-if="previewRow.kind === 'person' && previewRow.signed"
-              :src="previewRow.person.signature_preview_url"
-              alt="其他人员签名"
-              @error="emit('image-error', previewRow.person)"
-            />
-            <em v-else class="other-signature-state">
-              {{ previewRow.kind === 'draft' ? draftStatusText(previewRow.draft) : '待签名' }}
-            </em>
-            <strong>{{ previewRow.display_name }}</strong>
-          </span>
-        </template>
-        <button type="button"
-          class="selected-signature-open temporary-open"
-          :class="{ ready: displayRows.length > 0 && !unsignedCount, pending: unsignedCount > 0 }"
-          :aria-expanded="drawerOpen"
-          :title="unsignedCount ? `${unsignedCount} 人未签名，点击处理` : '临时/外部人员签名已齐全，点击查看'"
-          @click.stop="emit('update:drawerOpen', !drawerOpen)"
-        >
-          {{ drawerButtonText }}
-          <em v-if="unsignedCount">{{ unsignedCount }} 未签</em>
+
+    <div v-if="displayRows.length" class="task-toolbar">
+      <input v-model="taskSearch" type="search" placeholder="搜索临时/外部人员" />
+      <div class="task-filter-tabs" role="group" aria-label="临时人员签名筛选">
+        <button type="button" :aria-pressed="taskFilter === 'all'" :class="{ active: taskFilter === 'all' }" @click="taskFilter = 'all'">
+          全部 {{ displayRows.length }}
         </button>
-        <MopSignatureDrawer
-          :open="drawerOpen"
-          tone="temporary"
-          :title="`${role === 'implementer' ? '维护实施人' : '维护审核人'} · 临时/外部人员`"
-          @close="emit('update:drawerOpen', false)"
-        >
-          <div class="drawer-filter-bar temporary-filter-bar">
-            <div class="drawer-progress">
-              <strong>{{ signedCount }}/{{ displayRows.length }}</strong>
-              <span>{{ unsignedCount ? `待签 ${unsignedCount} 人` : "签名已齐" }}</span>
-            </div>
-            <input
-              v-model="drawerSearch"
-              type="search"
-              placeholder="搜索临时/外部人员"
-            />
-            <div class="drawer-filter-tabs" aria-label="临时人员签名筛选">
-              <button type="button" :class="{ active: drawerFilter === 'all' }" @click="drawerFilter = 'all'">全部</button>
-              <button type="button" :class="{ active: drawerFilter === 'unsigned' }" @click="drawerFilter = 'unsigned'">未签</button>
-              <button type="button" :class="{ active: drawerFilter === 'signed' }" @click="drawerFilter = 'signed'">已签</button>
-            </div>
-          </div>
-          <template
-            v-for="row in drawerVisibleRows"
-            :key="row.row_key"
-          >
-            <article
-              v-if="row.kind === 'person'"
-              :class="{ ready: row.signed, pending: !row.signed }"
-            >
-              <img
-                v-if="row.signed"
-                :src="row.person.signature_preview_url"
-                alt="其他人员签名"
-                @error="emit('image-error', row.person)"
-              />
-              <span v-else class="signature-chip-state">待签名</span>
-              <div>
-                <strong>{{ row.display_name }}</strong>
-                <small :class="{ failed: Boolean(row.person?.temp_id && temporaryLinkErrorById[row.person.temp_id]) }">
-                  {{ drawerPersonStatus(row) }}
-                </small>
-              </div>
-              <div class="drawer-actions">
-                <button type="button"
-                  class="drawer-action"
-                  :disabled="Boolean(personWebSignDisabledReason(row.person))"
-                  :title="personWebSignDisabledReason(row.person)"
-                  @click.stop="emit('web-sign-person', row.person)"
-                >
-                  {{ row.signed ? "网页重签" : "网页签名" }}
-                </button>
-                <button type="button"
-                  v-if="row.person.source !== 'external'"
-                  class="drawer-action link-action"
-                  :disabled="Boolean(temporaryLinkSendingById[row.person.temp_id]) || !row.person.temp_id"
-                  :title="row.person.temp_id ? '重新发送该临时人员签名链接' : '该临时人员签名会话不完整，无法发送链接'"
-                  @click.stop="emit('send-temp-person', row.person)"
-                >
-                  {{ temporaryLinkSendingById[row.person.temp_id] ? "发送中" : (row.signed ? "重发链接" : "发链接") }}
-                </button>
-                <button type="button" class="drawer-remove" @click.stop="emit('remove-person', signaturePersonKey(row.person))">移除</button>
-              </div>
-            </article>
-            <article
-              v-else
-              :class="['draft', String(row.draft.status || ''), 'pending']"
-            >
-              <span class="signature-chip-state">{{ draftStatusText(row.draft) }}</span>
-              <div>
-                <input
-                  :value="row.draft.display_name"
-                  placeholder="姓名可不填，默认临时人员N"
-                  :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
-                  @input="emit('update-draft-name', String(row.draft.draft_id || ''), ($event.target as HTMLInputElement).value)"
-                  @blur="emit('ensure-draft-name', row.draft)"
-                />
-                <small v-if="row.draft.error">{{ row.draft.error }}</small>
-                <small v-else-if="draftDisabledReason(row.draft)" class="row-disabled-reason">
-                  {{ draftDisabledReason(row.draft) }}
-                </small>
-                <small v-else>可网页签名或发送链接</small>
-              </div>
-              <div class="drawer-actions">
-                <button type="button"
-                  class="drawer-action"
-                  :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
-                  :title="draftSendingById[String(row.draft.draft_id || '')] ? '正在创建临时人员' : '在当前网页手写签名'"
-                  @click.stop="emit('web-sign-draft', row.draft)"
-                >
-                  网页签名
-                </button>
-                <button type="button"
-                  class="drawer-action link-action"
-                  :disabled="Boolean(draftDisabledReason(row.draft))"
-                  :title="draftDisabledReason(row.draft)"
-                  @click.stop="emit('send-draft-link', row.draft)"
-                >
-                  {{ draftSendingById[String(row.draft.draft_id || '')] ? '发送中' : '发送链接' }}
-                </button>
-                <button type="button" class="drawer-remove" @click.stop="emit('remove-draft', String(row.draft.draft_id || ''))">移除</button>
-              </div>
-            </article>
-          </template>
-          <div v-if="!drawerVisibleRows.length" class="drawer-empty">当前筛选下没有临时/外部人员。</div>
-        </MopSignatureDrawer>
+        <button type="button" :aria-pressed="taskFilter === 'unsigned'" :class="{ active: taskFilter === 'unsigned' }" @click="taskFilter = 'unsigned'">
+          未签 {{ unsignedCount }}
+        </button>
+        <button type="button" :aria-pressed="taskFilter === 'signed'" :class="{ active: taskFilter === 'signed' }" @click="taskFilter = 'signed'">
+          已签 {{ signedCount }}
+        </button>
       </div>
     </div>
-    <div v-else class="other-signature-empty">
-      未添加人员。
+
+    <div v-if="visibleRows.length" class="other-signature-task-list">
+      <template v-for="row in visibleRows" :key="row.row_key">
+        <article
+          v-if="row.kind === 'person'"
+          :class="{ ready: row.signed, pending: !row.signed }"
+        >
+          <div class="signature-preview">
+            <img
+              v-if="row.signed"
+              :src="row.person.signature_preview_url"
+              alt="其他人员签名预览"
+              loading="lazy"
+              @error="emit('image-error', row.person)"
+            />
+            <span v-else>未签名</span>
+          </div>
+          <div class="person-summary">
+            <strong>{{ row.display_name }}</strong>
+            <small :class="{ failed: Boolean(row.person?.temp_id && temporaryLinkErrorById[row.person.temp_id]) }">
+              {{ personStatus(row) }}
+            </small>
+          </div>
+          <div class="task-actions">
+            <button type="button"
+              :disabled="Boolean(personWebSignDisabledReason(row.person))"
+              :title="personWebSignDisabledReason(row.person)"
+              @click="emit('web-sign-person', row.person)"
+            >
+              {{ row.signed ? "网页重签" : "网页签名" }}
+            </button>
+            <button type="button"
+              v-if="row.person.source !== 'external'"
+              class="link-action"
+              :disabled="Boolean(temporaryLinkSendingById[row.person.temp_id]) || !row.person.temp_id"
+              :title="row.person.temp_id ? '重新发送该临时人员签名链接' : '该临时人员签名会话不完整，无法发送链接'"
+              @click="emit('send-temp-person', row.person)"
+            >
+              {{ temporaryLinkSendingById[row.person.temp_id] ? "发送中" : (row.signed ? "重发链接" : "发送链接") }}
+            </button>
+            <button type="button" class="remove-action" @click="emit('remove-person', signaturePersonKey(row.person))">
+              移除
+            </button>
+          </div>
+        </article>
+
+        <article v-else class="draft pending">
+          <div class="signature-preview">
+            <span>{{ draftStatusText(row.draft) }}</span>
+          </div>
+          <div class="person-summary draft-name">
+            <input
+              :value="row.draft.display_name"
+              placeholder="姓名可不填，默认临时人员N"
+              :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
+              @input="emit('update-draft-name', String(row.draft.draft_id || ''), ($event.target as HTMLInputElement).value)"
+              @blur="emit('ensure-draft-name', row.draft)"
+            />
+            <small v-if="row.draft.error" class="failed">{{ row.draft.error }}</small>
+            <small v-else-if="draftDisabledReason(row.draft)" class="failed">
+              {{ draftDisabledReason(row.draft) }}
+            </small>
+            <small v-else>可网页签名或发送链接</small>
+          </div>
+          <div class="task-actions">
+            <button type="button"
+              :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
+              @click="emit('web-sign-draft', row.draft)"
+            >
+              网页签名
+            </button>
+            <button type="button"
+              class="link-action"
+              :disabled="Boolean(draftDisabledReason(row.draft))"
+              :title="draftDisabledReason(row.draft)"
+              @click="emit('send-draft-link', row.draft)"
+            >
+              {{ draftSendingById[String(row.draft.draft_id || '')] ? "发送中" : "发送链接" }}
+            </button>
+            <button type="button" class="remove-action" @click="emit('remove-draft', String(row.draft.draft_id || ''))">
+              移除
+            </button>
+          </div>
+        </article>
+      </template>
     </div>
-    <div class="external-signature-reuse">
+    <div v-else-if="displayRows.length" class="panel-empty">当前筛选下没有人员。</div>
+    <div v-else class="panel-empty">尚未添加临时或外部人员。</div>
+
+    <section class="external-signature-reuse">
       <button type="button"
         class="reuse-toggle"
         :class="{ open: externalReuseOpen }"
         :aria-expanded="externalReuseOpen"
         @click="externalReuseOpen = !externalReuseOpen"
       >
-        {{ externalReuseOpen ? "收起" : "选已有签名" }}
+        {{ externalReuseOpen ? "收起已有签名" : "选择已有外部签名" }}
         <em v-if="externalPeople.length">{{ externalPeople.length }}</em>
       </button>
       <div v-if="externalReuseOpen" class="external-signature-reuse-body">
-        <label class="field external-signature-search">
+        <label class="external-signature-search">
           <span>搜索其他人员签名</span>
           <div class="inline-search">
             <input
@@ -174,7 +140,7 @@
               @input="emit('update:externalSearch', ($event.target as HTMLInputElement).value)"
             />
             <button type="button"
-              class="btn ghost signature-refresh"
+              class="signature-refresh"
               :disabled="externalLoading"
               title="重新读取其他人员签名"
               @click="emit('refresh-external')"
@@ -182,7 +148,7 @@
               {{ externalLoading ? "读取中" : "刷新" }}
             </button>
           </div>
-          <small class="search-inline-status">{{ externalStatusText }}</small>
+          <small>{{ externalStatusText }}</small>
         </label>
         <div v-if="externalPeople.length" class="external-signature-results">
           <button type="button"
@@ -190,9 +156,9 @@
             :key="String(person.record_id || person.name || '')"
             @click="emit('add-external', person)"
           >
-            <img :src="person.signature_preview_url" alt="已有其他人员签名" @error="emit('image-error', person)" />
+            <img :src="person.signature_preview_url" alt="已有其他人员签名" loading="lazy" @error="emit('image-error', person)" />
             <span>
-              <strong>{{ person.name || '其他人员' }}</strong>
+              <strong>{{ person.name || "其他人员" }}</strong>
               <small>
                 <template v-if="person.building">{{ person.building }} · </template>
                 <template v-if="person.specialty">{{ person.specialty }} · </template>
@@ -203,13 +169,12 @@
           </button>
         </div>
       </div>
-    </div>
+    </section>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import MopSignatureDrawer from "./MopSignatureDrawer.vue";
+import { computed, ref, watch } from "vue";
 
 type Dict = Record<string, any>;
 type SignatureRole = "implementer" | "auditor";
@@ -226,9 +191,7 @@ const props = defineProps<{
   role: SignatureRole;
   addDisabledReason: string;
   displayRows: OtherSignatureRow[];
-  previewRow: OtherSignatureRow | null;
   unsignedCount: number;
-  drawerOpen: boolean;
   temporaryLinkSendingById: Record<string, boolean>;
   temporaryLinkSentAtById: Record<string, string>;
   temporaryLinkErrorById: Record<string, string>;
@@ -243,45 +206,8 @@ const props = defineProps<{
   draftDisabledReason: (draft: Dict) => string;
 }>();
 
-const externalReuseOpen = ref(false);
-const drawerSearch = ref("");
-const drawerFilter = ref<"all" | "unsigned" | "signed">("all");
-const signedCount = computed(() => Math.max(0, props.displayRows.length - props.unsignedCount));
-const drawerVisibleRows = computed(() => {
-  const query = drawerSearch.value.trim().toLowerCase();
-  return props.displayRows.filter((row) => {
-    if (drawerFilter.value === "unsigned" && row.signed) return false;
-    if (drawerFilter.value === "signed" && !row.signed) return false;
-    if (!query) return true;
-    const values = [
-      row.display_name,
-      row.person?.name,
-      row.person?.display_name,
-      row.person?.building,
-      row.person?.specialty,
-      row.draft?.display_name,
-      row.draft?.status,
-    ];
-    return values.some((value) => String(value || "").toLowerCase().includes(query));
-  });
-});
-const summaryText = computed(() => {
-  if (!props.displayRows.length) return "未添加";
-  if (!props.unsignedCount) return "签名齐全";
-  return `${signedCount.value}/${props.displayRows.length} 已签`;
-});
-const summaryTone = computed(() => ({
-  ready: props.displayRows.length > 0 && props.unsignedCount === 0,
-  pending: props.unsignedCount > 0,
-  empty: props.displayRows.length === 0,
-}));
-const drawerButtonText = computed(() => {
-  return props.unsignedCount ? "处理临时人员" : "查看临时人员";
-});
-
 const emit = defineEmits<{
   "add-other": [];
-  "update:drawerOpen": [value: boolean];
   "image-error": [person: Dict];
   "web-sign-person": [person: Dict];
   "send-temp-person": [person: Dict];
@@ -296,6 +222,44 @@ const emit = defineEmits<{
   "add-external": [person: Dict];
 }>();
 
+const externalReuseOpen = ref(false);
+const taskSearch = ref("");
+const taskFilter = ref<"all" | "unsigned" | "signed">("all");
+const signedCount = computed(() => Math.max(0, props.displayRows.length - props.unsignedCount));
+const summaryText = computed(() => {
+  if (!props.displayRows.length) return "未添加";
+  return props.unsignedCount
+    ? `已签 ${signedCount.value}/${props.displayRows.length} · 未签 ${props.unsignedCount}`
+    : `全部已签 ${props.displayRows.length}`;
+});
+const summaryTone = computed(() => ({
+  ready: props.displayRows.length > 0 && props.unsignedCount === 0,
+  pending: props.unsignedCount > 0,
+  empty: props.displayRows.length === 0,
+}));
+const visibleRows = computed(() => {
+  const query = taskSearch.value.trim().toLowerCase();
+  return props.displayRows.filter((row) => {
+    if (taskFilter.value === "unsigned" && row.signed) return false;
+    if (taskFilter.value === "signed" && !row.signed) return false;
+    if (!query) return true;
+    return [
+      row.display_name,
+      row.person?.name,
+      row.person?.display_name,
+      row.person?.building,
+      row.person?.specialty,
+      row.draft?.display_name,
+    ].some((value) => String(value || "").toLowerCase().includes(query));
+  });
+});
+
+watch(() => props.role, () => {
+  taskSearch.value = "";
+  taskFilter.value = "all";
+  externalReuseOpen.value = false;
+});
+
 function signaturePersonKey(person: Dict): string {
   const source = String(person?.source || "");
   if (source === "external") return `external:${String(person?.record_id || "")}`;
@@ -303,185 +267,214 @@ function signaturePersonKey(person: Dict): string {
   return String(person?.record_id || "");
 }
 
-function drawerPersonStatus(row: OtherSignatureRow): string {
-  if (row.kind !== "person") return row.draft?.error || props.draftStatusText(row.draft);
+function personStatus(row: OtherSignatureRow): string {
   const tempId = String(row.person?.temp_id || "");
-  if (tempId && props.temporaryLinkErrorById[tempId]) return `链接失败：${props.temporaryLinkErrorById[tempId]}`;
-  if (tempId && props.temporaryLinkSentAtById[tempId]) return `链接已发送 ${props.temporaryLinkSentAtById[tempId]}`;
+  if (tempId && props.temporaryLinkErrorById[tempId]) return `发送失败：${props.temporaryLinkErrorById[tempId]}`;
+  if (tempId && props.temporaryLinkSentAtById[tempId] && !row.signed) {
+    return `签名链接已发送 ${props.temporaryLinkSentAtById[tempId]}`;
+  }
   return props.personStatusText(row.person);
 }
 </script>
 
 <style scoped>
 .other-signature-panel {
-  display: grid;
-  gap: 5px;
   min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
   border: 1px solid #fed7aa;
-  border-radius: 16px;
-  background: linear-gradient(135deg, rgba(255, 247, 237, 0.98), rgba(255, 255, 255, 0.94));
-  box-shadow: inset 4px 0 0 #f97316;
-  padding: 7px;
-  overflow: visible;
-}
-
-.other-signature-panel .btn {
-  min-height: 24px;
-  border-radius: 999px;
-  padding: 3px 8px;
-  font-size: 11px;
-  font-weight: 850;
+  border-radius: 12px;
+  padding: 9px;
+  background: #fffaf2;
+  box-shadow: inset 3px 0 0 #f97316;
 }
 
 .other-signature-head {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .other-signature-head > div {
   min-width: 0;
 }
 
-.other-signature-head strong {
+.other-signature-head strong,
+.other-signature-head small {
   display: block;
-  color: #9a3412;
-  font-size: 11px;
+}
+
+.other-signature-head strong {
+  color: #7c2d12;
+  font-size: 13px;
   font-weight: 950;
 }
 
-.other-signature-head small,
-.other-signature-empty {
+.other-signature-head small {
+  margin-top: 2px;
   color: #9a3412;
   font-size: 11px;
-  line-height: 1.35;
-}
-
-.other-signature-head small {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  min-height: 18px;
-  margin-top: 2px;
-  border-radius: 999px;
-  padding: 2px 5px;
-  background: #fff7ed;
-  font-weight: 900;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 850;
 }
 
 .other-signature-head small.ready {
-  background: #dcfce7;
   color: #047857;
 }
 
-.other-signature-head small.pending {
-  background: #fff7ed;
+.add-person-button,
+.signature-refresh {
+  flex: 0 0 auto;
+  min-height: 30px;
+  border: 1px solid #fdba74;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff;
   color: #c2410c;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
 }
 
-.other-signature-head small.empty {
-  background: #fffbeb;
-  color: #9a3412;
+.add-person-button:disabled,
+.signature-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .other-signature-disabled {
   margin: 0;
   border: 1px solid #fed7aa;
-  border-radius: 12px;
-  padding: 5px 8px;
+  border-radius: 8px;
+  padding: 6px 8px;
   background: #fff7ed;
   color: #9a3412;
   font-size: 11px;
-  font-weight: 900;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.other-signature-empty {
-  border: 1px dashed rgba(251, 146, 60, 0.45);
-  border-radius: 12px;
-  background: rgba(255, 251, 235, 0.72);
-  padding: 6px 8px;
   font-weight: 850;
 }
 
-.other-signature-list {
-  display: grid;
-  gap: 6px;
-  overflow: visible;
-}
-
-.other-signature-summary {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(86px, auto);
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
+.task-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   min-width: 0;
-  overflow: visible;
-  isolation: isolate;
-}
-
-.other-signature-row {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-  min-height: 40px;
-  border: 1px solid #d8e5f7;
-  border-radius: 13px;
-  background: #ffffff;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px;
   padding: 6px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  background: rgba(255, 250, 242, 0.96);
+  backdrop-filter: blur(8px);
 }
 
-.other-signature-summary .summary-chip {
+.task-toolbar input,
+.draft-name input,
+.external-signature-search input {
   min-width: 0;
-  width: 100%;
   height: 32px;
-  grid-template-columns: 48px minmax(56px, 1fr);
-  padding: 4px 6px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
 }
 
-.other-signature-summary .summary-chip img {
-  width: 46px;
-  height: 20px;
+.task-toolbar input:focus,
+.draft-name input:focus,
+.external-signature-search input:focus {
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
 }
 
-.other-signature-summary .summary-chip .other-signature-state {
-  width: 46px;
-  min-height: 20px;
+.task-filter-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
-.other-signature-row.signed {
-  border-color: #bbf7d0;
+.task-filter-tabs button {
+  min-height: 26px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: transparent;
+  color: #9a3412;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.task-filter-tabs button.active {
+  background: #f97316;
+  color: #ffffff;
+}
+
+.other-signature-task-list {
+  display: grid;
+  gap: 6px;
+}
+
+.other-signature-task-list article {
+  min-width: 0;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) minmax(220px, auto);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  padding: 6px;
+  background: #ffffff;
+}
+
+.other-signature-task-list article.ready {
+  border-color: #a7e8c2;
   background: #f0fdf4;
 }
 
-.other-signature-row.pending,
-.other-signature-row.draft {
-  border-color: #fed7aa;
+.other-signature-task-list article.pending {
   background: #fff7ed;
 }
 
-.other-signature-row.failed {
-  border-color: #fecaca;
-  background: #fef2f2;
+.signature-preview {
+  width: 68px;
+  min-height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: #ffffff;
 }
 
-.other-signature-row img {
+.signature-preview img {
   width: 62px;
-  height: 22px;
+  height: 26px;
   object-fit: contain;
 }
 
-.other-signature-row strong,
-.other-signature-row small {
+.signature-preview span {
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.person-summary {
+  min-width: 0;
+}
+
+.person-summary strong,
+.person-summary small {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -489,314 +482,176 @@ function drawerPersonStatus(row: OtherSignatureRow): string {
   white-space: nowrap;
 }
 
-.other-signature-row strong {
+.person-summary strong {
   color: #0f172a;
   font-size: 12px;
-  font-weight: 900;
-}
-
-.other-signature-row small {
-  margin-top: 2px;
-  color: #64748b;
-  font-size: 11px;
-}
-
-.other-signature-row .row-disabled-reason {
-  color: #c2410c;
-  font-weight: 850;
-}
-
-.other-signature-state,
-.signature-chip-state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 22px;
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #c2410c;
-  padding: 3px 7px;
-  font-size: 11px;
-  font-weight: 850;
-  white-space: nowrap;
-}
-
-.signature-chip-state {
-  min-width: 54px;
-}
-
-.selected-signature-open {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  flex: 0 0 auto;
-  max-width: 100%;
-  min-width: 0;
-  min-height: 28px;
-  border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  padding: 0 8px;
-  font-size: 11px;
-  font-weight: 900;
-  cursor: pointer;
-}
-
-.selected-signature-open em {
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #c2410c;
-  padding: 2px 6px;
-  font-style: normal;
-  font-size: 11px;
-  line-height: 1;
-}
-
-.temporary-open {
-  border-color: #fed7aa;
-  background: #fff7ed;
-  color: #c2410c;
-}
-
-.temporary-open.ready {
-  border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.temporary-open.pending {
-  border-color: #fed7aa;
-  background: #fff7ed;
-  color: #c2410c;
-}
-
-.inline-search {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
-}
-
-.inline-search input {
-  min-width: 0;
-}
-
-.signature-refresh {
-  min-width: 42px;
-  min-height: 30px;
-  border-radius: 999px;
-  padding: 4px 9px;
-  font-size: 11px;
-  line-height: 1;
-}
-
-.external-signature-reuse {
-  display: grid;
-  gap: 6px;
-  border-top: 1px dashed rgba(251, 146, 60, 0.32);
-  padding-top: 6px;
-}
-
-.drawer-filter-bar {
-  display: grid;
-  grid-template-columns: minmax(104px, auto) minmax(180px, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  border: 1px solid #fed7aa;
-  border-radius: 14px;
-  background: rgba(255, 251, 235, 0.96);
-  padding: 8px;
-  backdrop-filter: blur(10px);
-}
-
-.drawer-progress {
-  display: grid;
-  gap: 2px;
-  color: #c2410c;
-}
-
-.drawer-progress strong {
-  font-size: 13px;
   font-weight: 950;
 }
 
-.drawer-progress span {
+.person-summary small {
+  margin-top: 3px;
+  color: #64748b;
   font-size: 11px;
-  font-weight: 850;
+  font-weight: 800;
 }
 
-.drawer-filter-bar input {
-  min-width: 0;
-  height: 30px;
-  border: 1px solid #fed7aa;
-  border-radius: 999px;
-  padding: 0 11px;
-  color: #0f172a;
+.person-summary small.failed {
+  color: #b91c1c;
+}
+
+.draft-name {
+  display: grid;
+  gap: 3px;
+}
+
+.task-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.task-actions button {
+  min-height: 30px;
+  border: 1px solid #fdba74;
+  border-radius: 8px;
+  padding: 0 9px;
   background: #ffffff;
+  color: #c2410c;
   font: inherit;
-  font-size: 12px;
-  font-weight: 850;
-  outline: none;
-}
-
-.drawer-filter-bar input:focus {
-  border-color: #f97316;
-  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
-}
-
-.drawer-filter-tabs {
-  display: inline-flex;
-  gap: 4px;
-  border: 1px solid rgba(254, 215, 170, 0.9);
-  border-radius: 999px;
-  background: #ffffff;
-  padding: 3px;
-}
-
-.drawer-filter-tabs button {
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: #9a3412;
-  padding: 5px 9px;
   font-size: 11px;
   font-weight: 900;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.drawer-filter-tabs button.active {
-  background: #f97316;
-  color: #ffffff;
+.task-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
-.drawer-empty {
-  border: 1px dashed #fed7aa;
-  border-radius: 14px;
-  padding: 14px;
-  background: #fffbeb;
+.task-actions .link-action {
+  border-color: #bae6fd;
+  color: #0369a1;
+  background: #f0f9ff;
+}
+
+.task-actions .remove-action {
+  border-color: #e2e8f0;
+  color: #475569;
+  background: #f8fafc;
+}
+
+.panel-empty {
+  border: 1px dashed #fdba74;
+  border-radius: 10px;
+  padding: 18px 12px;
+  background: rgba(255, 255, 255, 0.7);
   color: #9a3412;
   font-size: 12px;
   font-weight: 850;
   text-align: center;
 }
 
-:deep(small.failed) {
-  color: #b91c1c !important;
+.external-signature-reuse {
+  display: grid;
+  gap: 7px;
+  border-top: 1px dashed #fdba74;
+  padding-top: 8px;
 }
 
 .reuse-toggle {
   justify-self: start;
+  min-height: 30px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 26px;
-  border: 1px solid rgba(251, 146, 60, 0.42);
-  border-radius: 999px;
-  padding: 0 9px;
-  background: rgba(255, 247, 237, 0.78);
+  border: 1px solid #fdba74;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff;
   color: #9a3412;
+  font: inherit;
   font-size: 11px;
   font-weight: 900;
   cursor: pointer;
 }
 
 .reuse-toggle.open {
-  border-color: #fed7aa;
   background: #fff7ed;
 }
 
 .reuse-toggle em {
-  display: inline-grid;
-  place-items: center;
   min-width: 20px;
   height: 20px;
+  display: grid;
+  place-items: center;
   border-radius: 999px;
-  background: #ffffff;
+  background: #ffedd5;
   color: #c2410c;
-  font-size: 11px;
+  font-size: 10px;
   font-style: normal;
-  font-weight: 950;
 }
 
 .external-signature-reuse-body {
   display: grid;
-  gap: 6px;
-  max-height: min(24vh, 180px);
-  overflow: auto;
-  border: 1px solid rgba(254, 215, 170, 0.72);
-  border-radius: 13px;
-  padding: 7px;
-  background: rgba(255, 251, 235, 0.56);
-}
-
-.external-signature-reuse-body,
-.external-signature-results {
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-}
-
-.external-signature-reuse-body::-webkit-scrollbar,
-.external-signature-results::-webkit-scrollbar {
-  width: 8px;
-}
-
-.external-signature-reuse-body::-webkit-scrollbar-thumb,
-.external-signature-results::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(194, 65, 12, 0.28);
-}
-
-.search-inline-status {
-  display: block;
-  margin-top: 5px;
-  color: #64748b;
-  font-size: 11px;
-  line-height: 1.4;
+  gap: 7px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .external-signature-search {
+  min-width: 0;
   display: grid;
   gap: 5px;
-  margin-top: 2px;
   color: #475569;
   font-size: 11px;
   font-weight: 900;
 }
 
+.inline-search {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.external-signature-search small {
+  color: #64748b;
+  font-size: 11px;
+}
+
 .external-signature-results {
+  max-height: 240px;
   display: grid;
   gap: 6px;
-  max-height: min(16vh, 126px);
   overflow: auto;
-  padding-right: 3px;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
 }
 
 .external-signature-results button {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) auto;
+  grid-template-columns: 62px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   border: 1px solid #d8e5f7;
-  border-radius: 13px;
-  background: #ffffff;
+  border-radius: 9px;
   padding: 6px;
+  background: #ffffff;
   text-align: left;
   cursor: pointer;
 }
 
 .external-signature-results button:hover {
   border-color: #1e63ff;
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.12);
 }
 
 .external-signature-results img {
-  width: 56px;
-  height: 22px;
+  width: 58px;
+  height: 24px;
   object-fit: contain;
 }
 
@@ -822,58 +677,52 @@ function drawerPersonStatus(row: OtherSignatureRow): string {
 }
 
 .external-signature-results button > em {
-  border: 0;
-  border-radius: 999px;
+  border-radius: 7px;
+  padding: 5px 9px;
   background: #dbeafe;
   color: #1d4ed8;
-  padding: 6px 9px;
   font-size: 11px;
   font-style: normal;
-  font-weight: 850;
-  white-space: nowrap;
+  font-weight: 900;
 }
 
 @media (max-width: 760px) {
+  .other-signature-head,
+  .task-toolbar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
   .other-signature-head {
-    grid-template-columns: 1fr;
-  }
-
-  .other-signature-summary {
     display: grid;
-    grid-template-columns: 1fr;
   }
 
-  .other-signature-summary .summary-chip {
-    width: auto;
+  .add-person-button {
+    min-height: 44px;
   }
 
-  .temporary-open {
-    min-width: max-content;
-    padding: 0 10px;
-  }
-
+  .task-toolbar input,
+  .draft-name input,
+  .external-signature-search input,
+  .signature-refresh,
+  .reuse-toggle,
+  .task-filter-tabs button,
   .external-signature-results button {
+    min-height: 44px;
+  }
+
+  .other-signature-task-list article {
     grid-template-columns: 64px minmax(0, 1fr);
   }
 
-  .external-signature-results button > em {
+  .task-actions {
     grid-column: 1 / -1;
-    justify-self: stretch;
-    text-align: center;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .drawer-filter-bar {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 1160px) {
-  .drawer-filter-bar {
-    grid-template-columns: minmax(104px, auto) minmax(0, 1fr);
-  }
-
-  .drawer-filter-tabs {
-    justify-content: flex-start;
+  .task-actions button {
+    min-height: 44px;
   }
 }
 </style>

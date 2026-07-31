@@ -56,18 +56,19 @@
         ></div>
         <section
           v-if="activeSheet && !activeSheet.is_cover"
+          ref="signatureManagerRef"
           class="mop-sign-panel"
-          :class="{
-            'manager-open': signatureManagerOpen,
-            'signature-drawer-open': selectedSignatureDrawerOpen || temporarySignatureDrawerOpen
-          }"
+          :class="{ 'manager-open': signatureManagerOpen }"
+          :role="signatureManagerOpen ? 'dialog' : undefined"
+          :aria-modal="signatureManagerOpen ? 'true' : undefined"
+          :aria-label="signatureManagerOpen ? '维护人员签名' : undefined"
+          :tabindex="signatureManagerOpen ? -1 : undefined"
+          @keydown="handleSignatureManagerKeydown"
         >
           <div class="sign-panel-head">
             <div>
-              <strong>签名任务中心</strong>
-              <p v-if="signatureManagerOpen">
-                {{ signatureTaskSummaryText }}
-              </p>
+              <strong>维护人员签名</strong>
+              <p v-if="signatureManagerOpen">{{ selectedNotice?.title || previewTitle }}</p>
             </div>
             <button type="button"
               v-if="signatureManagerOpen"
@@ -82,12 +83,43 @@
             :items="signatureRoleSummaryItems"
             @select="openSignatureManager"
           />
-          <MopSignatureGuideStrip
-            v-if="signatureManagerOpen"
-            :items="signatureGuideItems"
-            @select-role="openSignatureManager"
-          />
-          <div class="sign-workspace">
+          <div v-if="signatureManagerOpen" class="signature-source-tabs" role="tablist" aria-label="签名人员类型">
+            <button type="button"
+              role="tab"
+              id="mop-sign-source-company-tab"
+              aria-controls="mop-sign-source-company-panel"
+              :aria-selected="signatureSourceTab === 'company'"
+              :tabindex="signatureSourceTab === 'company' ? 0 : -1"
+              :class="{ active: signatureSourceTab === 'company' }"
+              @click="signatureSourceTab = 'company'"
+              @keydown.left.prevent="focusSignatureSourceTab('temporary')"
+              @keydown.right.prevent="focusSignatureSourceTab('temporary')"
+            >
+              公司人员
+              <em>{{ selectedFormalSignaturePeople(signatureRole).length }}</em>
+            </button>
+            <button type="button"
+              role="tab"
+              id="mop-sign-source-temporary-tab"
+              aria-controls="mop-sign-source-temporary-panel"
+              :aria-selected="signatureSourceTab === 'temporary'"
+              :tabindex="signatureSourceTab === 'temporary' ? 0 : -1"
+              :class="{ active: signatureSourceTab === 'temporary' }"
+              @click="signatureSourceTab = 'temporary'"
+              @keydown.left.prevent="focusSignatureSourceTab('company')"
+              @keydown.right.prevent="focusSignatureSourceTab('company')"
+            >
+              临时/外部人员
+              <em>{{ currentRoleOtherSignatureDisplayRows.length }}</em>
+            </button>
+          </div>
+          <div
+            v-if="signatureSourceTab === 'company'"
+            id="mop-sign-source-company-panel"
+            class="sign-workspace company-workspace"
+            role="tabpanel"
+            aria-labelledby="mop-sign-source-company-tab"
+          >
             <MopCompanySignaturePicker
               v-model:search="signatureSearch"
               :loading="signatureLoading"
@@ -110,7 +142,6 @@
                 :active-record-id="activeSignatureRecordId"
                 :unsigned-count="selectedFormalSignatureNotReadyCount(signatureRole)"
                 :unsigned-signature-count="selectedFormalSignatureMissingSignatureCount(signatureRole)"
-                :drawer-open="selectedSignatureDrawerOpen"
                 :link-sending-by-id="signatureLinkSendingById"
                 :link-sent-at-by-id="signatureLinkSentAtById"
                 :link-error-by-id="signatureLinkErrorById"
@@ -123,8 +154,6 @@
                 :confirm-sending="signatureUsageConfirmSending"
                 :confirmable-count="signatureUsageConfirmationCount(signatureRole)"
                 @activate="activateSelectedSignaturePerson"
-                @toggle-drawer="toggleSelectedSignatureDrawer"
-                @close-drawer="setSelectedSignatureDrawerOpen(false)"
                 @image-error="handleSelectedSignatureImageError"
                 @web-sign="openSignaturePadForPerson"
                 @send-link="sendSignatureLinkForPerson"
@@ -132,52 +161,59 @@
                 @send-confirmations="sendSignatureUsageConfirmationsForRole(signatureRole)"
                 @remove="removeSignaturePerson(signatureRole, $event)"
               />
-              <MopOtherSignatureManager
-                :drawer-open="temporarySignatureDrawerOpen"
-                v-model:external-search="externalSignatureSearch"
-                :role="signatureRole"
-                :add-disabled-reason="addOtherSignatureDisabledReason"
-                :display-rows="currentRoleOtherSignatureDisplayRows"
-                :preview-row="currentRoleOtherSignaturePreviewRow"
-                :unsigned-count="currentRoleOtherSignatureUnsignedCount"
-                :temporary-link-sending-by-id="temporarySignatureLinkSendingById"
-                :temporary-link-sent-at-by-id="temporarySignatureLinkSentAtById"
-                :temporary-link-error-by-id="temporarySignatureLinkErrorById"
-                :draft-sending-by-id="temporarySignatureSendingByDraft"
-                :external-loading="externalSignatureLoading"
-                :external-status-text="externalSignatureSearchStatus"
-                :external-people="externalSignaturePeople"
-                :person-status-text="otherSignaturePersonStatusText"
-                :person-web-sign-disabled-reason="otherSignatureWebSignDisabledReason"
-                :draft-status-text="otherSignatureDraftStatusText"
-                :draft-disabled-reason="temporarySignatureRowDisabledReason"
-                @update:drawer-open="setTemporarySignatureDrawerOpen"
-                @add-other="addOtherSignatureDraft"
-                @image-error="handleSelectedSignatureImageError"
-                @web-sign-person="openSignaturePadForPerson"
-                @send-temp-person="sendTemporarySignatureLinkForPerson"
-                @remove-person="removeSignaturePerson(signatureRole, $event)"
-                @update-draft-name="updateOtherSignatureDraftName"
-                @ensure-draft-name="ensureOtherSignatureDraftName"
-                @web-sign-draft="openSignaturePadForDraft"
-                @send-draft-link="sendTemporarySignatureLinkForDraft"
-                @remove-draft="removeOtherSignatureDraft"
-                @refresh-external="loadExternalSignaturePeople()"
-                @add-external="addExternalSignaturePerson"
-              />
-              <MopFileActions
-                :message="signatureMessage"
-                :message-type="signatureMessageType"
-                :role-hint="signatureRoleHint"
-                :fill-saving="mopFillSaving"
-                :upload-saving="mopUploadSaving"
-                :reset-saving="mopResetting"
-                :fill-disabled-reason="fillMopDisabledReason"
-                :filled-mop-available="Boolean(filledMopResult)"
-                @fill="fillMopSignatures"
-                @reset="resetMopSigning"
-              />
             </div>
+          </div>
+          <div
+            v-else
+            id="mop-sign-source-temporary-panel"
+            class="sign-workspace temporary-workspace"
+            role="tabpanel"
+            aria-labelledby="mop-sign-source-temporary-tab"
+          >
+            <MopOtherSignatureManager
+              v-model:external-search="externalSignatureSearch"
+              :role="signatureRole"
+              :add-disabled-reason="addOtherSignatureDisabledReason"
+              :display-rows="currentRoleOtherSignatureDisplayRows"
+              :unsigned-count="currentRoleOtherSignatureUnsignedCount"
+              :temporary-link-sending-by-id="temporarySignatureLinkSendingById"
+              :temporary-link-sent-at-by-id="temporarySignatureLinkSentAtById"
+              :temporary-link-error-by-id="temporarySignatureLinkErrorById"
+              :draft-sending-by-id="temporarySignatureSendingByDraft"
+              :external-loading="externalSignatureLoading"
+              :external-status-text="externalSignatureSearchStatus"
+              :external-people="externalSignaturePeople"
+              :person-status-text="otherSignaturePersonStatusText"
+              :person-web-sign-disabled-reason="otherSignatureWebSignDisabledReason"
+              :draft-status-text="otherSignatureDraftStatusText"
+              :draft-disabled-reason="temporarySignatureRowDisabledReason"
+              @add-other="addOtherSignatureDraft"
+              @image-error="handleSelectedSignatureImageError"
+              @web-sign-person="openSignaturePadForPerson"
+              @send-temp-person="sendTemporarySignatureLinkForPerson"
+              @remove-person="removeSignaturePerson(signatureRole, $event)"
+              @update-draft-name="updateOtherSignatureDraftName"
+              @ensure-draft-name="ensureOtherSignatureDraftName"
+              @web-sign-draft="openSignaturePadForDraft"
+              @send-draft-link="sendTemporarySignatureLinkForDraft"
+              @remove-draft="removeOtherSignatureDraft"
+              @refresh-external="loadExternalSignaturePeople()"
+              @add-external="addExternalSignaturePerson"
+            />
+          </div>
+          <div v-if="signatureManagerOpen" class="sign-drawer-footer">
+            <MopFileActions
+              :message="signatureMessage"
+              :message-type="signatureMessageType"
+              :role-hint="signatureTaskSummaryText"
+              :fill-saving="mopFillSaving"
+              :upload-saving="mopUploadSaving"
+              :reset-saving="mopResetting"
+              :fill-disabled-reason="fillMopDisabledReason"
+              :filled-mop-available="Boolean(filledMopResult)"
+              @fill="fillMopSignatures"
+              @reset="resetMopSigning"
+            />
           </div>
         </section>
         <MopSignaturePadModal
@@ -432,7 +468,6 @@ import MopSheetPreviewTable from "./MopSheetPreviewTable.vue";
 import MopSheetStatusPanel from "./MopSheetStatusPanel.vue";
 import MopSheetTabs from "./MopSheetTabs.vue";
 import MopSignaturePadModal from "./MopSignaturePadModal.vue";
-import MopSignatureGuideStrip from "./MopSignatureGuideStrip.vue";
 import MopSignatureRoleSummary, {
   type MopSignatureRole,
   type MopSignatureRoleSummaryItem,
@@ -507,7 +542,7 @@ const {
 } = useMopSignatureSelection(signaturePeople, {
   onChanged: () => updateFormalSignaturePolling(),
 });
-const selectedSignatureDrawerOpen = ref(false);
+const signatureSourceTab = ref<"company" | "temporary">("company");
 const externalSignatureSearch = ref("");
 const externalSignaturePeople = shallowRef<Dict[]>([]);
 const externalSignaturePeopleTotal = ref(0);
@@ -524,9 +559,9 @@ const temporarySignatureLinkSendingById = ref<Record<string, boolean>>({});
 const temporarySignatureLinkSentAtById = ref<Record<string, string>>({});
 const temporarySignatureLinkErrorById = ref<Record<string, string>>({});
 const signatureManagerOpen = ref(false);
+const signatureManagerRef = ref<HTMLElement | null>(null);
 const signaturePadOpen = ref(false);
 const signaturePadTarget = ref<Dict | null>(null);
-const temporarySignatureDrawerOpen = ref(false);
 const temporarySignatureSendingByDraft = ref<Record<string, boolean>>({});
 const mopFillSaving = ref(false);
 const mopUploadSaving = ref(false);
@@ -555,6 +590,10 @@ let signatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let externalSignatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let signatureSearchRequestSeq = 0;
 let externalSignatureSearchRequestSeq = 0;
+let temporarySignatureRequestSeq = 0;
+let formalSignatureRefreshSeq = 0;
+let signatureManagerReturnFocus: HTMLElement | null = null;
+let signatureManagerBodyOverflow = "";
 let mopPageLoadAbortController: AbortController | null = null;
 let mopPageLoadVersion = 0;
 const temporarySignaturePolling = useGuardedPolling(() => loadTemporarySignatures({ silent: true }), 5000);
@@ -759,8 +798,8 @@ const selectedRoleUnsignedCount = computed(() => (
 const selectedRoleSignatureStatusText = computed(() => {
   const total = selectedRoleSignaturePeople.value.length;
   if (!total) return "未选择人员";
-  const signed = Math.max(0, total - selectedRoleUnsignedCount.value);
-  return selectedRoleUnsignedCount.value ? `${signed}/${total} 已签` : "签名齐全";
+  const ready = Math.max(0, total - selectedRoleUnsignedCount.value);
+  return selectedRoleUnsignedCount.value ? `${ready}/${total} 可用` : "全部可用";
 });
 const signatureRoleSummaryItems = computed<MopSignatureRoleSummaryItem[]>(() => (
   ([
@@ -771,49 +810,13 @@ const signatureRoleSummaryItems = computed<MopSignatureRoleSummaryItem[]>(() => 
     label,
     totalCount: selectedSignaturePeople(role).length,
     companyCount: selectedFormalSignaturePeople(role).length,
-    companyUnsigned: selectedFormalSignatureNotReadyCount(role),
+    companyMissingSignature: selectedFormalSignatureMissingSignatureCount(role),
+    companyPendingConfirmation: selectedFormalSignaturePendingConfirmationCount(role),
+    companyRejected: selectedFormalSignatureRejectedCount(role),
     temporaryCount: selectedTemporarySignaturePeople(role).length,
     temporaryUnsigned: selectedTemporarySignatureUnsignedCount(role),
   }))
 ));
-const signatureGuideItems = computed(() => [
-  {
-    key: "time",
-    label: "时间",
-    value: mopMaintenanceTimeValidationMessage.value ? "待补" : "已完成",
-    text: mopMaintenanceTimeValidationMessage.value || "已填写",
-    ready: !mopMaintenanceTimeValidationMessage.value,
-    tone: "time",
-    role: "" as MopSignatureRole | "",
-  },
-  {
-    key: "implementer",
-    label: "维护实施人",
-    value: `${implementerSignatureDisplayCount.value}/${requiredImplementerSignatureCount.value || 1}`,
-    text: implementerSignatureReady.value ? "已签名" : "待签名",
-    ready: implementerSignatureReady.value,
-    tone: "implementer",
-    role: "implementer" as MopSignatureRole,
-  },
-  {
-    key: "auditor",
-    label: "维护审核人",
-    value: `${auditorSignatureDisplayCount.value}/${requiredAuditorSignatureCount.value}`,
-    text: auditorSignatureReady.value ? "已签名" : "待签名",
-    ready: auditorSignatureReady.value,
-    tone: "auditor",
-    role: "auditor" as MopSignatureRole,
-  },
-  {
-    key: "upload",
-    label: "上传",
-    value: canUploadSignedMop.value ? "可上传" : "待完成",
-    text: canUploadSignedMop.value ? "可上传" : uploadSignedMopDisabledReason.value,
-    ready: canUploadSignedMop.value,
-    tone: "upload",
-    role: "" as MopSignatureRole | "",
-  },
-]);
 const signatureTaskSummaryText = computed(() => {
   const items: string[] = [];
   if (mopMaintenanceTimeValidationMessage.value) items.push("时间待补");
@@ -878,14 +881,9 @@ const currentRoleOtherSignatureDisplayRows = computed(() => {
     return left.original_index - right.original_index;
   });
 });
-const currentRoleOtherSignaturePreviewRow = computed(() => currentRoleOtherSignatureDisplayRows.value[0] || null);
 const currentRoleOtherSignatureUnsignedCount = computed(() => (
   currentRoleOtherSignatureDisplayRows.value.filter((row) => !row.signed).length
 ));
-const signatureRoleHint = computed(() => {
-  const label = signatureRole.value === "implementer" ? "维护实施人" : "维护审核人";
-  return activeSignaturePerson.value ? `${label}可网页手写或发送链接。` : `请选择${label}。`;
-});
 const addOtherSignatureDisabledReason = computed(() => {
   if (!selectedNotice.value) return "请先选择左侧维保通告";
   if (!selectedNotice.value.notice_key) return "当前通告缺少记忆键，无法创建临时签名";
@@ -1934,6 +1932,16 @@ function selectedFormalSignatureMissingSignatureCount(role: MopSignatureRole): n
   return selectedFormalSignaturePeople(role).filter((person) => !personHasUsableSignature(person)).length;
 }
 
+function selectedFormalSignaturePendingConfirmationCount(role: MopSignatureRole): number {
+  return selectedFormalSignaturePeople(role).filter((person) => (
+    personHasUsableSignature(person) && !personReadyForMop(person) && !person?.usage_rejected
+  )).length;
+}
+
+function selectedFormalSignatureRejectedCount(role: MopSignatureRole): number {
+  return selectedFormalSignaturePeople(role).filter((person) => Boolean(person?.usage_rejected)).length;
+}
+
 function handleSignatureImageError(recordId: unknown): void {
   markSignatureUnavailable(recordId);
   signatureMessage.value = "该人员签名附件不可用，请重新手写保存。";
@@ -1968,7 +1976,6 @@ async function openSignaturePad(): Promise<void> {
   signatureMessage.value = "";
   signatureMessageType.value = "";
   signatureCanvas.resetInk();
-  closeSignatureDrawers();
   signaturePadOpen.value = true;
   await nextTick();
   disconnectSignatureCanvasObserver();
@@ -2066,8 +2073,8 @@ function closeSignaturePad(): void {
 
 function closeMopTransientUi(): void {
   mopCellSelection.clear();
-  closeSignatureManager();
   if (signaturePadOpen.value) closeSignaturePad();
+  closeSignatureManager();
 }
 
 function startSignatureDraw(event: PointerEvent): void {
@@ -2103,29 +2110,6 @@ function removeSignaturePerson(role: "implementer" | "auditor", recordId: string
   removeSignaturePersonByRole(role, recordId);
   clearMopOutputState();
   clearSignatureCanvas();
-}
-
-function closeSignatureDrawers(): void {
-  selectedSignatureDrawerOpen.value = false;
-  temporarySignatureDrawerOpen.value = false;
-}
-
-function setSelectedSignatureDrawerOpen(value: boolean): void {
-  selectedSignatureDrawerOpen.value = value;
-  if (value) temporarySignatureDrawerOpen.value = false;
-}
-
-function setTemporarySignatureDrawerOpen(value: boolean): void {
-  temporarySignatureDrawerOpen.value = value;
-  if (value) selectedSignatureDrawerOpen.value = false;
-}
-
-function toggleSelectedSignatureDrawer(): void {
-  setSelectedSignatureDrawerOpen(!selectedSignatureDrawerOpen.value);
-}
-
-function toggleTemporarySignatureDrawer(): void {
-  setTemporarySignatureDrawerOpen(!temporarySignatureDrawerOpen.value);
 }
 
 function ensureOtherSignatureDraftName(draft: Dict): void {
@@ -2184,17 +2168,69 @@ function signatureMoreStyle(rowIndex: number): Record<string, string> {
   };
 }
 
-function openSignatureManager(role: "implementer" | "auditor"): void {
-  if (signatureRole.value !== role) {
-    closeSignatureDrawers();
+async function openSignatureManager(role: "implementer" | "auditor"): Promise<void> {
+  const wasOpen = signatureManagerOpen.value;
+  if (!wasOpen) {
+    signatureManagerReturnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    signatureManagerBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
   }
   signatureRole.value = role;
   signatureManagerOpen.value = true;
+  if (!wasOpen) {
+    await nextTick();
+    signatureManagerRef.value?.focus({ preventScroll: true });
+  }
 }
 
 function closeSignatureManager(): void {
+  if (!signatureManagerOpen.value) return;
   signatureManagerOpen.value = false;
-  closeSignatureDrawers();
+  document.body.style.overflow = signatureManagerBodyOverflow;
+  signatureManagerBodyOverflow = "";
+  const returnFocus = signatureManagerReturnFocus;
+  signatureManagerReturnFocus = null;
+  if (returnFocus?.isConnected) {
+    window.requestAnimationFrame(() => returnFocus.focus({ preventScroll: true }));
+  }
+}
+
+function handleSignatureManagerKeydown(event: KeyboardEvent): void {
+  if (!signatureManagerOpen.value || signaturePadOpen.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSignatureManager();
+    return;
+  }
+  if (event.key !== "Tab" || !signatureManagerRef.value) return;
+  const focusable = Array.from(signatureManagerRef.value.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => element.offsetParent !== null);
+  if (!focusable.length) {
+    event.preventDefault();
+    signatureManagerRef.value.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || active === signatureManagerRef.value)) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && (active === last || active === signatureManagerRef.value)) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+}
+
+function focusSignatureSourceTab(tab: "company" | "temporary"): void {
+  signatureSourceTab.value = tab;
+  void nextTick(() => {
+    document.getElementById(`mop-sign-source-${tab}-tab`)?.focus({ preventScroll: true });
+  });
 }
 
 function scheduleSignaturePeopleSearch(): void {
@@ -2600,18 +2636,30 @@ function mergeTemporarySignatures(items: Dict[]): void {
 }
 
 async function loadTemporarySignatures(options: { silent?: boolean } = {}): Promise<void> {
+  const requestSeq = ++temporarySignatureRequestSeq;
+  const requestScope = scope.value;
   const noticeKey = String(selectedNotice.value?.notice_key || "").trim();
   if (!noticeKey) {
     temporarySignatures.value = [];
     return;
   }
   try {
-    const data = await fetchTemporarySignatures(scope.value, noticeKey);
+    const data = await fetchTemporarySignatures(requestScope, noticeKey);
+    if (
+      requestSeq !== temporarySignatureRequestSeq
+      || scope.value !== requestScope
+      || String(selectedNotice.value?.notice_key || "").trim() !== noticeKey
+    ) return;
     const items = Array.isArray(data.items) ? data.items : [];
     mergeTemporarySignatures(items);
     updateTemporarySignaturePolling();
   } catch (error) {
-    if (!options.silent) {
+    if (
+      requestSeq === temporarySignatureRequestSeq
+      && scope.value === requestScope
+      && String(selectedNotice.value?.notice_key || "").trim() === noticeKey
+      && !options.silent
+    ) {
       signatureMessage.value = error instanceof Error ? error.message : "读取临时签名失败";
       signatureMessageType.value = "failed";
     }
@@ -2698,7 +2746,7 @@ function addOtherSignatureDraft(): void {
     },
   ];
   clearMopOutputState();
-  setTemporarySignatureDrawerOpen(true);
+  signatureSourceTab.value = "temporary";
 }
 
 function removeOtherSignatureDraft(draftId: string): void {
@@ -2732,30 +2780,29 @@ function formalSignaturePollNeeded(): boolean {
 }
 
 async function refreshSelectedFormalSignatures(): Promise<void> {
+  const requestSeq = ++formalSignatureRefreshSeq;
+  const requestScope = scope.value;
+  const requestNoticeKey = signatureUsageNoticeKey.value;
   const targets = selectedPendingFormalSignaturePeople();
   if (!targets.length) {
     updateFormalSignaturePolling();
     return;
   }
-  for (const person of targets) {
-    const recordId = String(person.record_id || "").trim();
-    if (!recordId) continue;
-    try {
-      const data = await fetchSignaturePeople({
-        scope: scope.value,
-        recordId,
-        noticeKey: signatureUsageNoticeKey.value,
-        refresh: true,
-        limit: 1,
-      });
-      const found = Array.isArray(data.people) ? data.people[0] : null;
-      if (found && String(found.record_id || "") === recordId) {
-        updateRememberedSignaturePerson(recordId, found);
-      }
-    } catch {
-      // Polling should not interrupt the user's current MOP editing flow.
-    }
-  }
+  const data = await fetchSignaturePeople({
+    scope: requestScope,
+    noticeKey: requestNoticeKey,
+    refresh: true,
+    limit: 500,
+  });
+  if (
+    requestSeq !== formalSignatureRefreshSeq
+    || scope.value !== requestScope
+    || signatureUsageNoticeKey.value !== requestNoticeKey
+  ) return;
+  const targetIds = new Set(targets.map((person) => String(person.record_id || "").trim()).filter(Boolean));
+  const refreshedPeople = (Array.isArray(data.people) ? data.people : [])
+    .filter((person: Dict) => targetIds.has(String(person.record_id || "").trim()));
+  if (refreshedPeople.length) rememberSignaturePeople(refreshedPeople);
   updateFormalSignaturePolling();
 }
 
@@ -3173,6 +3220,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  temporarySignatureRequestSeq += 1;
+  formalSignatureRefreshSeq += 1;
   if (signatureSearchTimer) {
     clearTimeout(signatureSearchTimer);
     signatureSearchTimer = null;
@@ -3183,6 +3232,11 @@ onBeforeUnmount(() => {
   }
   temporarySignaturePolling.stop();
   formalSignaturePolling.stop();
+  if (signatureManagerOpen.value) {
+    document.body.style.overflow = signatureManagerBodyOverflow;
+    signatureManagerBodyOverflow = "";
+    signatureManagerOpen.value = false;
+  }
   mopPageLoadAbortController?.abort();
   mopPageLoadAbortController = null;
   window.removeEventListener("scroll", scheduleActiveMopCellOverlayPosition, true);
@@ -3198,7 +3252,6 @@ onBeforeUnmount(() => {
 watch(signatureRole, () => {
   signatureMessage.value = "";
   signatureMessageType.value = "";
-  closeSignatureDrawers();
   clearSignatureCanvas();
   void nextTick(() => resizeSignatureCanvas());
 });
@@ -3208,6 +3261,7 @@ watch(signatureSelectedRecords, () => {
 }, { deep: true });
 
 watch(signatureUsageNoticeKey, () => {
+  formalSignatureRefreshSeq += 1;
   if (!props.loggedIn) return;
   void loadSignaturePeople({ silent: true });
   updateFormalSignaturePolling();
@@ -3436,17 +3490,17 @@ watch(() => props.scopeOptions, (items) => {
   right: 18px;
   bottom: 18px;
   left: auto;
-  width: min(1120px, calc(100vw - 36px));
+  width: min(1240px, calc(100vw - 36px));
   max-height: none;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   align-content: stretch;
   gap: 8px;
   padding: 0 7px 7px;
   overflow-x: hidden;
   overflow-y: hidden;
   transform: none;
-  border-radius: 22px;
+  border-radius: 14px;
   border-color: rgba(191, 219, 254, 0.96);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 251, 255, 0.96)),
@@ -3456,14 +3510,6 @@ watch(() => props.scopeOptions, (items) => {
   scrollbar-gutter: stable;
 }
 
-.mop-preview-page .mop-sign-panel.manager-open.signature-drawer-open {
-  overflow: hidden;
-}
-
-.mop-preview-page .mop-sign-panel.manager-open.signature-drawer-open .sign-workspace {
-  overflow: auto;
-}
-
 .mop-preview-page .mop-sign-panel.manager-open .sign-panel-head {
   position: relative;
   z-index: 4;
@@ -3471,7 +3517,7 @@ watch(() => props.scopeOptions, (items) => {
   min-height: 40px;
   padding: 8px 12px;
   border-bottom: 1px solid rgba(216, 229, 247, 0.92);
-  border-radius: 22px 22px 0 0;
+  border-radius: 14px 14px 0 0;
   background:
     linear-gradient(135deg, rgba(239, 246, 255, 0.99), rgba(255, 255, 255, 0.96)),
     #ffffff;
@@ -3531,13 +3577,12 @@ watch(() => props.scopeOptions, (items) => {
   font-size: 10px;
 }
 
-.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-chip-row) {
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-state-row small) {
   display: none;
 }
 
-.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-state-line) {
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-state-row strong) {
   flex: 0 0 auto;
-  padding: 3px 6px;
   font-size: 10px;
 }
 
@@ -3569,7 +3614,7 @@ watch(() => props.scopeOptions, (items) => {
 }
 
 .mop-preview-page .mop-sign-panel.manager-open .sign-workspace {
-  grid-template-columns: minmax(244px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   align-items: start;
   gap: 7px;
   min-height: 0;
@@ -3577,6 +3622,10 @@ watch(() => props.scopeOptions, (items) => {
   padding: 0 1px 3px 0;
   scrollbar-width: thin;
   scrollbar-gutter: stable;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .temporary-workspace {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .mop-preview-page .mop-sign-panel.manager-open .sign-workspace::-webkit-scrollbar {
@@ -3661,6 +3710,65 @@ watch(() => props.scopeOptions, (items) => {
   background: #eff6ff;
 }
 
+.sign-close-inline:focus-visible,
+.signature-source-tabs button:focus-visible {
+  outline: 3px solid rgba(30, 99, 255, 0.22);
+  outline-offset: 2px;
+}
+
+.signature-source-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  padding: 0 1px;
+}
+
+.signature-source-tabs button {
+  min-width: 0;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #d8e5f7;
+  border-radius: 9px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: #64748b;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.signature-source-tabs button.active {
+  border-color: #7fb0ff;
+  background: #eff6ff;
+  color: #075bd8;
+  box-shadow: inset 0 -3px 0 #1e63ff;
+}
+
+.signature-source-tabs button:last-child.active {
+  border-color: #fdba74;
+  background: #fff7ed;
+  color: #c2410c;
+  box-shadow: inset 0 -3px 0 #f97316;
+}
+
+.signature-source-tabs em {
+  min-width: 22px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0 5px;
+  background: #e2e8f0;
+  color: currentColor;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 950;
+}
+
 .sign-workspace {
   display: grid;
   grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
@@ -3680,12 +3788,11 @@ watch(() => props.scopeOptions, (items) => {
 
 .mop-preview-page .signature-zone {
   min-height: 0;
-  border-color: rgba(191, 219, 254, 0.98);
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 251, 255, 0.96)),
-    #ffffff;
-  box-shadow: 0 14px 30px rgba(30, 99, 255, 0.07);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .signature-zone-head {
@@ -3696,6 +3803,16 @@ watch(() => props.scopeOptions, (items) => {
   min-width: 0;
   border-bottom: 1px solid rgba(216, 229, 247, 0.78);
   padding-bottom: 6px;
+}
+
+.sign-drawer-footer {
+  position: relative;
+  z-index: 3;
+  margin: 0 -7px -7px;
+  border-top: 1px solid rgba(216, 229, 247, 0.96);
+  padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 -10px 24px rgba(12, 46, 108, 0.06);
 }
 
 .signature-zone-head strong {
@@ -4013,6 +4130,17 @@ watch(() => props.scopeOptions, (items) => {
   .mop-preview-page .mop-sign-panel.manager-open {
     inset: 8px;
     border-radius: 18px;
+  }
+
+  .sign-close-inline,
+  .signature-source-tabs button {
+    min-height: 44px;
+  }
+
+  .mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.signature-role-summary button),
+  .mop-preview-page .mop-sign-panel.manager-open :deep(.company-signature-picker.compact .sign-person),
+  .mop-preview-page .mop-sign-panel.manager-open :deep(.signature-refresh) {
+    min-height: 44px;
   }
 }
 </style>
