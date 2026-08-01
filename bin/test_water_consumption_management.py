@@ -23,6 +23,7 @@ from lan_bitable_template_portal.portal_service import (
     PortalConfirmationRequiredError,
     PortalError,
     WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD,
+    WATER_CONSUMPTION_ALERT_CHAT_ID,
     WATER_CONSUMPTION_SUPERVISOR_FALLBACKS,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
@@ -729,11 +730,18 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 ],
             }
         )
-        with patch.object(
-            portal_service_module,
-            "send_text_to_open_ids",
-            return_value=(True, "发送成功", []),
-        ) as sender:
+        with (
+            patch.object(
+                portal_service_module,
+                "send_text_to_open_ids",
+                return_value=(True, "发送成功", []),
+            ) as sender,
+            patch.object(
+                portal_service_module,
+                "send_text_to_chat_id",
+                return_value=(True, "发送成功"),
+            ) as group_sender,
+        ):
             result = self.service._notify_water_large_change(
                 scope="A",
                 record_id="rec_notice",
@@ -753,6 +761,9 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             )
 
         self.assertTrue(result["sent"])
+        self.assertTrue(result["personal_sent"])
+        self.assertTrue(result["group_sent"])
+        self.assertEqual(result["group_chat_id"], WATER_CONSUMPTION_ALERT_CHAT_ID)
         recipients = sender.call_args.args[1]
         self.assertEqual(
             recipients,
@@ -774,6 +785,46 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         self.assertEqual(sent_text.count("统计日期：2026-07-28"), 1)
         self.assertNotIn("记录标识", sent_text)
         self.assertNotIn("操作人 openid", sent_text)
+        group_sender.assert_called_once_with(sent_text, WATER_CONSUMPTION_ALERT_CHAT_ID)
+
+    def test_large_change_notification_reports_group_failure_without_hiding_personal_success(
+        self,
+    ) -> None:
+        self.service._water_supervisor_recipient = Mock(return_value={})
+        with (
+            patch.object(
+                portal_service_module,
+                "send_text_to_open_ids",
+                return_value=(True, "ok", []),
+            ),
+            patch.object(
+                portal_service_module,
+                "send_text_to_chat_id",
+                return_value=(False, "群不可用"),
+            ),
+        ):
+            result = self.service._notify_water_large_change(
+                scope="A",
+                record_id="rec_notice",
+                meter="东区水表-总",
+                statistic_date="2026-07-28",
+                change={
+                    "old_value": 100,
+                    "new_value": 180,
+                    "ratio": 0.8,
+                    "ratio_percent": 80,
+                    "baseline_zero": False,
+                    "previous_date": "2026-07-27",
+                },
+                operator_open_id="ou_operator",
+                operator_name="测试用户",
+                abnormal_note="已现场复核水表读数。",
+            )
+
+        self.assertFalse(result["sent"])
+        self.assertTrue(result["personal_sent"])
+        self.assertFalse(result["group_sent"])
+        self.assertIn("群通知失败：群不可用", result["message"])
 
     def test_supervisor_resolution_requires_matching_scope_and_position(
         self,

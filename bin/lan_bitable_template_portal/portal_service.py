@@ -124,6 +124,8 @@ WATER_CONSUMPTION_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT = 2
 WATER_CONSUMPTION_LARGE_CHANGE_THRESHOLD = 0.5
 WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD = "异常备注"
+WATER_CONSUMPTION_ALERT_CHAT_ID = "oc_3bc648b9b761f24a65366a9b04b32eb2"
+WATER_CONSUMPTION_ALERT_CHAT_NAME = "全景异常项同步"
 WATER_CONSUMPTION_SUPERVISOR_POSITIONS = {
     "A": "设施运维主管",
     "B": "设施运维主管",
@@ -1147,6 +1149,14 @@ def send_text_to_open_ids(
     )
 
     return send_impl(text, open_ids)
+
+
+def send_text_to_chat_id(text: str, chat_id: str) -> tuple[bool, str]:
+    from upload_event_module.services.robot_webhook import (
+        send_text_to_chat_id as send_impl,
+    )
+
+    return send_impl(text, chat_id)
 
 
 class MaintenancePortalService:
@@ -17728,12 +17738,37 @@ class MaintenancePortalService:
                 f"操作时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ]
         )
-        ok, message, results = send_text_to_open_ids(text, recipients)
+        try:
+            personal_ok, personal_message, results = send_text_to_open_ids(
+                text,
+                recipients,
+            )
+        except Exception as exc:
+            personal_ok, personal_message, results = False, str(exc), []
+        try:
+            group_ok, group_message = send_text_to_chat_id(
+                text,
+                WATER_CONSUMPTION_ALERT_CHAT_ID,
+            )
+        except Exception as exc:
+            group_ok, group_message = False, str(exc)
+
+        failures: list[str] = []
+        if not personal_ok:
+            failures.append(f"个人通知失败：{personal_message or '发送失败'}")
+        if not group_ok:
+            failures.append(f"群通知失败：{group_message or '发送失败'}")
         return {
-            "sent": bool(ok),
-            "message": str(message or ""),
+            "sent": bool(personal_ok and group_ok),
+            "message": "；".join(failures) if failures else "ok",
             "recipients": recipients,
             "results": results,
+            "personal_sent": bool(personal_ok),
+            "personal_message": str(personal_message or ""),
+            "group_sent": bool(group_ok),
+            "group_message": str(group_message or ""),
+            "group_chat_id": WATER_CONSUMPTION_ALERT_CHAT_ID,
+            "group_name": WATER_CONSUMPTION_ALERT_CHAT_NAME,
             "supervisor": supervisor,
             "abnormal_note": note,
         }
