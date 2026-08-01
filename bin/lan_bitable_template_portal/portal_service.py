@@ -17464,7 +17464,30 @@ class MaintenancePortalService:
             raise PortalError("未找到水耗记录，可能已被删除。")
         if str(record.get("scope_code") or "") != scope_code:
             raise PortalError("当前账号无权查看该水耗记录。")
-        return record
+        result = dict(record)
+        previous = self._state_store.find_previous_water_consumption_record(
+            scope=scope_code,
+            meter=str(record.get("meter") or ""),
+            frequency=str(record.get("frequency") or ""),
+            shift=str(record.get("shift") or ""),
+            statistic_date=str(
+                record.get("statistic_date")
+                or record.get("statistic_date_key")
+                or ""
+            ),
+            exclude_record_id=record_id,
+        )
+        result["previous_date_text"] = str(
+            (previous or {}).get("statistic_date")
+            or (previous or {}).get("statistic_date_key")
+            or ""
+        )
+        result["previous_value_text"] = (
+            self._water_change_value_text((previous or {}).get("meter_value"))
+            if previous
+            else ""
+        )
+        return result
 
     def water_consumption_record_edit_policy(
         self,
@@ -17527,6 +17550,44 @@ class MaintenancePortalService:
             "baseline_zero": baseline_zero,
         }
 
+    def _water_previous_meter_change(
+        self,
+        *,
+        scope: str,
+        meter: str,
+        frequency: str,
+        shift: str,
+        statistic_date: str,
+        new_value: Any,
+        exclude_record_id: str = "",
+    ) -> dict[str, Any]:
+        previous = self._state_store.find_previous_water_consumption_record(
+            scope=scope,
+            meter=meter,
+            frequency=frequency,
+            shift=shift,
+            statistic_date=statistic_date,
+            exclude_record_id=exclude_record_id,
+        )
+        change = self._water_meter_change(
+            (previous or {}).get("meter_value"),
+            new_value,
+        )
+        change.update(
+            {
+                "comparison_basis": "same_type_previous",
+                "previous_record_id": str(
+                    (previous or {}).get("record_id") or ""
+                ),
+                "previous_date": str(
+                    (previous or {}).get("statistic_date")
+                    or (previous or {}).get("statistic_date_key")
+                    or ""
+                ),
+            }
+        )
+        return change
+
     @staticmethod
     def _water_change_ratio_text(change: dict[str, Any]) -> str:
         if change.get("baseline_zero") and change.get("old_value") == 0:
@@ -17545,21 +17606,48 @@ class MaintenancePortalService:
             return str(int(number))
         return f"{float(number):.6f}".rstrip("0").rstrip(".")
 
-    @classmethod
-    def _water_abnormal_note(
-        cls,
-        change: dict[str, Any],
+    def _water_large_change_note(
+        self,
         *,
-        statistic_date: str,
+        change: dict[str, Any],
+        meta_by_name: dict[str, FieldMeta],
+        large_change_confirmed: bool,
+        abnormal_note: str,
     ) -> str:
-        return (
-            "水耗每日录入："
-            f"统计日期：{str(statistic_date or '').strip() or '未填写'}；"
-            f"上次数值：{cls._water_change_value_text(change.get('old_value'))}；"
-            f"当前录入数值：{cls._water_change_value_text(change.get('new_value'))}；"
-            f"变化率：{cls._water_change_ratio_text(change)}。"
-            "请关注并核查。"
-        )
+        if not change.get("requires_confirmation"):
+            return ""
+        details = {
+            "kind": "water_large_change",
+            "note_required": True,
+            **change,
+        }
+        if not large_change_confirmed:
+            raise PortalConfirmationRequiredError(
+                (
+                    "当前水表数值较同类型上一条记录变化"
+                    f"{self._water_change_ratio_text(change)}，"
+                    "请填写异常备注后确认保存。"
+                ),
+                details=details,
+            )
+        note = str(abnormal_note or "").strip()
+        if not note:
+            raise PortalConfirmationRequiredError(
+                "请填写异常备注后再确认保存。",
+                details=details,
+            )
+        if len(note) > 1000:
+            raise PortalError("异常备注不能超过 1000 个字符。")
+        abnormal_meta = meta_by_name.get(WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD)
+        if (
+            not abnormal_meta
+            or abnormal_meta.has_formula
+            or abnormal_meta.field_type != 1
+        ):
+            raise PortalError(
+                "水耗表缺少可写的“异常备注”文本字段，请检查多维表结构。"
+            )
+        return note
 
     def _water_supervisor_recipient(self, scope: str) -> dict[str, str]:
         scope_code = self._water_scope_code(scope)
@@ -17624,16 +17712,18 @@ class MaintenancePortalService:
             )
             if item
         ]
-        note = str(abnormal_note or "").strip() or self._water_abnormal_note(
-            change,
-            statistic_date=statistic_date,
-        )
+        note = str(abnormal_note or "").strip()
         text = "\n".join(
             [
                 "【水耗每日录入异常提醒】",
                 f"楼栋：{WATER_CONSUMPTION_SCOPE_LABELS.get(self._water_scope_code(scope), scope)}",
                 f"水表：{meter}",
-                note,
+                f"统计日期：{str(statistic_date or '').strip() or '未填写'}",
+                f"上期日期：{str(change.get('previous_date') or '').strip() or '未找到'}",
+                f"上期数值：{self._water_change_value_text(change.get('old_value'))}",
+                f"当前录入数值：{self._water_change_value_text(change.get('new_value'))}",
+                f"变化率：{self._water_change_ratio_text(change)}",
+                f"异常备注：{note or '未填写'}",
                 f"操作人：{operator_name or '当前登录用户'}",
                 f"操作时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             ]
@@ -17816,7 +17906,10 @@ class MaintenancePortalService:
         upload_ids: list[str] | None = None,
         operation_id: str,
         operator_open_id: str,
+        operator_name: str = "",
         operator_is_admin: bool = False,
+        large_change_confirmed: bool = False,
+        abnormal_note: str = "",
     ) -> dict[str, Any]:
         if not operator_is_admin:
             raise PortalError("只有管理员可以新增水耗记录。")
@@ -17848,14 +17941,10 @@ class MaintenancePortalService:
         used_upload_ids: list[str] = []
         remote_written = False
         checkpoint_result: dict[str, Any] = {}
+        meter_change: dict[str, Any] = {}
+        saved_abnormal_note = ""
         try:
             _metas, meta_by_name, _options = self._water_consumption_fields()
-            uploaded_tokens, used_upload_ids = self._water_upload_staged_images(
-                upload_ids=list(upload_ids or []),
-                open_id=operator_open_id,
-            )
-            if not uploaded_tokens:
-                raise PortalError("新增水耗记录必须至少上传一张水表照片。")
             fields = self._water_write_fields(
                 scope=scope,
                 meter=meter,
@@ -17864,9 +17953,36 @@ class MaintenancePortalService:
                 statistic_date=statistic_date,
                 meter_value=meter_value,
                 corrected_usage=corrected_usage,
-                attachment_tokens=uploaded_tokens,
+                attachment_tokens=[],
                 meta_by_name=meta_by_name,
             )
+            meter_change = self._water_previous_meter_change(
+                scope=scope,
+                meter=meter,
+                frequency=frequency,
+                shift=shift,
+                statistic_date=statistic_date,
+                new_value=meter_value,
+            )
+            saved_abnormal_note = self._water_large_change_note(
+                change=meter_change,
+                meta_by_name=meta_by_name,
+                large_change_confirmed=large_change_confirmed,
+                abnormal_note=abnormal_note,
+            )
+            uploaded_tokens, used_upload_ids = self._water_upload_staged_images(
+                upload_ids=list(upload_ids or []),
+                open_id=operator_open_id,
+            )
+            if not uploaded_tokens:
+                raise PortalError("新增水耗记录必须至少上传一张水表照片。")
+            fields["水表照片"] = [
+                {"file_token": token} for token in uploaded_tokens if token
+            ]
+            if saved_abnormal_note:
+                fields[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD] = (
+                    saved_abnormal_note
+                )
             create_payload = self._create_record_fields(
                 app_token=WATER_CONSUMPTION_APP_TOKEN,
                 table_id=WATER_CONSUMPTION_TABLE_ID,
@@ -17908,8 +18024,16 @@ class MaintenancePortalService:
                     "meter_value": self._water_number(meter_value),
                     "corrected_usage": self._water_number(corrected_usage),
                     "computed_usage": None,
-                    "previous_date_text": "",
-                    "previous_value_text": "",
+                    "previous_date_text": str(
+                        meter_change.get("previous_date") or ""
+                    ),
+                    "previous_value_text": (
+                        self._water_change_value_text(
+                            meter_change.get("old_value")
+                        )
+                        if meter_change.get("previous_record_id")
+                        else ""
+                    ),
                     "previous_usage": None,
                     "yoy_ratio": None,
                     "created_time": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -17935,6 +18059,34 @@ class MaintenancePortalService:
             for upload_id in used_upload_ids:
                 with suppress(Exception):
                     self._state_store.mark_notice_upload_attachment_used(upload_id)
+            notification: dict[str, Any] = {}
+            if meter_change.get("requires_confirmation"):
+                try:
+                    notification = self._notify_water_large_change(
+                        scope=scope,
+                        record_id=record_id,
+                        meter=meter,
+                        statistic_date=statistic_date,
+                        change=meter_change,
+                        operator_open_id=operator_open_id,
+                        operator_name=operator_name,
+                        abnormal_note=saved_abnormal_note,
+                    )
+                    if not notification.get("sent"):
+                        warnings.append(
+                            "记录已新增，但大幅变化提醒发送失败："
+                            f"{notification.get('message') or '未知原因'}"
+                        )
+                except Exception as exc:
+                    notification = {
+                        "sent": False,
+                        "message": str(exc),
+                        "recipients": [],
+                        "results": [],
+                    }
+                    warnings.append(
+                        f"记录已新增，但大幅变化提醒发送失败：{exc}"
+                    )
             result = {
                 "saved": True,
                 "created": True,
@@ -17942,6 +18094,8 @@ class MaintenancePortalService:
                 "record": self._state_store.get_water_consumption_record(record_id),
                 "warnings": warnings,
                 "remote_written": True,
+                "large_change": meter_change,
+                "large_change_notification": notification,
             }
             self._state_store.finish_water_consumption_operation(
                 operation_id,
@@ -17999,6 +18153,7 @@ class MaintenancePortalService:
         operator_name: str = "",
         operator_is_admin: bool = False,
         large_change_confirmed: bool = False,
+        abnormal_note: str = "",
     ) -> dict[str, Any]:
         with self._water_consumption_record_lock(record_id):
             return self._update_water_consumption_record_unlocked(
@@ -18018,6 +18173,7 @@ class MaintenancePortalService:
                 operator_name=operator_name,
                 operator_is_admin=operator_is_admin,
                 large_change_confirmed=large_change_confirmed,
+                abnormal_note=abnormal_note,
             )
 
     def _update_water_consumption_record_unlocked(
@@ -18039,6 +18195,7 @@ class MaintenancePortalService:
         operator_name: str = "",
         operator_is_admin: bool = False,
         large_change_confirmed: bool = False,
+        abnormal_note: str = "",
     ) -> dict[str, Any]:
         record_id = str(record_id or "").strip()
         if not record_id.startswith("rec"):
@@ -18092,49 +18249,39 @@ class MaintenancePortalService:
                 raise PortalConflictError(
                     "该记录已被其他用户修改，请重新加载后再保存。"
                 )
-            meter_change = self._water_meter_change(
-                remote_record.get("meter_value"),
-                meter_value,
+            fields = self._water_write_fields(
+                scope=scope_code,
+                meter=meter,
+                frequency=frequency,
+                shift=shift,
+                statistic_date=statistic_date,
+                meter_value=meter_value,
+                corrected_usage=corrected_usage,
+                attachment_tokens=[],
+                meta_by_name=meta_by_name,
             )
-            abnormal_note = ""
-            if (
-                meter_change.get("requires_confirmation")
-                and not large_change_confirmed
-            ):
-                raise PortalConfirmationRequiredError(
-                    (
-                        "修改后的水表数值变化率为"
-                        f"{self._water_change_ratio_text(meter_change)}，"
-                        "超过 ±50%，请确认后再保存。"
-                    ),
-                    details={
-                        "kind": "water_large_change",
-                        **meter_change,
-                    },
-                )
-            if meter_change.get("requires_confirmation"):
-                abnormal_meta = meta_by_name.get(
-                    WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD
-                )
-                if (
-                    not abnormal_meta
-                    or abnormal_meta.has_formula
-                    or abnormal_meta.field_type != 1
-                ):
-                    raise PortalError(
-                        "水耗表缺少可写的“异常备注”文本字段，请检查多维表结构。"
-                    )
-                abnormal_note = self._water_abnormal_note(
-                    meter_change,
-                    statistic_date=statistic_date,
-                )
+            meter_change = self._water_previous_meter_change(
+                scope=scope,
+                meter=meter,
+                frequency=frequency,
+                shift=shift,
+                statistic_date=statistic_date,
+                new_value=meter_value,
+                exclude_record_id=record_id,
+            )
+            saved_abnormal_note = self._water_large_change_note(
+                change=meter_change,
+                meta_by_name=meta_by_name,
+                large_change_confirmed=large_change_confirmed,
+                abnormal_note=abnormal_note,
+            )
             if not operator_is_admin:
                 edit_reservation = (
                     self._state_store.begin_water_consumption_record_edit(
                         operation_id=operation_id,
                         record_id=record_id,
                         actor_open_id=operator_open_id,
-                        old_meter_value=meter_change.get("old_value"),
+                        old_meter_value=remote_record.get("meter_value"),
                         new_meter_value=meter_change.get("new_value"),
                         change_ratio=meter_change.get("ratio"),
                         edit_limit=WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT,
@@ -18174,23 +18321,15 @@ class MaintenancePortalService:
             ]
             if not attachment_tokens:
                 raise PortalError("水耗记录必须至少保留一张水表照片。")
-            fields = self._water_write_fields(
-                scope=scope_code,
-                meter=meter,
-                frequency=frequency,
-                shift=shift,
-                statistic_date=statistic_date,
-                meter_value=meter_value,
-                corrected_usage=corrected_usage,
-                attachment_tokens=attachment_tokens,
-                meta_by_name=meta_by_name,
-            )
+            fields["水表照片"] = [
+                {"file_token": token} for token in attachment_tokens if token
+            ]
             if self._water_number(corrected_usage) is None:
                 fields["当期耗水量（修正）"] = None
-            if abnormal_note:
-                fields[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD] = abnormal_note
-            elif WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD in meta_by_name:
-                fields[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD] = None
+            if saved_abnormal_note:
+                fields[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD] = (
+                    saved_abnormal_note
+                )
             self._patch_record_fields_exact(
                 app_token=WATER_CONSUMPTION_APP_TOKEN,
                 table_id=WATER_CONSUMPTION_TABLE_ID,
@@ -18231,6 +18370,16 @@ class MaintenancePortalService:
                     "statistic_date_ms": self._water_datetime_ms(statistic_date),
                     "meter_value": self._water_number(meter_value),
                     "corrected_usage": self._water_number(corrected_usage),
+                    "previous_date_text": str(
+                        meter_change.get("previous_date") or ""
+                    ),
+                    "previous_value_text": (
+                        self._water_change_value_text(
+                            meter_change.get("old_value")
+                        )
+                        if meter_change.get("previous_record_id")
+                        else ""
+                    ),
                     "formula_pending": True,
                     "version": current_version,
                     "photos": [
@@ -18263,7 +18412,7 @@ class MaintenancePortalService:
                         change=meter_change,
                         operator_open_id=operator_open_id,
                         operator_name=operator_name,
-                        abnormal_note=abnormal_note,
+                        abnormal_note=saved_abnormal_note,
                     )
                     if not notification.get("sent"):
                         warnings.append(

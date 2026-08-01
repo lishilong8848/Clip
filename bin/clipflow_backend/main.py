@@ -3201,7 +3201,14 @@ class FastAPIPortalController:
                     upload_ids=payload.get("upload_ids") or [],
                     operation_id=str(payload.get("operation_id") or ""),
                     operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(
+                        user.get("name") or user.get("en_name") or ""
+                    ),
                     operator_is_admin=is_admin,
+                    large_change_confirmed=bool(
+                        payload.get("large_change_confirmed")
+                    ),
+                    abnormal_note=str(payload.get("abnormal_note") or ""),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3260,6 +3267,7 @@ class FastAPIPortalController:
                     large_change_confirmed=bool(
                         payload.get("large_change_confirmed")
                     ),
+                    abnormal_note=str(payload.get("abnormal_note") or ""),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:

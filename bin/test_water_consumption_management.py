@@ -34,6 +34,9 @@ def _record(
     date_key: str,
     *,
     meter: str = "东区水表-总",
+    frequency: str = "日",
+    shift: str = "白",
+    meter_value: float = 100.0,
     usage: float = 1.0,
 ) -> dict:
     date_ms = int(
@@ -48,12 +51,12 @@ def _record(
         "title": f"{scope}楼水耗",
         "auto_number": record_id,
         "meter": meter,
-        "frequency": "日",
-        "shift": "白",
+        "frequency": frequency,
+        "shift": shift,
         "statistic_date_ms": date_ms,
         "statistic_date_key": date_key,
         "statistic_date": date_key,
-        "meter_value": 100.0,
+        "meter_value": meter_value,
         "corrected_usage": None,
         "computed_usage": usage,
         "previous_date_text": "",
@@ -149,6 +152,47 @@ class WaterConsumptionStateStoreTests(unittest.TestCase):
         )
         self.assertEqual(replay["state"], "replay")
         self.assertEqual(replay["result"]["record_id"], "rec_created")
+
+    def test_previous_record_uses_same_meter_frequency_and_shift(self) -> None:
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[
+                _record("rec_daily_old", "A", "2026-07-20", meter_value=80),
+                _record("rec_daily_previous", "A", "2026-07-27", meter_value=100),
+                _record("rec_daily_current", "A", "2026-07-28", meter_value=105),
+                _record(
+                    "rec_weekly",
+                    "A",
+                    "2026-07-27",
+                    frequency="周",
+                    meter_value=500,
+                ),
+                _record(
+                    "rec_other_shift",
+                    "A",
+                    "2026-07-27",
+                    shift="夜",
+                    meter_value=900,
+                ),
+                _record("rec_other_scope", "B", "2026-07-27", meter_value=700),
+            ],
+        )
+
+        previous = self.store.find_previous_water_consumption_record(
+            scope="A",
+            meter="东区水表-总",
+            frequency="日",
+            shift="白",
+            statistic_date="2026-07-28",
+            exclude_record_id="rec_daily_current",
+        )
+
+        self.assertIsNotNone(previous)
+        self.assertEqual(previous["record_id"], "rec_daily_previous")
+        self.assertEqual(previous["meter_value"], 100)
 
     def test_non_admin_edit_limit_counts_only_successful_writes(self) -> None:
         failed = self.store.begin_water_consumption_record_edit(
@@ -344,6 +388,87 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             [{"file_token": "photo-token-1"}],
         )
 
+    def test_create_large_change_uses_previous_same_type_and_requires_note(
+        self,
+    ) -> None:
+        previous = _record(
+            "rec_create_previous",
+            "A",
+            "2026-07-27",
+            meter_value=100,
+        )
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[previous],
+        )
+        created = _record(
+            "rec_create_large",
+            "A",
+            "2026-07-28",
+            meter_value=180,
+        )
+        self.service._water_upload_staged_images = Mock(
+            return_value=(["photo-token-large"], ["upload-large"])
+        )
+        self.service._create_record_fields = Mock(
+            return_value={"data": {"record": {"record_id": "rec_create_large"}}}
+        )
+        self.service._water_remote_record = Mock(return_value=created)
+        self.service._notify_water_large_change = Mock(
+            return_value={"sent": True, "message": "发送成功", "results": []}
+        )
+        kwargs = {
+            "scope": "A",
+            "meter": "东区水表-总",
+            "frequency": "日",
+            "shift": "白",
+            "statistic_date": "2026-07-28",
+            "meter_value": "180",
+            "corrected_usage": None,
+            "upload_ids": ["upload-large"],
+            "operation_id": "water-create-large-op",
+            "operator_open_id": "ou_admin",
+            "operator_name": "管理员",
+            "operator_is_admin": True,
+        }
+
+        with self.assertRaises(PortalConfirmationRequiredError) as raised:
+            self.service.create_water_consumption_record(
+                large_change_confirmed=False,
+                **kwargs,
+            )
+        self.assertEqual(
+            raised.exception.details["previous_record_id"],
+            "rec_create_previous",
+        )
+        self.service._water_upload_staged_images.assert_not_called()
+
+        with self.assertRaises(PortalConfirmationRequiredError) as missing_note:
+            self.service.create_water_consumption_record(
+                large_change_confirmed=True,
+                abnormal_note="",
+                **kwargs,
+            )
+        self.assertTrue(missing_note.exception.details["note_required"])
+        self.service._water_upload_staged_images.assert_not_called()
+
+        result = self.service.create_water_consumption_record(
+            large_change_confirmed=True,
+            abnormal_note="水表更换后首次录入，现场已复核。",
+            **kwargs,
+        )
+
+        self.assertTrue(result["saved"])
+        written = self.service._create_record_fields.call_args.kwargs["fields"]
+        self.assertEqual(
+            written[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD],
+            "水表更换后首次录入，现场已复核。",
+        )
+        self.service._notify_water_large_change.assert_called_once()
+
     def test_non_admin_cannot_create_record(self) -> None:
         with self.assertRaisesRegex(PortalError, "只有管理员"):
             self.service.create_water_consumption_record(
@@ -447,18 +572,72 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 {"file_token": "photo-token-new"},
             ],
         )
-        self.assertIsNone(
-            written[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD]
-        )
+        self.assertNotIn(WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD, written)
 
-    def test_large_change_requires_confirmation_then_notifies(self) -> None:
-        existing = _record("rec_large", "A", "2026-07-28")
+    def test_update_compares_with_previous_record_not_current_edit_value(
+        self,
+    ) -> None:
+        previous = _record(
+            "rec_baseline_previous",
+            "A",
+            "2026-07-27",
+            meter_value=1000,
+        )
+        current = _record(
+            "rec_baseline_current",
+            "A",
+            "2026-07-28",
+            meter_value=100,
+        )
         self.store.replace_water_consumption_snapshot(
             app_token="app",
             table_id="table",
             fields=[],
             options={},
-            records=[existing],
+            records=[previous, current],
+        )
+        updated = {**current, "version": "2", "meter_value": 1100}
+        self.service._water_remote_record = Mock(side_effect=[current, updated])
+        self.service._water_upload_staged_images = Mock(return_value=([], []))
+        self.service._patch_record_fields_exact = Mock()
+
+        result = self.service._update_water_consumption_record_unlocked(
+            "rec_baseline_current",
+            scope="A",
+            meter="东区水表-总",
+            frequency="日",
+            shift="白",
+            statistic_date="2026-07-28",
+            meter_value="1100",
+            corrected_usage=None,
+            retained_image_ids=["image_rec_baseline_current"],
+            upload_ids=[],
+            expected_version="1",
+            operation_id="water-baseline-op",
+            operator_open_id="ou_admin",
+            operator_is_admin=True,
+        )
+
+        self.assertFalse(result["large_change"]["requires_confirmation"])
+        self.assertEqual(result["large_change"]["old_value"], 1000)
+        self.assertAlmostEqual(result["large_change"]["ratio"], 0.1)
+        written = self.service._patch_record_fields_exact.call_args.kwargs["fields"]
+        self.assertNotIn(WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD, written)
+
+    def test_large_change_requires_confirmation_then_notifies(self) -> None:
+        existing = _record("rec_large", "A", "2026-07-28")
+        previous = _record(
+            "rec_large_previous",
+            "A",
+            "2026-07-27",
+            meter_value=100,
+        )
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[previous, existing],
         )
         updated = {
             **existing,
@@ -517,6 +696,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         result = self.service._update_water_consumption_record_unlocked(
             "rec_large",
             large_change_confirmed=True,
+            abnormal_note="现场核查为抄表数值异常，已复核。",
             **kwargs,
         )
 
@@ -528,9 +708,9 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         written = self.service._patch_record_fields_exact.call_args.kwargs["fields"]
         self.assertEqual(
             written[WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD],
-            "水耗每日录入：统计日期：2026-07-28；上次数值：100；"
-            "当前录入数值：180；变化率：+80.00%。请关注并核查。",
+            "现场核查为抄表数值异常，已复核。",
         )
+        self.assertEqual(result["large_change"]["previous_date"], "2026-07-27")
         self.assertEqual(
             self.service._notify_water_large_change.call_args.kwargs[
                 "abnormal_note"
@@ -565,9 +745,11 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                     "ratio": 0.8,
                     "ratio_percent": 80,
                     "baseline_zero": False,
+                    "previous_date": "2026-07-27",
                 },
                 operator_open_id="ou_operator",
                 operator_name="测试用户",
+                abnormal_note="已现场复核水表读数。",
             )
 
         self.assertTrue(result["sent"])
@@ -582,11 +764,12 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         )
         sent_text = sender.call_args.args[0]
         self.assertIn("【水耗每日录入异常提醒】", sent_text)
-        self.assertIn("水耗每日录入：", sent_text)
         self.assertIn("统计日期：2026-07-28", sent_text)
-        self.assertIn("上次数值：100", sent_text)
+        self.assertIn("上期日期：2026-07-27", sent_text)
+        self.assertIn("上期数值：100", sent_text)
         self.assertIn("当前录入数值：180", sent_text)
         self.assertIn("变化率：+80.00%", sent_text)
+        self.assertIn("异常备注：已现场复核水表读数。", sent_text)
         self.assertNotIn("变化率超过±50%", sent_text)
         self.assertEqual(sent_text.count("统计日期：2026-07-28"), 1)
         self.assertNotIn("记录标识", sent_text)
@@ -634,12 +817,18 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         self,
     ) -> None:
         existing = _record("rec_missing_note", "A", "2026-07-28")
+        previous = _record(
+            "rec_missing_note_previous",
+            "A",
+            "2026-07-27",
+            meter_value=100,
+        )
         self.store.replace_water_consumption_snapshot(
             app_token="app",
             table_id="table",
             fields=[],
             options={},
-            records=[existing],
+            records=[previous, existing],
         )
         self.service._water_consumption_fields = Mock(
             return_value=([], {}, {})
@@ -666,6 +855,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 operator_name="测试用户",
                 operator_is_admin=False,
                 large_change_confirmed=True,
+                abnormal_note="已核查。",
             )
 
         self.service._water_upload_staged_images.assert_not_called()
@@ -715,12 +905,18 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
 
     def test_notification_failure_keeps_successful_remote_update(self) -> None:
         existing = _record("rec_notice_fail", "A", "2026-07-28")
+        previous = _record(
+            "rec_notice_fail_previous",
+            "A",
+            "2026-07-27",
+            meter_value=100,
+        )
         self.store.replace_water_consumption_snapshot(
             app_token="app",
             table_id="table",
             fields=[],
             options={},
-            records=[existing],
+            records=[previous, existing],
         )
         updated = {
             **existing,
@@ -764,6 +960,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             operator_name="测试用户",
             operator_is_admin=False,
             large_change_confirmed=True,
+            abnormal_note="已现场核查。",
         )
 
         self.assertTrue(result["saved"])

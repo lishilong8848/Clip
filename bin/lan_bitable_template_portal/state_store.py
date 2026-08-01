@@ -5309,6 +5309,65 @@ class LanPortalStateStore:
             "has_more": offset + len(records) < total,
         }
 
+    def find_previous_water_consumption_record(
+        self,
+        *,
+        scope: str,
+        meter: str,
+        frequency: str,
+        shift: str,
+        statistic_date: str,
+        exclude_record_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the latest earlier record for the same meter cadence."""
+        scope_code = self._normalize_water_scope_code(scope)
+        meter = self._text(meter)
+        frequency = self._text(frequency)
+        shift = self._text(shift)
+        statistic_date = self._text(statistic_date)
+        if not scope_code or not meter or not frequency or not shift:
+            return None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", statistic_date):
+            return None
+        clauses = [
+            "scope_code=?",
+            "meter=?",
+            "frequency=?",
+            "shift_name=?",
+            "statistic_date_key<>''",
+            "statistic_date_key<?",
+            "meter_value IS NOT NULL",
+        ]
+        params: list[Any] = [
+            scope_code,
+            meter,
+            frequency,
+            shift,
+            statistic_date,
+        ]
+        excluded = self._text(exclude_record_id)
+        if excluded:
+            clauses.append("record_id<>?")
+            params.append(excluded)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    f"""
+                    SELECT payload_json
+                    FROM water_consumption_records
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY statistic_date_ms DESC, source_updated_at DESC,
+                             record_id DESC
+                    LIMIT 1
+                    """,
+                    tuple(params),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        return payload if isinstance(payload, dict) else None
+
     def get_water_consumption_record(
         self, record_id: str
     ) -> dict[str, Any] | None:

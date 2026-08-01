@@ -458,6 +458,57 @@
       </button>
     </div>
 
+    <div
+      v-if="abnormalNoteDialog.open"
+      class="abnormal-note-backdrop"
+      @click.self="closeAbnormalNoteDialog"
+    >
+      <section
+        class="abnormal-note-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="water-abnormal-note-title"
+      >
+        <header>
+          <span class="abnormal-note-icon"><AlertTriangle :size="22" /></span>
+          <div>
+            <h2 id="water-abnormal-note-title">填写异常备注</h2>
+            <p>{{ abnormalNoteDialog.message }}</p>
+          </div>
+        </header>
+        <dl class="abnormal-change-summary">
+          <div><dt>上期日期</dt><dd>{{ abnormalNoteDialog.change.previousDate || "未找到" }}</dd></div>
+          <div><dt>上期数值</dt><dd>{{ formatNullableNumber(abnormalNoteDialog.change.oldValue) }}</dd></div>
+          <div><dt>当前数值</dt><dd>{{ formatNullableNumber(abnormalNoteDialog.change.newValue) }}</dd></div>
+          <div><dt>变化率</dt><dd>{{ largeChangeRatioText(abnormalNoteDialog.change) }}</dd></div>
+        </dl>
+        <label class="abnormal-note-field">
+          <span>异常备注 <b>*</b></span>
+          <textarea
+            ref="abnormalNoteInput"
+            v-model.trim="abnormalNoteDialog.note"
+            maxlength="1000"
+            rows="4"
+            placeholder="请填写数值变化原因或现场核查情况"
+            :disabled="saving"
+            @input="abnormalNoteDialog.error = ''"
+          />
+          <small>{{ abnormalNoteDialog.note.length }} / 1000</small>
+        </label>
+        <p v-if="abnormalNoteDialog.error" class="abnormal-note-error" role="alert">
+          {{ abnormalNoteDialog.error }}
+        </p>
+        <footer>
+          <button type="button" class="btn secondary" :disabled="saving" @click="closeAbnormalNoteDialog">
+            取消
+          </button>
+          <button type="button" class="btn primary" :disabled="saving" @click="submitAbnormalNote">
+            {{ saving ? "保存中" : "确认并保存" }}
+          </button>
+        </footer>
+      </section>
+    </div>
+
     <ConfirmDialog
       :open="confirmState.open"
       :tone="confirmState.tone"
@@ -471,8 +522,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
+  AlertTriangle,
   Camera,
   ChevronLeft,
   ChevronRight,
@@ -553,6 +605,14 @@ const photoUploading = computed(
 const fileInput = ref<HTMLInputElement | null>(null);
 const lightboxPhotos = ref<LightboxPhoto[]>([]);
 const lightboxIndex = ref(0);
+const abnormalNoteInput = ref<HTMLTextAreaElement | null>(null);
+const abnormalNoteDialog = reactive({
+  open: false,
+  note: "",
+  error: "",
+  message: "",
+  change: {} as Dict,
+});
 const confirmState = reactive({
   open: false,
   tone: "warning" as "danger" | "warning" | "primary",
@@ -560,7 +620,7 @@ const confirmState = reactive({
   message: "",
   details: [] as string[],
   confirmLabel: "确认",
-  action: "" as "" | "close" | "remove-photo" | "save-large-change",
+  action: "" as "" | "close" | "remove-photo",
   targetId: "",
 });
 const filters = reactive({
@@ -1004,56 +1064,13 @@ function operationId(): string {
   return `water_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function meterChangePreview(details: Dict = {}): Dict {
-  const oldRaw = Object.prototype.hasOwnProperty.call(details, "old_value")
-    ? details.old_value
-    : detail.value.meter_value;
-  const newRaw = Object.prototype.hasOwnProperty.call(details, "new_value")
-    ? details.new_value
-    : form.meterValue;
-  if (
-    oldRaw === null
-    || oldRaw === undefined
-    || String(oldRaw).trim() === ""
-    || newRaw === null
-    || newRaw === undefined
-    || String(newRaw).trim() === ""
-  ) {
-    return { requiresConfirmation: false };
-  }
-  const oldValue = Number(oldRaw);
-  const newValue = Number(newRaw);
-  if (!Number.isFinite(oldValue) || !Number.isFinite(newValue)) {
-    return { requiresConfirmation: false };
-  }
-  let ratio = 0;
-  let baselineZero = false;
-  if (Math.abs(oldValue - newValue) <= 1e-12) {
-    ratio = 0;
-    baselineZero = Math.abs(oldValue) <= 1e-12;
-  } else if (Math.abs(oldValue) <= 1e-12) {
-    ratio = 1;
-    baselineZero = true;
-  } else {
-    ratio = (newValue - oldValue) / Math.abs(oldValue);
-  }
-  if (
-    details.ratio !== null
-    && details.ratio !== undefined
-    && String(details.ratio).trim() !== ""
-  ) {
-    const serverRatio = Number(details.ratio);
-    if (Number.isFinite(serverRatio)) ratio = serverRatio;
-  }
-  if (Object.prototype.hasOwnProperty.call(details, "baseline_zero")) {
-    baselineZero = Boolean(details.baseline_zero);
-  }
+function normalizeLargeChange(details: Dict = {}): Dict {
   return {
-    oldValue,
-    newValue,
-    ratio,
-    baselineZero,
-    requiresConfirmation: ratio > 0.5 || ratio < -0.5,
+    oldValue: details.old_value,
+    newValue: details.new_value,
+    ratio: Number(details.ratio || 0),
+    baselineZero: Boolean(details.baseline_zero),
+    previousDate: String(details.previous_date || ""),
   };
 }
 
@@ -1064,38 +1081,51 @@ function largeChangeRatioText(change: Dict): string {
   return `${Number(change.ratio || 0) >= 0 ? "+" : ""}${(Number(change.ratio || 0) * 100).toFixed(2)}%`;
 }
 
-function requestLargeChangeConfirmation(change: Dict, messageText = ""): void {
-  Object.assign(confirmState, {
+function openAbnormalNoteDialog(change: Dict, messageText = ""): void {
+  Object.assign(abnormalNoteDialog, {
     open: true,
-    tone: "warning",
-    title: "确认大幅修改水表数值？",
     message:
       messageText
-      || "当前录入数值变化幅度较大。确认后将更新记录，并通知当前操作人、当前楼栋主管和马进宇。",
-    details: [
-      `原水表数值：${formatNullableNumber(change.oldValue)}`,
-      `修改后数值：${formatNullableNumber(change.newValue)}`,
-      `变化率：${largeChangeRatioText(change)}`,
-    ],
-    confirmLabel: "确认修改并通知",
-    action: "save-large-change",
-    targetId: "",
+      || "当前数值与同类型上一条记录差异较大，请填写原因或核查情况。",
+    change,
+    error: "",
   });
+  void nextTick(() => abnormalNoteInput.value?.focus());
 }
 
-async function saveRecord(largeChangeConfirmed = false): Promise<void> {
+function closeAbnormalNoteDialog(): void {
   if (saving.value) return;
+  abnormalNoteDialog.open = false;
+  abnormalNoteDialog.note = "";
+  abnormalNoteDialog.error = "";
+  abnormalNoteDialog.message = "";
+  abnormalNoteDialog.change = {};
+}
+
+async function submitAbnormalNote(): Promise<void> {
+  const note = abnormalNoteDialog.note.trim();
+  if (!note) {
+    abnormalNoteDialog.error = "请填写异常备注。";
+    abnormalNoteInput.value?.focus();
+    return;
+  }
+  const saved = await saveRecord(true, note);
+  if (saved) {
+    closeAbnormalNoteDialog();
+  } else if (formError.value) {
+    abnormalNoteDialog.error = formError.value;
+  }
+}
+
+async function saveRecord(
+  largeChangeConfirmed = false,
+  abnormalNote = "",
+): Promise<boolean> {
+  if (saving.value) return false;
   const error = validateForm();
   if (error) {
     formError.value = error;
-    return;
-  }
-  if (editingRecordId.value && !largeChangeConfirmed) {
-    const change = meterChangePreview();
-    if (change.requiresConfirmation) {
-      requestLargeChangeConfirmation(change);
-      return;
-    }
+    return false;
   }
   saving.value = true;
   formError.value = "";
@@ -1113,6 +1143,7 @@ async function saveRecord(largeChangeConfirmed = false): Promise<void> {
     upload_ids: stagedPhotos.value.map((item) => item.uploadId).filter(Boolean),
     retained_image_ids: retainedPhotos.value.map((item) => item.image_id).filter(Boolean),
     large_change_confirmed: largeChangeConfirmed,
+    abnormal_note: abnormalNote,
   };
   try {
     const path = editingRecordId.value
@@ -1136,14 +1167,15 @@ async function saveRecord(largeChangeConfirmed = false): Promise<void> {
       warnings.length ? "warning" : "success",
     );
     await Promise.all([loadBootstrap(), loadRecords()]);
+    return true;
   } catch (saveError: any) {
     const errorPayload = saveError?.payload || {};
     if (
       errorPayload.error_code === "confirmation_required"
       && errorPayload.details?.kind === "water_large_change"
     ) {
-      const change = meterChangePreview(errorPayload.details);
-      requestLargeChangeConfirmation(
+      const change = normalizeLargeChange(errorPayload.details);
+      openAbnormalNoteDialog(
         change,
         String(errorPayload.error || saveError?.message || ""),
       );
@@ -1151,6 +1183,7 @@ async function saveRecord(largeChangeConfirmed = false): Promise<void> {
     } else {
       formError.value = saveError?.message || "水耗记录保存失败。";
     }
+    return false;
   } finally {
     saving.value = false;
   }
@@ -1306,8 +1339,6 @@ function resolveConfirmation(confirmed: boolean): void {
     retainedPhotos.value = retainedPhotos.value.filter((item) => item.image_id !== targetId);
     if (!saving.value) pendingOperationId.value = "";
     drawerDirty.value = true;
-  } else if (action === "save-large-change") {
-    void saveRecord(true);
   }
 }
 
@@ -1353,6 +1384,10 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape") return;
   if (lightboxPhotos.value.length) {
     closeLightbox();
+    return;
+  }
+  if (abnormalNoteDialog.open) {
+    closeAbnormalNoteDialog();
     return;
   }
   if (drawerOpen.value) requestCloseDrawer();
@@ -1802,6 +1837,147 @@ th {
   z-index: var(--cf-z-drawer-backdrop, 780);
   background: rgba(8, 31, 72, 0.34);
   backdrop-filter: blur(4px);
+}
+
+.abnormal-note-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--cf-z-drawer-backdrop, 780) + 20);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(8, 31, 72, 0.48);
+  backdrop-filter: blur(5px);
+}
+
+.abnormal-note-dialog {
+  width: min(520px, 100%);
+  max-height: min(720px, calc(100vh - 40px));
+  overflow-y: auto;
+  border: 1px solid #d5e3f6;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(7, 37, 86, 0.28);
+}
+
+.abnormal-note-dialog > header {
+  display: flex;
+  gap: 12px;
+  padding: 20px 20px 14px;
+  border-bottom: 1px solid #e4ebf5;
+}
+
+.abnormal-note-dialog h2,
+.abnormal-note-dialog p {
+  margin: 0;
+}
+
+.abnormal-note-dialog h2 {
+  color: #102a56;
+  font-size: 18px;
+}
+
+.abnormal-note-dialog header p {
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.abnormal-note-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  place-items: center;
+  border-radius: 8px;
+  background: #fff4e5;
+  color: #d97706;
+}
+
+.abnormal-change-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px 20px;
+}
+
+.abnormal-change-summary > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e1e9f5;
+  border-radius: 8px;
+  background: #f7faff;
+}
+
+.abnormal-change-summary dt {
+  color: #718096;
+  font-size: 12px;
+}
+
+.abnormal-change-summary dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: #163a70;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.abnormal-note-field {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  margin: 0 20px;
+}
+
+.abnormal-note-field > span {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.abnormal-note-field b {
+  color: #dc2626;
+}
+
+.abnormal-note-field textarea {
+  min-height: 104px;
+  resize: vertical;
+  padding: 10px 12px 24px;
+  border: 1px solid #c9d7ea;
+  border-radius: 8px;
+  color: #172b4d;
+  font: inherit;
+  line-height: 1.55;
+  outline: none;
+}
+
+.abnormal-note-field textarea:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.abnormal-note-field small {
+  position: absolute;
+  right: 10px;
+  bottom: 7px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.abnormal-note-error {
+  margin: 8px 20px 0 !important;
+  color: #b42318;
+  font-size: 13px;
+}
+
+.abnormal-note-dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 14px 20px 18px;
+  border-top: 1px solid #e4ebf5;
 }
 
 .record-drawer {
@@ -2271,6 +2447,14 @@ th {
 
   .record-drawer {
     width: min(680px, 96vw);
+  }
+
+  .abnormal-note-backdrop {
+    padding: 12px;
+  }
+
+  .abnormal-change-summary {
+    grid-template-columns: 1fr;
   }
 }
 </style>
