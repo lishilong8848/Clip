@@ -17,7 +17,6 @@
     <div v-else-if="!isAdmin" class="notice-box danger">仅管理员可使用历史通告记忆导入。</div>
 
     <template v-else>
-      <HistoryMemorySteps :steps="historySteps" :active-key="historyStep" />
       <section class="scan-bar">
         <div class="scan-fields">
           <label>
@@ -34,7 +33,7 @@
         </div>
         <div class="scan-actions">
           <button type="button" class="btn blue" :disabled="Boolean(scanDisabledReason)" :title="scanDisabledReason" @click="scanHistory">
-            {{ busy ? "扫描中" : "扫描历史通告" }}
+            {{ scanButtonLabel }}
           </button>
           <DisabledReason v-if="scanDisabledReason && !busy" :text="scanDisabledReason" />
         </div>
@@ -132,7 +131,25 @@
           </div>
         </aside>
 
-        <section class="panel detail-panel">
+        <Teleport to="body">
+          <div
+            v-if="reviewOpen && activeSource"
+            class="history-review-backdrop"
+            role="presentation"
+            @click.self="closeReview"
+          >
+            <section class="history-review-drawer" role="dialog" aria-modal="true" aria-labelledby="history-review-title">
+              <header class="drawer-head">
+                <div>
+                  <span>{{ workTypeLabel(activeSource.work_type) }} · {{ activeSource.building || "-" }}</span>
+                  <strong id="history-review-title">{{ activeSource.title || activeSource.memory_name }}</strong>
+                </div>
+                <button type="button" class="icon-close" aria-label="关闭" title="关闭" @click="closeReview">
+                  <X :size="20" aria-hidden="true" />
+                </button>
+              </header>
+              <div class="drawer-content">
+                <section class="panel detail-panel">
           <div class="panel-head">
             <h2>字段确认</h2>
             <span>{{ activeSource?.title || "未选择" }}</span>
@@ -204,9 +221,9 @@
               </section>
             </div>
           </template>
-        </section>
+                </section>
 
-        <aside class="panel candidate-panel">
+                <aside class="panel candidate-panel">
           <div class="panel-head">
             <h2>历史候选</h2>
             <span>{{ candidateOptions.length }}</span>
@@ -229,7 +246,11 @@
               暂无候选
             </div>
           </div>
-        </aside>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </Teleport>
       </section>
 
       <section v-if="sourceItems.length || candidates.length" class="history-save-footer">
@@ -265,7 +286,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { X } from "lucide-vue-next";
 import { requestJson, type Dict } from "../api/client";
 import {
   HISTORY_MEMORY_EDITABLE_FIELD_DEFS as editableFieldDefs,
@@ -281,7 +303,6 @@ import {
 } from "../historyMemoryUtils";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import DisabledReason from "./DisabledReason.vue";
-import HistoryMemorySteps from "./HistoryMemorySteps.vue";
 import HistoryMemorySummaryGrid from "./HistoryMemorySummaryGrid.vue";
 import MessageBanner from "./MessageBanner.vue";
 import VnetBackButton from "./VnetBackButton.vue";
@@ -294,6 +315,8 @@ defineProps<{
 }>();
 
 const busy = ref(false);
+const scanBusy = ref(false);
+const scanElapsedSeconds = ref(0);
 const months = ref(3);
 const selectedWorkTypes = ref(["maintenance", "change", "repair"]);
 const sourceItems = ref<Dict[]>([]);
@@ -304,6 +327,7 @@ const message = ref("");
 const messageType = ref("");
 const activeSourceId = ref("");
 const showExtraFields = ref(false);
+const reviewOpen = ref(false);
 const filterType = ref("");
 const filterBuilding = ref("");
 const filterMatch = ref("");
@@ -315,6 +339,7 @@ const fieldOriginMap = reactive<Record<string, string>>({});
 const saveConfirmOpen = ref(false);
 const pendingSavePayload = ref<Dict[]>([]);
 const saveConfirmMode = ref<"selected" | "filled">("selected");
+let scanElapsedTimer: number | null = null;
 
 const buildingOptions = computed(() => {
   const values = new Set<string>();
@@ -377,6 +402,9 @@ const scanDisabledReason = computed(() => {
   if (!selectedWorkTypes.value.length) return "请至少选择一种通告类型后再扫描。";
   return "";
 });
+const scanButtonLabel = computed(() => scanBusy.value
+  ? `扫描中 ${scanElapsedSeconds.value}s`
+  : "扫描历史通告");
 const fillRecommendedDisabledReason = computed(() => {
   if (busy.value) return "正在处理历史记忆，请等待当前操作完成。";
   if (!recommendedMatchCount.value) return "没有推荐候选。";
@@ -430,34 +458,6 @@ const saveConfirmDetails = computed(() => {
   if (hiddenCount > 0) rows.push(`未展示 ${hiddenCount} 条`);
   return rows;
 });
-const historyStep = computed(() => {
-  if (!sourceItems.value.length && !candidates.value.length) return "scan";
-  if (selectedCount.value > 0 || recommendedMatchCount.value > 0) return "confirm";
-  return "review";
-});
-const historySteps = computed(() => [
-  {
-    key: "scan",
-    index: "1",
-    title: "扫描历史",
-    text: sourceItems.value.length ? `已识别 ${sourceItems.value.length}` : "待扫描",
-    done: sourceItems.value.length > 0 || candidates.value.length > 0,
-  },
-  {
-    key: "review",
-    index: "2",
-    title: "确认匹配",
-    text: recommendedMatchCount.value ? `推荐 ${recommendedMatchCount.value}` : "待选择",
-    done: selectedCount.value > 0,
-  },
-  {
-    key: "confirm",
-    index: "3",
-    title: "保存记忆",
-    text: selectedCount.value ? `准备保存 ${selectedCount.value}` : "待保存",
-    done: false,
-  },
-]);
 const filteredSources = computed(() => {
   const q = query.value.trim().toLowerCase();
   return sourceItems.value.filter((item) => {
@@ -514,6 +514,7 @@ function sourceFieldOriginLabel(sourceId: string): string {
 
 function selectSource(item: Dict): void {
   activeSourceId.value = item.id;
+  reviewOpen.value = true;
   if (!fieldEdits[item.id]) {
     fieldEdits[item.id] = sourceInitialFields(item);
     fieldOriginMap[item.id] = sourceInitialOrigin(item);
@@ -525,6 +526,7 @@ function fieldVisible(key: string): boolean {
 }
 
 function applyScanPayload(data: Dict): void {
+  reviewOpen.value = false;
   sourceItems.value = Array.isArray(data.source_items) ? data.source_items : [];
   candidates.value = Array.isArray(data.candidates) ? data.candidates : [];
   matches.value = Array.isArray(data.matches) ? data.matches : [];
@@ -556,12 +558,19 @@ function clearHistoryFilters(): void {
 
 async function scanHistory(): Promise<void> {
   busy.value = true;
+  scanBusy.value = true;
+  scanElapsedSeconds.value = 0;
+  if (scanElapsedTimer !== null) window.clearInterval(scanElapsedTimer);
+  scanElapsedTimer = window.setInterval(() => {
+    scanElapsedSeconds.value += 1;
+  }, 1000);
   message.value = "扫描中...";
   messageType.value = "";
   try {
     const data = await api("/api/admin/notice-memory/history-scan", {
       method: "POST",
       body: JSON.stringify({ months: months.value, work_types: selectedWorkTypes.value }),
+      timeoutMs: 300_000,
     });
     applyScanPayload(data);
     const counts = data.counts || {};
@@ -571,9 +580,29 @@ async function scanHistory(): Promise<void> {
     message.value = error?.message || "扫描失败";
     messageType.value = "failed";
   } finally {
+    if (scanElapsedTimer !== null) {
+      window.clearInterval(scanElapsedTimer);
+      scanElapsedTimer = null;
+    }
+    scanBusy.value = false;
     busy.value = false;
   }
 }
+
+function closeReview(): void {
+  reviewOpen.value = false;
+}
+
+function handleReviewKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && reviewOpen.value) closeReview();
+}
+
+onBeforeUnmount(() => {
+  if (scanElapsedTimer !== null) window.clearInterval(scanElapsedTimer);
+  document.removeEventListener("keydown", handleReviewKeydown);
+});
+
+onMounted(() => document.addEventListener("keydown", handleReviewKeydown));
 
 function chooseCandidate(candidate: Dict): void {
   if (!activeSourceId.value) return;
@@ -1540,6 +1569,184 @@ textarea:focus {
 @media (max-width: 980px) {
   .history-memory {
     padding-bottom: 190px;
+  }
+}
+
+/* Current operations layout: list first, edit details in a wide drawer. */
+.match-layout {
+  min-height: 0;
+  display: block;
+  overflow: visible;
+  border-radius: 14px;
+}
+
+.source-panel {
+  min-height: 360px;
+  max-height: calc(100vh - 390px);
+  border: 0;
+  border-radius: 14px;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.source-panel .list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: auto;
+  padding: 12px;
+}
+
+.source-row {
+  min-height: 88px;
+  align-items: center;
+}
+
+.history-review-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+  padding: 18px;
+  background: rgba(8, 27, 55, 0.32);
+  backdrop-filter: blur(3px);
+}
+
+.history-review-drawer {
+  width: min(1120px, calc(100vw - 48px));
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #cfe0f5;
+  border-radius: 16px;
+  background: #f7faff;
+  box-shadow: 0 28px 80px rgba(8, 38, 85, 0.28);
+  animation: history-drawer-in 180ms ease-out;
+}
+
+.drawer-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #d8e5f7;
+  background: #ffffff;
+}
+
+.drawer-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.drawer-head span {
+  color: #5f7189;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.drawer-head strong {
+  overflow: hidden;
+  color: #09204a;
+  font-size: 17px;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-close {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cfe0f5;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #31506f;
+  cursor: pointer;
+}
+
+.icon-close:hover,
+.icon-close:focus-visible {
+  border-color: #3080ff;
+  color: #155dfc;
+  outline: 3px solid rgba(21, 93, 252, 0.12);
+}
+
+.drawer-content {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 12px;
+  padding: 12px;
+}
+
+.drawer-content .panel {
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #d8e5f7;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.drawer-content .field-scroll,
+.drawer-content .candidate-panel .list {
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+@keyframes history-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 900px) {
+  .history-memory {
+    padding: 16px;
+  }
+
+  .source-panel {
+    max-height: none;
+  }
+
+  .source-panel .list {
+    grid-template-columns: 1fr;
+  }
+
+  .history-review-backdrop {
+    padding: 0;
+  }
+
+  .history-review-drawer {
+    width: 100%;
+    border-radius: 0;
+  }
+
+  .drawer-content {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .drawer-content .detail-panel,
+  .drawer-content .candidate-panel {
+    min-height: 420px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-review-drawer {
+    animation: none;
   }
 }
 </style>

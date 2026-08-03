@@ -121,6 +121,8 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         if progress:
             fields[CHANGE_NOTICE_FIELDS["progress"]] = progress
 
+        fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = "是"
+
         if payload.file_tokens:
             fields[CHANGE_NOTICE_FIELDS["start_snapshot"]] = [
                 {"file_token": token} for token in payload.file_tokens
@@ -215,6 +217,10 @@ class ChangeNoticeHandler(BaseNoticeHandler):
                     {"file_token": token} for token in extra_tokens
                 ]
             return fields
+
+        fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
+            "是" if "准备工作已完成" in progress else "否"
+        )
 
         response_dt = self._parse_response_datetime(payload.response_time, start_dt)
         if response_dt:

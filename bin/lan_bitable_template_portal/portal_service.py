@@ -23,6 +23,7 @@ import time
 import uuid
 import copy
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
@@ -16563,20 +16564,16 @@ class MaintenancePortalService:
                     meta=self._snapshot_meta(),
                     error=warning,
                 )
-            if not refreshed_sources:
-                self._load_warnings = warnings
-                raise PortalError(
-                    "；".join(warnings)
-                    or "变更源表刷新失败，当前仍显示上次成功数据。"
-                )
             target_result: dict[str, Any] = {}
             target_warning = ""
+            target_refreshed = False
             if self._repair_snapshots_enabled:
                 try:
                     target_result = self._refresh_notice_target_replica(
                         work_type=WORK_TYPE_CHANGE,
                         notice_type=NOTICE_TYPE_CHANGE,
                     )
+                    target_refreshed = True
                 except Exception as exc:
                     target_warning = self._source_sync_warning(
                         "变更目标表",
@@ -16584,6 +16581,16 @@ class MaintenancePortalService:
                     )
                     if target_warning not in warnings:
                         warnings.append(target_warning)
+            # The target table is the source of truth for ongoing notices. A
+            # source-plan refresh failure must not prevent target reconciliation,
+            # otherwise records already written to Feishu can never be restored
+            # to Qt/Web by the manual refresh action.
+            if not refreshed_sources and not target_refreshed:
+                self._load_warnings = warnings
+                raise PortalError(
+                    "；".join(warnings)
+                    or "变更源表和目标表刷新失败，当前仍显示上次成功数据。"
+                )
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
@@ -16610,6 +16617,7 @@ class MaintenancePortalService:
                 ),
                 "change_target_reconcile": target_result,
                 "change_target_warning": target_warning,
+                "change_target_refreshed": target_refreshed,
             }
 
     @staticmethod
@@ -20548,7 +20556,6 @@ class MaintenancePortalService:
                 self._change_specialty(record)
                 for record in change_records
                 if self._change_progress_allows_workbench(record)
-                and self._source_record_matches_month_window(record)
             }
         )
         values.update(
@@ -20884,8 +20891,6 @@ class MaintenancePortalService:
                     continue
             elif progress not in progress_values:
                 continue
-            if not self._source_record_matches_month_window(record, month):
-                continue
             if specialty and specialty != self._change_specialty(record):
                 continue
             codes = self._change_record_building_codes(record)
@@ -21032,8 +21037,6 @@ class MaintenancePortalService:
                 continue
             progress = self._zhihang_change_progress(record)
             if progress == ZHIHANG_PROGRESS_ENDED:
-                continue
-            if not self._source_record_matches_month_window(record, month):
                 continue
             filtered.append(record)
         return filtered
@@ -24508,8 +24511,31 @@ class MaintenancePortalService:
 
     def _get_record_memory(self, record: dict[str, Any]) -> dict[str, str]:
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
+        source_work_type = self._record_source_work_type(record)
         fields = record.get("display_fields") or {}
-        if work_type == WORK_TYPE_CHANGE:
+        converted_maintenance = (
+            work_type == WORK_TYPE_CHANGE
+            and source_work_type == WORK_TYPE_MAINTENANCE
+        )
+        lookup_keys: list[str] = []
+        if converted_maintenance:
+            building = str(fields.get("楼栋") or "").strip()
+            memory_name = str(fields.get("维护总项") or "").strip()
+            maintenance_cycle = str(
+                fields.get("维护周期") or record.get("maintenance_cycle") or ""
+            ).strip()
+            lookup_keys.append(
+                self._converted_change_memory_key(
+                    memory_name,
+                    maintenance_cycle,
+                )
+            )
+            # Records saved before converted-change aliases were introduced may
+            # still have a normal change-memory entry under the generated title.
+            lookup_keys.append(
+                self._memory_item_key(WORK_TYPE_CHANGE, self._change_title(record))
+            )
+        elif work_type == WORK_TYPE_CHANGE:
             building = self._building_label_from_codes(
                 self._change_record_building_codes(record)
             )
@@ -24527,15 +24553,23 @@ class MaintenancePortalService:
             ).strip()
         if not building or not memory_name:
             return {}
-        key = self._memory_item_key(
-            work_type,
-            memory_name,
-            maintenance_cycle if work_type == WORK_TYPE_MAINTENANCE else "",
-        )
+        if not lookup_keys:
+            lookup_keys.append(
+                self._memory_item_key(
+                    work_type,
+                    memory_name,
+                    maintenance_cycle if work_type == WORK_TYPE_MAINTENANCE else "",
+                )
+            )
         with self._memory_lock:
             payload = self._load_building_memory_locked(building)
             items = payload.get("items") or {}
-            item = items.get(key) or {}
+            item: dict[str, Any] = {}
+            for key in lookup_keys:
+                candidate = items.get(key)
+                if isinstance(candidate, dict):
+                    item = candidate
+                    break
             if not item and work_type == WORK_TYPE_MAINTENANCE:
                 canonical_name = self._canonical_history_notice_title(
                     memory_name,
@@ -24591,6 +24625,7 @@ class MaintenancePortalService:
             "zhihang_record_id": str(item.get("zhihang_record_id") or ""),
             "zhihang_title": str(item.get("zhihang_title") or ""),
             "zhihang_progress": str(item.get("zhihang_progress") or ""),
+            "converted_title": str(item.get("converted_title") or ""),
             "updated_at": str(item.get("updated_at") or ""),
         }
 
@@ -24606,6 +24641,13 @@ class MaintenancePortalService:
             return normalized
         return f"{work_type}:{normalized}"
 
+    def _converted_change_memory_key(
+        self, maintenance_total: str, maintenance_cycle: str = ""
+    ) -> str:
+        name = self._normalize_memory_key(maintenance_total)
+        cycle = self._normalize_memory_cycle(maintenance_cycle)
+        return f"change-from-maintenance:{name}|cycle:{cycle}"
+
     def _remember_draft_fields(
         self,
         *,
@@ -24619,6 +24661,7 @@ class MaintenancePortalService:
         item_name: str = "",
         maintenance_cycle: str = "",
         extra_fields: dict[str, Any] | None = None,
+        key_override: str = "",
     ) -> None:
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip() or WORK_TYPE_MAINTENANCE
         building = str(building or "").strip()
@@ -24627,7 +24670,9 @@ class MaintenancePortalService:
         maintenance_cycle = str(maintenance_cycle or "").strip()
         if not building or not memory_name:
             return
-        key = self._memory_item_key(work_type, memory_name, maintenance_cycle)
+        key = str(key_override or "").strip() or self._memory_item_key(
+            work_type, memory_name, maintenance_cycle
+        )
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         remembered = {
             "work_type": work_type,
@@ -25344,13 +25389,16 @@ class MaintenancePortalService:
 
         This intentionally does not reuse the workbench active snapshot because
         that snapshot is filtered for day-to-day issuing. The memory import page
-        needs all current-month source records, including records that are
-        already ended.  The ``work_types`` argument controls which historical
-        target tables are scanned as candidates; it must not hide current-month
-        source items from the left side of the import page.
+        needs current-month source records including ended items, while the
+        ``work_types`` selection limits both source reads and historical target
+        scans so an operator does not pay for unrelated tables.
         """
         current_month = self._current_month_label()
-        source_work_types = [WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE, WORK_TYPE_REPAIR]
+        source_work_types = [
+            item
+            for item in (WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE, WORK_TYPE_REPAIR)
+            if item in work_types
+        ]
         records: list[dict[str, Any]] = []
         warnings: list[str] = []
         with self._refresh_lock:
@@ -25538,15 +25586,29 @@ class MaintenancePortalService:
         months = max(1, min(int(months or 3), 12))
         candidates: list[dict[str, Any]] = []
         source_items, warnings = self._history_current_month_source_items(work_type_list)
-        for work_type in work_type_list:
-            try:
-                items, item_warnings = self._scan_target_history_candidates(
-                    work_type=work_type, months=months
-                )
-                candidates.extend(items)
-                warnings.extend(item_warnings)
-            except Exception as exc:
-                warnings.append(f"{self._history_work_type_label(work_type)}历史扫描失败: {exc}")
+        max_workers = max(1, min(3, len(work_type_list)))
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="HistoryMemoryScan",
+        ) as executor:
+            futures = {
+                executor.submit(
+                    self._scan_target_history_candidates,
+                    work_type=work_type,
+                    months=months,
+                ): work_type
+                for work_type in work_type_list
+            }
+            for future in as_completed(futures):
+                work_type = futures[future]
+                try:
+                    items, item_warnings = future.result()
+                    candidates.extend(items)
+                    warnings.extend(item_warnings)
+                except Exception as exc:
+                    warnings.append(
+                        f"{self._history_work_type_label(work_type)}历史扫描失败: {exc}"
+                    )
         candidates.sort(
             key=lambda item: (
                 str(item.get("work_type") or ""),
@@ -25705,6 +25767,7 @@ class MaintenancePortalService:
             "work_summary": work_summary,
             "source_progress": source_progress,
             "source_status": source_progress,
+            "plan_window_active": self._maintenance_plan_window_is_active(record),
             "building_codes": (
                 self._change_record_building_codes(record)
                 if record.get("work_type") == WORK_TYPE_CHANGE
@@ -26109,6 +26172,14 @@ class MaintenancePortalService:
         self._touch_state_cache_version()
 
     def _is_ongoing_hidden(self, item: dict[str, Any]) -> bool:
+        # A complete target-table refresh is authoritative for ongoing notices.
+        # Local "remove from display" markers may hide unbound/local drafts, but
+        # they must never suppress a remote record that still exists and is not
+        # ended in Feishu.
+        if bool(item.get("target_snapshot_authoritative")) and canonical_target_record_id(
+            item
+        ):
+            return False
         keys = self._ongoing_hidden_keys(item)
         if not keys:
             return False
@@ -27362,14 +27433,25 @@ class MaintenancePortalService:
         status = self._clean_source_text(status_value)
         started_at = self._format_source_datetime(start_value).strip()
         ended_at = self._format_source_datetime(end_value).strip()
-        finished = bool(ended_at) or self._target_status_is_finished(status)
-        active = bool(
-            not finished
-            and (
-                self._target_status_is_active(status)
-                or bool(started_at)
-            )
-        )
+        status_finished = self._target_status_is_finished(status)
+        status_active = self._target_status_is_active(status)
+        if work_type == WORK_TYPE_CHANGE:
+            # `变更结束时间` is the planned end written on the start action, not
+            # proof that the notice has ended. Change lifecycle is authoritative
+            # only from `变更状态`.
+            finished = status_finished
+            active = bool(not finished and status_active)
+            if not finished:
+                ended_at = ""
+        elif status_finished or status_active:
+            # An explicit lifecycle status wins over stale/pre-filled time data.
+            finished = status_finished
+            active = bool(status_active and not finished)
+            if active:
+                ended_at = ""
+        else:
+            finished = bool(ended_at)
+            active = bool(not finished and started_at)
         return {
             "status": status,
             "started_at": started_at,
@@ -27457,6 +27539,8 @@ class MaintenancePortalService:
             or (identity or {}).get("active_item_id")
             or f"target-{work_type}-{target_record_id}"
         ).strip()
+        if is_local_record_id(active_item_id):
+            active_item_id = target_record_id
         payload.update(
             {
                 "active_item_id": active_item_id,
@@ -27475,6 +27559,7 @@ class MaintenancePortalService:
                     or target_record.get("updated_time")
                     or ""
                 ).strip(),
+                "target_snapshot_authoritative": True,
                 "_is_placeholder_record": False,
             }
         )
@@ -27698,8 +27783,6 @@ class MaintenancePortalService:
                 target_record=target_record,
                 identity=identity,
             )
-            if self._is_ongoing_hidden(projected):
-                continue
             section = "event" if work_type == WORK_TYPE_EVENT else "other"
             row = {
                 "section": section,
@@ -27710,6 +27793,12 @@ class MaintenancePortalService:
                 section=section,
                 sort_order=0,
                 origin="target_snapshot_refresh",
+                # A prior target snapshot may have soft-deleted this row after
+                # classifying planned end time as an actual end time.  The
+                # current complete target snapshot is authoritative: revive
+                # active remote records even if an older local action removed
+                # them from display.
+                allow_revive=True,
             ):
                 self._mark_local_notice_active_from_target(projected)
                 with suppress(Exception):
@@ -29104,9 +29193,11 @@ class MaintenancePortalService:
                 return False
             if self._repair_source_status(record) not in WORKBENCH_SOURCE_STATUSES:
                 return False
-        if (
-            work_type != WORK_TYPE_REPAIR
-            and not self._source_record_matches_month_window(record, month)
+        # Only maintenance plans are selected by the requested plan month.
+        # Change and repair plans remain visible until their source lifecycle
+        # is completed, regardless of the month currently selected in the UI.
+        if work_type == WORK_TYPE_MAINTENANCE and not self._source_record_matches_month_window(
+            record, month
         ):
             return False
         specialty = str(specialty or "").strip()
@@ -29156,12 +29247,41 @@ class MaintenancePortalService:
             return 2
         return 10
 
+    def _maintenance_plan_window_is_active(
+        self,
+        record: dict[str, Any],
+        *,
+        now: dt.datetime | None = None,
+    ) -> bool:
+        if self._record_source_work_type(record) != WORK_TYPE_MAINTENANCE:
+            return False
+        fields = record.get("display_fields") or {}
+        start_at = self._history_datetime_from_values(
+            fields.get("计划开始维护时间")
+        )
+        end_at = self._history_datetime_from_values(
+            fields.get("计划结束维护时间")
+        )
+        if start_at is None or end_at is None or end_at < start_at:
+            return False
+        current = now or dt.datetime.now()
+        return start_at <= current <= end_at
+
     def _sort_workbench_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        now = dt.datetime.now()
         return [
             item
             for _, item in sorted(
                 enumerate(records or []),
-                key=lambda pair: (self._source_record_display_priority(pair[1]), pair[0]),
+                key=lambda pair: (
+                    0
+                    if self._maintenance_plan_window_is_active(
+                        pair[1], now=now
+                    )
+                    else 1,
+                    self._source_record_display_priority(pair[1]),
+                    pair[0],
+                ),
             )
         ]
 
@@ -37356,6 +37476,15 @@ class MaintenancePortalService:
             or (DEFAULT_PROGRESS_TEXT if action == "start" else "")
         )
         if action == "start":
+            remembered_change_fields = {
+                "specialty": specialty,
+                "level": level,
+                "progress": progress,
+                "zhihang_involved": "1" if zhihang_involved else "",
+                "zhihang_record_id": zhihang_record_id,
+                "zhihang_title": zhihang_title,
+                "zhihang_progress": zhihang_progress,
+            }
             self._remember_draft_fields(
                 work_type=WORK_TYPE_CHANGE,
                 building=building,
@@ -37365,15 +37494,31 @@ class MaintenancePortalService:
                 content=content,
                 reason=reason,
                 impact=impact,
-                extra_fields={
-                    "specialty": specialty,
-                    "level": level,
-                    "zhihang_involved": "1" if zhihang_involved else "",
-                    "zhihang_record_id": zhihang_record_id,
-                    "zhihang_title": zhihang_title,
-                    "zhihang_progress": zhihang_progress,
-                },
+                extra_fields=remembered_change_fields,
             )
+            if source_work_type == WORK_TYPE_MAINTENANCE:
+                source_memory_name = str(fields.get("维护总项") or "").strip()
+                if source_memory_name:
+                    self._remember_draft_fields(
+                        work_type=WORK_TYPE_CHANGE,
+                        building=building,
+                        maintenance_total=source_memory_name,
+                        item_name=source_memory_name,
+                        maintenance_cycle=maintenance_cycle,
+                        location=location,
+                        content=content,
+                        reason=reason,
+                        impact=impact,
+                        extra_fields={
+                            **remembered_change_fields,
+                            "converted_title": title,
+                            "converted_from_work_type": WORK_TYPE_MAINTENANCE,
+                        },
+                        key_override=self._converted_change_memory_key(
+                            source_memory_name,
+                            maintenance_cycle,
+                        ),
+                    )
         building_code = "CAMPUS" if len(building_codes) >= 2 else (building_codes[0] if building_codes else "")
         text = self.build_change_notice_text(
             status=status,

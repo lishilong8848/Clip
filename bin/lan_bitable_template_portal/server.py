@@ -1434,22 +1434,7 @@ class PortalRuntime:
                 "change_refresh_reused": False,
                 "mock_external": True,
             }
-        now = time.monotonic()
         with cls.change_refresh_lock:
-            if (
-                cls.change_refresh_last_result
-                and now - float(cls.change_refresh_last_finished or 0)
-                <= float(cls.change_refresh_reuse_window_s)
-            ):
-                result = copy.deepcopy(cls.change_refresh_last_result)
-                result.update(
-                    {
-                        "change_refresh_started": False,
-                        "change_refresh_inflight": False,
-                        "change_refresh_reused": True,
-                    }
-                )
-                return result
             if cls.change_refresh_inflight:
                 return {
                     "change_refresh_started": False,
@@ -7055,7 +7040,12 @@ class PortalRuntime:
         prepared["source_record_id"] = source_record_id
         prepared["record_id"] = target_record_id
         prepared["target_record_id"] = target_record_id
-        if target_record_id and not str(prepared.get("active_item_id") or "").strip():
+        active_item_id = str(prepared.get("active_item_id") or "").strip()
+        if target_record_id and (
+            str(prepared.get("action") or "").strip().lower() == "start"
+            or not active_item_id
+            or is_local_record_id(active_item_id)
+        ):
             prepared["active_item_id"] = target_record_id
         prepared.setdefault("origin", "portal")
         prepared["lan_created_from_portal"] = True
@@ -9209,7 +9199,13 @@ class PortalRuntime:
             action = str(prepared.get("action") or "").strip().lower()
             if action in {"start", "update"} and resolved_remote_record_id:
                 prepared["target_record_id"] = resolved_remote_record_id
-                if not str(prepared.get("active_item_id") or "").strip():
+                # A pure-manual form used to reuse one local active ID for every
+                # notice of the same scope/type. Once a start has created the
+                # remote row, its record ID is the canonical ongoing identity.
+                # Updates keep their established active ID for Qt compatibility.
+                if action == "start" or not str(
+                    prepared.get("active_item_id") or ""
+                ).strip():
                     prepared["active_item_id"] = resolved_remote_record_id
 
             # The target write is already durable at this point. Persist the

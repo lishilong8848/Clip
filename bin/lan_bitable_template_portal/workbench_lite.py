@@ -5,6 +5,7 @@ import datetime as dt
 import html
 import json
 import re
+import uuid
 from contextlib import suppress
 from typing import Any
 from urllib.parse import urlencode
@@ -651,7 +652,7 @@ def _record_disabled_reason(
     return ""
 
 
-def _record_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
+def _record_sort_key(record: dict[str, Any]) -> tuple[int, int, str, str]:
     progress = _record_progress(record)
     title = _record_title(record)
     if "延期未开始" in progress:
@@ -666,7 +667,13 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
         priority = 9
     else:
         priority = 5
-    return priority, title, str(record.get("record_id") or record.get("source_record_id") or "")
+    plan_window_priority = 0 if _truthy_display(record.get("plan_window_active")) else 1
+    return (
+        plan_window_priority,
+        priority,
+        title,
+        str(record.get("record_id") or record.get("source_record_id") or ""),
+    )
 
 
 def _record_cycle(record: dict[str, Any]) -> str:
@@ -1206,6 +1213,9 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
     converted_from = str(record.get("converted_from_work_type") or "").strip()
     converted_to = str(record.get("converted_to_work_type") or "").strip()
     if work == "change" and (source_work_type == "maintenance" or converted_from == "maintenance"):
+        converted_title = str(memory.get("converted_title") or "").strip()
+        if converted_title:
+            draft["title"] = converted_title
         draft.update(
             {
                 "source_work_type": "maintenance",
@@ -2135,7 +2145,7 @@ def _detail_form(
         manual_id = (
             f"manual:repair-management:{context_id}"
             if context_id
-            else f"manual:lite:{scope}:{work}"
+            else f"manual:lite:{scope}:{work}:{uuid.uuid4().hex}"
         )
     return f"""
       <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">

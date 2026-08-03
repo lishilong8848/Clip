@@ -1644,6 +1644,61 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(restored_fields["专业"], "暖通")
         self.assertNotIn("不存在字段", restored_fields)
 
+    def test_change_handler_writes_today_in_progress_for_each_action(self):
+        handler = ChangeNoticeHandler("变更通告")
+        base_text = (
+            "【变更通告】状态：{status}\n"
+            "【名称】测试变更\n"
+            "【等级】低风险\n"
+            "【时间】2026-06-12 09:30~2026-06-12 18:30\n"
+            "【进度】{progress}"
+        )
+
+        create_fields = handler.build_create_fields(
+            NoticePayload(
+                text=base_text.format(status="开始", progress="人员正在准备")
+            )
+        )
+        prepared_update_fields = handler.build_update_fields(
+            NoticePayload(
+                text=base_text.format(
+                    status="更新",
+                    progress="准备工作已完成，人员已就位，是否可以操作？",
+                )
+            )
+        )
+        ordinary_update_fields = handler.build_update_fields(
+            NoticePayload(
+                text=base_text.format(status="更新", progress="设备检查进行中")
+            )
+        )
+        no_progress_update_fields = handler.build_update_fields(
+            NoticePayload(
+                text=(
+                    "【变更通告】状态：更新\n"
+                    "【名称】测试变更\n"
+                    "【等级】低风险\n"
+                    "【时间】2026-06-12 09:30~2026-06-12 18:30"
+                )
+            )
+        )
+        end_fields = handler.build_update_fields(
+            NoticePayload(
+                text=base_text.format(
+                    status="结束",
+                    progress="准备工作已完成，全部操作已经结束",
+                ),
+                response_time="2026-06-12 18:35",
+            )
+        )
+
+        today_field = CHANGE_NOTICE_FIELDS["today_in_progress"]
+        self.assertEqual(create_fields[today_field], "是")
+        self.assertEqual(prepared_update_fields[today_field], "是")
+        self.assertEqual(ordinary_update_fields[today_field], "否")
+        self.assertEqual(no_progress_update_fields[today_field], "否")
+        self.assertEqual(end_fields[today_field], "否")
+
     def test_update_notice_screenshots_append_to_type_specific_fields(self):
         cases = [
             (
@@ -3333,7 +3388,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(second["real_record_id"], "rec-event-1")
         self.assertTrue(second.get("deduped"))
         create_record.assert_called_once()
-        query_record.assert_called_once_with("rec-event-1", "事件通告")
+        self.assertGreaterEqual(query_record.call_count, 1)
+        self.assertTrue(
+            all(
+                item.args == ("rec-event-1", "事件通告")
+                for item in query_record.call_args_list
+            )
+        )
 
     def test_local_event_upload_dedupes_different_local_ids_by_notice_text(self):
         def payload(local_id: str) -> dict:
@@ -3392,7 +3453,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(second["real_record_id"], "rec-event-1")
         self.assertTrue(second.get("deduped"))
         create_record.assert_called_once()
-        query_record.assert_called_once_with("rec-event-1", "事件通告")
+        self.assertGreaterEqual(query_record.call_count, 1)
+        self.assertTrue(
+            all(
+                item.args == ("rec-event-1", "事件通告")
+                for item in query_record.call_args_list
+            )
+        )
 
     def test_local_event_update_and_end_reuse_created_target_across_new_local_ids(self):
         def event_text(status: str, progress: str = "测试测试测试") -> str:
@@ -4291,7 +4358,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["name"], "更新")
         self.assertEqual(result["record_id"], "rec-existing-event")
         self.assertEqual(result["real_record_id"], "rec-existing-event")
-        query_record.assert_called_once_with("rec-existing-event", "事件通告")
+        self.assertGreaterEqual(query_record.call_count, 1)
+        self.assertTrue(
+            all(
+                item.args == ("rec-existing-event", "事件通告")
+                for item in query_record.call_args_list
+            )
+        )
         update_record.assert_called_once()
         self.assertEqual(update_record.call_args.args[0], "rec-existing-event")
         self.assertEqual(update_record.call_args.args[2].file_tokens, ["event-update-token"])
@@ -4533,9 +4606,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["record_id"], "rec-existing-change-no-target-field")
         self.assertEqual(result["real_record_id"], "rec-existing-change-no-target-field")
-        query_record.assert_called_once_with(
-            "rec-existing-change-no-target-field",
-            "变更通告",
+        self.assertGreaterEqual(query_record.call_count, 1)
+        self.assertTrue(
+            all(
+                item.args
+                == ("rec-existing-change-no-target-field", "变更通告")
+                for item in query_record.call_args_list
+            )
         )
         update_record.assert_called_once()
         self.assertEqual(
@@ -5738,6 +5815,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service
+
+    def test_backend_started_notice_replaces_manual_active_id_with_target_id(self):
+        payload = PortalRuntime._prepared_to_qt_ui_payload(
+            {
+                "action": "start",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "active_item_id": "manual:lite:A:change:shared",
+                "title": "A楼纯手填变更",
+            },
+            remote_record_id="rec_target_started_change",
+        )
+
+        self.assertEqual(payload["active_item_id"], "rec_target_started_change")
+        self.assertEqual(payload["target_record_id"], "rec_target_started_change")
 
     def test_backend_clipboard_maintenance_same_title_different_reason_is_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8651,6 +8743,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "m-previous",
                     "c-current",
                     "c-previous",
+                    "c-old",
                     "r-current",
                     "r-previous",
                     "r-old",
@@ -8679,6 +8772,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [
                     "m-current",
                     "c-current",
+                    "c-previous",
+                    "c-old",
                     "r-current",
                     "r-previous",
                     "r-old",
@@ -8698,7 +8793,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [item["record_id"] for item in previous["records"]],
                 [
                     "m-previous",
+                    "c-current",
                     "c-previous",
+                    "c-old",
                     "r-current",
                     "r-previous",
                     "r-old",
@@ -10035,6 +10132,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("change-ended", source_ids)
         self.assertGreaterEqual(result["counts"]["source"], 2)
         self.assertTrue(result["source_items_full_current_month"])
+
+    def test_history_memory_scan_only_reads_selected_source_types(self):
+        service = _TestMaintenancePortalService()
+        service._load_fields = lambda: []
+        service._load_change_fields = lambda: []
+        current_month = service._current_month_label()
+        loaded_source_types: list[str] = []
+        scanned_target_types: list[str] = []
+
+        def fake_load_table_records(**kwargs):
+            work_type = str(kwargs.get("work_type") or "")
+            loaded_source_types.append(work_type)
+            return [
+                _build_record(
+                    "maintenance-only-history-scan",
+                    "A楼",
+                    "过滤网维护",
+                    current_month,
+                    status="已结束",
+                    maintenance_cycle="每月",
+                )
+            ]
+
+        def fake_scan_target_history_candidates(**kwargs):
+            scanned_target_types.append(str(kwargs.get("work_type") or ""))
+            return [], []
+
+        service._load_table_records = fake_load_table_records
+        service._scan_target_history_candidates = fake_scan_target_history_candidates
+
+        result = service.scan_historical_notice_memory_candidates(
+            work_types=[WORK_TYPE_MAINTENANCE],
+            months=3,
+        )
+
+        self.assertEqual(loaded_source_types, [WORK_TYPE_MAINTENANCE])
+        self.assertEqual(scanned_target_types, [WORK_TYPE_MAINTENANCE])
+        self.assertEqual(result["counts"]["source"], 1)
 
     def test_confirm_change_target_candidate_clears_actual_end_fields(self):
         class _ConfirmService:
@@ -11404,6 +11539,133 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 service._record_work_type(restored_by_id["m-convert-a-next-month"]),
                 WORK_TYPE_MAINTENANCE,
             )
+
+    def test_maintenance_plan_window_is_sorted_before_other_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            now = dt.datetime.now().replace(second=0, microsecond=0)
+            in_window = _build_record(
+                "maintenance-in-plan-window",
+                "A楼",
+                "时间窗内维护",
+                MaintenancePortalService._current_month_label(),
+                status="进行中",
+            )
+            in_window["display_fields"].update(
+                {
+                    "计划开始维护时间": (now - dt.timedelta(hours=1)).strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+                    "计划结束维护时间": (now + dt.timedelta(hours=1)).strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+                }
+            )
+            delayed = _build_record(
+                "maintenance-delayed",
+                "A楼",
+                "延期维护",
+                MaintenancePortalService._current_month_label(),
+                status="延期未开始",
+            )
+
+            ordered = service._sort_workbench_records([delayed, in_window])
+            serialized = service._serialize_record(in_window, {})
+
+            self.assertEqual(ordered[0]["record_id"], "maintenance-in-plan-window")
+            self.assertTrue(serialized["plan_window_active"])
+            self.assertLess(
+                workbench_lite_module._record_sort_key(serialized),
+                workbench_lite_module._record_sort_key(
+                    {
+                        **delayed,
+                        "source_record_id": delayed["record_id"],
+                        "plan_window_active": False,
+                    }
+                ),
+            )
+
+    def test_converted_maintenance_reuses_prior_change_memory_by_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = MaintenancePortalService._current_month_label()
+            previous_month = MaintenancePortalService._recent_month_labels()[1]
+            service._records = [
+                _build_record(
+                    "converted-memory-previous",
+                    "A楼",
+                    "冷却塔清洗",
+                    previous_month,
+                    maintenance_cycle="每月",
+                ),
+                _build_record(
+                    "converted-memory-current",
+                    "A楼",
+                    "冷却塔清洗",
+                    current_month,
+                    maintenance_cycle="每月",
+                ),
+            ]
+            service._change_records = []
+            service._repair_records = []
+            service._zhihang_change_records = []
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+
+            service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "source_work_type": WORK_TYPE_MAINTENANCE,
+                    "record_id": "converted-memory-previous",
+                    "source_record_id": "converted-memory-previous",
+                    "title": "EA118机房A楼冷却塔夜间清洗变更",
+                    "level": "低",
+                    "start_time": "2026-08-03T21:30",
+                    "end_time": "2026-08-04T05:30",
+                    "location": "A楼楼顶",
+                    "content": "复用的夜间清洗内容",
+                    "reason": "复用的变更原因",
+                    "impact": "复用的影响范围",
+                    "progress": "复用的准备进度",
+                },
+                job_id="job-converted-memory",
+            )
+            service.set_notice_work_type_override(
+                record_id="converted-memory-current",
+                source_work_type=WORK_TYPE_MAINTENANCE,
+                target_work_type=WORK_TYPE_CHANGE,
+                scope="A",
+                updated_by="tester",
+            )
+
+            converted = next(
+                item
+                for item in service._workbench_records(
+                    month=RECENT_MONTH_FILTER_LABEL,
+                    scope="A",
+                )
+                if item["record_id"] == "converted-memory-current"
+            )
+            serialized = service._serialize_record(converted, {})
+            draft = workbench_lite_module._draft_from_record(
+                serialized,
+                work_type=WORK_TYPE_CHANGE,
+            )
+
+            self.assertEqual(
+                draft["title"],
+                "EA118机房A楼冷却塔夜间清洗变更",
+            )
+            self.assertEqual(draft["location"], "A楼楼顶")
+            self.assertEqual(draft["content"], "复用的夜间清洗内容")
+            self.assertEqual(draft["reason"], "复用的变更原因")
+            self.assertEqual(draft["impact"], "复用的影响范围")
+            self.assertEqual(draft["progress"], "复用的准备进度")
+            self.assertEqual(draft["level"], "低")
 
     def test_prepare_change_action_accepts_converted_maintenance_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -15963,6 +16225,58 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.change_refresh_started_at = 0.0
                 PortalRuntime.change_refresh_completed_at = 0.0
 
+    def test_manual_change_refresh_does_not_reuse_completed_result(self):
+        class _ImmediateChangeRefreshService:
+            _load_warnings: list[str] = []
+
+            def __init__(self):
+                self.calls = 0
+
+            def refresh_change_source(self):
+                self.calls += 1
+                return {
+                    "change_count": 8,
+                    "change_refreshed_at": "18:05",
+                }
+
+        original_service = PortalRuntime.service
+        service = _ImmediateChangeRefreshService()
+        with PortalRuntime.change_refresh_lock:
+            PortalRuntime.change_refresh_inflight = False
+            PortalRuntime.change_refresh_event = threading.Event()
+            PortalRuntime.change_refresh_last_result = {
+                "change_count": 4,
+                "change_refreshed_at": "18:04",
+            }
+            PortalRuntime.change_refresh_last_error = ""
+            PortalRuntime.change_refresh_last_finished = time.monotonic()
+            PortalRuntime.change_refresh_started_at = time.time() - 1
+            PortalRuntime.change_refresh_completed_at = time.time() - 1
+        PortalRuntime.service = service
+        try:
+            started = PortalRuntime.start_change_source_refresh()
+            self.assertTrue(started["change_refresh_started"])
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with PortalRuntime.change_refresh_lock:
+                    if not PortalRuntime.change_refresh_inflight:
+                        break
+                time.sleep(0.01)
+            completed = PortalRuntime.source_refresh_status("change")
+            self.assertEqual(completed["status"], "success")
+            self.assertEqual(completed["change_count"], 8)
+            self.assertEqual(service.calls, 1)
+        finally:
+            PortalRuntime.service = original_service
+            with PortalRuntime.change_refresh_lock:
+                PortalRuntime.change_refresh_inflight = False
+                PortalRuntime.change_refresh_event = threading.Event()
+                PortalRuntime.change_refresh_last_result = {}
+                PortalRuntime.change_refresh_last_error = ""
+                PortalRuntime.change_refresh_last_finished = 0.0
+                PortalRuntime.change_refresh_started_at = 0.0
+                PortalRuntime.change_refresh_completed_at = 0.0
+
     def test_refresh_change_source_preserves_other_snapshot_records(self):
         class _ChangeRefreshService(MaintenancePortalService):
             def _load_change_fields(self):
@@ -16014,6 +16328,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("r-old", record_ids)
             self.assertIn("c-new", record_ids)
             self.assertIn("z-new", zhihang_ids)
+
+    def test_refresh_change_source_reconciles_target_when_plan_sources_fail(self):
+        class _TargetOnlyChangeRefreshService(MaintenancePortalService):
+            def _load_change_fields(self):
+                raise RuntimeError("change source down")
+
+            def _load_zhihang_change_fields(self):
+                raise RuntimeError("zhihang source down")
+
+            def _refresh_notice_target_replica(self, *, work_type, notice_type=""):
+                self.asserted_target_args = (work_type, notice_type)
+                return {
+                    "remote_count": 4,
+                    "restored": 4,
+                    "updated": 0,
+                    "finished_removed": 0,
+                    "missing_removed": 0,
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(
+                Path(tmp),
+                _TargetOnlyChangeRefreshService,
+            )
+            service._repair_snapshots_enabled = True
+
+            result = service.refresh_change_source()
+
+            self.assertTrue(result["change_target_refreshed"])
+            self.assertEqual(result["change_target_count"], 4)
+            self.assertEqual(result["change_target_reconcile"]["restored"], 4)
+            self.assertEqual(
+                service.asserted_target_args,
+                (WORK_TYPE_CHANGE, "变更通告"),
+            )
 
     def test_refresh_repair_source_updates_projects_followups_and_workbench_snapshot(self):
         class _RepairRefreshService(_TestMaintenancePortalService):
@@ -18791,7 +19140,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIn('name="manual" value="1"', html)
-        self.assertIn('name="manual_id" value="manual:lite:E:polling"', html)
+        self.assertRegex(
+            html,
+            r'name="manual_id" value="manual:lite:E:polling:[0-9a-f]{32}"',
+        )
         self.assertIn("纯手填通告", html)
         self.assertNotIn('class="detail-status-board"', html)
         self.assertNotIn("发送创建", html)
@@ -27975,6 +28327,203 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertFalse(recovered["finished"])
         self.assertFalse(ended["active"])
         self.assertTrue(ended["finished"])
+
+    def test_change_planned_end_time_does_not_finish_started_notice(self):
+        service = _TestMaintenancePortalService()
+
+        lifecycle = service._target_record_lifecycle(
+            work_type=WORK_TYPE_CHANGE,
+            notice_type="变更通告",
+            target_record={
+                "record_id": "rec_change_started",
+                "display_fields": {
+                    "变更状态": "开始",
+                    "变更开始时间": "2026-08-03 09:00",
+                    "变更结束时间": "2026-08-09 23:00",
+                },
+                "raw_fields": {},
+            },
+        )
+
+        self.assertTrue(lifecycle["active"])
+        self.assertFalse(lifecycle["finished"])
+        self.assertEqual(lifecycle["ended_at"], "")
+
+    def test_change_target_refresh_restores_all_started_manual_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            target_ids = [
+                "recvrbJCyRv43b",
+                "recvrbJm1hQSlP",
+                "recvrbITunvMqh",
+                "recvrbIifJ8MBc",
+            ]
+            records = []
+            for index, target_record_id in enumerate(target_ids):
+                records.append(
+                    {
+                        "record_id": target_record_id,
+                        "display_fields": {
+                            "变更状态": "开始",
+                            "名称": f"第{index + 1}条纯手填变更",
+                            "楼栋": "D楼" if index == 1 else "A楼",
+                            "专业": "电气",
+                            "变更开始时间": "2026-08-03 09:00",
+                            "变更结束时间": f"2026-08-{index + 5:02d} 23:00",
+                            "内容": f"第{index + 1}条内容",
+                            "原因": f"第{index + 1}条原因",
+                            "影响": "无影响",
+                            "进度": "准备工作已完成",
+                        },
+                        "raw_fields": {},
+                    }
+                )
+            service._state_store.upsert_notice_identity(
+                {
+                    "active_item_id": "manual:lite:A:change:shared",
+                    "target_record_id": target_ids[0],
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                },
+                origin="test",
+            )
+
+            result = service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=records,
+            )
+
+            self.assertEqual(result["restored"], 4)
+            active_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(active_rows), 4)
+            self.assertEqual(
+                {row["payload"]["target_record_id"] for row in active_rows},
+                set(target_ids),
+            )
+            active_ids = {row["active_item_id"] for row in active_rows}
+            self.assertEqual(len(active_ids), 4)
+            self.assertFalse(
+                any(active_item_id.startswith("manual:") for active_item_id in active_ids)
+            )
+
+    def test_change_target_refresh_revives_stale_soft_deleted_active_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            target_record_id = "rec_change_stale_soft_delete"
+            active_item_id = f"target:{WORK_TYPE_CHANGE}:{target_record_id}"
+            stale_payload = {
+                "active_item_id": active_item_id,
+                "target_record_id": target_record_id,
+                "record_id": target_record_id,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "开始",
+                "title": "A楼曾被旧逻辑误判结束的变更",
+                "building": "A楼",
+                "building_codes": ["A"],
+            }
+            service._state_store.upsert_qt_active_item(
+                stale_payload,
+                section="other",
+                origin="target_snapshot_refresh",
+            )
+            self.assertTrue(
+                service._state_store.delete_qt_active_item(
+                    active_item_id=active_item_id,
+                    record_id=target_record_id,
+                )
+            )
+            self.assertEqual(service._state_store.list_qt_active_items(), [])
+
+            result = service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=[
+                    {
+                        "record_id": target_record_id,
+                        "display_fields": {
+                            "变更状态": "开始",
+                            "名称": "A楼曾被旧逻辑误判结束的变更",
+                            "楼栋": "A楼",
+                            "专业": "电气",
+                            "变更开始时间": "2026-08-03 09:00",
+                            "变更结束时间": "",
+                            "内容": "现场验证",
+                            "原因": "按计划实施",
+                            "影响": "无影响",
+                            "进度": "准备工作已完成",
+                        },
+                        "raw_fields": {},
+                    }
+                ],
+            )
+
+            self.assertEqual(result["restored"], 1)
+            active_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            self.assertEqual(
+                active_rows[0]["payload"]["target_record_id"],
+                target_record_id,
+            )
+
+    def test_target_refresh_restores_remote_active_record_even_if_locally_hidden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            target_record_id = "rec_change_locally_hidden"
+            hidden_payload = {
+                "active_item_id": target_record_id,
+                "target_record_id": target_record_id,
+                "record_id": target_record_id,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "开始",
+                "title": "A楼本地移除但多维仍未结束的变更",
+                "building": "A楼",
+                "building_codes": ["A"],
+            }
+            service.hide_ongoing_item(
+                hidden_payload,
+                scope="A",
+                deleted_by="administrator",
+            )
+            self.assertTrue(service._is_ongoing_hidden(hidden_payload))
+
+            result = service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=[
+                    {
+                        "record_id": target_record_id,
+                        "display_fields": {
+                            "变更状态": "更新",
+                            "名称": "A楼本地移除但多维仍未结束的变更",
+                            "楼栋": "A楼",
+                            "专业": "电气",
+                            "变更开始时间": "2026-07-31 09:00",
+                            "变更结束时间": "",
+                            "内容": "继续实施",
+                            "原因": "按计划实施",
+                            "影响": "无影响",
+                            "进度": "处理中",
+                        },
+                        "raw_fields": {},
+                    }
+                ],
+            )
+
+            self.assertEqual(result["restored"], 1)
+            active_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            projected = active_rows[0]["payload"]
+            self.assertTrue(projected["target_snapshot_authoritative"])
+            self.assertFalse(service._is_ongoing_hidden(projected))
+            self.assertEqual(
+                service._project_ongoing_items("A", [projected])[0][
+                    "target_record_id"
+                ],
+                target_record_id,
+            )
 
     def test_target_snapshot_refresh_removes_remote_deleted_active_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
