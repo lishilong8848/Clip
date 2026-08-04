@@ -142,6 +142,19 @@ class BackendProcessControllerTests(unittest.TestCase):
             BackendProcessPortalController._host_is_local_interface("203.0.113.254")
         )
 
+    def test_lan_urls_only_include_addresses_served_by_the_bind_host(self):
+        with patch(
+            "clipflow_backend.process_controller._local_lan_ipv4_addresses",
+            return_value=["192.168.1.20", "192.168.56.1"],
+        ):
+            controller = BackendProcessPortalController(host="0.0.0.0", port=18766)
+            self.assertEqual(
+                controller.get_lan_urls(),
+                ["http://192.168.1.20:18766", "http://192.168.56.1:18766"],
+            )
+            loopback = BackendProcessPortalController(host="127.0.0.1", port=18766)
+            self.assertEqual(loopback.get_lan_urls(), [])
+
     def test_qt_command_strips_legacy_inline_image_fields(self):
         controller = BackendProcessPortalController()
         payload = {

@@ -323,6 +323,7 @@ const emit = defineEmits<{
   engineer: [scope: string];
   "repair-management": [scope: string];
   water: [scope: string];
+  "critical-guard": [];
   daily: [scope: string];
   "request-permission": [];
 }>();
@@ -554,6 +555,10 @@ function selectEntry(key: EntryKey): void {
   if (key === "event") {
     const scope = defaultEventScope();
     if (scope) emit("event", scope);
+    return;
+  }
+  if (key === "critical_guard") {
+    emit("critical-guard");
     return;
   }
   activeMode.value = key;

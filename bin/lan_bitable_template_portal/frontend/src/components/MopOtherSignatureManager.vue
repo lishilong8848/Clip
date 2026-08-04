@@ -40,13 +40,13 @@
         >
           <div class="signature-preview">
             <img
-              v-if="row.signed"
+              v-if="row.signed && showSignaturePreview !== false"
               :src="row.person.signature_preview_url"
               alt="其他人员签名预览"
               loading="lazy"
               @error="emit('image-error', row.person)"
             />
-            <span v-else>未签名</span>
+            <span v-else>{{ row.signed ? "已签名" : "未签名" }}</span>
           </div>
           <div class="person-summary">
             <strong>{{ row.display_name }}</strong>
@@ -154,9 +154,10 @@
           <button type="button"
             v-for="person in externalPeople"
             :key="String(person.record_id || person.name || '')"
-            @click="emit('add-external', person)"
+            @click="chooseExternal(person)"
           >
-            <img :src="person.signature_preview_url" alt="已有其他人员签名" loading="lazy" @error="emit('image-error', person)" />
+            <img v-if="showSignaturePreview !== false" :src="person.signature_preview_url" alt="已有其他人员签名" loading="lazy" @error="emit('image-error', person)" />
+            <span v-else class="protected-signature">已签名</span>
             <span>
               <strong>{{ person.name || "其他人员" }}</strong>
               <small>
@@ -177,7 +178,7 @@
 import { computed, ref, watch } from "vue";
 
 type Dict = Record<string, any>;
-type SignatureRole = "implementer" | "auditor";
+type SignatureRole = "implementer" | "auditor" | "inspector";
 type OtherSignatureRow = {
   kind: string;
   row_key: string;
@@ -204,6 +205,8 @@ const props = defineProps<{
   personWebSignDisabledReason: (person: Dict) => string;
   draftStatusText: (draft: Dict) => string;
   draftDisabledReason: (draft: Dict) => string;
+  showSignaturePreview?: boolean;
+  active?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -259,6 +262,15 @@ watch(() => props.role, () => {
   taskFilter.value = "all";
   externalReuseOpen.value = false;
 });
+
+watch(() => props.active, (active) => {
+  if (!active) externalReuseOpen.value = false;
+});
+
+function chooseExternal(person: Dict): void {
+  externalReuseOpen.value = false;
+  emit("add-external", person);
+}
 
 function signaturePersonKey(person: Dict): string {
   const source = String(person?.source || "");
@@ -468,6 +480,7 @@ function personStatus(row: OtherSignatureRow): string {
   font-size: 11px;
   font-weight: 900;
 }
+.protected-signature { min-width: 58px; min-height: 36px; display: grid; place-items: center; border-radius: 7px; background: #eef5ff; color: #175ab9; font-size: 11px; font-weight: 900; }
 
 .person-summary {
   min-width: 0;

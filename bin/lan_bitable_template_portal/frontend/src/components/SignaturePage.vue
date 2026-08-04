@@ -228,7 +228,11 @@ async function loadPeople(options: { silent?: boolean } = {}): Promise<void> {
       url.searchParams.set("token", linkToken.value);
       const data = await requestJson(`${url.pathname}${url.search}`);
       if (requestSeq !== peopleRequestSeq) return;
-      const roleLabel = data.role === "auditor" ? "维护审核人" : "维护实施人";
+      const roleLabel = data.role === "inspector"
+        ? "检查人"
+        : data.role === "auditor"
+          ? "维护审核人"
+          : "维护实施人";
       people.value = [{ ...data, role_label: roleLabel }];
       totalCount.value = 1;
       selectedRecordId.value = personKey(people.value[0]);

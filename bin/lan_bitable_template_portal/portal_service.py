@@ -56,6 +56,27 @@ from .repair_status_index import (
     repair_completed_at_seconds,
 )
 from .operation_audit import finish_business_audit
+from .critical_guard import (
+    CRITICAL_GUARD_CHECK_SHEETS,
+    CRITICAL_GUARD_FILE_SHEETS,
+    CRITICAL_GUARD_SCOPE_CODES,
+    CRITICAL_GUARD_SCOPE_LABELS,
+    CRITICAL_GUARD_SHEET_NAMES,
+    CriticalGuardError,
+    critical_guard_catalog,
+    default_response_cells,
+    memory_cells_for_new_task,
+    normalize_response_cells,
+    normalize_scope as normalize_critical_guard_scope,
+    normalize_sheet_name as normalize_critical_guard_sheet,
+    normalize_task_memory_key,
+    render_critical_guard_source_file_preview,
+    render_critical_guard_template_artifacts,
+    render_critical_guard_source_file_artifacts,
+    safe_path_part as safe_critical_guard_path_part,
+    validate_critical_guard_source_workbook,
+    validate_response_for_generation,
+)
 
 
 DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
@@ -1282,6 +1303,9 @@ class MaintenancePortalService:
         self._water_consumption_image_cache_lock = threading.RLock()
         self._water_consumption_record_locks_guard = threading.RLock()
         self._water_consumption_record_locks: dict[str, threading.RLock] = {}
+        self._critical_guard_response_locks_guard = threading.RLock()
+        self._critical_guard_response_locks: dict[str, threading.RLock] = {}
+        self._critical_guard_render_semaphore = threading.BoundedSemaphore(1)
         self._signature_crypto = SignatureCryptoManager()
         self._signature_crypto_migration_lock = threading.RLock()
         self._signature_crypto_migration_running = False
@@ -31247,6 +31271,15 @@ class MaintenancePortalService:
                     if isinstance(first_signature, dict) and first_signature
                     else ""
                 )
+                signature_crypto_metadata = self._signature_crypto.metadata_from_field(
+                    fields.get(SIGNATURE_KEY_FIELD)
+                )
+                signature_crypto_version = int(
+                    signature_crypto_metadata.get("version") or 0
+                )
+                portable_signature = self._signature_crypto.is_portable_metadata(
+                    signature_crypto_metadata
+                )
                 building = self._mop_field_text(fields, ["楼栋", "机楼/专业"])
                 has_signature = bool(signature_version)
                 person = {
@@ -31263,6 +31296,8 @@ class MaintenancePortalService:
                     "has_signature": has_signature,
                     "signature_count": len(attachments) if has_signature else 0,
                     "signature_version": signature_version,
+                    "signature_crypto_version": signature_crypto_version,
+                    "portable_signature": portable_signature,
                     "latest_publish_time": latest_publish_time,
                     "signature_preview_url": (
                         self._signature_preview_url(
@@ -31395,6 +31430,13 @@ class MaintenancePortalService:
                     and not rejected
                 )
                 person["usage_confirmation_pending"] = pending
+        if notice_key.startswith("critical_guard:"):
+            for person in limited:
+                if person.get("has_signature") and not person.get("portable_signature"):
+                    person["has_signature"] = False
+                    person["signature_requires_resign"] = True
+                person.pop("signature_preview_url", None)
+                person.pop("signature_file_token", None)
         return {
             "people": limited,
             "count": len(filtered),
@@ -31461,6 +31503,15 @@ class MaintenancePortalService:
                     continue
                 first_signature = attachments[0]
                 signature_version = self._signature_attachment_version(first_signature)
+                signature_crypto_metadata = self._signature_crypto.metadata_from_field(
+                    fields.get(TEMP_SIGNATURE_KEY_FIELD)
+                )
+                signature_crypto_version = int(
+                    signature_crypto_metadata.get("version") or 0
+                )
+                portable_signature = self._signature_crypto.is_portable_metadata(
+                    signature_crypto_metadata
+                )
                 name = (
                     self._mop_field_text(fields, [TEMP_SIGNATURE_NAME_FIELD, "姓名", "名称"])
                     or record_id
@@ -31481,6 +31532,8 @@ class MaintenancePortalService:
                         "has_signature": True,
                         "signature_count": len(attachments),
                         "signature_version": signature_version,
+                        "signature_crypto_version": signature_crypto_version,
+                        "portable_signature": portable_signature,
                         "latest_publish_time": latest_publish_time,
                         "signature_preview_url": self._external_signature_preview_url(
                             record_id=record_id,
@@ -31518,6 +31571,7 @@ class MaintenancePortalService:
         *,
         scope: str = "ALL",
         query: str = "",
+        notice_key: str = "",
         limit: int = 80,
         refresh: bool = False,
     ) -> dict[str, Any]:
@@ -31552,6 +31606,13 @@ class MaintenancePortalService:
             if matches_query(person)
         ]
         limited = filtered[: max(1, min(500, int(limit or 80)))]
+        if str(notice_key or "").strip().startswith("critical_guard:"):
+            for person in limited:
+                if person.get("has_signature") and not person.get("portable_signature"):
+                    person["has_signature"] = False
+                    person["signature_requires_resign"] = True
+                person.pop("signature_preview_url", None)
+                person.pop("signature_file_token", None)
         return {
             "people": limited,
             "count": len(filtered),
@@ -31963,6 +32024,8 @@ class MaintenancePortalService:
         record_id: str,
         signer_name: str = "",
         scope: str = "",
+        context_type: str = "mop",
+        context_title: str = "",
         request_base_url: str = "",
         created_by: str = "",
     ) -> dict[str, Any]:
@@ -31981,15 +32044,23 @@ class MaintenancePortalService:
             f"&token={quote(link_token, safe='')}"
         )
         name = str(signer_name or person.get("name") or "签名人员").strip()
+        is_critical_guard = str(context_type or "mop").strip().lower() == "critical_guard"
+        purpose_title = "重保检查手写签名" if is_critical_guard else "MOP 手写签名"
+        context_line = (
+            f"重保任务：{str(context_title or '').strip()}"
+            if is_critical_guard and str(context_title or "").strip()
+            else ""
+        )
         text = "\n".join(
-            [
-                "【线上签名】请完成 MOP 手写签名",
+            [item for item in [
+                f"【线上签名】请完成{purpose_title}",
                 "",
                 f"签名人员：{name}",
+                context_line,
                 f"签名链接：{link_url}",
                 "",
                 "请用手机打开链接，在页面手写签名并保存。",
-            ]
+            ] if item]
         )
         return {
             "record_id": str(record_id or "").strip(),
@@ -32008,6 +32079,7 @@ class MaintenancePortalService:
         notice_title: str,
         signatures: list[dict[str, Any]],
         mop_attachment_name: str = "",
+        context_type: str = "mop",
         request_base_url: str = "",
         operator_open_id: str = "",
         operator_name: str = "",
@@ -32015,6 +32087,8 @@ class MaintenancePortalService:
         operator_open_id = str(operator_open_id or "").strip()
         operator_name = str(operator_name or "").strip()
         mop_attachment_name = str(mop_attachment_name or "").strip()
+        normalized_context = str(context_type or "mop").strip().lower()
+        is_critical_guard = normalized_context == "critical_guard"
         people = self._load_signature_people(force=False)
         people_by_id = {
             str(item.get("record_id") or "").strip(): item
@@ -32029,7 +32103,7 @@ class MaintenancePortalService:
                 continue
             record_id = str(item.get("record_id") or "").strip()
             role = str(item.get("role") or "").strip()
-            if not record_id or role not in {"implementer", "auditor"}:
+            if not record_id or role not in {"implementer", "auditor", "inspector"}:
                 continue
             requested.setdefault(record_id, set()).add(role)
         missing = [record_id for record_id in requested if record_id not in people_by_id]
@@ -32058,11 +32132,19 @@ class MaintenancePortalService:
             if operator_open_id and person_open_id == operator_open_id:
                 skipped.append({"record_id": record_id, "name": person.get("name") or "", "reason": "本人签名无需确认"})
                 continue
-            role_text = "、".join(self._mop_role_label(role) for role in ("implementer", "auditor") if role in roles)
+            role_text = "、".join(
+                self._mop_role_label(role)
+                for role in ("implementer", "auditor", "inspector")
+                if role in roles
+            )
             confirmation = self._state_store.create_mop_signature_usage_confirmation(
                 scope=scope,
                 notice_key=notice_key,
-                role="auditor" if "auditor" in roles else "implementer",
+                role=(
+                    "inspector"
+                    if "inspector" in roles
+                    else "auditor" if "auditor" in roles else "implementer"
+                ),
                 signer_record_id=record_id,
                 signer_open_id=person_open_id,
                 signer_name=str(person.get("name") or ""),
@@ -32073,23 +32155,37 @@ class MaintenancePortalService:
                     "mop_attachment_name": mop_attachment_name,
                     "roles": sorted(roles),
                     "role_text": role_text,
+                    "context_type": normalized_context,
                 },
             )
             token = str(confirmation.get("token") or "").strip()
             link_url = f"{base_url}/api/signatures/usage-confirm?token={quote(token, safe='')}"
+            if is_critical_guard:
+                detail_lines = [
+                    f"重保任务：{notice_title or '未命名重保任务'}",
+                    f"检查表：{mop_attachment_name or '当前检查表'}",
+                ]
+            else:
+                detail_lines = [
+                    f"维护通告：{notice_title or '未命名维保通告'}",
+                    f"MOP附件：{mop_attachment_name or '当前选中附件'}",
+                ]
             text = "\n".join(
                 [
-                    "【MOP签名使用确认】",
+                    "【重保检查签名使用确认】" if is_critical_guard else "【MOP签名使用确认】",
                     "",
                     f"签名人员：{person.get('name') or record_id}",
                     f"签名角色：{role_text or '签名人员'}",
-                    f"维护通告：{notice_title or '未命名维保通告'}",
-                    f"MOP附件：{mop_attachment_name or '当前选中附件'}",
+                    *detail_lines,
                     f"操作人：{operator_name or '未知'}"
                     + (f"（{operator_open_id}）" if operator_open_id else ""),
                     "",
                     f"确认链接：{link_url}",
-                    "请确认是否允许本次 MOP 使用你的已保存签名。",
+                    (
+                        "请确认是否允许本次重保检查使用你的已保存签名。"
+                        if is_critical_guard
+                        else "请确认是否允许本次 MOP 使用你的已保存签名。"
+                    ),
                 ]
             )
             messages.append(
@@ -32124,7 +32220,10 @@ class MaintenancePortalService:
 
     @staticmethod
     def _mop_role_label(role: str) -> str:
-        return "维护审核人" if str(role or "") == "auditor" else "维护实施人"
+        normalized = str(role or "")
+        if normalized == "inspector":
+            return "检查人"
+        return "维护审核人" if normalized == "auditor" else "维护实施人"
 
     def _temporary_signature_public_url(
         self,
@@ -32168,13 +32267,16 @@ class MaintenancePortalService:
         notice_title: str = "",
         specialty: str = "",
         display_name: str = "",
+        context_type: str = "mop",
+        origin_staff_record_id: str = "",
+        origin_staff_open_id: str = "",
         request_base_url: str = "",
         created_by: str = "",
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope or "ALL")
         notice_key = str(notice_key or "").strip()
         role = str(role or "implementer").strip()
-        if role not in {"implementer", "auditor"}:
+        if role not in {"implementer", "auditor", "inspector"}:
             raise PortalError("临时签名角色无效。")
         recipients = [
             str(item or "").strip()
@@ -32182,7 +32284,7 @@ class MaintenancePortalService:
             if str(item or "").strip()
         ]
         if not recipients:
-            raise PortalError("请先选择维护实施人，再发送其他人员签名链接。")
+            raise PortalError("缺少签名链接接收人，无法发送临时人员签名链接。")
         display_name = str(display_name or "").strip() or self._temporary_signature_display_name(
             scope=scope,
             notice_key=notice_key,
@@ -32199,6 +32301,9 @@ class MaintenancePortalService:
             payload={
                 "notice_title": str(notice_title or ""),
                 "specialty": str(specialty or ""),
+                "context_type": str(context_type or "mop").strip().lower(),
+                "origin_staff_record_id": str(origin_staff_record_id or "").strip(),
+                "origin_staff_open_id": str(origin_staff_open_id or "").strip(),
             },
         )
         link_url = self._temporary_signature_public_url(
@@ -32208,13 +32313,16 @@ class MaintenancePortalService:
             request_base_url=request_base_url,
         )
         role_label = self._mop_role_label(role)
+        is_critical_guard = str(context_type or "mop").strip().lower() == "critical_guard"
+        subject = "重保检查临时人员签名" if is_critical_guard else "MOP 其他人员签名"
+        context_label = "重保任务" if is_critical_guard else "维护通告"
         text = "\n".join(
             [
-                "【线上签名】请现场完成 MOP 其他人员签名",
+                f"【线上签名】请现场完成{subject}",
                 "",
                 f"签名角色：{role_label}",
                 f"临时人员：{display_name}",
-                f"维护通告：{notice_title or '未命名维保通告'}",
+                f"{context_label}：{notice_title or ('未命名重保任务' if is_critical_guard else '未命名维保通告')}",
                 f"签名链接：{link_url}",
                 "",
                 "请用手机打开链接，让现场人员在页面手写签名并保存。",
@@ -32240,6 +32348,9 @@ class MaintenancePortalService:
         notice_title: str = "",
         specialty: str = "",
         display_name: str = "",
+        context_type: str = "mop",
+        origin_staff_record_id: str = "",
+        origin_staff_open_id: str = "",
         created_by: str = "",
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
@@ -32247,7 +32358,7 @@ class MaintenancePortalService:
         if not notice_key:
             raise PortalError("当前通告缺少记忆键，无法创建临时签名。")
         role = str(role or "implementer").strip()
-        if role not in {"implementer", "auditor"}:
+        if role not in {"implementer", "auditor", "inspector"}:
             raise PortalError("临时签名角色无效。")
         display_name = str(display_name or "").strip() or self._temporary_signature_display_name(
             scope=scope,
@@ -32265,6 +32376,9 @@ class MaintenancePortalService:
             payload={
                 "notice_title": str(notice_title or ""),
                 "specialty": str(specialty or ""),
+                "context_type": str(context_type or "mop").strip().lower(),
+                "origin_staff_record_id": str(origin_staff_record_id or "").strip(),
+                "origin_staff_open_id": str(origin_staff_open_id or "").strip(),
             },
         )
         return self._public_temporary_signature_session(
@@ -32276,6 +32390,7 @@ class MaintenancePortalService:
         self,
         *,
         temp_id: str,
+        recipient_open_ids: list[str] | None = None,
         request_base_url: str = "",
     ) -> dict[str, Any]:
         temp_id = str(temp_id or "").strip()
@@ -32284,6 +32399,7 @@ class MaintenancePortalService:
         session = self._state_store.refresh_mop_temporary_signature_session_token(
             temp_id=temp_id,
             ttl_seconds=SIGNATURE_LINK_TOKEN_TTL_SECONDS,
+            recipient_open_ids=recipient_open_ids,
         )
         scope = self._normalize_scope(str(session.get("scope") or "ALL"))
         token = str(session.get("token") or "")
@@ -32298,6 +32414,7 @@ class MaintenancePortalService:
         payload = session.get("payload") if isinstance(session.get("payload"), dict) else {}
         display_name = str(session.get("display_name") or "临时人员").strip()
         notice_title = str(payload.get("notice_title") or "").strip()
+        is_critical_guard = str(payload.get("context_type") or "mop").strip().lower() == "critical_guard"
         recipients = [
             str(item or "").strip()
             for item in (session.get("recipient_open_ids") or [])
@@ -32307,11 +32424,19 @@ class MaintenancePortalService:
             raise PortalError("该临时人员缺少接收人 openid，无法重发链接。")
         text = "\n".join(
             [
-                "【线上签名】请现场完成 MOP 其他人员签名",
+                (
+                    "【线上签名】请现场完成重保检查临时人员签名"
+                    if is_critical_guard
+                    else "【线上签名】请现场完成 MOP 其他人员签名"
+                ),
                 "",
                 f"签名角色：{role_label}",
                 f"临时人员：{display_name}",
-                f"维护通告：{notice_title or '未命名维保通告'}",
+                (
+                    f"重保任务：{notice_title or '未命名重保任务'}"
+                    if is_critical_guard
+                    else f"维护通告：{notice_title or '未命名维保通告'}"
+                ),
                 f"签名链接：{link_url}",
                 "",
                 "请用手机打开链接，让现场人员在页面手写签名并保存。",
@@ -32360,6 +32485,8 @@ class MaintenancePortalService:
             "expires_at": session.get("expires_at"),
             "notice_title": str(payload.get("notice_title") or ""),
             "specialty": str(payload.get("specialty") or ""),
+            "origin_staff_record_id": str(payload.get("origin_staff_record_id") or ""),
+            "origin_staff_open_id": str(payload.get("origin_staff_open_id") or ""),
         }
 
     def temporary_signature_session(
@@ -32390,11 +32517,16 @@ class MaintenancePortalService:
             notice_key=str(notice_key or "").strip(),
             created_by=str(created_by or "").strip(),
         )
+        items = [
+            self._public_temporary_signature_session(session)
+            for session in sessions
+        ]
+        if str(notice_key or "").strip().startswith("critical_guard:"):
+            for item in items:
+                item.pop("signature_preview_url", None)
+                item.pop("signature_file_token", None)
         return {
-            "items": [
-                self._public_temporary_signature_session(session)
-                for session in sessions
-            ],
+            "items": items,
             "count": len(sessions),
         }
 
@@ -38400,3 +38532,1232 @@ class MaintenancePortalService:
                 base_result["error"] = str(exc)
                 results.append(base_result)
         return results
+
+    def _critical_guard_response_lock(self, response_id: str) -> threading.RLock:
+        key = str(response_id or "").strip()
+        if not key:
+            raise PortalError("缺少重保填报记录。")
+        with self._critical_guard_response_locks_guard:
+            lock = self._critical_guard_response_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._critical_guard_response_locks[key] = lock
+            return lock
+
+    @staticmethod
+    def _critical_guard_signature_context(response: dict[str, Any]) -> str:
+        return ":".join(
+            [
+                "critical_guard",
+                str(response.get("task_id") or "").strip(),
+                str(response.get("scope") or "").strip().upper(),
+            ]
+        )
+
+    @staticmethod
+    def _critical_guard_signature_reference(item: dict[str, Any]) -> dict[str, str]:
+        source = str(item.get("source") or "staff").strip().lower()
+        if source not in {"staff", "temporary", "external"}:
+            raise PortalError("检查人签名来源无效，请重新选择。")
+        record_id = str(item.get("record_id") or "").strip()
+        temp_id = str(item.get("temp_id") or "").strip()
+        if source == "temporary":
+            if not temp_id:
+                raise PortalError("临时检查人签名记录不完整，请重新添加。")
+            record_id = ""
+        elif not record_id:
+            raise PortalError("检查人签名记录不完整，请重新选择。")
+        return {
+            "source": source,
+            "role": "inspector",
+            "record_id": record_id,
+            "temp_id": temp_id if source == "temporary" else "",
+            "name": str(item.get("name") or item.get("display_name") or "").strip(),
+        }
+
+    def _normalize_critical_guard_signature_references(
+        self,
+        signatures: list[dict[str, Any]] | None,
+        *,
+        legacy_source: str = "",
+        legacy_record_id: str = "",
+    ) -> list[dict[str, str]]:
+        raw_items = [item for item in (signatures or []) if isinstance(item, dict)]
+        if not raw_items and str(legacy_record_id or "").strip():
+            raw_items = [
+                {
+                    "source": str(legacy_source or "staff").strip() or "staff",
+                    "record_id": str(legacy_record_id or "").strip(),
+                    "role": "inspector",
+                }
+            ]
+        if len(raw_items) > 50:
+            raise PortalError("每个任务每栋楼最多选择 50 名检查人。")
+        normalized: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw_items:
+            reference = self._critical_guard_signature_reference(item)
+            identity = (
+                reference["source"],
+                reference["temp_id"]
+                if reference["source"] == "temporary"
+                else reference["record_id"],
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            normalized.append(reference)
+        return normalized
+
+    def _resolve_critical_guard_signatures(
+        self,
+        *,
+        response: dict[str, Any],
+        signatures: list[dict[str, Any]] | None,
+        operator_open_id: str,
+        strict_context: bool = True,
+    ) -> list[dict[str, Any]]:
+        references = self._normalize_critical_guard_signature_references(signatures)
+        if not references:
+            return []
+        scope = str(response.get("scope") or "").strip().upper()
+        notice_key = self._critical_guard_signature_context(response)
+        operator_open_id = str(operator_open_id or "").strip()
+
+        staff_people = self._load_signature_people(force=False)
+        staff_by_id = {
+            str(item.get("record_id") or "").strip(): item
+            for item in staff_people
+            if str(item.get("record_id") or "").strip()
+        }
+        external_people = self._load_external_signature_people(force=False)
+        external_by_id = {
+            str(item.get("record_id") or "").strip(): item
+            for item in external_people
+            if str(item.get("record_id") or "").strip()
+        }
+        missing_staff = {
+            item["record_id"]
+            for item in references
+            if item["source"] == "staff" and item["record_id"] not in staff_by_id
+        }
+        missing_external = {
+            item["record_id"]
+            for item in references
+            if item["source"] == "external" and item["record_id"] not in external_by_id
+        }
+        if missing_staff:
+            staff_people = self._load_signature_people(force=True)
+            staff_by_id = {
+                str(item.get("record_id") or "").strip(): item
+                for item in staff_people
+                if str(item.get("record_id") or "").strip()
+            }
+        if missing_external:
+            external_people = self._load_external_signature_people(force=True)
+            external_by_id = {
+                str(item.get("record_id") or "").strip(): item
+                for item in external_people
+                if str(item.get("record_id") or "").strip()
+            }
+
+        resolved: list[dict[str, Any]] = []
+        for reference in references:
+            source = reference["source"]
+            if source == "staff":
+                person = staff_by_id.get(reference["record_id"])
+                if not person:
+                    raise PortalError("公司检查人记录不存在，请刷新人员后重新选择。")
+                signer_open_id = str(person.get("open_id") or "").strip()
+                usage_status = ""
+                usage_confirmed = bool(
+                    operator_open_id
+                    and signer_open_id
+                    and signer_open_id == operator_open_id
+                )
+                if not usage_confirmed and operator_open_id and signer_open_id:
+                    usage_status = self._state_store.mop_signature_usage_status(
+                        scope=scope,
+                        notice_key=notice_key,
+                        signer_record_id=reference["record_id"],
+                        requested_by_openid=operator_open_id,
+                    )
+                    usage_confirmed = usage_status == "confirmed"
+                has_signature = bool(
+                    person.get("has_signature")
+                    and str(person.get("signature_version") or "").strip()
+                    and person.get("portable_signature")
+                )
+                resolved.append(
+                    {
+                        **reference,
+                        "name": str(person.get("name") or reference.get("name") or "公司人员"),
+                        "open_id": signer_open_id,
+                        "employee_no": str(person.get("employee_no") or ""),
+                        "building": str(person.get("building") or ""),
+                        "has_signature": has_signature,
+                        "signature_version": str(person.get("signature_version") or ""),
+                        "signature_crypto_version": int(
+                            person.get("signature_crypto_version") or 0
+                        ),
+                        "signature_requires_resign": bool(
+                            person.get("has_signature") and not person.get("portable_signature")
+                        ),
+                        "signature_preview_url": str(person.get("signature_preview_url") or ""),
+                        "usage_status": "confirmed" if usage_confirmed else usage_status,
+                        "usage_confirmed": usage_confirmed,
+                        "usage_rejected": usage_status == "rejected",
+                        "usage_confirmation_pending": usage_status == "pending",
+                        "usage_confirmation_required": bool(
+                            signer_open_id
+                            and signer_open_id != operator_open_id
+                            and not usage_confirmed
+                            and usage_status != "rejected"
+                        ),
+                        "is_current_user": bool(
+                            operator_open_id and signer_open_id == operator_open_id
+                        ),
+                        "ready": bool(has_signature and usage_confirmed),
+                    }
+                )
+                continue
+
+            if source == "temporary":
+                session = self._state_store.get_mop_temporary_signature_session(
+                    temp_id=reference["temp_id"]
+                )
+                if not session:
+                    raise PortalError("临时检查人记录不存在，请重新添加。")
+                context_matches = bool(
+                    str(session.get("scope") or "").strip().upper() == scope
+                    and str(session.get("notice_key") or "").strip() == notice_key
+                    and str(session.get("role") or "").strip() == "inspector"
+                )
+                if strict_context and not context_matches:
+                    raise PortalError("临时检查人签名不属于当前任务、楼栋或检查表，请重新添加。")
+                public = self._public_temporary_signature_session(session)
+                has_signature = bool(public.get("has_signature") and context_matches)
+                resolved.append(
+                    {
+                        **reference,
+                        **public,
+                        "role": "inspector",
+                        "context_matches": context_matches,
+                        "ready": has_signature,
+                    }
+                )
+                continue
+
+            person = external_by_id.get(reference["record_id"])
+            if not person:
+                raise PortalError("外部检查人签名记录不存在，请刷新后重新选择。")
+            has_signature = bool(
+                person.get("has_signature")
+                and str(person.get("signature_version") or "").strip()
+                and person.get("portable_signature")
+            )
+            resolved.append(
+                {
+                    **reference,
+                    "name": str(person.get("name") or reference.get("name") or "外部人员"),
+                    "display_name": str(person.get("display_name") or person.get("name") or "外部人员"),
+                    "building": str(person.get("building") or ""),
+                    "specialty": str(person.get("specialty") or ""),
+                    "has_signature": has_signature,
+                    "signature_version": str(person.get("signature_version") or ""),
+                    "signature_crypto_version": int(
+                        person.get("signature_crypto_version") or 0
+                    ),
+                    "signature_requires_resign": bool(
+                        person.get("has_signature") and not person.get("portable_signature")
+                    ),
+                    "signature_preview_url": str(person.get("signature_preview_url") or ""),
+                    "ready": has_signature,
+                }
+            )
+        return resolved
+
+    @staticmethod
+    def _critical_guard_public_scope_file(item: dict[str, Any] | None) -> dict[str, Any]:
+        source = dict(item or {})
+        file_id = str(source.get("file_id") or "").strip()
+        if not file_id:
+            return {}
+        return {
+            "file_id": file_id,
+            "scope": str(source.get("scope") or "").strip().upper(),
+            "sheet_type": str(source.get("sheet_type") or "").strip(),
+            "file_name": str(source.get("original_file_name") or "").strip(),
+            "sha256": str(source.get("sha256") or "").strip(),
+            "size": int(source.get("size") or 0),
+            "uploaded_by_name": str(source.get("uploaded_by_name") or "").strip(),
+            "updated_at": float(source.get("updated_at") or 0),
+            "download_url": (
+                f"/api/critical-guard/source-files/{quote(file_id, safe='')}"
+            ),
+            "preview_url": (
+                f"/api/critical-guard/source-files/{quote(file_id, safe='')}/preview"
+                f"?v={quote(str(source.get('sha256') or '')[:16], safe='')}"
+            ),
+        }
+
+    def _critical_guard_public_response(
+        self,
+        response: dict[str, Any],
+        *,
+        operator_open_id: str = "",
+    ) -> dict[str, Any]:
+        result = dict(response or {})
+        result.pop("generated_image_path", None)
+        result.pop("generated_workbook_path", None)
+        result.pop("_stale_artifact_paths", None)
+        if str(result.get("status") or "") == "pending" and isinstance(
+            result.get("cells"), dict
+        ):
+            result["cells"] = dict(result["cells"])
+            result["cells"]["check_date"] = dt.date.today().isoformat()
+            result["check_date"] = result["cells"]["check_date"]
+        response_id = str(result.get("response_id") or "").strip()
+        image_sha = str(result.get("generated_image_sha256") or "").strip()
+        result["has_image"] = bool(image_sha)
+        result["image_url"] = (
+            f"/api/critical-guard/images/{quote(response_id, safe='')}?v={quote(image_sha[:16], safe='')}"
+            if response_id and image_sha
+            else ""
+        )
+        workbook_sha = str(result.get("generated_workbook_sha256") or "").strip()
+        result["has_workbook"] = bool(workbook_sha)
+        result["workbook_url"] = (
+            f"/api/critical-guard/workbooks/{quote(response_id, safe='')}?v={quote(workbook_sha[:16], safe='')}"
+            if response_id and workbook_sha
+            else ""
+        )
+        sheet_type = str(result.get("sheet_type") or "").strip()
+        if sheet_type in CRITICAL_GUARD_FILE_SHEETS:
+            response_cells = result.get("cells") if isinstance(result.get("cells"), dict) else {}
+            bound_file_id = str(response_cells.get("source_file_id") or "").strip()
+            bound_file = (
+                self._state_store.get_critical_guard_scope_file(bound_file_id)
+                if bound_file_id
+                else None
+            )
+            if bound_file and (
+                str(bound_file.get("scope") or "").strip().upper()
+                != str(result.get("scope") or "").strip().upper()
+                or str(bound_file.get("sheet_type") or "").strip() != sheet_type
+            ):
+                bound_file = None
+            latest_file = self._state_store.get_latest_critical_guard_scope_file(
+                scope=str(result.get("scope") or ""),
+                sheet_type=sheet_type,
+            )
+            result["source_file"] = self._critical_guard_public_scope_file(bound_file)
+            result["reusable_source_file"] = self._critical_guard_public_scope_file(
+                latest_file
+                if latest_file
+                and str(latest_file.get("file_id") or "")
+                != str((bound_file or {}).get("file_id") or "")
+                else None
+            )
+        references = self._normalize_critical_guard_signature_references(
+            result.get("signatures") if isinstance(result.get("signatures"), list) else [],
+            legacy_source=str(result.get("signature_source") or ""),
+            legacy_record_id=str(result.get("signature_record_id") or ""),
+        )
+        result["signatures"] = references
+        if operator_open_id and str(result.get("sheet_type") or "") in CRITICAL_GUARD_CHECK_SHEETS:
+            try:
+                result["selected_signers"] = self._resolve_critical_guard_signatures(
+                    response=result,
+                    signatures=references,
+                    operator_open_id=operator_open_id,
+                    strict_context=False,
+                )
+                result["signature_load_error"] = ""
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "读取重保多人签名状态失败: response_id=%s",
+                    response_id,
+                    exc_info=True,
+                )
+                result["selected_signers"] = references
+                result["signature_load_error"] = str(exc)
+        else:
+            result["selected_signers"] = references
+        for signer in result.get("selected_signers") or []:
+            if isinstance(signer, dict):
+                signer.pop("signature_preview_url", None)
+                signer.pop("signature_file_token", None)
+        result["signature_count"] = len(references)
+        result["signature_names"] = "、".join(
+            str(item.get("name") or item.get("display_name") or "").strip()
+            for item in result.get("selected_signers") or []
+            if str(item.get("name") or item.get("display_name") or "").strip()
+        )
+        return result
+
+    def _critical_guard_current_signer(self, operator_open_id: str) -> dict[str, Any]:
+        open_id = str(operator_open_id or "").strip()
+        if not open_id:
+            return {}
+        people = self._load_signature_people(force=False)
+        person = next(
+            (
+                item
+                for item in people
+                if str(item.get("open_id") or "").strip() == open_id
+            ),
+            None,
+        )
+        if not person:
+            return {}
+        record_id = str(person.get("record_id") or "").strip()
+        signature_version = str(person.get("signature_version") or "").strip()
+        portable_signature = bool(person.get("portable_signature"))
+        return {
+            "record_id": record_id,
+            "name": str(person.get("name") or "").strip(),
+            "open_id": open_id,
+            "employee_no": str(person.get("employee_no") or "").strip(),
+            "has_signature": bool(
+                person.get("has_signature") and signature_version and portable_signature
+            ),
+            "signature_version": signature_version,
+            "signature_crypto_version": int(
+                person.get("signature_crypto_version") or 0
+            ),
+            "signature_requires_resign": bool(
+                person.get("has_signature") and not portable_signature
+            ),
+            "signature_page_url": (
+                f"/signature?record_id={quote(record_id, safe='')}"
+                if record_id
+                else ""
+            ),
+        }
+
+    def _critical_guard_current_signer_safe(self, operator_open_id: str) -> dict[str, Any]:
+        try:
+            return self._critical_guard_current_signer(operator_open_id)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "读取重保检查人签名失败",
+                exc_info=True,
+            )
+            return {
+                "has_signature": False,
+                "load_error": "签名暂时无法读取，请稍后刷新。",
+            }
+
+    def critical_guard_bootstrap(
+        self,
+        *,
+        allowed_scopes: list[str],
+        is_admin: bool,
+        operator_open_id: str = "",
+    ) -> dict[str, Any]:
+        normalized_allowed = {
+            str(scope or "").strip().upper()
+            for scope in (allowed_scopes or [])
+        }
+        scopes = [
+            {
+                "value": code,
+                "label": CRITICAL_GUARD_SCOPE_LABELS[code],
+                "authorized": bool(is_admin or code in normalized_allowed or "ALL" in normalized_allowed),
+            }
+            for code in CRITICAL_GUARD_SCOPE_CODES
+        ]
+        task_counts: dict[str, dict[str, int]] = {
+            code: {"total": 0, "pending": 0, "completed": 0}
+            for code in CRITICAL_GUARD_SCOPE_CODES
+        }
+        for code in CRITICAL_GUARD_SCOPE_CODES:
+            authorized = bool(
+                is_admin or code in normalized_allowed or "ALL" in normalized_allowed
+            )
+            if not authorized:
+                continue
+            scoped_tasks = self._state_store.list_critical_guard_tasks(
+                scope=code,
+                status="active",
+            )
+            completed = sum(bool(item.get("complete")) for item in scoped_tasks)
+            task_counts[code] = {
+                "total": len(scoped_tasks),
+                "pending": max(0, len(scoped_tasks) - completed),
+                "completed": completed,
+            }
+        for item in scopes:
+            item.update(task_counts.get(str(item["value"]), {}))
+        return {
+            "scopes": scopes,
+            "is_admin": bool(is_admin),
+            "sheet_types": list(CRITICAL_GUARD_SHEET_NAMES),
+            "catalog": critical_guard_catalog(),
+            "current_signer": {},
+        }
+
+    def create_critical_guard_task(
+        self,
+        *,
+        name: str,
+        sheet_types: list[str],
+        target_scopes: list[str],
+        operation_id: str,
+        operator_open_id: str,
+        operator_name: str,
+    ) -> dict[str, Any]:
+        task_name = re.sub(r"\s+", " ", str(name or "").strip())[:160]
+        if not task_name:
+            raise PortalError("请填写重保任务名称。")
+        normalized_sheets: list[str] = []
+        for value in sheet_types or []:
+            try:
+                sheet = normalize_critical_guard_sheet(value)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if sheet not in normalized_sheets:
+                normalized_sheets.append(sheet)
+        if not normalized_sheets:
+            raise PortalError("请至少选择一张检查表。")
+        normalized_scopes: list[str] = []
+        for value in target_scopes or []:
+            try:
+                scope = normalize_critical_guard_scope(value)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if scope not in normalized_scopes:
+                normalized_scopes.append(scope)
+        if not normalized_scopes:
+            raise PortalError("请至少选择一个填写楼栋。")
+        normalized_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
+        memory_key = normalize_task_memory_key(task_name)
+        if not memory_key:
+            raise PortalError("任务名称无效，请重新填写。")
+        task_id = f"guard_{uuid.uuid4().hex}"
+        template_version = str(
+            critical_guard_catalog().get("template_version") or ""
+        )
+        responses: list[dict[str, Any]] = []
+        for scope in normalized_scopes:
+            for sheet in normalized_sheets:
+                memory = self._state_store.get_critical_guard_memory(
+                    memory_key=memory_key,
+                    scope=scope,
+                    sheet_type=sheet,
+                    template_version=template_version,
+                )
+                cells = (
+                    memory_cells_for_new_task(sheet, scope, memory.get("cells"))
+                    if memory
+                    else default_response_cells(sheet, scope)
+                )
+                if sheet in CRITICAL_GUARD_FILE_SHEETS:
+                    latest_file = self._state_store.get_latest_critical_guard_scope_file(
+                        scope=scope,
+                        sheet_type=sheet,
+                    )
+                    if latest_file:
+                        cells = dict(cells)
+                        cells.update(
+                            {
+                                "source_file_id": str(latest_file.get("file_id") or ""),
+                                "source_file_name": str(
+                                    latest_file.get("original_file_name") or ""
+                                ),
+                                "source_file_sha256": str(latest_file.get("sha256") or ""),
+                            }
+                        )
+                responses.append(
+                    {
+                        "response_id": f"guard_response_{uuid.uuid4().hex}",
+                        "scope": scope,
+                        "sheet_type": sheet,
+                        "cells": cells,
+                    }
+                )
+        task = self._state_store.create_critical_guard_task(
+            task_id=task_id,
+            operation_id=normalized_operation_id,
+            task_name=task_name,
+            memory_key=memory_key,
+            sheet_types=normalized_sheets,
+            target_scopes=normalized_scopes,
+            template_version=template_version,
+            created_by_open_id=operator_open_id,
+            created_by_name=operator_name,
+            responses=responses,
+        )
+        detail = self._state_store.get_critical_guard_task(
+            str(task.get("task_id") or task_id),
+            include_all_responses=True,
+        ) or task
+        detail["responses"] = [
+            self._critical_guard_public_response(item)
+            for item in detail.get("responses") or []
+        ]
+        return detail
+
+    def list_critical_guard_tasks(
+        self,
+        *,
+        scope: str = "",
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        normalized_scope = ""
+        if scope:
+            try:
+                normalized_scope = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+        tasks = self._state_store.list_critical_guard_tasks(
+            scope="" if include_all else normalized_scope,
+            status="active",
+        )
+        current_template_version = str(
+            critical_guard_catalog().get("template_version") or ""
+        )
+        for task in tasks:
+            task_version = str(task.get("template_version") or "")
+            task["current_template_version"] = current_template_version
+            task["template_outdated"] = bool(
+                not task_version or task_version != current_template_version
+            )
+        return {"tasks": tasks, "count": len(tasks), "scope": normalized_scope}
+
+    @staticmethod
+    def _ensure_critical_guard_template_current(task: dict[str, Any]) -> None:
+        current_version = str(critical_guard_catalog().get("template_version") or "")
+        task_version = str(task.get("template_version") or "")
+        if task_version and task_version == current_version:
+            return
+        raise PortalConflictError(
+            "检查模板已更新，为避免检查项错位，当前任务不能继续修改；"
+            "请管理员按最新模板重新发布任务。"
+        )
+
+    def get_critical_guard_task(
+        self,
+        task_id: str,
+        *,
+        scope: str = "",
+        include_all_responses: bool = False,
+        operator_open_id: str = "",
+    ) -> dict[str, Any]:
+        normalized_scope = ""
+        if scope:
+            try:
+                normalized_scope = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+        task = self._state_store.get_critical_guard_task(
+            str(task_id or "").strip(),
+            scope=normalized_scope,
+            include_all_responses=bool(include_all_responses),
+        )
+        if not task:
+            raise PortalError("重保任务不存在。")
+        if normalized_scope and normalized_scope not in set(task.get("target_scopes") or []):
+            raise PortalError("该重保任务未发布到当前楼栋。")
+        current_template_version = str(
+            critical_guard_catalog().get("template_version") or ""
+        )
+        task["current_template_version"] = current_template_version
+        task["template_outdated"] = bool(
+            not str(task.get("template_version") or "")
+            or str(task.get("template_version") or "") != current_template_version
+        )
+        task["responses"] = [
+            self._critical_guard_public_response(
+                item,
+                operator_open_id=("" if include_all_responses else operator_open_id),
+            )
+            for item in task.get("responses") or []
+        ]
+        task["catalog"] = critical_guard_catalog()
+        task["current_signer"] = (
+            {}
+            if include_all_responses
+            else self._critical_guard_current_signer_safe(operator_open_id)
+        )
+        return task
+
+    def upload_critical_guard_scope_file(
+        self,
+        response_id: str,
+        *,
+        scope: str,
+        file_name: str,
+        content: bytes,
+        expected_version: int | str | None,
+        operator_open_id: str,
+        operator_name: str,
+    ) -> dict[str, Any]:
+        original_name = Path(str(file_name or "").strip()).name
+        if Path(original_name).suffix.lower() != ".xlsx":
+            raise PortalError("楼栋清单只支持 .xlsx 文件。")
+        content_bytes = bytes(content or b"")
+        if not content_bytes:
+            raise PortalError("上传的楼栋清单文件为空。")
+        if len(content_bytes) > 20 * 1024 * 1024:
+            raise PortalError("楼栋清单文件不能超过 20MB。")
+
+        initial_response = self._state_store.get_critical_guard_response(response_id)
+        if not initial_response:
+            raise PortalError("重保填报记录不存在。")
+        lock = self._critical_guard_response_lock(
+            ":".join(
+                [
+                    str(initial_response.get("task_id") or ""),
+                    str(initial_response.get("scope") or "").strip().upper(),
+                ]
+            )
+        )
+        with lock:
+            response = self._state_store.get_critical_guard_response(response_id)
+            if not response:
+                raise PortalError("重保填报记录不存在。")
+            try:
+                scope_code = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            sheet_type = str(response.get("sheet_type") or "").strip()
+            if response.get("scope") != scope_code:
+                raise PortalError("该重保填报不属于当前楼栋。")
+            task = self._state_store.get_critical_guard_task(
+                str(response.get("task_id") or ""),
+                scope=scope_code,
+            )
+            if not task:
+                raise PortalError("重保任务不存在或未发布到当前楼栋。")
+            self._ensure_critical_guard_template_current(task)
+            if sheet_type not in CRITICAL_GUARD_FILE_SHEETS:
+                raise PortalError("当前检查表不使用楼栋文件。")
+            if expected_version not in (None, ""):
+                try:
+                    requested_version = int(expected_version)
+                except (TypeError, ValueError) as exc:
+                    raise PortalConflictError("重保填报版本无效，请重新读取。") from exc
+                if requested_version != int(response.get("version") or 1):
+                    raise PortalConflictError(
+                        "该重保填报已被其他用户修改，请重新读取后再上传。"
+                    )
+
+            digest = hashlib.sha256(content_bytes).hexdigest()
+            source_root = (
+                Path(get_data_file_path("critical_guard"))
+                / "source_files"
+                / scope_code
+                / safe_critical_guard_path_part(sheet_type, "sheet")
+                / digest[:16]
+            )
+            source_root.mkdir(parents=True, exist_ok=True)
+            final_path = source_root / safe_critical_guard_path_part(original_name, "source.xlsx")
+            temporary_path = source_root / f".{uuid.uuid4().hex}.upload.xlsx"
+            temporary_path.write_bytes(content_bytes)
+            try:
+                metadata = validate_critical_guard_source_workbook(
+                    temporary_path,
+                    sheet_name=sheet_type,
+                )
+                if not final_path.exists():
+                    os.replace(temporary_path, final_path)
+                else:
+                    temporary_path.unlink()
+            except CriticalGuardError as exc:
+                with suppress(OSError):
+                    temporary_path.unlink()
+                raise PortalError(str(exc)) from exc
+            except Exception:
+                with suppress(OSError):
+                    temporary_path.unlink()
+                raise
+
+            stored_file = self._state_store.put_critical_guard_scope_file(
+                file_id=f"guard_file_{uuid.uuid4().hex}",
+                scope=scope_code,
+                sheet_type=sheet_type,
+                original_file_name=original_name,
+                local_file_path=str(final_path),
+                sha256=str(metadata.get("sha256") or digest),
+                size=int(metadata.get("size") or len(content_bytes)),
+                uploaded_by_open_id=operator_open_id,
+                uploaded_by_name=operator_name,
+            )
+            stored_path = Path(str(stored_file.get("local_file_path") or ""))
+            if not stored_file.get("created") and stored_path != final_path:
+                if not stored_path.is_file():
+                    stored_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(final_path, stored_path)
+                with suppress(OSError):
+                    final_path.unlink()
+
+            old_paths = [
+                str(response.get("generated_image_path") or "").strip(),
+                str(response.get("generated_workbook_path") or "").strip(),
+            ]
+            next_cells = dict(
+                response.get("cells") if isinstance(response.get("cells"), dict) else {}
+            )
+            next_cells.update(
+                {
+                    "source_file_id": str(stored_file.get("file_id") or ""),
+                    "source_file_name": str(stored_file.get("original_file_name") or ""),
+                    "source_file_sha256": str(stored_file.get("sha256") or ""),
+                }
+            )
+            try:
+                updated = self._state_store.update_critical_guard_response(
+                    response_id,
+                    cells=next_cells,
+                    signatures=[],
+                    signature_source="",
+                    signature_record_id="",
+                    signature_name="",
+                    generated=False,
+                    generated_image=None,
+                    share_signatures=False,
+                    expected_version=expected_version,
+                    actor_open_id=operator_open_id,
+                    actor_name=operator_name,
+                )
+            except ValueError as exc:
+                raise PortalConflictError(str(exc)) from exc
+            for stale_path in old_paths:
+                if stale_path:
+                    with suppress(OSError):
+                        Path(stale_path).unlink()
+            return self._critical_guard_public_response(
+                updated,
+                operator_open_id=operator_open_id,
+            )
+
+    def get_critical_guard_scope_file_bytes(
+        self,
+        file_id: str,
+        *,
+        scope: str = "",
+        allow_all_scopes: bool = False,
+    ) -> tuple[bytes, str]:
+        item = self._state_store.get_critical_guard_scope_file(file_id)
+        if not item:
+            raise PortalError("楼栋清单文件不存在。")
+        if not allow_all_scopes:
+            try:
+                scope_code = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if str(item.get("scope") or "").strip().upper() != scope_code:
+                raise PortalError("无权下载其他楼栋的清单文件。")
+        path = Path(str(item.get("local_file_path") or ""))
+        if not path.is_file():
+            raise PortalError("楼栋清单文件已丢失，请重新上传。")
+        return path.read_bytes(), str(item.get("original_file_name") or "清单.xlsx")
+
+    def get_critical_guard_scope_file_preview_bytes(
+        self,
+        file_id: str,
+        *,
+        scope: str = "",
+        allow_all_scopes: bool = False,
+    ) -> tuple[bytes, str]:
+        item = self._state_store.get_critical_guard_scope_file(file_id)
+        if not item:
+            raise PortalError("楼栋清单文件不存在。")
+        if not allow_all_scopes:
+            try:
+                scope_code = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if str(item.get("scope") or "").strip().upper() != scope_code:
+                raise PortalError("无权预览其他楼栋的清单文件。")
+        source_path = Path(str(item.get("local_file_path") or ""))
+        if not source_path.is_file():
+            raise PortalError("楼栋清单文件已丢失，请重新上传。")
+        digest = str(item.get("sha256") or "").strip().lower()
+        preview_path = (
+            Path(get_data_file_path("critical_guard"))
+            / "source_previews"
+            / safe_critical_guard_path_part(str(item.get("scope") or "scope"), "scope")
+            / safe_critical_guard_path_part(str(item.get("sheet_type") or "sheet"), "sheet")
+            / f"{safe_critical_guard_path_part(str(item.get('file_id') or 'file'), 'file')}_{digest[:16]}.png"
+        )
+        if not preview_path.is_file():
+            lock = self._critical_guard_response_lock(f"source-preview:{file_id}")
+            with lock:
+                if not preview_path.is_file():
+                    try:
+                        with self._critical_guard_render_semaphore:
+                            render_critical_guard_source_file_preview(
+                                source_path=source_path,
+                                sheet_name=str(item.get("sheet_type") or ""),
+                                output_path=preview_path,
+                            )
+                    except CriticalGuardError as exc:
+                        raise PortalError(str(exc)) from exc
+        return preview_path.read_bytes(), (
+            f"{item.get('scope')}楼_{item.get('sheet_type')}_预览.png"
+        )
+
+    def save_critical_guard_response(
+        self,
+        response_id: str,
+        *,
+        scope: str,
+        cells: dict[str, Any],
+        signature_record_id: str,
+        generate_image: bool,
+        expected_version: int | str | None,
+        operator_open_id: str,
+        operator_name: str,
+        signatures: list[dict[str, Any]] | None = None,
+        signature_source: str = "",
+    ) -> dict[str, Any]:
+        initial_response = self._state_store.get_critical_guard_response(response_id)
+        if not initial_response:
+            raise PortalError("重保填报记录不存在。")
+        lock = self._critical_guard_response_lock(
+            ":".join(
+                [
+                    str(initial_response.get("task_id") or ""),
+                    str(initial_response.get("scope") or "").strip().upper(),
+                ]
+            )
+        )
+        with lock:
+            response = self._state_store.get_critical_guard_response(response_id)
+            if not response:
+                raise PortalError("重保填报记录不存在。")
+            try:
+                scope_code = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if response.get("scope") != scope_code:
+                raise PortalError("该重保填报不属于当前楼栋。")
+            if expected_version not in (None, ""):
+                try:
+                    requested_version = int(expected_version)
+                except (TypeError, ValueError) as exc:
+                    raise PortalConflictError("重保填报版本无效，请重新读取。") from exc
+                if requested_version != int(response.get("version") or 1):
+                    raise PortalConflictError(
+                        "该重保填报已被其他用户修改，请重新读取后再保存。"
+                    )
+            task = self._state_store.get_critical_guard_task(
+                str(response.get("task_id") or ""),
+                scope=scope_code,
+            )
+            if not task:
+                raise PortalError("重保任务不存在或未发布到当前楼栋。")
+            self._ensure_critical_guard_template_current(task)
+            sheet_type = str(response.get("sheet_type") or "")
+            try:
+                normalized_cells = normalize_response_cells(
+                    sheet_type,
+                    scope_code,
+                    cells,
+                    fallback=response.get("cells") if isinstance(response.get("cells"), dict) else None,
+                )
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+
+            source_file: dict[str, Any] | None = None
+            if sheet_type in CRITICAL_GUARD_FILE_SHEETS:
+                bound_file_id = str(normalized_cells.get("source_file_id") or "").strip()
+                source_file = (
+                    self._state_store.get_critical_guard_scope_file(bound_file_id)
+                    if bound_file_id
+                    else self._state_store.get_latest_critical_guard_scope_file(
+                        scope=scope_code,
+                        sheet_type=sheet_type,
+                    )
+                )
+                if source_file and (
+                    str(source_file.get("scope") or "").strip().upper() != scope_code
+                    or str(source_file.get("sheet_type") or "").strip() != sheet_type
+                ):
+                    source_file = None
+                if generate_image and not source_file:
+                    raise PortalError(f"请先上传 {scope_code}楼的{sheet_type}文件。")
+                if source_file:
+                    normalized_cells.update(
+                        {
+                            "source_file_id": str(source_file.get("file_id") or ""),
+                            "source_file_name": str(
+                                source_file.get("original_file_name") or ""
+                            ),
+                            "source_file_sha256": str(source_file.get("sha256") or ""),
+                        }
+                    )
+
+            signature_references = self._normalize_critical_guard_signature_references(
+                signatures,
+                legacy_source=signature_source,
+                legacy_record_id=signature_record_id,
+            )
+            resolved_signers: list[dict[str, Any]] = []
+            signature_name = ""
+            rendered_signatures: list[dict[str, Any]] = []
+            if sheet_type in CRITICAL_GUARD_CHECK_SHEETS:
+                try:
+                    resolved_signers = self._resolve_critical_guard_signatures(
+                        response=response,
+                        signatures=signature_references,
+                        operator_open_id=operator_open_id,
+                    )
+                except PortalError:
+                    raise
+                except Exception as exc:
+                    raise PortalError("检查人签名暂时无法读取，请稍后重试。") from exc
+                if generate_image:
+                    if not resolved_signers:
+                        raise PortalError("生成图片前请至少选择一名检查人签名。")
+                    unavailable: list[str] = []
+                    for signer in resolved_signers:
+                        if signer.get("ready"):
+                            continue
+                        name = str(
+                            signer.get("name")
+                            or signer.get("display_name")
+                            or "未命名人员"
+                        )
+                        if signer.get("signature_requires_resign"):
+                            unavailable.append(f"{name}（签名版本过旧，请重新签名）")
+                        elif not signer.get("has_signature"):
+                            unavailable.append(f"{name}（未签名）")
+                        elif signer.get("usage_rejected"):
+                            unavailable.append(f"{name}（已拒绝使用）")
+                        else:
+                            unavailable.append(f"{name}（待本人确认）")
+                    if unavailable:
+                        raise PortalError(
+                            "以下检查人签名尚不可用：" + "、".join(unavailable)
+                        )
+                    try:
+                        validate_response_for_generation(
+                            sheet_type,
+                            normalized_cells,
+                            signature_count=len(resolved_signers),
+                        )
+                    except CriticalGuardError as exc:
+                        raise PortalError(str(exc)) from exc
+                    for signer in resolved_signers:
+                        source = str(signer.get("source") or "staff")
+                        name = str(
+                            signer.get("name")
+                            or signer.get("display_name")
+                            or "检查人"
+                        )
+                        try:
+                            if source == "temporary":
+                                image_bytes, _content_type = self.temporary_signature_image_bytes(
+                                    temp_id=str(signer.get("temp_id") or "")
+                                )
+                            elif source == "external":
+                                image_bytes, _content_type = self.external_signature_image_bytes(
+                                    record_id=str(signer.get("record_id") or "")
+                                )
+                            else:
+                                image_bytes, _content_type = self.signature_image_bytes(
+                                    record_id=str(signer.get("record_id") or "")
+                                )
+                        except Exception as exc:
+                            raise PortalError(f"{name} 的签名读取失败，请重新签名后再试。") from exc
+                        rendered_signatures.append(
+                            {"name": name, "image_bytes": image_bytes}
+                        )
+                    signature_name = "、".join(
+                        str(item.get("name") or "检查人")
+                        for item in rendered_signatures
+                    )
+            else:
+                signature_references = []
+
+            generated_image: dict[str, Any] | None = None
+            old_image_path = str(response.get("generated_image_path") or "").strip()
+            old_workbook_path = str(response.get("generated_workbook_path") or "").strip()
+            output_path: Path | None = None
+            if generate_image:
+                task_name = str(task.get("name") or "重保任务")
+                output_path = (
+                    Path(get_data_file_path("critical_guard"))
+                    / "generated"
+                    / safe_critical_guard_path_part(str(task.get("task_id") or "task"), "task")
+                    / safe_critical_guard_path_part(sheet_type, "sheet")
+                    / (
+                        f"{scope_code}_v{int(response.get('version') or 1) + 1}_"
+                        f"{uuid.uuid4().hex[:10]}.png"
+                    )
+                )
+                try:
+                    with self._critical_guard_render_semaphore:
+                        if sheet_type in CRITICAL_GUARD_FILE_SHEETS:
+                            generated_image = render_critical_guard_source_file_artifacts(
+                                source_path=Path(
+                                    str((source_file or {}).get("local_file_path") or "")
+                                ),
+                                sheet_name=sheet_type,
+                                output_path=output_path,
+                            )
+                        else:
+                            generated_image = render_critical_guard_template_artifacts(
+                                sheet_name=sheet_type,
+                                scope=scope_code,
+                                task_name=task_name,
+                                cells=normalized_cells,
+                                signatures=rendered_signatures,
+                                output_path=output_path,
+                            )
+                except CriticalGuardError as exc:
+                    raise PortalError(str(exc)) from exc
+                except Exception as exc:
+                    with suppress(OSError):
+                        output_path.unlink()
+                    with suppress(OSError):
+                        output_path.with_suffix(".xlsx").unlink()
+                    logging.getLogger(__name__).exception("生成重保检查图片失败")
+                    raise PortalError("生成检查图片失败，请稍后重试。") from exc
+            try:
+                updated = self._state_store.update_critical_guard_response(
+                    response_id,
+                    cells=normalized_cells,
+                    signatures=signature_references,
+                    signature_source=(
+                        str(signature_references[0].get("source") or "")
+                        if signature_references
+                        else ""
+                    ),
+                    signature_record_id=(
+                        str(
+                            signature_references[0].get("record_id")
+                            or signature_references[0].get("temp_id")
+                            or ""
+                        )
+                        if signature_references
+                        else ""
+                    ),
+                    signature_name=signature_name,
+                    generated=bool(generate_image),
+                    generated_image=generated_image,
+                    share_signatures=sheet_type in CRITICAL_GUARD_CHECK_SHEETS,
+                    expected_version=expected_version,
+                    actor_open_id=operator_open_id,
+                    actor_name=operator_name,
+                )
+            except ValueError as exc:
+                if output_path:
+                    with suppress(OSError):
+                        output_path.unlink()
+                    with suppress(OSError):
+                        output_path.with_suffix(".xlsx").unlink()
+                raise PortalConflictError(str(exc)) from exc
+            except Exception:
+                if output_path:
+                    with suppress(OSError):
+                        output_path.unlink()
+                    with suppress(OSError):
+                        output_path.with_suffix(".xlsx").unlink()
+                raise
+            if old_image_path and old_image_path != str(
+                (generated_image or {}).get("path") or ""
+            ):
+                with suppress(OSError):
+                    Path(old_image_path).unlink()
+            if old_workbook_path and old_workbook_path != str(
+                (generated_image or {}).get("workbook_path") or ""
+            ):
+                with suppress(OSError):
+                    Path(old_workbook_path).unlink()
+            for stale_path in updated.pop("_stale_artifact_paths", []) or []:
+                with suppress(OSError):
+                    Path(str(stale_path)).unlink()
+            return self._critical_guard_public_response(
+                updated,
+                operator_open_id=operator_open_id,
+            )
+
+    def get_critical_guard_image_bytes(
+        self,
+        response_id: str,
+        *,
+        scope: str = "",
+        allow_all_scopes: bool = False,
+    ) -> tuple[bytes, str]:
+        response = self._state_store.get_critical_guard_response(response_id)
+        if not response:
+            raise PortalError("重保检查图片不存在。")
+        if not allow_all_scopes:
+            try:
+                scope_code = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if response.get("scope") != scope_code:
+                raise PortalError("无权查看其他楼栋的重保检查图片。")
+        path = Path(str(response.get("generated_image_path") or ""))
+        if not path.exists() or not path.is_file():
+            raise PortalError("重保检查图片尚未生成或已失效。")
+        return path.read_bytes(), f"{response.get('scope')}_{response.get('sheet_type')}.png"
+
+    def get_critical_guard_workbook_bytes(
+        self,
+        response_id: str,
+        *,
+        scope: str = "",
+        allow_all_scopes: bool = False,
+    ) -> tuple[bytes, str]:
+        response = self._state_store.get_critical_guard_response(response_id)
+        if not response:
+            raise PortalError("重保检查原表不存在。")
+        if not allow_all_scopes:
+            try:
+                scope_code = normalize_critical_guard_scope(scope)
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+            if response.get("scope") != scope_code:
+                raise PortalError("无权下载其他楼栋的重保检查原表。")
+        path = Path(str(response.get("generated_workbook_path") or ""))
+        if not path.exists() or not path.is_file():
+            raise PortalError("重保检查原表尚未生成或已失效。")
+        file_name = f"{response.get('scope')}楼_{response.get('sheet_type')}_已填写.xlsx"
+        return path.read_bytes(), file_name
+
+    def download_critical_guard_sheet_images(
+        self,
+        task_id: str,
+        *,
+        sheet_type: str,
+    ) -> tuple[bytes, str, int]:
+        try:
+            normalized_sheet = normalize_critical_guard_sheet(sheet_type)
+        except CriticalGuardError as exc:
+            raise PortalError(str(exc)) from exc
+        task = self._state_store.get_critical_guard_task(
+            task_id,
+            include_all_responses=True,
+        )
+        if not task:
+            raise PortalError("重保任务不存在。")
+        images = [
+            item
+            for item in task.get("responses") or []
+            if item.get("sheet_type") == normalized_sheet
+            and str(item.get("generated_image_path") or "").strip()
+            and Path(str(item.get("generated_image_path") or "")).is_file()
+        ]
+        if not images:
+            raise PortalError("该类型尚无可下载的检查图片。")
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for item in images:
+                scope_code = str(item.get("scope") or "")
+                image_path = Path(str(item.get("generated_image_path") or ""))
+                archive.writestr(
+                    f"{safe_critical_guard_path_part(str(task.get('name') or '重保任务'))}_{normalized_sheet}_{scope_code}楼.png",
+                    image_path.read_bytes(),
+                )
+        file_name = (
+            f"{safe_critical_guard_path_part(str(task.get('name') or '重保任务'))}_"
+            f"{safe_critical_guard_path_part(normalized_sheet)}_图片.zip"
+        )
+        return stream.getvalue(), file_name, len(images)

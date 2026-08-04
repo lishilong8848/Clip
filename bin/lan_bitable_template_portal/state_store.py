@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 31
+    SCHEMA_VERSION = 36
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     _live_portal_restore_last: dict[str, float] = {}
@@ -126,6 +126,11 @@ class LanPortalStateStore:
         "water_consumption_images",
         "water_consumption_operations",
         "water_consumption_record_edits",
+        "critical_guard_tasks",
+        "critical_guard_responses",
+        "critical_guard_signature_sets",
+        "critical_guard_memories",
+        "critical_guard_scope_files",
         "repair_project_status_index",
         "repair_management_change_log",
         "business_operation_audits",
@@ -177,6 +182,12 @@ class LanPortalStateStore:
         "idx_water_consumption_images_record",
         "idx_water_consumption_operations_updated",
         "idx_water_consumption_record_edits_record",
+        "idx_critical_guard_tasks_status",
+        "idx_critical_guard_responses_task_scope",
+        "idx_critical_guard_responses_status",
+        "idx_critical_guard_signature_sets_updated",
+        "idx_critical_guard_memories_updated",
+        "idx_critical_guard_scope_files_latest",
         "idx_repair_project_status_state",
         "idx_repair_project_status_completed",
         "idx_repair_management_change_created",
@@ -1665,6 +1676,241 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_water_consumption_record_edits_record
             ON water_consumption_record_edits(record_id, status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_tasks (
+                task_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE,
+                task_name TEXT NOT NULL,
+                memory_key TEXT NOT NULL,
+                sheet_types_json TEXT NOT NULL,
+                target_scopes_json TEXT NOT NULL,
+                template_version TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_by_open_id TEXT NOT NULL DEFAULT '',
+                created_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_tasks_status
+            ON critical_guard_tasks(status, created_at DESC, task_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_responses (
+                response_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                scope_code TEXT NOT NULL,
+                sheet_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                check_date TEXT NOT NULL DEFAULT '',
+                cells_json TEXT NOT NULL DEFAULT '{}',
+                signatures_json TEXT NOT NULL DEFAULT '[]',
+                signature_source TEXT NOT NULL DEFAULT '',
+                signature_record_id TEXT NOT NULL DEFAULT '',
+                signature_name TEXT NOT NULL DEFAULT '',
+                generated_image_path TEXT NOT NULL DEFAULT '',
+                generated_image_sha256 TEXT NOT NULL DEFAULT '',
+                generated_image_size INTEGER NOT NULL DEFAULT 0,
+                generated_image_width INTEGER NOT NULL DEFAULT 0,
+                generated_image_height INTEGER NOT NULL DEFAULT 0,
+                generated_workbook_path TEXT NOT NULL DEFAULT '',
+                generated_workbook_sha256 TEXT NOT NULL DEFAULT '',
+                generated_workbook_size INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
+                submitted_by_open_id TEXT NOT NULL DEFAULT '',
+                submitted_by_name TEXT NOT NULL DEFAULT '',
+                submitted_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(task_id, scope_code, sheet_type)
+            )
+            """
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_responses",
+            "signatures_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_responses",
+            "signature_source",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_responses",
+            "generated_workbook_path",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_responses",
+            "generated_workbook_sha256",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_responses",
+            "generated_workbook_size",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        conn.execute(
+            """
+            UPDATE critical_guard_responses
+            SET signature_source='staff'
+            WHERE signature_source='' AND signature_record_id!=''
+            """
+        )
+        legacy_signature_rows = conn.execute(
+            """
+            SELECT response_id, signature_source, signature_record_id, signature_name
+            FROM critical_guard_responses
+            WHERE signature_record_id!='' AND (signatures_json='' OR signatures_json='[]')
+            """
+        ).fetchall()
+        for legacy_row in legacy_signature_rows:
+            conn.execute(
+                "UPDATE critical_guard_responses SET signatures_json=? WHERE response_id=?",
+                (
+                    self._json(
+                        [
+                            {
+                                "source": self._text(legacy_row["signature_source"]) or "staff",
+                                "record_id": self._text(legacy_row["signature_record_id"]),
+                                "name": self._text(legacy_row["signature_name"]),
+                                "role": "inspector",
+                            }
+                        ]
+                    ),
+                    self._text(legacy_row["response_id"]),
+                ),
+            )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_responses_task_scope
+            ON critical_guard_responses(task_id, scope_code, sheet_type)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_responses_status
+            ON critical_guard_responses(status, updated_at DESC, response_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_signature_sets (
+                task_id TEXT NOT NULL,
+                scope_code TEXT NOT NULL,
+                signatures_json TEXT NOT NULL DEFAULT '[]',
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_by_open_id TEXT NOT NULL DEFAULT '',
+                updated_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(task_id, scope_code)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_signature_sets_updated
+            ON critical_guard_signature_sets(updated_at DESC, task_id, scope_code)
+            """
+        )
+        shared_signature_rows = conn.execute(
+            """
+            SELECT task_id, scope_code, signatures_json, updated_at
+            FROM critical_guard_responses
+            WHERE signatures_json NOT IN ('', '[]')
+            ORDER BY updated_at DESC, response_id DESC
+            """
+        ).fetchall()
+        migrated_signature_keys: set[tuple[str, str]] = set()
+        for shared_row in shared_signature_rows:
+            signature_key = (
+                self._text(shared_row["task_id"]),
+                self._text(shared_row["scope_code"]).upper(),
+            )
+            if not all(signature_key) or signature_key in migrated_signature_keys:
+                continue
+            migrated_signature_keys.add(signature_key)
+            migrated_at = float(shared_row["updated_at"] or time.time())
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO critical_guard_signature_sets(
+                    task_id, scope_code, signatures_json, version,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    signature_key[0],
+                    signature_key[1],
+                    self._text(shared_row["signatures_json"]) or "[]",
+                    migrated_at,
+                    migrated_at,
+                ),
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_memories (
+                memory_key TEXT NOT NULL,
+                scope_code TEXT NOT NULL,
+                sheet_type TEXT NOT NULL,
+                template_version TEXT NOT NULL DEFAULT '',
+                cells_json TEXT NOT NULL DEFAULT '{}',
+                updated_by_open_id TEXT NOT NULL DEFAULT '',
+                updated_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(memory_key, scope_code, sheet_type)
+            )
+            """
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_memories",
+            "template_version",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_memories_updated
+            ON critical_guard_memories(updated_at DESC, memory_key)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_scope_files (
+                file_id TEXT PRIMARY KEY,
+                scope_code TEXT NOT NULL,
+                sheet_type TEXT NOT NULL,
+                original_file_name TEXT NOT NULL,
+                local_file_path TEXT NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                uploaded_by_open_id TEXT NOT NULL DEFAULT '',
+                uploaded_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(scope_code, sheet_type, file_sha256)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_scope_files_latest
+            ON critical_guard_scope_files(scope_code, sheet_type, updated_at DESC, file_id)
             """
         )
         conn.execute(
@@ -9847,7 +10093,7 @@ class LanPortalStateStore:
         role = self._text(role)
         signer_record_id = self._text(signer_record_id)
         signer_open_id = self._text(signer_open_id)
-        if role not in {"implementer", "auditor"}:
+        if role not in {"implementer", "auditor", "inspector"}:
             raise ValueError("签名确认角色无效。")
         if not signer_record_id or not signer_open_id:
             raise ValueError("签名确认缺少人员信息。")
@@ -10084,7 +10330,7 @@ class LanPortalStateStore:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         role = self._text(role)
-        if role not in {"implementer", "auditor"}:
+        if role not in {"implementer", "auditor", "inspector"}:
             raise ValueError("临时签名角色无效。")
         display_name = self._text(display_name) or "临时人员"
         ttl_seconds = max(300, min(int(ttl_seconds or 3600), 24 * 3600))
@@ -10142,6 +10388,7 @@ class LanPortalStateStore:
             "recipient_open_ids": recipients,
             "status": "pending",
             "expires_at": expires_at,
+            "payload": dict(payload or {}),
             "created_at": now,
         }
 
@@ -10203,6 +10450,7 @@ class LanPortalStateStore:
         *,
         temp_id: str,
         ttl_seconds: int = 3600,
+        recipient_open_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         temp_id = self._text(temp_id)
         if not temp_id:
@@ -10212,6 +10460,11 @@ class LanPortalStateStore:
         token_hash = self._signature_link_token_hash(token)
         now = time.time()
         expires_at = now + ttl_seconds
+        recipients = [
+            self._text(item)
+            for item in (recipient_open_ids or [])
+            if self._text(item)
+        ]
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
@@ -10226,10 +10479,21 @@ class LanPortalStateStore:
                     UPDATE mop_temporary_signature_sessions
                     SET token_hash = ?,
                         expires_at = ?,
+                        recipient_open_ids_json = CASE
+                            WHEN ? != '[]' THEN ?
+                            ELSE recipient_open_ids_json
+                        END,
                         updated_at = ?
                     WHERE temp_id = ?
                     """,
-                    (token_hash, expires_at, now, temp_id),
+                    (
+                        token_hash,
+                        expires_at,
+                        self._json(recipients),
+                        self._json(recipients),
+                        now,
+                        temp_id,
+                    ),
                 )
                 conn.commit()
         session = self.get_mop_temporary_signature_session(temp_id=temp_id) or {}
@@ -13500,3 +13764,718 @@ class LanPortalStateStore:
                     removed = len(ids)
                 conn.commit()
         return {"removed": removed, "source": source or "all"}
+
+    @classmethod
+    def _critical_guard_task_from_row(cls, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return {
+            "task_id": cls._text(row["task_id"]),
+            "operation_id": cls._text(row["operation_id"]),
+            "name": cls._text(row["task_name"]),
+            "memory_key": cls._text(row["memory_key"]),
+            "sheet_types": cls._loads(str(row["sheet_types_json"] or ""), []),
+            "target_scopes": cls._loads(str(row["target_scopes_json"] or ""), []),
+            "template_version": cls._text(row["template_version"]),
+            "status": cls._text(row["status"]),
+            "created_by_open_id": cls._text(row["created_by_open_id"]),
+            "created_by_name": cls._text(row["created_by_name"]),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    @classmethod
+    def _critical_guard_response_from_row(
+        cls, row: sqlite3.Row | dict[str, Any]
+    ) -> dict[str, Any]:
+        row_keys = set(row.keys())
+        shared_signatures_json = (
+            str(row["shared_signatures_json"] or "")
+            if "shared_signatures_json" in row_keys
+            else ""
+        )
+        signatures = cls._loads(
+            shared_signatures_json or str(row["signatures_json"] or ""), []
+        )
+        if not isinstance(signatures, list):
+            signatures = []
+        if not signatures and cls._text(row["signature_record_id"]):
+            signatures = [
+                {
+                    "source": cls._text(row["signature_source"]) or "staff",
+                    "record_id": cls._text(row["signature_record_id"]),
+                    "name": cls._text(row["signature_name"]),
+                    "role": "inspector",
+                }
+            ]
+        return {
+            "response_id": cls._text(row["response_id"]),
+            "task_id": cls._text(row["task_id"]),
+            "scope": cls._text(row["scope_code"]),
+            "sheet_type": cls._text(row["sheet_type"]),
+            "status": cls._text(row["status"]),
+            "check_date": cls._text(row["check_date"]),
+            "cells": cls._loads(str(row["cells_json"] or ""), {}),
+            "signatures": signatures,
+            "signature_source": cls._text(row["signature_source"]),
+            "signature_record_id": cls._text(row["signature_record_id"]),
+            "signature_name": cls._text(row["signature_name"]),
+            "generated_image_path": cls._text(row["generated_image_path"]),
+            "generated_image_sha256": cls._text(row["generated_image_sha256"]),
+            "generated_image_size": int(row["generated_image_size"] or 0),
+            "generated_image_width": int(row["generated_image_width"] or 0),
+            "generated_image_height": int(row["generated_image_height"] or 0),
+            "generated_workbook_path": cls._text(row["generated_workbook_path"]),
+            "generated_workbook_sha256": cls._text(row["generated_workbook_sha256"]),
+            "generated_workbook_size": int(row["generated_workbook_size"] or 0),
+            "signature_set_version": (
+                int(row["signature_set_version"] or 0)
+                if "signature_set_version" in row_keys
+                else 0
+            ),
+            "version": int(row["version"] or 1),
+            "submitted_by_open_id": cls._text(row["submitted_by_open_id"]),
+            "submitted_by_name": cls._text(row["submitted_by_name"]),
+            "submitted_at": float(row["submitted_at"] or 0),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    @classmethod
+    def _critical_guard_scope_file_from_row(
+        cls, row: sqlite3.Row | dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "file_id": cls._text(row["file_id"]),
+            "scope": cls._text(row["scope_code"]).upper(),
+            "sheet_type": cls._text(row["sheet_type"]),
+            "original_file_name": cls._text(row["original_file_name"]),
+            "local_file_path": cls._text(row["local_file_path"]),
+            "sha256": cls._text(row["file_sha256"]),
+            "size": int(row["file_size"] or 0),
+            "uploaded_by_open_id": cls._text(row["uploaded_by_open_id"]),
+            "uploaded_by_name": cls._text(row["uploaded_by_name"]),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def put_critical_guard_scope_file(
+        self,
+        *,
+        file_id: str,
+        scope: str,
+        sheet_type: str,
+        original_file_name: str,
+        local_file_path: str,
+        sha256: str,
+        size: int,
+        uploaded_by_open_id: str,
+        uploaded_by_name: str,
+    ) -> dict[str, Any]:
+        normalized_id = self._text(file_id)
+        scope_code = self._text(scope).upper()
+        sheet = self._text(sheet_type)
+        digest = self._text(sha256).lower()
+        path = self._text(local_file_path)
+        if not normalized_id or not scope_code or not sheet or not digest or not path:
+            raise ValueError("重保楼栋清单文件信息不完整。")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    """
+                    SELECT * FROM critical_guard_scope_files
+                    WHERE scope_code=? AND sheet_type=? AND file_sha256=?
+                    """,
+                    (scope_code, sheet, digest),
+                ).fetchone()
+                if existing:
+                    conn.rollback()
+                    result = self._critical_guard_scope_file_from_row(existing) or {}
+                    result["created"] = False
+                    return result
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_scope_files(
+                        file_id, scope_code, sheet_type, original_file_name,
+                        local_file_path, file_sha256, file_size,
+                        uploaded_by_open_id, uploaded_by_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_id,
+                        scope_code,
+                        sheet,
+                        self._text(original_file_name),
+                        path,
+                        digest,
+                        max(0, int(size or 0)),
+                        self._text(uploaded_by_open_id),
+                        self._text(uploaded_by_name),
+                        now,
+                        now,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_scope_files WHERE file_id=?",
+                    (normalized_id,),
+                ).fetchone()
+                conn.commit()
+        result = self._critical_guard_scope_file_from_row(row) or {}
+        result["created"] = True
+        return result
+
+    def get_critical_guard_scope_file(self, file_id: str) -> dict[str, Any] | None:
+        normalized = self._text(file_id)
+        if not normalized or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_scope_files WHERE file_id=?",
+                    (normalized,),
+                ).fetchone()
+        return self._critical_guard_scope_file_from_row(row)
+
+    def get_latest_critical_guard_scope_file(
+        self, *, scope: str, sheet_type: str
+    ) -> dict[str, Any] | None:
+        scope_code = self._text(scope).upper()
+        sheet = self._text(sheet_type)
+        if not scope_code or not sheet or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT * FROM critical_guard_scope_files
+                    WHERE scope_code=? AND sheet_type=?
+                    ORDER BY updated_at DESC, file_id DESC
+                    LIMIT 1
+                    """,
+                    (scope_code, sheet),
+                ).fetchone()
+        return self._critical_guard_scope_file_from_row(row)
+
+    def get_critical_guard_memory(
+        self,
+        *,
+        memory_key: str,
+        scope: str,
+        sheet_type: str,
+        template_version: str = "",
+    ) -> dict[str, Any] | None:
+        key = self._text(memory_key)
+        scope_code = self._text(scope).upper()
+        sheet = self._text(sheet_type)
+        version = self._text(template_version)
+        if not key or not scope_code or not sheet or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if version:
+                    row = conn.execute(
+                        """
+                        SELECT * FROM critical_guard_memories
+                        WHERE memory_key=? AND scope_code=? AND sheet_type=?
+                          AND template_version=?
+                        """,
+                        (key, scope_code, sheet, version),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT * FROM critical_guard_memories
+                        WHERE memory_key=? AND scope_code=? AND sheet_type=?
+                        """,
+                        (key, scope_code, sheet),
+                    ).fetchone()
+        if not row:
+            return None
+        return {
+            "memory_key": key,
+            "scope": scope_code,
+            "sheet_type": sheet,
+            "template_version": self._text(row["template_version"]),
+            "cells": self._loads(str(row["cells_json"] or ""), {}),
+            "updated_by_open_id": self._text(row["updated_by_open_id"]),
+            "updated_by_name": self._text(row["updated_by_name"]),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def create_critical_guard_task(
+        self,
+        *,
+        task_id: str,
+        operation_id: str,
+        task_name: str,
+        memory_key: str,
+        sheet_types: list[str],
+        target_scopes: list[str],
+        template_version: str,
+        created_by_open_id: str,
+        created_by_name: str,
+        responses: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_operation_id = self._text(operation_id)
+        if not normalized_operation_id:
+            raise ValueError("critical guard operation_id is required")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    "SELECT * FROM critical_guard_tasks WHERE operation_id=?",
+                    (normalized_operation_id,),
+                ).fetchone()
+                if existing:
+                    task = self._critical_guard_task_from_row(existing)
+                    conn.rollback()
+                    task["created"] = False
+                    return task
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_tasks(
+                        task_id, operation_id, task_name, memory_key,
+                        sheet_types_json, target_scopes_json, template_version,
+                        status, created_by_open_id, created_by_name,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                    """,
+                    (
+                        self._text(task_id),
+                        normalized_operation_id,
+                        self._text(task_name),
+                        self._text(memory_key),
+                        self._json(list(sheet_types or [])),
+                        self._json(list(target_scopes or [])),
+                        self._text(template_version),
+                        self._text(created_by_open_id),
+                        self._text(created_by_name),
+                        now,
+                        now,
+                    ),
+                )
+                for item in responses:
+                    cells = item.get("cells") if isinstance(item.get("cells"), dict) else {}
+                    conn.execute(
+                        """
+                        INSERT INTO critical_guard_responses(
+                            response_id, task_id, scope_code, sheet_type,
+                            status, check_date, cells_json, version,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, 1, ?, ?)
+                        """,
+                        (
+                            self._text(item.get("response_id")),
+                            self._text(task_id),
+                            self._text(item.get("scope")).upper(),
+                            self._text(item.get("sheet_type")),
+                            self._text(cells.get("check_date")),
+                            self._json(cells),
+                            now,
+                            now,
+                        ),
+                    )
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_tasks WHERE task_id=?",
+                    (self._text(task_id),),
+                ).fetchone()
+                conn.commit()
+        task = self._critical_guard_task_from_row(row)
+        task["created"] = True
+        return task
+
+    def list_critical_guard_tasks(
+        self, *, scope: str = "", status: str = "active"
+    ) -> list[dict[str, Any]]:
+        scope_code = self._text(scope).upper()
+        normalized_status = self._text(status)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                params: list[Any] = []
+                where = ""
+                if normalized_status and normalized_status != "all":
+                    where = "WHERE status=?"
+                    params.append(normalized_status)
+                task_rows = conn.execute(
+                    f"SELECT * FROM critical_guard_tasks {where} ORDER BY created_at DESC, task_id DESC",
+                    tuple(params),
+                ).fetchall()
+                response_rows = conn.execute(
+                    "SELECT * FROM critical_guard_responses ORDER BY updated_at DESC"
+                ).fetchall()
+        responses_by_task: dict[str, list[dict[str, Any]]] = {}
+        for row in response_rows:
+            response = self._critical_guard_response_from_row(row)
+            responses_by_task.setdefault(response["task_id"], []).append(response)
+        tasks: list[dict[str, Any]] = []
+        for row in task_rows:
+            task = self._critical_guard_task_from_row(row)
+            if scope_code and scope_code not in set(task.get("target_scopes") or []):
+                continue
+            responses = responses_by_task.get(task["task_id"], [])
+            relevant = [item for item in responses if not scope_code or item["scope"] == scope_code]
+            task["response_count"] = len(relevant)
+            task["submitted_count"] = sum(item.get("status") == "submitted" for item in relevant)
+            task["draft_count"] = sum(item.get("status") == "draft" for item in relevant)
+            task["pending_count"] = sum(item.get("status") == "pending" for item in relevant)
+            task["complete"] = bool(relevant) and all(item.get("status") == "submitted" for item in relevant)
+            tasks.append(task)
+        return tasks
+
+    def get_critical_guard_task(
+        self,
+        task_id: str,
+        *,
+        scope: str = "",
+        include_all_responses: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_task_id = self._text(task_id)
+        scope_code = self._text(scope).upper()
+        if not normalized_task_id:
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                task_row = conn.execute(
+                    "SELECT * FROM critical_guard_tasks WHERE task_id=?",
+                    (normalized_task_id,),
+                ).fetchone()
+                if not task_row:
+                    return None
+                if include_all_responses:
+                    rows = conn.execute(
+                        """
+                        SELECT r.*,
+                               s.signatures_json AS shared_signatures_json,
+                               s.version AS signature_set_version
+                        FROM critical_guard_responses r
+                        LEFT JOIN critical_guard_signature_sets s
+                          ON s.task_id=r.task_id AND s.scope_code=r.scope_code
+                        WHERE r.task_id=?
+                        ORDER BY r.sheet_type, r.scope_code
+                        """,
+                        (normalized_task_id,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT r.*,
+                               s.signatures_json AS shared_signatures_json,
+                               s.version AS signature_set_version
+                        FROM critical_guard_responses r
+                        LEFT JOIN critical_guard_signature_sets s
+                          ON s.task_id=r.task_id AND s.scope_code=r.scope_code
+                        WHERE r.task_id=? AND r.scope_code=?
+                        ORDER BY r.sheet_type
+                        """,
+                        (normalized_task_id, scope_code),
+                    ).fetchall()
+        task = self._critical_guard_task_from_row(task_row)
+        task["responses"] = [self._critical_guard_response_from_row(row) for row in rows]
+        return task
+
+    def get_critical_guard_response(self, response_id: str) -> dict[str, Any] | None:
+        normalized = self._text(response_id)
+        if not normalized:
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT r.*,
+                           s.signatures_json AS shared_signatures_json,
+                           s.version AS signature_set_version
+                    FROM critical_guard_responses r
+                    LEFT JOIN critical_guard_signature_sets s
+                      ON s.task_id=r.task_id AND s.scope_code=r.scope_code
+                    WHERE r.response_id=?
+                    """,
+                    (normalized,),
+                ).fetchone()
+        return self._critical_guard_response_from_row(row) if row else None
+
+    def update_critical_guard_response(
+        self,
+        response_id: str,
+        *,
+        cells: dict[str, Any],
+        signatures: list[dict[str, Any]],
+        signature_source: str,
+        signature_record_id: str,
+        signature_name: str,
+        generated: bool,
+        generated_image: dict[str, Any] | None,
+        share_signatures: bool = False,
+        expected_version: int | str | None,
+        actor_open_id: str,
+        actor_name: str,
+    ) -> dict[str, Any]:
+        normalized = self._text(response_id)
+        if not normalized:
+            raise ValueError("critical guard response_id is required")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT r.*, t.memory_key,
+                           t.template_version AS task_template_version
+                    FROM critical_guard_responses r
+                    JOIN critical_guard_tasks t ON t.task_id=r.task_id
+                    WHERE r.response_id=?
+                    """,
+                    (normalized,),
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    raise KeyError(f"critical guard response not found: {normalized}")
+                current_version = int(row["version"] or 1)
+                if expected_version not in (None, ""):
+                    try:
+                        requested_version = int(expected_version)
+                    except (TypeError, ValueError) as exc:
+                        conn.rollback()
+                        raise ValueError("重保填报版本无效，请重新读取。") from exc
+                    if requested_version != current_version:
+                        conn.rollback()
+                        raise ValueError("该重保填报已被其他用户修改，请重新读取后再保存。")
+                image = generated_image if isinstance(generated_image, dict) else {}
+                normalized_signatures = [
+                    dict(item)
+                    for item in (signatures or [])[:50]
+                    if isinstance(item, dict)
+                ]
+                first_signature = normalized_signatures[0] if normalized_signatures else {}
+                summary_source = self._text(
+                    first_signature.get("source") or signature_source
+                )
+                summary_record_id = self._text(
+                    first_signature.get("record_id")
+                    or first_signature.get("temp_id")
+                    or signature_record_id
+                )
+                summary_name = self._text(
+                    first_signature.get("name")
+                    or first_signature.get("display_name")
+                    or signature_name
+                )
+                signature_set_changed = False
+                signature_set_version = 0
+                invalidated_response_ids: list[str] = []
+                invalidated_response_versions: dict[str, int] = {}
+                stale_artifact_paths: list[str] = []
+                if share_signatures:
+                    shared_row = conn.execute(
+                        """
+                        SELECT signatures_json, version
+                        FROM critical_guard_signature_sets
+                        WHERE task_id=? AND scope_code=?
+                        """,
+                        (self._text(row["task_id"]), self._text(row["scope_code"])),
+                    ).fetchone()
+                    previous_signatures = self._loads(
+                        str(
+                            (shared_row["signatures_json"] if shared_row else row["signatures_json"])
+                            or ""
+                        ),
+                        [],
+                    )
+                    if not isinstance(previous_signatures, list):
+                        previous_signatures = []
+                    signature_set_changed = previous_signatures != normalized_signatures
+                    signature_set_version = (
+                        int(shared_row["version"] or 1) + (1 if signature_set_changed else 0)
+                        if shared_row
+                        else 1
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO critical_guard_signature_sets(
+                            task_id, scope_code, signatures_json, version,
+                            updated_by_open_id, updated_by_name, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(task_id, scope_code) DO UPDATE SET
+                            signatures_json=excluded.signatures_json,
+                            version=excluded.version,
+                            updated_by_open_id=excluded.updated_by_open_id,
+                            updated_by_name=excluded.updated_by_name,
+                            updated_at=excluded.updated_at
+                        """,
+                        (
+                            self._text(row["task_id"]),
+                            self._text(row["scope_code"]),
+                            self._json(normalized_signatures),
+                            signature_set_version,
+                            self._text(actor_open_id),
+                            self._text(actor_name),
+                            now,
+                            now,
+                        ),
+                    )
+                    check_sheet_names = ("设备安全", "环境安全", "客户重保", "灾害专项")
+                    placeholders = ",".join("?" for _ in check_sheet_names)
+                    conn.execute(
+                        f"""
+                        UPDATE critical_guard_responses
+                        SET signatures_json=?, signature_source=?,
+                            signature_record_id=?, signature_name=?
+                        WHERE task_id=? AND scope_code=?
+                          AND sheet_type IN ({placeholders})
+                        """,
+                        (
+                            self._json(normalized_signatures),
+                            summary_source,
+                            summary_record_id,
+                            summary_name,
+                            self._text(row["task_id"]),
+                            self._text(row["scope_code"]),
+                            *check_sheet_names,
+                        ),
+                    )
+                    if signature_set_changed:
+                        stale_rows = conn.execute(
+                            f"""
+                            SELECT response_id, version,
+                                   generated_image_path, generated_workbook_path
+                            FROM critical_guard_responses
+                            WHERE task_id=? AND scope_code=? AND response_id!=?
+                              AND sheet_type IN ({placeholders})
+                            """,
+                            (
+                                self._text(row["task_id"]),
+                                self._text(row["scope_code"]),
+                                normalized,
+                                *check_sheet_names,
+                            ),
+                        ).fetchall()
+                        for stale_row in stale_rows:
+                            invalidated_response_ids.append(
+                                self._text(stale_row["response_id"])
+                            )
+                            invalidated_response_versions[
+                                self._text(stale_row["response_id"])
+                            ] = int(stale_row["version"] or 1) + 1
+                            stale_artifact_paths.extend(
+                                self._text(stale_row[key])
+                                for key in ("generated_image_path", "generated_workbook_path")
+                                if self._text(stale_row[key])
+                            )
+                        conn.execute(
+                            f"""
+                            UPDATE critical_guard_responses
+                            SET status=CASE WHEN status='pending' THEN 'pending' ELSE 'draft' END,
+                                generated_image_path='', generated_image_sha256='',
+                                generated_image_size=0, generated_image_width=0,
+                                generated_image_height=0,
+                                generated_workbook_path='', generated_workbook_sha256='',
+                                generated_workbook_size=0, submitted_at=NULL,
+                                version=version + 1,
+                                updated_at=?
+                            WHERE task_id=? AND scope_code=? AND response_id!=?
+                              AND sheet_type IN ({placeholders})
+                            """,
+                            (
+                                now,
+                                self._text(row["task_id"]),
+                                self._text(row["scope_code"]),
+                                normalized,
+                                *check_sheet_names,
+                            ),
+                        )
+                status = "submitted" if generated else "draft"
+                submitted_at = now if generated else None
+                conn.execute(
+                    """
+                    UPDATE critical_guard_responses
+                    SET status=?, check_date=?, cells_json=?,
+                        signatures_json=?, signature_source=?, signature_record_id=?, signature_name=?,
+                        generated_image_path=?, generated_image_sha256=?,
+                        generated_image_size=?, generated_image_width=?, generated_image_height=?,
+                        generated_workbook_path=?, generated_workbook_sha256=?,
+                        generated_workbook_size=?,
+                        version=?, submitted_by_open_id=?, submitted_by_name=?,
+                        submitted_at=?, updated_at=?
+                    WHERE response_id=?
+                    """,
+                    (
+                        status,
+                        self._text(cells.get("check_date")),
+                        self._json(cells),
+                        self._json(normalized_signatures),
+                        summary_source,
+                        summary_record_id,
+                        summary_name,
+                        self._text(image.get("path")) if generated else "",
+                        self._text(image.get("sha256")) if generated else "",
+                        int(image.get("size") or 0) if generated else 0,
+                        int(image.get("width") or 0) if generated else 0,
+                        int(image.get("height") or 0) if generated else 0,
+                        self._text(image.get("workbook_path")) if generated else "",
+                        self._text(image.get("workbook_sha256")) if generated else "",
+                        int(image.get("workbook_size") or 0) if generated else 0,
+                        current_version + 1,
+                        self._text(actor_open_id),
+                        self._text(actor_name),
+                        submitted_at,
+                        now,
+                        normalized,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_memories(
+                        memory_key, scope_code, sheet_type, template_version, cells_json,
+                        updated_by_open_id, updated_by_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(memory_key, scope_code, sheet_type) DO UPDATE SET
+                        template_version=excluded.template_version,
+                        cells_json=excluded.cells_json,
+                        updated_by_open_id=excluded.updated_by_open_id,
+                        updated_by_name=excluded.updated_by_name,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        self._text(row["memory_key"]),
+                        self._text(row["scope_code"]),
+                        self._text(row["sheet_type"]),
+                        self._text(row["task_template_version"]),
+                        self._json(cells),
+                        self._text(actor_open_id),
+                        self._text(actor_name),
+                        now,
+                        now,
+                    ),
+                )
+                updated = conn.execute(
+                    """
+                    SELECT r.*,
+                           s.signatures_json AS shared_signatures_json,
+                           s.version AS signature_set_version
+                    FROM critical_guard_responses r
+                    LEFT JOIN critical_guard_signature_sets s
+                      ON s.task_id=r.task_id AND s.scope_code=r.scope_code
+                    WHERE r.response_id=?
+                    """,
+                    (normalized,),
+                ).fetchone()
+                conn.commit()
+        result = self._critical_guard_response_from_row(updated)
+        result["signature_set_changed"] = signature_set_changed
+        result["signature_set_version"] = signature_set_version
+        result["invalidated_response_ids"] = invalidated_response_ids
+        result["invalidated_response_versions"] = invalidated_response_versions
+        result["_stale_artifact_paths"] = stale_artifact_paths
+        return result

@@ -270,6 +270,15 @@ def main():
                     print(f"[ClipFlow] 剪贴板后端地址刷新失败: {exc}")
             window.refresh_lan_template_portal_link()
             print(f"[ClipFlow] 局域网模板门户已随主程序启动: {controller.get_url()}")
+            lan_urls = (
+                list(controller.get_lan_urls() or [])
+                if hasattr(controller, "get_lan_urls")
+                else []
+            )
+            if lan_urls:
+                print(f"[ClipFlow] 同一局域网访问地址: {', '.join(lan_urls)}")
+            else:
+                print("[ClipFlow] 未识别到可用的本机局域网 IPv4 地址。")
         except Exception as exc:
             print(f"[ClipFlow] 局域网模板门户回调绑定失败: {exc}")
 

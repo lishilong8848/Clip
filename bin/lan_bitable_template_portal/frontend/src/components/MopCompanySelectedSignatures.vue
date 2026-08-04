@@ -52,13 +52,13 @@
       >
         <button type="button" class="signature-preview" @click="emit('activate', person)">
           <img
-            v-if="personHasStoredSignature(person)"
+            v-if="personHasStoredSignature(person) && showSignaturePreview !== false"
             :src="person.signature_preview_url"
             alt="人员签名预览"
             loading="lazy"
             @error="emit('image-error', person)"
           />
-          <span v-else>未签名</span>
+          <span v-else>{{ personHasStoredSignature(person) ? "已签名" : "未签名" }}</span>
         </button>
         <button type="button" class="person-summary" @click="emit('activate', person)">
           <strong>{{ displayName(person) }}</strong>
@@ -95,7 +95,7 @@
 import { computed, ref, watch } from "vue";
 
 type Dict = Record<string, any>;
-type SignatureRole = "implementer" | "auditor";
+type SignatureRole = "implementer" | "auditor" | "inspector";
 
 const props = defineProps<{
   role: SignatureRole;
@@ -114,6 +114,8 @@ const props = defineProps<{
   bulkLinkSending: boolean;
   confirmSending: boolean;
   confirmableCount: number;
+  readyTargetLabel?: string;
+  showSignaturePreview?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -166,14 +168,18 @@ watch(() => props.role, () => {
 });
 
 function personHasStoredSignature(person: Dict | null | undefined): boolean {
-  return Boolean(person?.has_signature && String(person?.signature_preview_url || "").trim());
+  if (!person?.has_signature) return false;
+  return props.showSignaturePreview === false
+    || Boolean(String(person?.signature_preview_url || "").trim());
 }
 
 function personStatus(person: Dict): string {
   const recordId = String(person?.record_id || "");
   if (props.linkErrorById[recordId]) return `发送失败：${props.linkErrorById[recordId]}`;
   if (person?.usage_rejected) return "已拒绝本次使用";
-  if (props.hasUsableSignature(person)) return person?.usage_confirmed ? "已确认，可写入MOP" : "当前登录人签名，可直接使用";
+  if (props.hasUsableSignature(person)) return person?.usage_confirmed
+    ? `已确认，可写入${props.readyTargetLabel || "MOP"}`
+    : "当前登录人签名，可直接使用";
   if (personHasStoredSignature(person)) return "已有签名，等待本人确认";
   if (props.linkSentAtById[recordId]) return `签名链接已发送 ${props.linkSentAtById[recordId]}`;
   return "尚未签名";

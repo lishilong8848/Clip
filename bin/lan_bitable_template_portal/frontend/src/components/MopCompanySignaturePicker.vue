@@ -32,13 +32,16 @@
         class="sign-person"
         :class="{
           active: selectedIds.includes(String(person.record_id || '')),
+          temporary: temporaryMappedIds.includes(String(person.record_id || '')),
           current: String(person.record_id || '') === activeRecordId
         }"
         :disabled="!person.record_id"
-        :title="person.record_id ? '选择该人员签名' : '该人员缺少记录信息，无法选择'"
+        :title="person.record_id ? temporaryMappedIds.includes(String(person.record_id || '')) ? '已对应临时/外部人员，点击查看' : '选择该人员签名' : '该人员缺少记录信息，无法选择'"
         @click="emit('select', String(person.record_id || ''))"
       >
-        <b v-if="selectedIds.includes(String(person.record_id || ''))" class="selected-corner">已选</b>
+        <b v-if="selectedIds.includes(String(person.record_id || ''))" class="selected-corner">
+          {{ temporaryMappedIds.includes(String(person.record_id || '')) ? "临时" : "已选" }}
+        </b>
         <span>{{ personInitial(person) }}</span>
         <strong>{{ person.name || "未命名人员" }}</strong>
         <small>
@@ -46,8 +49,8 @@
           <template v-if="person.building">{{ person.building }} · </template>
           {{ person.position || person.team || "签名人员" }}
         </small>
-        <em :class="{ ok: personHasUsableSignature(person) }">
-          {{ personHasUsableSignature(person) ? "已有签名" : "待签名" }}
+        <em :class="{ ok: personHasUsableSignature(person), temporary: temporaryMappedIds.includes(String(person.record_id || '')) }">
+          {{ temporaryMappedIds.includes(String(person.record_id || '')) ? "临时/外部" : personHasUsableSignature(person) ? "已有签名" : "待签名" }}
         </em>
       </button>
       <div v-if="!loading && !people.length" class="empty-box compact">
@@ -68,10 +71,12 @@ withDefaults(defineProps<{
   statusText: string;
   people: Dict[];
   selectedIds: string[];
+  temporaryMappedIds?: string[];
   activeRecordId?: string;
   compact?: boolean;
 }>(), {
   activeRecordId: "",
+  temporaryMappedIds: () => [],
   compact: false,
 });
 
@@ -203,6 +208,25 @@ function personHasUsableSignature(person: Dict | null | undefined): boolean {
 .sign-person.active {
   border-color: #1e63ff;
   box-shadow: 0 8px 18px rgba(30, 99, 255, 0.12);
+}
+
+.sign-person.active.temporary {
+  border-color: #f59e0b;
+  background: #fff8e8;
+  box-shadow:
+    0 10px 24px rgba(245, 158, 11, 0.16),
+    inset 4px 0 0 #f59e0b;
+}
+
+.sign-person.active.temporary .selected-corner {
+  background: #d97706;
+}
+
+.sign-person em.temporary,
+.sign-person.active em.temporary {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #b45309;
 }
 
 .sign-person.active {

@@ -157,6 +157,30 @@ class WaterConsumptionRecordRequest(APIModel):
         extra = "forbid"
 
 
+class CriticalGuardTaskRequest(APIModel):
+    operation_id: str = Field(default="", max_length=128)
+    name: str = Field(default="", max_length=160)
+    sheet_types: list[str] = Field(default_factory=list, max_length=6)
+    target_scopes: list[str] = Field(default_factory=list, max_length=5)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class CriticalGuardResponseRequest(APIModel):
+    scope: str
+    cells: dict[str, Any] = Field(default_factory=dict)
+    signatures: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
+    signature_source: str = Field(default="", max_length=32)
+    signature_record_id: str = Field(default="", max_length=128)
+    generate_image: bool = False
+    expected_version: int | str | None = None
+    operation_id: str = Field(default="", max_length=128)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""
@@ -261,6 +285,8 @@ class SignatureSendLinkRequest(APIModel):
     record_id: str = ""
     signer_name: str = ""
     scope: str = ""
+    context_type: str = Field(default="mop", max_length=32)
+    context_title: str = Field(default="", max_length=200)
     request_base_url: str = ""
 
 
@@ -269,6 +295,7 @@ class SignatureUsageConfirmationSendRequest(APIModel):
     notice_key: str = ""
     notice_title: str = ""
     mop_attachment_name: str = ""
+    context_type: str = Field(default="mop", max_length=32)
     signatures: list[dict[str, Any]] = Field(default_factory=list)
     request_base_url: str = ""
 
@@ -281,6 +308,9 @@ class TemporarySignatureSendLinkRequest(APIModel):
     specialty: str = ""
     display_name: str = ""
     role: str = "implementer"
+    context_type: str = Field(default="mop", max_length=32)
+    origin_staff_record_id: str = Field(default="", max_length=128)
+    origin_staff_open_id: str = Field(default="", max_length=128)
     recipient_open_ids: list[str] = Field(default_factory=list)
     request_base_url: str = ""
 
@@ -292,6 +322,9 @@ class TemporarySignatureCreateRequest(APIModel):
     specialty: str = ""
     display_name: str = ""
     role: str = "implementer"
+    context_type: str = Field(default="mop", max_length=32)
+    origin_staff_record_id: str = Field(default="", max_length=128)
+    origin_staff_open_id: str = Field(default="", max_length=128)
 
 
 class TemporarySignatureSaveRequest(APIModel):

@@ -178,6 +178,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "PIL": "Pillow",
 
+    "openpyxl": "openpyxl",
+
     "anyio": "anyio",
 
     "apscheduler": "APScheduler",
@@ -229,6 +231,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "cryptography",
 
     "PIL",
+
+    "openpyxl",
 
     "anyio",
 
@@ -1365,8 +1369,10 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "clipflow_backend" / "process_controller.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
+        PROJECT_ROOT / "bin" / "test_critical_guard.py",
         PROJECT_ROOT / "bin" / "test_notice_identity_boundaries.py",
         PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py",
         PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py",
@@ -1430,6 +1436,13 @@ def _run_packaging_preflight_tests() -> None:
         check=True,
     )
     log("通告 ID 边界测试通过。")
+
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_critical_guard"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    log("重保管理专项测试通过。")
 
     log("打包前自动测试完成。")
 

@@ -237,7 +237,19 @@ def send_text_to_open_ids(
     all_ok = True
     for open_id in recipients:
         ok, msg = _send_message_to_open_id(token, open_id, text)
-        results.append({"open_id": open_id, "ok": ok, "message": msg})
+        failure_kind = (
+            "bot_unavailable"
+            if not ok and "no availability" in str(msg or "").lower()
+            else ""
+        )
+        results.append(
+            {
+                "open_id": open_id,
+                "ok": ok,
+                "message": msg,
+                "failure_kind": failure_kind,
+            }
+        )
         if not ok:
             all_ok = False
 

@@ -45,6 +45,8 @@ from clipflow_backend.api_models import (
     AuthPermissionsSaveRequest,
     ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
+    CriticalGuardResponseRequest,
+    CriticalGuardTaskRequest,
     EngineerMopBindRequest,
     EngineerMopFillRequest,
     EngineerMopResetRequest,
@@ -839,6 +841,11 @@ class FastAPIPortalController:
         async def water_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
+        @app.get("/critical-guard")
+        @app.get("/critical-guard/")
+        async def critical_guard_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
         @app.get("/signature")
         @app.get("/signature/")
         async def signature_page(request: Request):
@@ -848,6 +855,13 @@ class FastAPIPortalController:
         async def assets(asset_path: str, request: Request):
             relative = Path(*str(asset_path or "").split("/"))
             return self._static_file_response(request, portal_asset_file(relative))
+
+        @app.get("/favicon.ico", include_in_schema=False)
+        async def favicon(request: Request):
+            return self._static_file_response(
+                request,
+                portal_asset_file(Path("clipflow-favicon.svg")),
+            )
 
         @app.get("/api/auth/login")
         async def auth_login(request: Request):
@@ -2371,8 +2385,13 @@ class FastAPIPortalController:
                     signature_png=str(payload.get("signature_png") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     link_token=link_token if session is None else "",
-                    operator_open_id=str((session or {}).get("open_id") or ""),
-                    operator_name=str((session or {}).get("name") or ""),
+                    operator_open_id=str(((session or {}).get("user") or {}).get("open_id") or ""),
+                    operator_name=str(
+                        ((session or {}).get("user") or {}).get("name")
+                        or ((session or {}).get("user") or {}).get("en_name")
+                        or ""
+                    ),
+                    require_operator_match=bool(session is not None),
                 )
                 if session is None:
                     await asyncio.to_thread(
@@ -2433,6 +2452,9 @@ class FastAPIPortalController:
                     notice_title=str(payload.get("notice_title") or ""),
                     specialty=str(payload.get("specialty") or ""),
                     display_name=str(payload.get("display_name") or ""),
+                    context_type=str(payload.get("context_type") or "mop"),
+                    origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
+                    origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
                     created_by=str(user.get("open_id") or ""),
                 )
                 return {"ok": True, "data": data}
@@ -2496,6 +2518,8 @@ class FastAPIPortalController:
                     record_id=str(payload.get("record_id") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     scope=scope,
+                    context_type=str(payload.get("context_type") or "mop"),
+                    context_title=str(payload.get("context_title") or ""),
                     request_base_url=str(payload.get("request_base_url") or "")
                     or self._request_base_url(request),
                     created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
@@ -2506,6 +2530,14 @@ class FastAPIPortalController:
                     [str(data.get("open_id") or "")],
                 )
                 if not ok:
+                    failure_kind = next(
+                        (
+                            str(item.get("failure_kind") or "")
+                            for item in (results or [])
+                            if str(item.get("failure_kind") or "")
+                        ),
+                        "",
+                    )
                     return JSONResponse(
                         {
                             "ok": False,
@@ -2514,6 +2546,7 @@ class FastAPIPortalController:
                                 "person": data.get("person") or {},
                                 "link_url": data.get("link_url") or "",
                                 "results": results,
+                                "failure_kind": failure_kind,
                             },
                         },
                         status_code=400,
@@ -2558,6 +2591,7 @@ class FastAPIPortalController:
                         if isinstance(item, dict)
                     ],
                     mop_attachment_name=str(payload.get("mop_attachment_name") or ""),
+                    context_type=str(payload.get("context_type") or "mop"),
                     request_base_url=str(payload.get("request_base_url") or "")
                     or self._request_base_url(request),
                     operator_open_id=str(user.get("open_id") or ""),
@@ -2579,6 +2613,7 @@ class FastAPIPortalController:
                             "open_id": open_id,
                             "ok": bool(ok and send_result.get("ok", ok)),
                             "message": str(send_result.get("message") or message or ""),
+                            "failure_kind": str(send_result.get("failure_kind") or ""),
                         }
                     )
                 failed = [item for item in results if not item.get("ok")]
@@ -2629,6 +2664,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.temporary_signature_people,
                     scope=scope,
                     query=str(request.query_params.get("q") or ""),
+                    notice_key=str(request.query_params.get("notice_key") or ""),
                     limit=int(str(request.query_params.get("limit") or "80") or 80),
                     refresh=str(request.query_params.get("refresh") or "").lower() in {"1", "true", "yes"},
                 )
@@ -2655,6 +2691,7 @@ class FastAPIPortalController:
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 temporary_id = str(payload.get("temporary_id") or "").strip()
+                recipient_open_ids = list(payload.get("recipient_open_ids") or [])
                 if temporary_id:
                     temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
                         temp_id=temporary_id,
@@ -2665,22 +2702,42 @@ class FastAPIPortalController:
                         session,
                         str(temp_session.get("scope") or scope or "ALL"),
                     )
+                    temp_payload = (
+                        temp_session.get("payload")
+                        if isinstance(temp_session.get("payload"), dict)
+                        else {}
+                    )
+                    if str(temp_payload.get("context_type") or "mop").strip().lower() == "critical_guard":
+                        current_open_id = str(user.get("open_id") or "").strip()
+                        if not current_open_id:
+                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
+                        recipient_open_ids = [current_open_id]
                     data = await asyncio.to_thread(
                         PortalRuntime.service.build_existing_temporary_signature_link_message,
                         temp_id=temporary_id,
+                        recipient_open_ids=recipient_open_ids,
                         request_base_url=str(payload.get("request_base_url") or "")
                         or self._request_base_url(request),
                     )
                 else:
+                    context_type = str(payload.get("context_type") or "mop").strip().lower()
+                    if context_type == "critical_guard":
+                        current_open_id = str(user.get("open_id") or "").strip()
+                        if not current_open_id:
+                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
+                        recipient_open_ids = [current_open_id]
                     data = await asyncio.to_thread(
                         PortalRuntime.service.build_temporary_signature_link_message,
                         scope=scope,
                         notice_key=str(payload.get("notice_key") or ""),
                         role=str(payload.get("role") or "implementer"),
-                        recipient_open_ids=list(payload.get("recipient_open_ids") or []),
+                        recipient_open_ids=recipient_open_ids,
                         notice_title=str(payload.get("notice_title") or ""),
                         specialty=str(payload.get("specialty") or ""),
                         display_name=str(payload.get("display_name") or ""),
+                        context_type=context_type,
+                        origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
+                        origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
                         request_base_url=str(payload.get("request_base_url") or "")
                         or self._request_base_url(request),
                         created_by=str(user.get("open_id") or ""),
@@ -3296,6 +3353,302 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/critical-guard/bootstrap")
+        async def critical_guard_bootstrap(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.critical_guard_bootstrap,
+                    allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
+                    is_admin=PortalRuntime.auth_manager.is_admin(session),
+                    operator_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/critical-guard/tasks")
+        async def critical_guard_tasks(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = str(request.query_params.get("scope") or "").strip()
+                include_all = str(request.query_params.get("admin") or "").strip() == "1"
+                if include_all:
+                    if not PortalRuntime.auth_manager.is_admin(session):
+                        return JSONResponse(
+                            {"ok": False, "error": "只有管理员可以查看全部重保任务。"},
+                            status_code=403,
+                        )
+                else:
+                    scope = self._authorized_scope_or_error(session, scope)
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_critical_guard_tasks,
+                    scope=scope,
+                    include_all=include_all,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/critical-guard/tasks")
+        async def critical_guard_task_create(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, CriticalGuardTaskRequest)
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.create_critical_guard_task,
+                    name=str(payload.get("name") or ""),
+                    sheet_types=list(payload.get("sheet_types") or []),
+                    target_scopes=list(payload.get("target_scopes") or []),
+                    operation_id=str(payload.get("operation_id") or ""),
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/critical-guard/tasks/{task_id}")
+        async def critical_guard_task_detail(task_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                is_admin_view = (
+                    str(request.query_params.get("admin") or "").strip() == "1"
+                    and PortalRuntime.auth_manager.is_admin(session)
+                )
+                scope = str(request.query_params.get("scope") or "").strip()
+                if not is_admin_view:
+                    scope = self._authorized_scope_or_error(session, scope)
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_task,
+                    task_id,
+                    scope=scope,
+                    include_all_responses=is_admin_view,
+                    operator_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/critical-guard/source-files")
+        async def critical_guard_source_file_upload(
+            request: Request,
+            file: UploadFile = File(...),
+            scope: str = Form(""),
+            response_id: str = Form(""),
+            expected_version: str = Form(""),
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                normalized_scope = self._authorized_scope_or_error(session, scope)
+                content = await file.read(20 * 1024 * 1024 + 1)
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.upload_critical_guard_scope_file,
+                    response_id,
+                    scope=normalized_scope,
+                    file_name=str(file.filename or ""),
+                    content=content,
+                    expected_version=expected_version,
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+            finally:
+                with suppress(Exception):
+                    await file.close()
+
+        @app.get("/api/critical-guard/source-files/{file_id}")
+        async def critical_guard_source_file_download(file_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                item = PortalRuntime.state_store.get_critical_guard_scope_file(file_id)
+                if not item:
+                    raise PortalError("楼栋清单文件不存在。")
+                self._authorized_scope_or_error(session, str(item.get("scope") or ""))
+                content, file_name = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_scope_file_bytes,
+                    file_id,
+                    allow_all_scopes=True,
+                )
+                return Response(
+                    content=content,
+                    media_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    headers={
+                        "Cache-Control": "private, no-store",
+                        "Content-Disposition": (
+                            "attachment; filename*=UTF-8''"
+                            f"{quote(file_name, safe='')}"
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.get("/api/critical-guard/source-files/{file_id}/preview")
+        async def critical_guard_source_file_preview(file_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                item = PortalRuntime.state_store.get_critical_guard_scope_file(file_id)
+                if not item:
+                    raise PortalError("楼栋清单文件不存在。")
+                self._authorized_scope_or_error(session, str(item.get("scope") or ""))
+                content, _file_name = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_scope_file_preview_bytes,
+                    file_id,
+                    allow_all_scopes=True,
+                )
+                return Response(
+                    content=content,
+                    media_type="image/png",
+                    headers={"Cache-Control": "private, max-age=86400"},
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.put("/api/critical-guard/responses/{response_id}")
+        async def critical_guard_response_save(response_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, CriticalGuardResponseRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "")
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.save_critical_guard_response,
+                    response_id,
+                    scope=scope,
+                    cells=dict(payload.get("cells") or {}),
+                    signatures=[
+                        item
+                        for item in (payload.get("signatures") or [])
+                        if isinstance(item, dict)
+                    ],
+                    signature_source=str(payload.get("signature_source") or ""),
+                    signature_record_id=str(payload.get("signature_record_id") or ""),
+                    generate_image=bool(payload.get("generate_image")),
+                    expected_version=payload.get("expected_version"),
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/critical-guard/images/{response_id}")
+        async def critical_guard_image(response_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                response = PortalRuntime.state_store.get_critical_guard_response(response_id)
+                if not response:
+                    raise PortalError("重保检查图片不存在。")
+                self._authorized_scope_or_error(session, str(response.get("scope") or ""))
+                content, file_name = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_image_bytes,
+                    response_id,
+                    allow_all_scopes=True,
+                )
+                return Response(
+                    content=content,
+                    media_type="image/png",
+                    headers={
+                        "Cache-Control": "private, max-age=300",
+                        "Content-Disposition": (
+                            "inline; filename*=UTF-8''"
+                            f"{quote(file_name, safe='')}"
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.get("/api/critical-guard/workbooks/{response_id}")
+        async def critical_guard_workbook(response_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                response = PortalRuntime.state_store.get_critical_guard_response(response_id)
+                if not response:
+                    raise PortalError("重保检查原表不存在。")
+                self._authorized_scope_or_error(session, str(response.get("scope") or ""))
+                content, file_name = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_workbook_bytes,
+                    response_id,
+                    allow_all_scopes=True,
+                )
+                return Response(
+                    content=content,
+                    media_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    headers={
+                        "Cache-Control": "private, no-store",
+                        "Content-Disposition": (
+                            "attachment; filename*=UTF-8''"
+                            f"{quote(file_name, safe='')}"
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.get("/api/critical-guard/tasks/{task_id}/download")
+        async def critical_guard_download(task_id: str, request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                content, file_name, _count = await asyncio.to_thread(
+                    PortalRuntime.service.download_critical_guard_sheet_images,
+                    task_id,
+                    sheet_type=str(request.query_params.get("sheet_type") or ""),
+                )
+                return Response(
+                    content=content,
+                    media_type="application/zip",
+                    headers={
+                        "Content-Disposition": (
+                            "attachment; filename*=UTF-8''"
+                            f"{quote(file_name, safe='')}"
+                        )
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/api/events/monthly")
         async def events_monthly(request: Request):
@@ -7285,13 +7638,25 @@ class FastAPIPortalController:
         import html
 
         payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        context_type = str(payload.get("context_type") or "mop").strip().lower()
+        is_critical_guard = context_type == "critical_guard"
         status = str(data.get("status") or "pending")
         signer_name = str(data.get("signer_name") or "签名人员")
         role_text = str(payload.get("role_text") or "")
         if not role_text:
-            role_text = "维护审核人" if str(data.get("role") or "") == "auditor" else "维护实施人"
-        notice_title = str(payload.get("notice_title") or "未命名维保通告")
-        mop_attachment_name = str(payload.get("mop_attachment_name") or "当前选中附件")
+            role = str(data.get("role") or "")
+            role_text = "检查人" if role == "inspector" else "维护审核人" if role == "auditor" else "维护实施人"
+        notice_title = str(
+            payload.get("notice_title")
+            or ("未命名重保任务" if is_critical_guard else "未命名维保通告")
+        )
+        mop_attachment_name = str(
+            payload.get("mop_attachment_name")
+            or ("当前检查表" if is_critical_guard else "当前选中附件")
+        )
+        page_title = "重保检查签名使用确认" if is_critical_guard else "MOP签名使用确认"
+        notice_label = "重保任务" if is_critical_guard else "维护通告"
+        attachment_label = "检查表" if is_critical_guard else "MOP附件"
         requested_by = str(data.get("requested_by_name") or "未知操作人")
         requested_by_openid = str(data.get("requested_by_openid") or "")
         status_label = {
@@ -7327,7 +7692,7 @@ class FastAPIPortalController:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MOP签名使用确认</title>
+  <title>{html.escape(page_title)}</title>
   <style>
     :root {{
       color-scheme: light;
@@ -7447,15 +7812,15 @@ class FastAPIPortalController:
 </head>
 <body>
   <main class="card">
-    <span class="badge">MOP签名使用确认</span>
+    <span class="badge">{html.escape(page_title)}</span>
     <h1>是否允许本次使用你的已保存签名？</h1>
     {result_html}
     <div class="status {html.escape(status_class, quote=True)}">{html.escape(status_label)}</div>
     <dl>
       <div class="row"><dt>签名人员</dt><dd>{html.escape(signer_name)}</dd></div>
       <div class="row"><dt>签名角色</dt><dd>{html.escape(role_text)}</dd></div>
-      <div class="row"><dt>维护通告</dt><dd>{html.escape(notice_title)}</dd></div>
-      <div class="row"><dt>MOP附件</dt><dd>{html.escape(mop_attachment_name)}</dd></div>
+      <div class="row"><dt>{html.escape(notice_label)}</dt><dd>{html.escape(notice_title)}</dd></div>
+      <div class="row"><dt>{html.escape(attachment_label)}</dt><dd>{html.escape(mop_attachment_name)}</dd></div>
       <div class="row"><dt>操作人</dt><dd>{html.escape(operator_text)}</dd></div>
     </dl>
     {action_html}

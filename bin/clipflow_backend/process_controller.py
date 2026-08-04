@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import socket
@@ -43,6 +44,47 @@ def _display_host(host: str) -> str:
 def _probe_host(host: str) -> str:
     text = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
     return "127.0.0.1" if text in {"0.0.0.0", "::"} else text
+
+
+def _local_lan_ipv4_addresses() -> list[str]:
+    """Return usable LAN IPv4 addresses with the active route first."""
+    addresses: list[str] = []
+    lan_ranges = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+    )
+
+    def add(value: object) -> None:
+        text = str(value or "").strip()
+        try:
+            parsed = ipaddress.ip_address(text)
+        except ValueError:
+            return
+        if (
+            parsed.version != 4
+            or parsed.is_loopback
+            or parsed.is_link_local
+            or not any(parsed in network for network in lan_ranges)
+            or text in addresses
+        ):
+            return
+        addresses.append(text)
+
+    # No packet is sent by UDP connect; it only asks Windows which interface
+    # would carry normal network traffic and therefore identifies the primary LAN.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("223.5.5.5", 80))
+            add(sock.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for entry in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            add(entry[4][0])
+    except OSError:
+        pass
+    return addresses
 
 
 class BackendProcessPortalController:
@@ -160,6 +202,20 @@ class BackendProcessPortalController:
 
     def get_url(self) -> str:
         return f"http://{_display_host(self.host)}:{self.bound_port}"
+
+    def get_lan_urls(self) -> list[str]:
+        port = int(self.bound_port or self.preferred_port)
+        bind_host = str(self.host or DEFAULT_HOST).strip() or DEFAULT_HOST
+        hosts: list[str] = []
+        if bind_host in {"0.0.0.0", "::"}:
+            hosts.extend(_local_lan_ipv4_addresses())
+        elif self._is_specific_bind_host(bind_host) and self._host_is_local_interface(bind_host):
+            hosts.append(bind_host)
+        return [f"http://{host}:{port}" for host in hosts]
+
+    def get_lan_url(self) -> str:
+        urls = self.get_lan_urls()
+        return urls[0] if urls else self.get_url()
 
     def _local_url(self) -> str:
         return f"http://{_probe_host(self.host)}:{self.bound_port}"

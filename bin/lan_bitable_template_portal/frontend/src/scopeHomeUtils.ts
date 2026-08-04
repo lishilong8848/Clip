@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleCard = {
   key: string;
@@ -109,10 +109,9 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "risk",
     badge: "闭环管理",
     title: "风险管理",
-    description: "风险识别、分级管控、整改跟踪与闭环验收",
-    tags: ["风险识别", "整改跟踪", "闭环验收"],
-    disabled: true,
-    actions: [{ key: "", label: "建设中", disabled: true }],
+    description: "统一发布重保检查任务并汇总各楼填报结果",
+    tags: ["重保任务", "检查填报", "结果汇总"],
+    actions: [{ key: "critical_guard", label: "重保管理", primary: true }],
   },
   {
     key: "tools",
@@ -177,6 +176,12 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     title: "选择楼栋进入水耗管理",
     description: "",
     actionLabel: "进入水耗管理",
+  },
+  critical_guard: {
+    kicker: "风险管理",
+    title: "重保管理",
+    description: "",
+    actionLabel: "进入重保管理",
   },
   tools: {
     kicker: "其他工具",

@@ -1742,6 +1742,8 @@ class PortalRuntime:
             relative_text = parsed.path[len("/assets/") :]
             relative = Path(*relative_text.split("/")) if relative_text else Path()
             return self._send_static_file(portal_asset_file(relative))
+        if parsed.path == "/favicon.ico":
+            return self._send_static_file(portal_asset_file(Path("clipflow-favicon.svg")))
         if parsed.path == "/api/engineer/mop/bootstrap":
             session = self._require_auth_json()
             if session is None:
@@ -1931,6 +1933,7 @@ class PortalRuntime:
                 data = self.service.temporary_signature_people(
                     scope=scope,
                     query=(qs.get("q") or [""])[0],
+                    notice_key=(qs.get("notice_key") or [""])[0],
                     limit=int((qs.get("limit") or ["80"])[0] or 80),
                     refresh=str((qs.get("refresh") or [""])[0]).lower() in {"1", "true", "yes"},
                 )
@@ -2548,6 +2551,9 @@ class PortalRuntime:
                     notice_title=str(payload.get("notice_title") or ""),
                     specialty=str(payload.get("specialty") or ""),
                     display_name=str(payload.get("display_name") or ""),
+                    context_type=str(payload.get("context_type") or "mop"),
+                    origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
+                    origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
                     created_by=str(user.get("open_id") or ""),
                 )
                 return self._send_json(200, {"ok": True, "data": data})
@@ -2593,6 +2599,8 @@ class PortalRuntime:
                     record_id=str(payload.get("record_id") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     scope=scope,
+                    context_type=str(payload.get("context_type") or "mop"),
+                    context_title=str(payload.get("context_title") or ""),
                     request_base_url=str(payload.get("request_base_url") or "")
                     or self._request_base_url(),
                     created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
@@ -2602,6 +2610,14 @@ class PortalRuntime:
                     [str(data.get("open_id") or "")],
                 )
                 if not ok:
+                    failure_kind = next(
+                        (
+                            str(item.get("failure_kind") or "")
+                            for item in (results or [])
+                            if str(item.get("failure_kind") or "")
+                        ),
+                        "",
+                    )
                     return self._send_json(
                         400,
                         {
@@ -2611,6 +2627,7 @@ class PortalRuntime:
                                 "person": data.get("person") or {},
                                 "link_url": data.get("link_url") or "",
                                 "results": results,
+                                "failure_kind": failure_kind,
                             },
                         },
                     )
@@ -2648,6 +2665,7 @@ class PortalRuntime:
                         if isinstance(item, dict)
                     ],
                     mop_attachment_name=str(payload.get("mop_attachment_name") or ""),
+                    context_type=str(payload.get("context_type") or "mop"),
                     request_base_url=str(payload.get("request_base_url") or "")
                     or self._request_base_url(),
                     operator_open_id=str(user.get("open_id") or ""),
@@ -2668,6 +2686,7 @@ class PortalRuntime:
                             "open_id": open_id,
                             "ok": bool(ok and send_result.get("ok", ok)),
                             "message": str(send_result.get("message") or message or ""),
+                            "failure_kind": str(send_result.get("failure_kind") or ""),
                         }
                     )
                 failed = [item for item in results if not item.get("ok")]
@@ -2697,6 +2716,7 @@ class PortalRuntime:
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 temporary_id = str(payload.get("temporary_id") or "").strip()
+                recipient_open_ids = list(payload.get("recipient_open_ids") or [])
                 if temporary_id:
                     temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
                         temp_id=temporary_id,
@@ -2707,20 +2727,40 @@ class PortalRuntime:
                         session,
                         str(temp_session.get("scope") or scope or "ALL"),
                     )
+                    temp_payload = (
+                        temp_session.get("payload")
+                        if isinstance(temp_session.get("payload"), dict)
+                        else {}
+                    )
+                    if str(temp_payload.get("context_type") or "mop").strip().lower() == "critical_guard":
+                        current_open_id = str(user.get("open_id") or "").strip()
+                        if not current_open_id:
+                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
+                        recipient_open_ids = [current_open_id]
                     data = self.service.build_existing_temporary_signature_link_message(
                         temp_id=temporary_id,
+                        recipient_open_ids=recipient_open_ids,
                         request_base_url=str(payload.get("request_base_url") or "")
                         or self._request_base_url(),
                     )
                 else:
+                    context_type = str(payload.get("context_type") or "mop").strip().lower()
+                    if context_type == "critical_guard":
+                        current_open_id = str(user.get("open_id") or "").strip()
+                        if not current_open_id:
+                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
+                        recipient_open_ids = [current_open_id]
                     data = self.service.build_temporary_signature_link_message(
                         scope=scope,
                         notice_key=str(payload.get("notice_key") or ""),
                         role=str(payload.get("role") or "implementer"),
-                        recipient_open_ids=list(payload.get("recipient_open_ids") or []),
+                        recipient_open_ids=recipient_open_ids,
                         notice_title=str(payload.get("notice_title") or ""),
                         specialty=str(payload.get("specialty") or ""),
                         display_name=str(payload.get("display_name") or ""),
+                        context_type=context_type,
+                        origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
+                        origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
                         request_base_url=str(payload.get("request_base_url") or "")
                         or self._request_base_url(),
                         created_by=str(user.get("open_id") or ""),

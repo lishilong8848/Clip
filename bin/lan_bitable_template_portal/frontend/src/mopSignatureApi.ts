@@ -62,13 +62,21 @@ export function saveStaffSignature(recordId: string, signerName: string, signatu
   });
 }
 
-export function sendStaffSignatureLink(recordId: string, signerName: string, scope: string): Promise<Dict> {
+export function sendStaffSignatureLink(
+  recordId: string,
+  signerName: string,
+  scope: string,
+  contextType = "mop",
+  contextTitle = "",
+): Promise<Dict> {
   return requestJson("/api/signatures/send-link", {
     method: "POST",
     body: JSON.stringify({
       record_id: recordId,
       signer_name: signerName,
       scope,
+      context_type: contextType,
+      context_title: contextTitle,
     }),
   });
 }
@@ -78,6 +86,7 @@ export function sendSignatureUsageConfirmations(payload: {
   noticeKey: string;
   noticeTitle: string;
   mopAttachmentName?: string;
+  contextType?: string;
   signatures: Dict[];
 }): Promise<Dict> {
   return requestJson("/api/signatures/usage-confirmations/send", {
@@ -87,6 +96,7 @@ export function sendSignatureUsageConfirmations(payload: {
       notice_key: payload.noticeKey,
       notice_title: payload.noticeTitle,
       mop_attachment_name: payload.mopAttachmentName || "",
+      context_type: payload.contextType || "mop",
       signatures: payload.signatures,
     }),
   });
@@ -99,6 +109,9 @@ export function createTemporarySignatureSession(payload: {
   specialty: string;
   role: string;
   displayName: string;
+  contextType?: string;
+  originStaffRecordId?: string;
+  originStaffOpenId?: string;
 }): Promise<Dict> {
   return requestJson("/api/signatures/temporary/create", {
     method: "POST",
@@ -109,6 +122,9 @@ export function createTemporarySignatureSession(payload: {
       specialty: payload.specialty,
       role: payload.role,
       display_name: payload.displayName,
+      context_type: payload.contextType || "mop",
+      origin_staff_record_id: payload.originStaffRecordId || "",
+      origin_staff_open_id: payload.originStaffOpenId || "",
     }),
   });
 }
@@ -122,6 +138,9 @@ export function sendTemporarySignatureLink(payload: {
   role?: string;
   displayName?: string;
   recipientOpenIds?: string[];
+  contextType?: string;
+  originStaffRecordId?: string;
+  originStaffOpenId?: string;
 }): Promise<Dict> {
   const body: Dict = {
     scope: payload.scope,
@@ -132,7 +151,10 @@ export function sendTemporarySignatureLink(payload: {
   if (payload.specialty !== undefined) body.specialty = payload.specialty;
   if (payload.role !== undefined) body.role = payload.role;
   if (payload.displayName !== undefined) body.display_name = payload.displayName;
+  if (payload.originStaffRecordId !== undefined) body.origin_staff_record_id = payload.originStaffRecordId;
+  if (payload.originStaffOpenId !== undefined) body.origin_staff_open_id = payload.originStaffOpenId;
   if (payload.recipientOpenIds) body.recipient_open_ids = payload.recipientOpenIds;
+  if (payload.contextType) body.context_type = payload.contextType;
   return requestJson("/api/signatures/temporary/send-link", {
     method: "POST",
     body: JSON.stringify(body),

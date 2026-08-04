@@ -16,6 +16,7 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "httpx": "httpx",
     "cryptography": "cryptography",
     "PIL": "Pillow",
+    "openpyxl": "openpyxl",
     "anyio": "anyio",
     "pydantic": "pydantic",
     "starlette": "starlette",

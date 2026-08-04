@@ -2211,8 +2211,20 @@ class MainWindowRuntimeMixin:
 
     def refresh_lan_template_portal_link(self):
         if hasattr(self, "lan_template_portal_btn"):
+            controller = getattr(self, "lan_template_portal_controller", None)
+            lan_urls = []
+            if controller is not None and hasattr(controller, "get_lan_urls"):
+                try:
+                    lan_urls = list(controller.get_lan_urls() or [])
+                except Exception:
+                    lan_urls = []
+            details = [f"本机：{self._build_lan_template_portal_url()}"]
+            if lan_urls:
+                details.append("局域网：" + "、".join(lan_urls))
+            else:
+                details.append("局域网：未识别到可用的本机局域网 IPv4 地址")
             self.lan_template_portal_btn.setToolTip(
-                f"打开局域网模板页面：{self._build_lan_template_portal_url()}"
+                "打开通告工作台\n" + "\n".join(details)
             )
 
     def refresh_lan_template_portal_setting(self):

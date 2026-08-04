@@ -38,6 +38,11 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (29, "water_consumption_management"),
     (30, "water_consumption_edit_limits"),
     (31, "independent_source_snapshots_and_remote_operations"),
+    (32, "critical_guard_tasks_and_responses"),
+    (33, "critical_guard_signature_sources"),
+    (34, "critical_guard_shared_signatures_and_template_artifacts"),
+    (35, "critical_guard_scope_source_files"),
+    (36, "critical_guard_template_scoped_memory"),
 )
 
 
