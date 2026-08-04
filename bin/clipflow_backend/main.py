@@ -5194,7 +5194,9 @@ class FastAPIPortalController:
                     PortalRuntime.execute_local_delete_active_item,
                     {"data_dict": payload},
                 )
-                if not bool((delete_result or {}).get("ok")):
+                delete_ok = bool((delete_result or {}).get("ok"))
+                remote_deleted = bool((delete_result or {}).get("remote_deleted"))
+                if not delete_ok and not remote_deleted:
                     return JSONResponse(
                         {
                             "ok": False,
@@ -5207,14 +5209,25 @@ class FastAPIPortalController:
                         },
                         status_code=500,
                     )
+                cleanup_payload = dict(payload)
+                for identity_field in ("source_record_id", "work_type"):
+                    resolved_value = str(
+                        (delete_result or {}).get(identity_field) or ""
+                    ).strip()
+                    if resolved_value:
+                        cleanup_payload[identity_field] = resolved_value
                 data = PortalRuntime.service.hide_ongoing_item(
-                    payload,
+                    cleanup_payload,
                     scope=scope,
                     deleted_by=payload["_auth_open_id"],
                 )
                 data.update(
                     PortalRuntime.service.discard_deleted_ongoing_state(
-                        payload, scope=scope
+                        cleanup_payload,
+                        scope=scope,
+                        reset_source_plan=bool(
+                            (delete_result or {}).get("remote_deleted")
+                        ),
                     )
                 )
                 PortalRuntime.clear_payload_cache()
@@ -5231,15 +5244,23 @@ class FastAPIPortalController:
                                 or payload.get("target_record_id")
                                 or ""
                             ),
-                            "source_record_id": str(payload.get("source_record_id") or ""),
-                            "work_type": str(payload.get("work_type") or ""),
+                            "source_record_id": str(
+                                cleanup_payload.get("source_record_id") or ""
+                            ),
+                            "work_type": str(cleanup_payload.get("work_type") or ""),
                             "notice_type": str(payload.get("notice_type") or ""),
                         },
                     },
                 )
                 data["qt_deleted"] = bool(delete_result.get("active_item_id") or delete_result.get("record_id"))
                 data["qt_event_id"] = event_id
-                data["remote_deleted"] = bool(delete_result.get("remote_deleted"))
+                data["remote_deleted"] = remote_deleted
+                if not delete_ok:
+                    data["cleanup_warning"] = str(
+                        (delete_result or {}).get("message")
+                        or "目标多维已删除，本地状态已通过补偿链路清理。"
+                    )
+                    data["cleanup_recovered"] = True
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -6204,14 +6225,29 @@ class FastAPIPortalController:
                         raw_delete_payload = command_payload.get("data_dict") or {}
                     elif isinstance(command_payload.get("data"), dict):
                         raw_delete_payload = command_payload.get("data") or {}
-                    raw_target_record_id = str(
-                        raw_delete_payload.get("target_record_id") or ""
-                    ).strip()
-                    local_only_candidate = (
-                        not raw_target_record_id
-                        or is_local_record_id(raw_target_record_id)
+                    delete_payload = normalize_notice_identity_payload(
+                        dict(raw_delete_payload)
                     )
-                    command_payload = normalize_notice_identity_payload(command_payload)
+                    scope = str(delete_payload.get("scope") or "ALL").strip() or "ALL"
+                    try:
+                        PortalRuntime.service.validate_ongoing_delete_item(
+                            delete_payload,
+                            scope=scope,
+                        )
+                    except Exception as exc:
+                        return {
+                            "ok": True,
+                            "data": {"ok": False, "message": str(exc)},
+                        }
+                    resolved_target_record_id = canonical_target_record_id(
+                        delete_payload
+                    )
+                    local_only_candidate = (
+                        not resolved_target_record_id
+                        or is_local_record_id(resolved_target_record_id)
+                        or bool(delete_payload.get("_is_placeholder_record"))
+                    )
+                    command_payload = {"data_dict": delete_payload}
                     if local_only_candidate:
                         data = await asyncio.to_thread(
                             PortalRuntime.execute_local_remove_active_item,
@@ -6225,14 +6261,18 @@ class FastAPIPortalController:
                             PortalRuntime.execute_local_delete_active_item,
                             command_payload,
                         )
-                    if not bool((data or {}).get("ok")):
+                    delete_ok = bool((data or {}).get("ok"))
+                    remote_deleted = bool((data or {}).get("remote_deleted"))
+                    if not delete_ok and not remote_deleted:
                         return {"ok": True, "data": data}
-                    delete_payload = command_payload
-                    if isinstance(command_payload.get("data_dict"), dict):
-                        delete_payload = command_payload.get("data_dict") or {}
-                    elif isinstance(command_payload.get("data"), dict):
-                        delete_payload = command_payload.get("data") or {}
+                    for identity_field in ("source_record_id", "work_type"):
+                        resolved_value = str(
+                            (data or {}).get(identity_field) or ""
+                        ).strip()
+                        if resolved_value:
+                            delete_payload[identity_field] = resolved_value
                     scope = str(delete_payload.get("scope") or "ALL").strip() or "ALL"
+                    cleanup_succeeded = True
                     try:
                         data.update(
                             PortalRuntime.service.hide_ongoing_item(
@@ -6245,10 +6285,27 @@ class FastAPIPortalController:
                             PortalRuntime.service.discard_deleted_ongoing_state(
                                 delete_payload,
                                 scope=scope,
+                                reset_source_plan=bool(
+                                    (data or {}).get("remote_deleted")
+                                ),
                             )
                         )
                     except Exception as cleanup_exc:
+                        cleanup_succeeded = False
                         data["cleanup_warning"] = str(cleanup_exc)
+                    if (
+                        remote_deleted
+                        and not delete_ok
+                        and cleanup_succeeded
+                        and not data.get("cleanup_warning")
+                    ):
+                        data["cleanup_warning"] = str(
+                            data.get("message")
+                            or "目标多维已删除，本地状态已通过补偿链路清理。"
+                        )
+                    if remote_deleted and not delete_ok and cleanup_succeeded:
+                        data["ok"] = True
+                        data["cleanup_recovered"] = True
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     self._notify_qt_active_streams()

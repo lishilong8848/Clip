@@ -3755,7 +3755,11 @@ def render_workbench_lite(
         const result = data.data || {{}};
         const message = isLocalRemove
           ? '已移除显示，Qt 和前端将同步消失，多维未删除。'
-          : (result.remote_deleted ? '已删除通告，并同步删除对应多维记录。' : '已删除通告，本地显示已同步。');
+          : (result.remote_deleted
+              ? (result.source_plan_reset
+                  ? '已删除通告，对应计划已恢复为未开始。'
+                  : '已删除通告，并同步删除对应多维记录。')
+              : '已删除通告，本地显示已同步。');
         button.removeAttribute('data-delete-operation-id');
         setLiteStatus(message);
         await navigateLite(workbenchBaseUrl(payload.scope, currentViewWorkType() || payload.work_type), {{

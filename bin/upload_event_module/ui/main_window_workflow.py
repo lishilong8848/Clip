@@ -718,6 +718,33 @@ class MainWindowWorkflowMixin:
         real_record_id = str(result.get("real_record_id") or "").strip()
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id
+        today_in_progress_state = str(
+            result.get("today_in_progress_state") or ""
+        ).strip().lower()
+        if success and today_in_progress_state in {"yes", "no"}:
+            state_payload = dict(data_snapshot or {})
+            if real_record_id:
+                state_payload["target_record_id"] = real_record_id
+
+            def apply_today_in_progress_state(
+                payload=state_payload,
+                state=today_in_progress_state,
+                fallback_record_id=real_record_id or record_id,
+            ):
+                apply_state = getattr(
+                    self, "_apply_today_in_progress_state_to_active_item", None
+                )
+                if callable(apply_state):
+                    apply_state(
+                        payload,
+                        state,
+                        fallback_record_id=fallback_record_id,
+                    )
+
+            self._enqueue_ui_mutation(
+                "today_in_progress_upload_result",
+                apply_today_in_progress_state,
+            )
         updated_record_version = str(result.get("record_version") or "").strip()
         if success and updated_record_version:
             version_record_id = real_record_id or record_id

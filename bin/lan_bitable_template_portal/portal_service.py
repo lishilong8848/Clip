@@ -22108,22 +22108,27 @@ class MaintenancePortalService:
                     )
                 except Exception:
                     pass
+        identity_payload = dict(prepared)
+        if active_item_id:
+            identity_payload["active_item_id"] = active_item_id
+        if source_record_id:
+            identity_payload["source_record_id"] = source_record_id
+        if target_record_id:
+            identity_payload["target_record_id"] = target_record_id
+            identity_payload["record_id"] = target_record_id
+        identity_payload["status"] = "已结束" if action == "end" else "进行中"
         try:
-            identity_payload = dict(prepared)
-            if active_item_id:
-                identity_payload["active_item_id"] = active_item_id
-            if source_record_id:
-                identity_payload["source_record_id"] = source_record_id
-            if target_record_id:
-                identity_payload["target_record_id"] = target_record_id
-                identity_payload["record_id"] = target_record_id
-            identity_payload["status"] = "已结束" if action == "end" else "进行中"
             self._state_store.upsert_notice_identity(
                 identity_payload,
                 origin=str(prepared.get("origin") or "action_success"),
             )
         except Exception:
             pass
+        if action in {"start", "update"}:
+            with suppress(Exception):
+                self._remove_hidden_ongoing_keys(
+                    self._ongoing_hidden_keys(identity_payload)
+                )
         repair_sync_warning = ""
         repair_summary_id = str(
             prepared.get("repair_management_record_id")
@@ -25766,6 +25771,12 @@ class MaintenancePortalService:
             work_summary.get("started_at") and not work_summary.get("ended_at")
         ):
             source_progress = "进行中"
+        elif local_status == DEFAULT_MAINTENANCE_STATUS and self._source_progress_allows_start(
+            source_progress
+        ):
+            # Deleting a mistakenly sent target notice restores the linked plan
+            # to a startable state without overwriting a terminal source status.
+            source_progress = DEFAULT_MAINTENANCE_STATUS
         title = (
             self._change_title(record)
             if work_type == WORK_TYPE_CHANGE
@@ -26247,10 +26258,18 @@ class MaintenancePortalService:
         return {"deleted": True, "keys": keys, "deleted_at": now}
 
     def discard_deleted_ongoing_state(
-        self, item: dict[str, Any], *, scope: str = "ALL"
+        self,
+        item: dict[str, Any],
+        *,
+        scope: str = "ALL",
+        reset_source_plan: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(item, dict):
-            return {"work_status_removed": 0, "daily_summary_removed": 0}
+            return {
+                "work_status_removed": 0,
+                "daily_summary_removed": 0,
+                "source_plan_reset": False,
+            }
         scope = self._normalize_scope(scope)
         item = copy.deepcopy(item)
         item["work_type"] = self._item_work_type(item)
@@ -26260,9 +26279,15 @@ class MaintenancePortalService:
         )
         deleted_keys = self._work_status_identity_keys(item)
         if not deleted_keys:
-            return {"work_status_removed": 0, "daily_summary_removed": 0}
+            return {
+                "work_status_removed": 0,
+                "daily_summary_removed": 0,
+                "source_plan_reset": False,
+            }
         work_status_removed = 0
         daily_summary_removed = 0
+        source_plan_reset = False
+        matched_work_status_item: dict[str, Any] | None = None
         with self._summary_lock:
             self._migrate_legacy_work_status_locked()
             for document in self._state_store.list_documents(STATE_NS_WORK_STATUS):
@@ -26277,6 +26302,8 @@ class MaintenancePortalService:
                         and self._scope_matches_item(scope, status_item)
                         and (self._work_status_identity_keys(status_item) & deleted_keys)
                     ):
+                        if matched_work_status_item is None:
+                            matched_work_status_item = copy.deepcopy(status_item)
                         work_status_removed += 1
                         changed = True
                         continue
@@ -26316,11 +26343,49 @@ class MaintenancePortalService:
                         summary_payload,
                         day=str(document.get("key") or ""),
                     )
+            source_record_id = canonical_source_record_id(item)
+            target_record_id = canonical_target_record_id(item)
+            if (
+                reset_source_plan
+                and source_record_id
+                and not is_local_record_id(source_record_id)
+                and source_record_id != target_record_id
+            ):
+                reset_item = copy.deepcopy(matched_work_status_item or {})
+                for field_name, value in item.items():
+                    if value not in (None, "", [], {}):
+                        reset_item[field_name] = copy.deepcopy(value)
+                reset_item["source_record_id"] = source_record_id
+                reset_item["status"] = DEFAULT_MAINTENANCE_STATUS
+                reset_item["source_progress"] = DEFAULT_MAINTENANCE_STATUS
+                reset_item["source_status"] = DEFAULT_MAINTENANCE_STATUS
+                reset_item["actions"] = []
+                reset_item["reset_after_delete"] = True
+                reset_item["reset_at"] = dt.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+                for field_name in (
+                    "record_id",
+                    "target_record_id",
+                    "active_item_id",
+                    "started_at",
+                    "started_date",
+                    "last_updated_at",
+                    "ended_at",
+                    "completed_date",
+                ):
+                    reset_item.pop(field_name, None)
+                self._upsert_work_status_item_locked(
+                    reset_item,
+                    now=reset_item["reset_at"],
+                )
+                source_plan_reset = True
             self._work_status_cache_signature = None
             self._work_status_cache_items = None
         return {
             "work_status_removed": work_status_removed,
             "daily_summary_removed": daily_summary_removed,
+            "source_plan_reset": source_plan_reset,
         }
 
     @staticmethod
@@ -27723,6 +27788,7 @@ class MaintenancePortalService:
                         self.discard_deleted_ongoing_state(
                             current,
                             scope="ALL",
+                            reset_source_plan=True,
                         )
                     missing_removed += 1
                 continue

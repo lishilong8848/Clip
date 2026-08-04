@@ -3015,13 +3015,29 @@ class PortalRuntime:
                             ),
                         },
                     )
+                cleanup_payload = dict(payload)
+                if isinstance(accepted, dict):
+                    for identity_field in ("source_record_id", "work_type"):
+                        resolved_value = str(
+                            accepted.get(identity_field) or ""
+                        ).strip()
+                        if resolved_value:
+                            cleanup_payload[identity_field] = resolved_value
                 data = self.service.hide_ongoing_item(
-                    payload,
+                    cleanup_payload,
                     scope=scope,
                     deleted_by=payload["_auth_open_id"],
                 )
                 data.update(
-                    self.service.discard_deleted_ongoing_state(payload, scope=scope)
+                    self.service.discard_deleted_ongoing_state(
+                        cleanup_payload,
+                        scope=scope,
+                        reset_source_plan=bool(
+                            accepted.get("remote_deleted")
+                            if isinstance(accepted, dict)
+                            else False
+                        ),
+                    )
                 )
                 PortalRuntime.clear_payload_cache()
                 data["qt_deleted"] = True
@@ -5651,10 +5667,16 @@ class PortalRuntime:
         *,
         notice_type: str,
         target_record_id: str,
+        action: str = "",
     ) -> str:
         target_record_id = str(target_record_id or "").strip()
         if not target_record_id:
             return ""
+        normalized_action = (
+            str(action or "").strip().lower()
+            or str((data or {}).get("action") or "").strip().lower()
+            or "update"
+        )
         payload = normalize_notice_identity_payload(
             {
                 **dict(data or {}),
@@ -5666,7 +5688,13 @@ class PortalRuntime:
                 "_last_upload_error": "",
                 "binding_status": "bound",
             },
-            action="update",
+            action=normalized_action,
+        )
+        payload["action"] = normalized_action
+        cls._apply_change_today_in_progress_state(
+            payload,
+            notice_type=notice_type,
+            action=normalized_action,
         )
         record_version = cls._expected_remote_record_version(payload)
         if not record_version and not is_local_record_id(target_record_id):
@@ -5693,8 +5721,6 @@ class PortalRuntime:
                 payload["event_identity_key"] = event_identity_key
                 payload["event_match_fields"] = cls._event_match_fields(payload)
             payload["last_remote_write_at"] = time.time()
-        if not str(payload.get("action") or "").strip():
-            payload["action"] = "start"
         if not str(payload.get("status") or "").strip():
             payload["status"] = "开始" if str(payload.get("action") or "") == "start" else str(payload.get("action") or "")
         if not str(payload.get("work_type") or "").strip():
@@ -7071,6 +7097,11 @@ class PortalRuntime:
         cls, prepared: dict, *, remote_record_id: str = ""
     ) -> dict:
         prepared = normalize_notice_identity_payload(dict(prepared or {}))
+        cls._apply_change_today_in_progress_state(
+            prepared,
+            notice_type=str(prepared.get("notice_type") or "").strip(),
+            action=str(prepared.get("action") or "").strip(),
+        )
         target_record_id = (
             str(remote_record_id or "").strip()
             or str(prepared.get("target_record_id") or "").strip()
@@ -7094,6 +7125,56 @@ class PortalRuntime:
         prepared["_has_unuploaded_changes"] = False
         cls._merge_existing_site_photo_projection(prepared)
         return prepared
+
+    @staticmethod
+    def _apply_change_today_in_progress_state(
+        payload: dict,
+        *,
+        notice_type: str,
+        action: str,
+    ) -> str:
+        if not isinstance(payload, dict) or str(notice_type or "").strip() != "变更通告":
+            return ""
+        normalized_action = str(action or "").strip().lower()
+        if not normalized_action:
+            status = str(payload.get("status") or "").strip()
+            if status in {"开始", "新增"}:
+                normalized_action = "start"
+            elif status == "结束":
+                normalized_action = "end"
+            elif status:
+                normalized_action = "update"
+        if not normalized_action:
+            text = str(payload.get("text") or "")
+            status_match = re.search(r"状态\s*[：:]\s*(开始|新增|更新|结束)", text)
+            if status_match:
+                normalized_action = (
+                    "start"
+                    if status_match.group(1) in {"开始", "新增"}
+                    else "end" if status_match.group(1) == "结束" else "update"
+                )
+        progress = str(payload.get("progress") or "").strip()
+        if not progress:
+            progress_match = re.search(
+                r"【进度】(.*?)(?=\n?【|$)",
+                str(payload.get("text") or ""),
+                re.DOTALL,
+            )
+            if progress_match:
+                progress = progress_match.group(1).strip()
+        state = (
+            "yes"
+            if normalized_action in {"start", "upload"}
+            or (
+                normalized_action == "update"
+                and "准备工作已完成" in progress
+            )
+            else "no"
+        )
+        payload["today_in_progress_state"] = state
+        payload.pop("_today_in_progress_syncing", None)
+        payload.pop("_today_in_progress_error", None)
+        return state
 
     @classmethod
     def _merge_existing_site_photo_projection(cls, prepared: dict) -> None:
@@ -7398,6 +7479,12 @@ class PortalRuntime:
                 current_record_version or expected_record_version,
             )
 
+        today_in_progress_state = cls._apply_change_today_in_progress_state(
+            data,
+            notice_type=notice_type,
+            action=action_type,
+        )
+
         extra_images = payload.get("extra_images")
         if not isinstance(extra_images, list):
             extra_images = payload.get("site_photos")
@@ -7582,6 +7669,7 @@ class PortalRuntime:
                         data,
                         notice_type=notice_type,
                         target_record_id=operation_target,
+                        action="start",
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -7600,6 +7688,7 @@ class PortalRuntime:
                         "real_record_id": operation_target,
                         "deduped": True,
                         "record_version": record_version,
+                        "today_in_progress_state": today_in_progress_state,
                     }
                 reconciled = False
                 reconciled_record_id = ""
@@ -7626,6 +7715,7 @@ class PortalRuntime:
                         data,
                         notice_type=notice_type,
                         target_record_id=reconciled_record_id,
+                        action="start",
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -7648,6 +7738,7 @@ class PortalRuntime:
                         "real_record_id": reconciled_record_id,
                         "deduped": True,
                         "record_version": record_version,
+                        "today_in_progress_state": today_in_progress_state,
                     }
                 if reconcile_blocked:
                     cls._mark_notice_remote_operation(
@@ -7673,6 +7764,7 @@ class PortalRuntime:
                             data,
                             notice_type=notice_type,
                             target_record_id=cached_target,
+                            action="start",
                         )
                         cls._mark_notice_remote_operation(
                             operation_id,
@@ -7691,6 +7783,7 @@ class PortalRuntime:
                             "real_record_id": cached_target,
                             "deduped": True,
                             "record_version": record_version,
+                            "today_in_progress_state": today_in_progress_state,
                         }
                 existing_target = cls._existing_target_for_local_upload(data, notice_type)
                 if existing_target:
@@ -7700,6 +7793,7 @@ class PortalRuntime:
                         data,
                         notice_type=notice_type,
                         target_record_id=existing_target,
+                        action="start",
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -7718,6 +7812,7 @@ class PortalRuntime:
                         "real_record_id": existing_target,
                         "deduped": True,
                         "record_version": record_version,
+                        "today_in_progress_state": today_in_progress_state,
                     }
                 cls._mark_notice_remote_operation(
                     operation_id,
@@ -7746,6 +7841,7 @@ class PortalRuntime:
                         data,
                         notice_type=notice_type,
                         target_record_id=real_record_id,
+                        action="start",
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -7786,6 +7882,9 @@ class PortalRuntime:
                     "real_record_id": real_record_id,
                     "record_version": (
                         record_version if success else ""
+                    ),
+                    "today_in_progress_state": (
+                        today_in_progress_state if success else ""
                     ),
                     **robot_result,
                 }
@@ -8135,6 +8234,7 @@ class PortalRuntime:
                 updated_active_payload,
                 notice_type=notice_type,
                 target_record_id=target_record_id,
+                action="update",
             )
         robot_result = (
             cls._robot_result_from_notice_payload(notice_payload)
@@ -8185,6 +8285,9 @@ class PortalRuntime:
             ),
             "repair_project_warning": repair_project_warning,
             "record_version": updated_record_version,
+            "today_in_progress_state": (
+                today_in_progress_state if success else ""
+            ),
             **robot_result,
         }
 
@@ -8232,6 +8335,8 @@ class PortalRuntime:
                 "operation_id": operation_id,
                 "record_id": target_record_id,
                 "active_item_id": active_item_id,
+                "source_record_id": source_record_id,
+                "work_type": work_type,
                 "remote_deleted": True,
                 "undo_id": checkpoint_id,
                 "undo_available": bool(checkpoint_id),
@@ -8253,6 +8358,8 @@ class PortalRuntime:
             "operation_id": operation_id,
             "record_id": target_record_id,
             "active_item_id": active_item_id,
+            "source_record_id": source_record_id,
+            "work_type": work_type,
             "remote_deleted": True,
             "undo_id": checkpoint_id,
             "undo_available": bool(checkpoint_id),
@@ -8421,6 +8528,8 @@ class PortalRuntime:
                     "message": str(result_payload.get("message") or ""),
                     "record_id": target_record_id,
                     "active_item_id": active_item_id,
+                    "source_record_id": source_record_id,
+                    "work_type": work_type,
                     "remote_deleted": True,
                     "undo_id": str(result_payload.get("undo_id") or ""),
                     "undo_available": bool(result_payload.get("undo_id")),
