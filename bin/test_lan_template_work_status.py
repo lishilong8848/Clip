@@ -18744,6 +18744,223 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "target-recreated-new",
             )
 
+    def test_undo_end_without_qt_snapshot_restores_all_notice_types_as_updateable(self):
+        notice_types = {
+            "maintenance": "维保通告",
+            "change": "变更通告",
+            "repair": "设备检修",
+            "power": "上电通告",
+            "polling": "设备轮巡",
+            "adjust": "设备调整",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            for work_type, notice_type in notice_types.items():
+                with self.subTest(work_type=work_type):
+                    active_item_id = f"active-undo-end-{work_type}"
+                    source_record_id = f"rec-source-undo-end-{work_type}"
+                    target_record_id = f"rec-target-undo-end-{work_type}"
+                    title = f"E楼{work_type}回退结束测试"
+                    context = {
+                        "scope": "E",
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "action": "end",
+                        "status": "结束",
+                        "active_item_id": active_item_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "record_id": target_record_id,
+                        "title": title,
+                        "building": "E楼",
+                        "building_codes": ["E"],
+                        "start_time": "2026-08-05 09:00",
+                        "end_time": "2026-08-05 18:00",
+                        "location": "E楼",
+                        "content": "回退结束测试内容",
+                        "reason": "回退结束测试原因",
+                        "impact": "无影响",
+                        "progress": "已完成，准备结束",
+                        "record_version": "stale-before-undo",
+                        "expected_record_version": "stale-before-undo",
+                        "text": (
+                            f"【{notice_type}】状态：结束\n"
+                            f"【名称】{title}\n"
+                            "【进度】已完成，准备结束"
+                        ),
+                    }
+                    undo = {
+                        "undo_id": f"undo-end-{work_type}",
+                        "action_type": "end",
+                        "scope": "E",
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "active_item_id": active_item_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "identity_keys": [
+                            f"{work_type}:active:{active_item_id}",
+                            f"{work_type}:source:{source_record_id}",
+                            f"{work_type}:target:{target_record_id}",
+                        ],
+                        "context": context,
+                        "local": {
+                            "daily_item": None,
+                            "work_items": [],
+                            "qt_active": None,
+                        },
+                    }
+
+                    restored = service.restore_notice_undo_local(
+                        undo,
+                        target_record_id=target_record_id,
+                        applied_by="ou-admin",
+                        job_id=f"job-undo-end-{work_type}",
+                    )
+
+                    self.assertTrue(restored["restored_active"])
+                    active_payload = restored["active_payload"]
+                    self.assertEqual(active_payload["action"], "update")
+                    self.assertEqual(active_payload["status"], "更新")
+                    self.assertEqual(
+                        active_payload["active_item_id"], active_item_id
+                    )
+                    self.assertEqual(
+                        active_payload["target_record_id"], target_record_id
+                    )
+                    self.assertEqual(active_payload["record_version"], "")
+                    self.assertEqual(active_payload["expected_record_version"], "")
+                    self.assertIn("状态：更新", active_payload["text"])
+
+                    for next_action in ("update", "end"):
+                        expanded = service.expand_workbench_action_command(
+                            {
+                                "command_format": "notice_command",
+                                "action": next_action,
+                                "scope": "E",
+                                "work_type": work_type,
+                                "notice_type": notice_type,
+                                # Simulate the old drawer race: business fields
+                                # are present, but all three identity fields are blank.
+                                "patch": {
+                                    "scope": "E",
+                                    "work_type": work_type,
+                                    "notice_type": notice_type,
+                                    "title": title,
+                                    "building": "E楼",
+                                    "start_time": "2026-08-05 09:00",
+                                    "end_time": "2026-08-05 18:00",
+                                    "location": "E楼",
+                                    "content": "回退结束测试内容",
+                                    "reason": "回退结束测试原因",
+                                    "impact": "无影响",
+                                    "progress": "回退后继续处理",
+                                },
+                            },
+                            scope="E",
+                            ongoing_items=[],
+                        )
+                        self.assertEqual(
+                            expanded["active_item_id"], active_item_id
+                        )
+                        self.assertEqual(
+                            expanded["source_record_id"], source_record_id
+                        )
+                        self.assertEqual(
+                            expanded["target_record_id"], target_record_id
+                        )
+                        self.assertEqual(expanded["record_id"], target_record_id)
+                        self.assertEqual(expanded["action"], next_action)
+
+    def test_workbench_ongoing_rows_keep_canonical_identity_after_undo(self):
+        from lan_bitable_template_portal.workbench_lite import (
+            _detail_form,
+            _ongoing_rows,
+        )
+
+        item = {
+            "scope": "E",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "target_record_id": "rec-undo-render-target",
+            "record_id": "rec-undo-render-target",
+            "source_record_id": "rec-undo-render-source",
+            "title": "E楼回退渲染测试",
+            "building": "E楼",
+            "start_time": "2026-08-05 09:00",
+            "end_time": "2026-08-05 18:00",
+        }
+
+        rows_html = _ongoing_rows(
+            [item],
+            scope="E",
+            work_type="maintenance",
+            selected_id="",
+        )
+        detail_html = _detail_form(
+            record=None,
+            ongoing_item=item,
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+        )
+        source = (
+            BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'data-active-item-id="rec-undo-render-target"', rows_html
+        )
+        self.assertIn(
+            'name="active_item_id" value="rec-undo-render-target"',
+            detail_html,
+        )
+        self.assertIn("function keepUpdatedCurrentNoticeActive", source)
+        self.assertIn(
+            "keepUpdatedCurrentNoticeActive(draft, row)", source
+        )
+
+    def test_undo_command_business_fallback_does_not_guess_duplicate_titles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            ongoing_items = [
+                {
+                    "active_item_id": f"active-duplicate-{index}",
+                    "target_record_id": f"rec-target-duplicate-{index}",
+                    "record_id": f"rec-target-duplicate-{index}",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "scope": "E",
+                    "title": "E楼同名维保通告",
+                    "building": "E楼",
+                    "start_time": f"2026-08-0{index} 09:00",
+                    "end_time": f"2026-08-0{index} 18:00",
+                }
+                for index in (1, 2)
+            ]
+
+            with self.assertRaisesRegex(
+                PortalError,
+                "更新/结束通告缺少可展开的进行中记录",
+            ):
+                service.expand_workbench_action_command(
+                    {
+                        "command_format": "notice_command",
+                        "action": "update",
+                        "scope": "E",
+                        "work_type": "maintenance",
+                        "patch": {
+                            "scope": "E",
+                            "work_type": "maintenance",
+                            "title": "E楼同名维保通告",
+                            "building": "E楼",
+                            "progress": "继续更新",
+                        },
+                    },
+                    scope="E",
+                    ongoing_items=ongoing_items,
+                )
+
     def test_fastapi_permission_request_routes_are_native(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_state_store = PortalRuntime.auth_manager._state_store

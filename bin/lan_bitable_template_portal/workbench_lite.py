@@ -1513,8 +1513,8 @@ def _ongoing_rows(
         f" data-direct-navigation=\"{'1' if direct_navigation else ''}\""
         f" data-local-only=\"{'1' if local_only_event else '0'}\""
         f" data-work-type=\"{_e(row_work_type)}\""
-        f" data-active-item-id=\"{_e(str(item.get('active_item_id') or ''))}\""
-        f" data-record-id=\"{_e(str(item.get('record_id') or ''))}\""
+        f" data-active-item-id=\"{_e(active_id)}\""
+        f" data-record-id=\"{_e(str(item.get('record_id') or target_record_id or ''))}\""
         f" data-target-record-id=\"{_e(target_record_id)}\""
         f" data-source-record-id=\"{_e(source_record_id)}\""
         f" data-source-event-id=\"{_e(source_event_id)}\""
@@ -2018,7 +2018,11 @@ def _detail_form(
             else ""
         )
     )
-    active_item_id = str(source.get("active_item_id") or "") if ongoing_item else ""
+    active_item_id = (
+        str(source.get("active_item_id") or target_record_id or source_record_id or "")
+        if ongoing_item
+        else ""
+    )
     site_photo_count = _site_photo_count(source)
     mop_status = _mop_status_text(source, work)
     require_manual_binding = bool(
@@ -5377,6 +5381,7 @@ def render_workbench_lite(
       form.dataset.detailMode = linkedOngoing ? 'ongoing' : 'source';
       form.dataset.localOnly = '';
       form.dataset.targetEnded = '';
+      delete form.dataset.submitOperationId;
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
       for (const [key, value] of Object.entries(draft)) {{
@@ -5401,7 +5406,13 @@ def render_workbench_lite(
       }}
       setSourceLinkDisplay(form, sourceRecordId, '已关联');
       setFormValue(form, 'target_record_id', targetRecordId);
-      setFormValue(form, 'active_item_id', linkedOngoing ? (link.getAttribute('data-active-item-id') || '') : '');
+      setFormValue(
+        form,
+        'active_item_id',
+        linkedOngoing
+          ? (link.getAttribute('data-active-item-id') || targetRecordId || sourceRecordId)
+          : ''
+      );
       setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
       setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
@@ -5428,6 +5439,7 @@ def render_workbench_lite(
       form.dataset.detailMode = 'ongoing';
       form.dataset.localOnly = localOnly ? '1' : '';
       form.dataset.targetEnded = '';
+      delete form.dataset.submitOperationId;
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
       const sourceId = link.getAttribute('data-source-record-id') || '';
@@ -5445,13 +5457,21 @@ def render_workbench_lite(
         repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
       }}
       setSourceLinkDisplay(form, sourceId, '已关联');
-      setFormValue(form, 'target_record_id', targetId);
-      setFormValue(form, 'active_item_id', link.getAttribute('data-active-item-id') || '');
       setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
       setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
       for (const [key, value] of Object.entries(draft)) {{
         setFormValue(form, key, value);
       }}
+      // Row identity is canonical. Apply it after the editable draft so stale
+      // cached fields cannot erase the ID restored by an undo operation.
+      setFormValue(form, 'record_id', targetId || rowRecordId);
+      setFormValue(form, 'source_record_id', sourceId);
+      setFormValue(form, 'target_record_id', targetId);
+      setFormValue(
+        form,
+        'active_item_id',
+        link.getAttribute('data-active-item-id') || targetId || rowRecordId || sourceId
+      );
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       const hint = form.querySelector('.detail-head em');
       if (hint) hint.textContent = '';
@@ -6201,7 +6221,13 @@ def render_workbench_lite(
     }}
     function clearCompletedCurrentNotice(draft) {{
       const form = document.getElementById('lite-notice-form');
-      if (!currentNoticeMatchesDraft(form, draft)) return false;
+      const operationId = String(draft?.operation_id || '').trim();
+      const submittedFromCurrentForm = Boolean(
+        operationId && form?.dataset.submitOperationId === operationId
+      );
+      if (!submittedFromCurrentForm) {{
+        if (!currentNoticeMatchesDraft(form, draft)) return false;
+      }}
       setLiteFormDirty(false);
       liteSitePhotos = [];
       liteSitePhotoSignature = '';
@@ -6225,8 +6251,8 @@ def render_workbench_lite(
     }}
     function findOngoingRowByDraft(draft) {{
       const candidates = rowIdentityCandidates(draft);
-      if (!candidates.length) return null;
-      return Array.from(document.querySelectorAll('.ongoing-row')).find(row => {{
+      const rows = Array.from(document.querySelectorAll('.ongoing-row'));
+      const identityMatch = rows.find(row => {{
         const rowValues = [
           row.getAttribute('data-active-item-id'),
           row.getAttribute('data-target-record-id'),
@@ -6235,6 +6261,15 @@ def render_workbench_lite(
         ].map(value => String(value || '').trim()).filter(Boolean);
         return candidates.some(value => rowValues.includes(value));
       }}) || null;
+      if (identityMatch) return identityMatch;
+      const title = String(draft?.title || '').trim();
+      const workType = String(draft?.work_type || '').trim();
+      if (!title) return null;
+      const titleMatches = rows.filter(row =>
+        String(row.getAttribute('data-title') || '').trim() === title
+        && (!workType || String(row.getAttribute('data-work-type') || '').trim() === workType)
+      );
+      return titleMatches.length === 1 ? titleMatches[0] : null;
     }}
     function ongoingListElements() {{
       const panel = document.querySelector('[data-ongoing-panel]');
@@ -6469,6 +6504,47 @@ def render_workbench_lite(
       setOngoingSubmitButtons(form);
       setLiteFormDirty(false);
     }}
+    function keepUpdatedCurrentNoticeActive(draft, row) {{
+      if (!draft || draft.action !== 'update') return false;
+      const form = document.getElementById('lite-notice-form');
+      if (!form) return false;
+      const operationId = String(draft.operation_id || '').trim();
+      const submittedFromCurrentForm = Boolean(
+        operationId && form.dataset.submitOperationId === operationId
+      );
+      if (!submittedFromCurrentForm && !currentNoticeMatchesDraft(form, draft)) return false;
+      const targetRecordId = String(draft.target_record_id || draft.record_id || '').trim();
+      const activeItemId = String(draft.active_item_id || targetRecordId || '').trim();
+      const sourceRecordId = String(draft.source_record_id || '').trim();
+      if (targetRecordId) {{
+        setFormValue(form, 'record_id', targetRecordId);
+        setFormValue(form, 'target_record_id', targetRecordId);
+      }}
+      if (activeItemId) setFormValue(form, 'active_item_id', activeItemId);
+      if (sourceRecordId) {{
+        setFormValue(form, 'source_record_id', sourceRecordId);
+        setSourceLinkDisplay(form, sourceRecordId, '已关联');
+      }}
+      form.dataset.action = 'update';
+      form.dataset.detailMode = 'ongoing';
+      form.dataset.localOnly = '';
+      form.dataset.targetEnded = '';
+      delete form.dataset.submitOperationId;
+      const wasDirty = liteFormDirty;
+      const actualTime = previewValue(form, 'actual_action_time');
+      setOngoingSubmitButtons(form);
+      if (wasDirty && actualTime) {{
+        setFormValue(form, 'actual_action_time', actualTime);
+        const actualField = form.querySelector('[name="actual_action_time"]');
+        if (actualField) actualField.dataset.autoActualTime = '0';
+      }}
+      setLiteFormDirty(wasDirty);
+      if (row) {{
+        row.classList.add('active');
+        row.setAttribute('aria-current', 'true');
+      }}
+      return true;
+    }}
     function applyJobPatch(jobPatch, payload, ok, message) {{
       const patch = jobPatch && typeof jobPatch === 'object' ? jobPatch : null;
       if (!patch || patch.kind !== 'notice_action_result') {{
@@ -6512,6 +6588,7 @@ def render_workbench_lite(
           adjustOngoingCount(1);
         }}
       }}
+      if (draft.action === 'update') keepUpdatedCurrentNoticeActive(draft, row);
       if (!row) return;
       row.classList.remove('optimistic', 'failed');
       row.setAttribute('data-active-item-id', draft.active_item_id || '');
@@ -6684,6 +6761,7 @@ def render_workbench_lite(
         // Capture the exact visible values before yielding; a background patch may
         // replace the drawer while the browser processes the next frame.
         payload = formPayload(form, submitter, submitAction);
+        form.dataset.submitOperationId = payload.operation_id || '';
         setLiteFormDirty(false);
         clearLiteHtmlCache();
         setFormSubmitBusy(form, true);
@@ -6701,6 +6779,7 @@ def render_workbench_lite(
         setLiteStatus(`后端已受理，正在排队发送和上传。任务号 ${{jobId}}`);
         schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload);
       }} catch (error) {{
+        delete form.dataset.submitOperationId;
         setLiteFormDirty(true);
         if (payload) removeOptimisticSubmission(payload);
         const message = error && error.message ? error.message : '提交失败';

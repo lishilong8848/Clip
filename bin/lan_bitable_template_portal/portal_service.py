@@ -26894,6 +26894,7 @@ class MaintenancePortalService:
         if not isinstance(undo, dict):
             raise PortalError("回退记录格式错误。")
         local = undo.get("local") if isinstance(undo.get("local"), dict) else {}
+        action_type = str(undo.get("action_type") or "").strip().lower()
         identity_keys = set(str(key or "") for key in (undo.get("identity_keys") or []) if str(key or ""))
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         restored_active = False
@@ -26922,6 +26923,10 @@ class MaintenancePortalService:
                 restored_daily = copy.deepcopy(daily_item)
                 if target_record_id:
                     restored_daily["target_record_id"] = target_record_id
+                if action_type == "end":
+                    restored_daily["status"] = "进行中"
+                    restored_daily.pop("ended_at", None)
+                    restored_daily.pop("completed_date", None)
                 summary_payload["items"].append(restored_daily)
             summary_payload["updated_at"] = now
             self._save_day_summary_locked(summary_payload)
@@ -26959,23 +26964,86 @@ class MaintenancePortalService:
                 item = copy.deepcopy(saved.get("item") or {})
                 if target_record_id:
                     item["target_record_id"] = target_record_id
+                if action_type == "end":
+                    item["status"] = "进行中"
+                    item.pop("ended_at", None)
+                    item.pop("completed_date", None)
                 payload["items"].append(item)
                 payload["updated_at"] = now
                 self._state_store.put_document(STATE_NS_WORK_STATUS, document_key, payload)
             self._work_status_cache_signature = None
             self._work_status_cache_items = None
         qt_snapshot = local.get("qt_active") if isinstance(local.get("qt_active"), dict) else None
+        qt_payload: dict[str, Any] = {}
+        context = undo.get("context") if isinstance(undo.get("context"), dict) else {}
+        if action_type in {"update", "end"}:
+            # The context is the last complete payload and is a safe fallback if
+            # an old runtime failed to capture the Qt row. Earlier local snapshots
+            # override it so undo still restores the pre-operation content.
+            qt_payload.update(copy.deepcopy(context))
+            for saved in local.get("work_items") or []:
+                if isinstance(saved, dict) and isinstance(saved.get("item"), dict):
+                    qt_payload.update(copy.deepcopy(saved.get("item") or {}))
+                    break
+            if isinstance(local.get("daily_item"), dict):
+                qt_payload.update(copy.deepcopy(local.get("daily_item") or {}))
         if qt_snapshot and isinstance(qt_snapshot.get("payload"), dict):
-            qt_payload = copy.deepcopy(qt_snapshot.get("payload") or {})
-            if target_record_id:
-                qt_payload["record_id"] = target_record_id
-                qt_payload["target_record_id"] = target_record_id
+            qt_payload.update(copy.deepcopy(qt_snapshot.get("payload") or {}))
+        if qt_payload:
+            resolved_target_record_id = str(
+                target_record_id
+                or undo.get("target_record_id")
+                or canonical_target_record_id(qt_payload)
+                or ""
+            ).strip()
+            resolved_source_record_id = str(
+                undo.get("source_record_id")
+                or canonical_source_record_id(qt_payload)
+                or ""
+            ).strip()
+            resolved_active_item_id = str(
+                undo.get("active_item_id")
+                or (qt_snapshot or {}).get("active_item_id")
+                or qt_payload.get("active_item_id")
+                or resolved_target_record_id
+                or resolved_source_record_id
+                or ""
+            ).strip()
+            if resolved_target_record_id:
+                qt_payload["record_id"] = resolved_target_record_id
+                qt_payload["target_record_id"] = resolved_target_record_id
+            if resolved_source_record_id:
+                qt_payload["source_record_id"] = resolved_source_record_id
+            if resolved_active_item_id:
+                qt_payload["active_item_id"] = resolved_active_item_id
+            qt_payload.setdefault("work_type", str(undo.get("work_type") or ""))
+            qt_payload.setdefault("notice_type", str(undo.get("notice_type") or ""))
+            qt_payload.setdefault("scope", str(undo.get("scope") or "ALL"))
+            if action_type in {"update", "end"}:
+                qt_payload["action"] = "update"
+                qt_payload["status"] = "更新"
+                notice_text = str(qt_payload.get("text") or "")
+                if notice_text:
+                    qt_payload["text"] = re.sub(
+                        r"(【[^】]+】\s*状态\s*[：:]\s*)(?:结束|已结束)",
+                        r"\1更新",
+                        notice_text,
+                        count=1,
+                    )
+                # Undo itself changes the remote row version. Blank these values
+                # so the next update/end first rebases to the just-restored row.
+                for version_key in (
+                    "record_version",
+                    "expected_record_version",
+                    "remote_last_modified_time",
+                ):
+                    qt_payload[version_key] = ""
             restored_active_payload = copy.deepcopy(qt_payload)
             restored_active = self._state_store.upsert_qt_active_item(
                 qt_payload,
-                section=str(qt_snapshot.get("section") or ""),
-                sort_order=int(qt_snapshot.get("sort_order") or 0),
-                origin=str(qt_snapshot.get("origin") or ""),
+                section=str((qt_snapshot or {}).get("section") or ""),
+                sort_order=int((qt_snapshot or {}).get("sort_order") or 0),
+                origin=str((qt_snapshot or {}).get("origin") or qt_payload.get("origin") or "undo"),
                 allow_revive=True,
             )
         else:
@@ -26983,6 +27051,8 @@ class MaintenancePortalService:
                 active_item_id=str(undo.get("active_item_id") or ""),
                 record_id=str(target_record_id or undo.get("target_record_id") or ""),
             )
+        if restored_active_payload:
+            identity_keys.update(self._ongoing_hidden_keys(restored_active_payload))
         self._remove_hidden_ongoing_keys(identity_keys)
         self._touch_state_cache_version()
         with suppress(Exception):
@@ -35764,8 +35834,22 @@ class MaintenancePortalService:
                 or (source_record_id and target_record_id == source_record_id)
             ):
                 target_record_id = ""
+        ongoing_candidates = list(ongoing_items or [])
+        if action in {"update", "end"}:
+            # Undo restoration is committed to SQLite before the browser refreshes.
+            # Read the canonical active projection again here so a request racing
+            # that refresh does not depend on a stale caller-side list.
+            try:
+                ongoing_candidates.extend(
+                    self._state_store.list_qt_active_items(include_deleted=False)
+                )
+            except Exception:
+                pass
+        projected_ongoing = self._project_ongoing_items(
+            scope, ongoing_candidates
+        )
         base: dict[str, Any] = {}
-        for item in self._project_ongoing_items(scope, ongoing_items or []):
+        for item in projected_ongoing:
             item_work_type = self._item_work_type(item)
             if work_type and item_work_type != work_type:
                 continue
@@ -35778,6 +35862,72 @@ class MaintenancePortalService:
             if source_record_id and str(item.get("source_record_id") or "").strip() == source_record_id:
                 base = item
                 break
+        if action in {"update", "end"} and not base:
+            # A restored row from an older runtime may be visible before its ID
+            # attributes are hydrated into the drawer. Recover only when the
+            # currently edited business fields identify exactly one live item.
+            command_hint = copy.deepcopy(payload)
+            command_hint.update(copy.deepcopy(patch))
+            command_hint["work_type"] = work_type
+            command_hint = normalize_notice_identity_payload(command_hint)
+            same_type_items = [
+                item
+                for item in projected_ongoing
+                if self._item_work_type(item) == work_type
+            ]
+            exact_signature = self._ongoing_exact_duplicate_signature(
+                command_hint
+            )
+            exact_matches = (
+                [
+                    item
+                    for item in same_type_items
+                    if self._ongoing_exact_duplicate_signature(item)
+                    == exact_signature
+                ]
+                if exact_signature
+                else []
+            )
+            if len(exact_matches) == 1:
+                base = exact_matches[0]
+            if not base:
+                command_business_keys = self._ongoing_business_merge_keys(
+                    command_hint,
+                    work_type=work_type,
+                )
+                business_matches = [
+                    item
+                    for item in same_type_items
+                    if command_business_keys.intersection(
+                        self._ongoing_business_merge_keys(
+                            item,
+                            work_type=work_type,
+                        )
+                    )
+                ]
+                if len(business_matches) == 1:
+                    base = business_matches[0]
+            if not base:
+                title_key = self._ongoing_business_text_key(
+                    command_hint.get("title")
+                    or command_hint.get("name")
+                    or command_hint.get("content")
+                    or ""
+                )
+                if title_key:
+                    title_matches = [
+                        item
+                        for item in same_type_items
+                        if self._ongoing_business_text_key(
+                            item.get("title")
+                            or item.get("name")
+                            or item.get("content")
+                            or ""
+                        )
+                        == title_key
+                    ]
+                    if len(title_matches) == 1:
+                        base = title_matches[0]
         if action in {"update", "end"}:
             resolved_active_item_id = active_item_id or str(
                 base.get("active_item_id") or ""
