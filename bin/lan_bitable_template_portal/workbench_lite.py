@@ -378,10 +378,17 @@ def _item_work_type(item: dict[str, Any] | None) -> str:
 
 def _remote_target_record_id(item: dict[str, Any] | None) -> str:
     item = item if isinstance(item, dict) else {}
-    for key in ("target_record_id", "record_id"):
-        candidate = str(item.get(key) or "").strip()
-        if candidate and not is_local_record_id(candidate):
-            return candidate
+    source_record_id = str(item.get("source_record_id") or "").strip()
+    candidate = str(item.get("target_record_id") or "").strip()
+    if candidate and not is_local_record_id(candidate):
+        return candidate
+    candidate = str(item.get("record_id") or "").strip()
+    if (
+        candidate
+        and candidate != source_record_id
+        and not is_local_record_id(candidate)
+    ):
+        return candidate
     return ""
 
 
@@ -1767,7 +1774,10 @@ def _target_link_panel(work_type: str, target_record_id: str) -> str:
     work = _work_type(work_type)
     if work not in BINDABLE_TARGET_WORK_TYPES:
         return ""
-    linked = bool(str(target_record_id or "").strip())
+    normalized_target_id = str(target_record_id or "").strip()
+    linked = bool(normalized_target_id) and not is_local_record_id(
+        normalized_target_id
+    )
     status_text = "已绑定" if linked else "未绑定"
     return f"""
         <section class="target-link-panel">
@@ -2012,11 +2022,7 @@ def _detail_form(
     target_record_id = (
         str(prefill_target_record_id or "").strip()
         if prefill_draft
-        else (
-            str(source.get("target_record_id") or source.get("record_id") or "")
-            if ongoing_item
-            else ""
-        )
+        else (_remote_target_record_id(source) if ongoing_item else "")
     )
     active_item_id = (
         str(source.get("active_item_id") or target_record_id or source_record_id or "")
@@ -3784,6 +3790,20 @@ def render_workbench_lite(
       const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
       if (!field) return;
       field.value = value == null ? '' : String(value);
+      if (name === 'target_record_id') {{
+        syncTargetLinkDisplay(form, field.value);
+      }}
+    }}
+    function syncTargetLinkDisplay(form, targetRecordId, statusText = '') {{
+      if (!form) return;
+      const panel = form.querySelector('.target-link-panel');
+      if (!panel) return;
+      const linked = !isMissingTargetRecordId(targetRecordId);
+      const status = panel.querySelector('#lite-target-link-status');
+      const searchButton = panel.querySelector('#lite-target-search');
+      if (status) status.textContent = statusText || (linked ? '已绑定' : '未绑定');
+      if (searchButton) searchButton.textContent = linked ? '更换' : '查找';
+      panel.dataset.linked = linked ? '1' : '0';
     }}
     const TARGET_FORM_PROTECTED_FIELDS = new Set([
       'scope', 'source_month', 'work_type', 'manual', 'manual_id',

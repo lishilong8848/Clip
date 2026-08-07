@@ -119,18 +119,34 @@
 
         <div class="admin-layout">
           <aside class="task-list">
-            <button
+            <div
               v-for="task in tasks"
               :key="task.task_id"
-              type="button"
-              :class="{ active: selectedTask?.task_id === task.task_id }"
-              :disabled="loading || saving"
-              @click="selectTask(task.task_id, true)"
+              class="admin-task-item"
             >
-              <strong>{{ task.name }}</strong>
-              <span>{{ formatDateTime(task.created_at) }}</span>
-              <small>{{ task.submitted_count || 0 }}/{{ task.response_count || 0 }} 已生成</small>
-            </button>
+              <button
+                type="button"
+                class="task-select"
+                :class="{ active: selectedTask?.task_id === task.task_id }"
+                :disabled="loading || saving || Boolean(deletingTaskId)"
+                @click="selectTask(task.task_id, true)"
+              >
+                <strong>{{ task.name }}</strong>
+                <span>{{ formatDateTime(task.created_at) }}</span>
+                <small>{{ task.submitted_count || 0 }}/{{ task.response_count || 0 }} 已生成</small>
+              </button>
+              <button
+                type="button"
+                class="task-delete"
+                :class="{ deleting: deletingTaskId === task.task_id }"
+                :disabled="loading || saving || Boolean(deletingTaskId)"
+                :aria-label="`删除任务：${task.name}`"
+                :title="deletingTaskId === task.task_id ? '正在删除' : '删除任务'"
+                @click.stop="requestDeleteTask(task)"
+              >
+                <Trash2 :size="16" />
+              </button>
+            </div>
             <div v-if="!tasks.length" class="empty-inline">暂无重保任务</div>
           </aside>
 
@@ -202,6 +218,7 @@
               v-for="task in tasks"
               :key="task.task_id"
               type="button"
+              class="task-select"
               :class="{ active: selectedTask?.task_id === task.task_id }"
               :disabled="loading || saving"
               @click="requestTaskSwitch(task.task_id)"
@@ -474,6 +491,16 @@
       @resolve="resolveMarkAllNormal"
     />
 
+    <ConfirmDialog
+      :open="deleteConfirmOpen"
+      tone="danger"
+      title="确认删除重保任务"
+      :message="`删除“${String(pendingDeleteTask?.name || '')}”后不可恢复。`"
+      :details="deleteTaskDetails"
+      confirm-label="删除任务"
+      @resolve="resolveDeleteTask"
+    />
+
     <CriticalGuardSignatureDrawer
       :open="signatureDrawerOpen"
       :scope="activeScope"
@@ -505,6 +532,7 @@ import {
   RefreshCw,
   Save,
   Settings2,
+  Trash2,
   UploadCloud,
   UsersRound,
   X,
@@ -546,6 +574,9 @@ const imageViewerUrl = ref("");
 const imageViewerTitle = ref("");
 const confirmOpen = ref(false);
 const normalConfirmOpen = ref(false);
+const deleteConfirmOpen = ref(false);
+const pendingDeleteTask = ref<Dict | null>(null);
+const deletingTaskId = ref("");
 const signatureDrawerOpen = ref(false);
 const sourceFileInput = ref<HTMLInputElement | null>(null);
 const sourceFileDragging = ref(false);
@@ -640,6 +671,16 @@ const hasGeneratedArtifact = computed(() => Boolean(
   || activeResponse.value?.status === "submitted"
 ));
 const generateButtonText = computed(() => (hasGeneratedArtifact.value ? "重新生成图片" : "生成图片"));
+const deleteTaskDetails = computed(() => {
+  const task = pendingDeleteTask.value;
+  if (!task) return [];
+  const scopes = Array.isArray(task.target_scopes) ? task.target_scopes.join("、") : "";
+  return [
+    scopes ? `发布楼栋：${scopes}` : "任务将从所有已发布楼栋移除",
+    `同时删除 ${Number(task.response_count || 0)} 份楼栋填报和已生成文件`,
+    "楼栋上传模板与同名任务填写记忆会保留",
+  ];
+});
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? {}));
@@ -698,9 +739,26 @@ async function loadTasks(): Promise<void> {
     || scope !== activeScope.value
   ) return;
   tasks.value = Array.isArray(data.tasks) ? data.tasks : [];
+  if (
+    selectedTask.value
+    && !tasks.value.some((item) => item.task_id === selectedTask.value?.task_id)
+  ) {
+    clearTaskSelection();
+  }
   if (!selectedTask.value && tasks.value.length) {
     await selectTask(tasks.value[0].task_id, viewMode.value === "admin");
   }
+}
+
+function clearTaskSelection(): void {
+  detailGeneration += 1;
+  detailController?.abort();
+  selectedTask.value = null;
+  activeResponse.value = null;
+  adminActiveSheet.value = "";
+  cells.value = {};
+  selectedSigners.value = [];
+  dirty.value = false;
 }
 
 async function selectTask(taskId: string, admin = false): Promise<void> {
@@ -1052,6 +1110,45 @@ async function publishTask(): Promise<void> {
   }
 }
 
+function requestDeleteTask(task: Dict): void {
+  if (loading.value || saving.value || deletingTaskId.value) return;
+  pendingDeleteTask.value = task;
+  deleteConfirmOpen.value = true;
+}
+
+async function resolveDeleteTask(confirmed: boolean): Promise<void> {
+  deleteConfirmOpen.value = false;
+  const task = pendingDeleteTask.value;
+  pendingDeleteTask.value = null;
+  if (!confirmed || !task || deletingTaskId.value) return;
+
+  const taskId = String(task.task_id || "").trim();
+  if (!taskId) return;
+  const deletedIndex = tasks.value.findIndex((item) => item.task_id === taskId);
+  deletingTaskId.value = taskId;
+  try {
+    const result = await requestJson(
+      `/api/critical-guard/tasks/${encodeURIComponent(taskId)}?operation_id=${encodeURIComponent(operationId())}`,
+      { method: "DELETE" },
+    );
+    tasks.value = tasks.value.filter((item) => item.task_id !== taskId);
+    const deletedSelected = selectedTask.value?.task_id === taskId;
+    if (deletedSelected) clearTaskSelection();
+    setMessage(
+      String(result.cleanup_warning || result.message || "重保任务已删除。"),
+      result.cleanup_warning ? "warning" : "success",
+    );
+    if (deletedSelected && tasks.value.length) {
+      const nextIndex = Math.min(Math.max(0, deletedIndex), tasks.value.length - 1);
+      await selectTask(String(tasks.value[nextIndex].task_id || ""), true);
+    }
+  } catch (deleteError: any) {
+    setMessage(deleteError?.message || "重保任务删除失败。", "error");
+  } finally {
+    deletingTaskId.value = "";
+  }
+}
+
 function adminSheetResponses(sheet: string): Dict[] {
   return (selectedTask.value?.responses || [])
     .filter((item: Dict) => item.sheet_type === sheet)
@@ -1372,12 +1469,19 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .admin-layout,
 .fill-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; margin-top: 14px; align-items: start; }
 .task-list { display: grid; gap: 7px; max-height: calc(100vh - 250px); overflow: auto; padding-right: 4px; }
-.task-list button { display: grid; gap: 6px; border: 1px solid #d6e3f2; border-radius: 10px; padding: 11px 12px; background: #fff; color: #183252; text-align: left; cursor: pointer; }
-.task-list button.active { border-color: #62a0f4; background: #eaf3ff; box-shadow: inset 4px 0 0 #2f73e7; }
-.task-list button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.task-list button span { color: #77879c; font-size: 11px; }
-.task-list button small { color: #b45309; font-weight: 850; }
-.task-list button small.done { color: #087f5b; }
+.task-list .task-select { width: 100%; display: grid; gap: 6px; border: 1px solid #d6e3f2; border-radius: 10px; padding: 11px 12px; background: #fff; color: #183252; text-align: left; cursor: pointer; }
+.task-list .task-select.active { border-color: #62a0f4; background: #eaf3ff; box-shadow: inset 4px 0 0 #2f73e7; }
+.task-list .task-select strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.task-list .task-select span { color: #77879c; font-size: 11px; }
+.task-list .task-select small { color: #b45309; font-weight: 850; }
+.task-list .task-select small.done { color: #087f5b; }
+.admin-task-item { position: relative; min-width: 0; }
+.admin-task-item .task-select { padding-right: 46px; }
+.task-delete { position: absolute; top: 8px; right: 8px; display: inline-grid; width: 30px; height: 30px; place-items: center; border: 1px solid #f3c8cf; border-radius: 8px; padding: 0; background: #fff7f8; color: #c9364f; cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+.task-delete:hover:not(:disabled) { border-color: #e76a7d; background: #fff0f2; color: #a91934; }
+.task-delete:disabled { opacity: .5; cursor: not-allowed; }
+.task-delete.deleting { animation: pulse-delete .8s ease-in-out infinite alternate; }
+@keyframes pulse-delete { to { opacity: .42; } }
 .empty-inline { padding: 24px 10px; color: #7b8ca2; text-align: center; font-size: 13px; }
 
 .admin-results,

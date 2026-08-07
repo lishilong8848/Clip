@@ -14184,6 +14184,78 @@ class LanPortalStateStore:
         task["responses"] = [self._critical_guard_response_from_row(row) for row in rows]
         return task
 
+    def delete_critical_guard_task(self, task_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self._text(task_id)
+        if not normalized_task_id:
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                task_row = conn.execute(
+                    "SELECT * FROM critical_guard_tasks WHERE task_id=?",
+                    (normalized_task_id,),
+                ).fetchone()
+                if not task_row:
+                    conn.rollback()
+                    return None
+                response_rows = conn.execute(
+                    """
+                    SELECT response_id, generated_image_path, generated_workbook_path
+                    FROM critical_guard_responses
+                    WHERE task_id=?
+                    """,
+                    (normalized_task_id,),
+                ).fetchall()
+                signature_prefix = f"critical_guard:{normalized_task_id}:"
+                prefix_length = len(signature_prefix)
+                usage_cursor = conn.execute(
+                    """
+                    DELETE FROM mop_signature_usage_confirmations
+                    WHERE substr(notice_key, 1, ?) = ?
+                    """,
+                    (prefix_length, signature_prefix),
+                )
+                temporary_cursor = conn.execute(
+                    """
+                    DELETE FROM mop_temporary_signature_sessions
+                    WHERE substr(notice_key, 1, ?) = ?
+                    """,
+                    (prefix_length, signature_prefix),
+                )
+                signature_cursor = conn.execute(
+                    "DELETE FROM critical_guard_signature_sets WHERE task_id=?",
+                    (normalized_task_id,),
+                )
+                response_cursor = conn.execute(
+                    "DELETE FROM critical_guard_responses WHERE task_id=?",
+                    (normalized_task_id,),
+                )
+                task_cursor = conn.execute(
+                    "DELETE FROM critical_guard_tasks WHERE task_id=?",
+                    (normalized_task_id,),
+                )
+                conn.commit()
+        task = self._critical_guard_task_from_row(task_row)
+        task.update(
+            {
+                "deleted": bool(task_cursor.rowcount),
+                "response_count": int(response_cursor.rowcount or 0),
+                "signature_set_count": int(signature_cursor.rowcount or 0),
+                "temporary_signature_count": int(temporary_cursor.rowcount or 0),
+                "usage_confirmation_count": int(usage_cursor.rowcount or 0),
+                "artifact_paths": sorted(
+                    {
+                        self._text(row[key])
+                        for row in response_rows
+                        for key in ("generated_image_path", "generated_workbook_path")
+                        if self._text(row[key])
+                    }
+                ),
+            }
+        )
+        return task
+
     def get_critical_guard_response(self, response_id: str) -> dict[str, Any] | None:
         normalized = self._text(response_id)
         if not normalized:

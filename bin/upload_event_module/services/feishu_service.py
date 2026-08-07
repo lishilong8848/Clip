@@ -4,6 +4,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from typing import Any, Callable
 
 from ..config import config
@@ -36,6 +37,8 @@ FEISHU_ERROR_SUGGESTIONS = {
 }
 
 _token_refresh_lock = threading.RLock()
+BITABLE_DATA_NOT_READY_CODE = 1254607
+BITABLE_DATA_NOT_READY_RETRY_DELAYS = (1.0, 2.5, 5.0)
 
 # These fields are useful when the target table has them, but older customer
 # tables may not.  Missing optional fields must not block the core notice state
@@ -157,6 +160,25 @@ def _with_token_retry(request_fn: Callable[[str], object]):
         new_token = refresh_feishu_token()
         if new_token:
             response = request_fn(new_token)
+    return response
+
+
+def _with_bitable_data_ready_retry(request_fn: Callable[[str], object]):
+    """Retry idempotent bitable reads/deletes while Feishu is still calculating."""
+
+    response = _with_token_retry(request_fn)
+    for delay in BITABLE_DATA_NOT_READY_RETRY_DELAYS:
+        try:
+            code = int(getattr(response, "code", 0) or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if response.success() or code != BITABLE_DATA_NOT_READY_CODE:
+            return response
+        log_warning(
+            f"飞书多维表数据未就绪(code={code})，{delay:g} 秒后重试..."
+        )
+        time.sleep(delay)
+        response = _with_token_retry(request_fn)
     return response
 
 
@@ -824,7 +846,7 @@ def query_record_by_id(record_id, notice_type):
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.get(request, option)
 
-    response = _with_token_retry(do_query)
+    response = _with_bitable_data_ready_retry(do_query)
 
     if not response.success():
         error_msg = f"查询记录失败: {response.code} - {response.msg}"
@@ -888,7 +910,7 @@ def delete_bitable_record(record_id: str, notice_type: str):
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.delete(request, option)
 
-    response = _with_token_retry(do_delete)
+    response = _with_bitable_data_ready_retry(do_delete)
 
     if not response.success():
         if response.code == 1254043:

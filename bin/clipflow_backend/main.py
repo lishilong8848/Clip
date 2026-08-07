@@ -3419,6 +3419,31 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.delete("/api/critical-guard/tasks/{task_id}")
+        async def critical_guard_task_delete(task_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
+                    PortalRuntime.service.delete_critical_guard_task,
+                    task_id,
+                    audit_domain="critical_guard",
+                    audit_action="delete_task",
+                    audit_operation_id=str(
+                        request.query_params.get("operation_id") or ""
+                    ),
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_metadata={"task_id": str(task_id or "")},
+                    audit_remote_written_on_success=False,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/critical-guard/tasks/{task_id}")
         async def critical_guard_task_detail(task_id: str, request: Request):
             session = self._current_session(request)

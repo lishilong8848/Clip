@@ -25,11 +25,55 @@ from upload_event_module.config import (  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.event_notice import EventNoticeHandler  # noqa: E402
+from upload_event_module.services import feishu_service  # noqa: E402
 
 
 class NoticeIdentityBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = object.__new__(MaintenancePortalService)
+
+    def test_bitable_data_not_ready_retries_idempotent_request(self) -> None:
+        class FakeResponse:
+            def __init__(self, code: int) -> None:
+                self.code = code
+
+            def success(self) -> bool:
+                return self.code == 0
+
+        responses = [FakeResponse(1254607), FakeResponse(0)]
+        with mock.patch.object(feishu_service.time, "sleep") as sleep_mock:
+            result = feishu_service._with_bitable_data_ready_retry(
+                lambda _token: responses.pop(0)
+            )
+
+        self.assertTrue(result.success())
+        sleep_mock.assert_called_once_with(1.0)
+
+    def test_bitable_data_not_ready_remains_distinct_from_missing_record(self) -> None:
+        class FakeResponse:
+            code = 1254607
+
+            @staticmethod
+            def success() -> bool:
+                return False
+
+        with mock.patch.object(feishu_service.time, "sleep") as sleep_mock:
+            result = feishu_service._with_bitable_data_ready_retry(
+                lambda _token: FakeResponse()
+            )
+
+        self.assertEqual(result.code, 1254607)
+        self.assertEqual(sleep_mock.call_count, 3)
+        self.assertTrue(
+            PortalRuntime._remote_record_data_not_ready(
+                "查询记录失败: 1254607 - Data not ready, please try again later"
+            )
+        )
+        self.assertFalse(
+            PortalRuntime._remote_record_not_found(
+                "查询记录失败: 1254607 - Data not ready, please try again later"
+            )
+        )
 
     def test_qt_active_notice_month_visibility_uses_business_dates(self) -> None:
         current = {

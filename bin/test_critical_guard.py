@@ -665,6 +665,120 @@ class CriticalGuardStateStoreTests(unittest.TestCase):
             self.assertEqual(workbook_bytes, source_bytes)
             self.assertTrue(workbook_name.endswith(".xlsx"))
 
+    def test_task_delete_removes_task_data_but_keeps_memory_and_scope_files(self) -> None:
+        data_root = Path(self.tempdir.name) / "critical_guard"
+        task_root = data_root / "generated" / self.task_id / "设备安全"
+        task_root.mkdir(parents=True, exist_ok=True)
+        image_path = task_root / "result.png"
+        workbook_path = task_root / "result.xlsx"
+        image_path.write_bytes(b"generated-image")
+        workbook_path.write_bytes(b"generated-workbook")
+        self.store.update_critical_guard_response(
+            self.response_id,
+            cells=self.initial_cells,
+            signatures=[
+                {
+                    "source": "staff",
+                    "record_id": "staff-record-1",
+                    "name": "检查人",
+                    "role": "inspector",
+                }
+            ],
+            signature_source="staff",
+            signature_record_id="staff-record-1",
+            signature_name="检查人",
+            generated=True,
+            generated_image={
+                "path": str(image_path),
+                "sha256": "image-sha",
+                "size": image_path.stat().st_size,
+                "width": 320,
+                "height": 200,
+                "workbook_path": str(workbook_path),
+                "workbook_sha256": "workbook-sha",
+                "workbook_size": workbook_path.stat().st_size,
+            },
+            share_signatures=True,
+            expected_version=1,
+            actor_open_id="operator-open-id",
+            actor_name="管理员",
+        )
+        reusable_file_path = Path(self.tempdir.name) / "A楼物资检查清单.xlsx"
+        reusable_file_path.write_bytes(b"reusable-scope-file")
+        reusable_file = self.store.put_critical_guard_scope_file(
+            file_id="guard-scope-file-kept",
+            scope="A",
+            sheet_type="物资检查清单",
+            original_file_name=reusable_file_path.name,
+            local_file_path=str(reusable_file_path),
+            sha256=hashlib.sha256(reusable_file_path.read_bytes()).hexdigest(),
+            size=reusable_file_path.stat().st_size,
+            uploaded_by_open_id="operator-open-id",
+            uploaded_by_name="管理员",
+        )
+        notice_key = f"critical_guard:{self.task_id}:A"
+        temporary = self.store.create_mop_temporary_signature_session(
+            scope="A",
+            notice_key=notice_key,
+            role="inspector",
+            display_name="临时检查人",
+            recipient_open_ids=["operator-open-id"],
+            created_by="operator-open-id",
+        )
+        confirmation = self.store.create_mop_signature_usage_confirmation(
+            scope="A",
+            notice_key=notice_key,
+            role="inspector",
+            signer_record_id="staff-record-1",
+            signer_open_id="staff-open-id-1",
+            requested_by_openid="operator-open-id",
+            requested_by_name="管理员",
+        )
+
+        service = MaintenancePortalService.__new__(MaintenancePortalService)
+        service._state_store = self.store
+        with patch.object(
+            portal_service_module,
+            "get_data_file_path",
+            return_value=str(data_root),
+        ):
+            deleted = service.delete_critical_guard_task(self.task_id)
+            repeated = service.delete_critical_guard_task(self.task_id)
+
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["response_count"], 1)
+        self.assertEqual(deleted["removed_artifact_count"], 2)
+        self.assertFalse(repeated["deleted"])
+        self.assertTrue(repeated["already_deleted"])
+        self.assertIsNone(
+            self.store.get_critical_guard_task(
+                self.task_id,
+                include_all_responses=True,
+            )
+        )
+        self.assertIsNone(self.store.get_critical_guard_response(self.response_id))
+        self.assertFalse((data_root / "generated" / self.task_id).exists())
+        self.assertIsNone(
+            self.store.get_mop_temporary_signature_session(
+                temp_id=temporary["temp_id"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "无效或已过期"):
+            self.store.get_mop_signature_usage_confirmation(
+                token=confirmation["token"]
+            )
+        self.assertIsNotNone(
+            self.store.get_critical_guard_memory(
+                memory_key=self.memory_key,
+                scope="A",
+                sheet_type="设备安全",
+            )
+        )
+        self.assertEqual(
+            self.store.get_critical_guard_scope_file(reusable_file["file_id"])["file_id"],
+            reusable_file["file_id"],
+        )
+
     def test_task_idempotency_scope_summary_and_memory(self) -> None:
         duplicate = self.store.create_critical_guard_task(
             task_id="unused-second-id",

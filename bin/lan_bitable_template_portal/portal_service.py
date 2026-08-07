@@ -26883,6 +26883,249 @@ class MaintenancePortalService:
                 payload["hidden"] = hidden
                 self._save_hidden_ongoing_locked(payload)
 
+    def _applied_end_undo_for_context(
+        self,
+        context: dict[str, Any],
+        *,
+        work_type: str,
+        scope: str,
+    ) -> dict[str, Any] | None:
+        context = normalize_notice_identity_payload(context or {})
+
+        def needs_related_restore(undo: dict[str, Any] | None) -> bool:
+            related = (
+                undo.get("related_remote")
+                if isinstance(undo, dict)
+                and isinstance(undo.get("related_remote"), dict)
+                else {}
+            )
+            return not bool(related.get("restored"))
+
+        marker_id = str(context.get("undo_restored_id") or "").strip()
+        if marker_id:
+            marked = self._state_store.get_notice_undo_action(marker_id)
+            if (
+                isinstance(marked, dict)
+                and str(marked.get("status") or "") == "undone"
+                and str(marked.get("action_type") or "").strip().lower() == "end"
+                and str(marked.get("work_type") or "").strip() == work_type
+                and needs_related_restore(marked)
+            ):
+                return marked
+
+        context_ids = {
+            str(value or "").strip()
+            for value in (
+                context.get("active_item_id"),
+                canonical_source_record_id(context),
+                canonical_target_record_id(context),
+            )
+            if str(value or "").strip()
+        }
+        if not context_ids:
+            return None
+        for undo in self._state_store.list_notice_undo_actions(
+            status="undone",
+            scope=self._normalize_scope(scope),
+            include_expired=True,
+            limit=200,
+        ):
+            if str(undo.get("action_type") or "").strip().lower() != "end":
+                continue
+            if str(undo.get("work_type") or "").strip() != work_type:
+                continue
+            if not needs_related_restore(undo):
+                continue
+            undo_ids = {
+                str(value or "").strip()
+                for value in (
+                    undo.get("active_item_id"),
+                    undo.get("source_record_id"),
+                    undo.get("target_record_id"),
+                    undo.get("restored_target_record_id"),
+                )
+                if str(value or "").strip()
+            }
+            if context_ids.intersection(undo_ids):
+                return undo
+        return None
+
+    def restore_notice_undo_related_remote(
+        self,
+        undo: dict[str, Any],
+        *,
+        target_record_id: str = "",
+    ) -> dict[str, Any]:
+        """Restore repair-summary state changed after the target notice write."""
+        if not isinstance(undo, dict):
+            raise PortalError("回退记录格式错误。")
+        action_type = str(undo.get("action_type") or "").strip().lower()
+        work_type = str(undo.get("work_type") or "").strip()
+        if action_type != "end" or work_type != WORK_TYPE_REPAIR:
+            return {"restored": False, "skipped": True, "warnings": []}
+
+        context = (
+            dict(undo.get("context") or {})
+            if isinstance(undo.get("context"), dict)
+            else {}
+        )
+        summary_id = str(
+            context.get("repair_management_record_id")
+            or undo.get("source_record_id")
+            or canonical_source_record_id(context)
+            or ""
+        ).strip()
+        if not summary_id.startswith("rec"):
+            return {"restored": False, "skipped": True, "warnings": []}
+
+        previous: dict[str, Any] = {}
+        local = undo.get("local") if isinstance(undo.get("local"), dict) else {}
+        if isinstance(local.get("daily_item"), dict):
+            previous.update(dict(local.get("daily_item") or {}))
+        for saved in local.get("work_items") or []:
+            if isinstance(saved, dict) and isinstance(saved.get("item"), dict):
+                previous.update(dict(saved.get("item") or {}))
+                break
+        qt_snapshot = local.get("qt_active")
+        if isinstance(qt_snapshot, dict) and isinstance(qt_snapshot.get("payload"), dict):
+            previous.update(dict(qt_snapshot.get("payload") or {}))
+
+        scope = self._normalize_scope(undo.get("scope") or context.get("scope") or "ALL")
+        with self._repair_management_record_lock(summary_id):
+            existing = self._ensure_repair_management_record_in_scope(summary_id, scope)
+            _metas, meta_by_name, _records = self._load_repair_management_project_records()
+            desired: dict[str, Any] = {
+                "维修结束时间（2026）": None,
+                "维修结束时间": None,
+            }
+            if "title" in previous:
+                desired["检修通告名称"] = str(previous.get("title") or "").strip() or None
+            if "progress" in previous:
+                desired["维修进展描述"] = str(previous.get("progress") or "").strip() or None
+            coerced, warnings = self._coerce_repair_management_fields(
+                desired,
+                meta_by_name,
+                excluded_field_names=REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES,
+            )
+            cleared_end_names = {
+                str(meta_by_name[name].field_name or "").strip()
+                for name in ("维修结束时间（2026）", "维修结束时间")
+                if name in meta_by_name
+            }
+            if not cleared_end_names.intersection(coerced):
+                raise PortalError("维修项目表缺少可写的维修结束时间字段。")
+            self._patch_record_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                record_id=summary_id,
+                fields=coerced,
+            )
+            self._upsert_repair_snapshot_fields(
+                source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                record_id=summary_id,
+                fields={**coerced, **desired},
+            )
+            updated_record = self._repair_management_record_with_fields(
+                existing,
+                {**coerced, **desired},
+            )
+            _followup_metas, _followup_meta_by_name, followups = (
+                self._load_repair_followups_for_summary(
+                    summary_id,
+                    limit=500,
+                )
+            )
+            linked_followups = [
+                record
+                for record in followups
+                if summary_id in self._repair_followup_parent_ids(record)
+            ]
+            followup_sync = self._sync_repair_followups_from_summary(
+                summary_record_id=summary_id,
+                summary_record=updated_record,
+                linked_followups=linked_followups,
+            )
+            followup_warnings = [
+                str(item or "").strip()
+                for item in (followup_sync.get("warnings") or [])
+                if str(item or "").strip()
+            ]
+            if (
+                int(followup_sync.get("failed_count") or 0) > 0
+                or self._repair_sync_warnings_require_retry(followup_warnings)
+            ):
+                raise PortalError("；".join(followup_warnings) or "维修跟进记录回退失败。")
+
+            has_followup, latest_progress = self._repair_management_latest_followup_progress(
+                linked_followups
+            )
+            raw_fields = updated_record.get("raw_fields") or {}
+            display_fields = updated_record.get("display_fields") or {}
+            start_value = raw_fields.get("维修开始时间")
+            if start_value in (None, "", [], {}):
+                start_value = display_fields.get("维修开始时间")
+            workflow = self._repair_management_workflow_for_state(
+                start_value=start_value,
+                end_value=None,
+                has_followup=has_followup,
+                latest_progress_percent=latest_progress,
+            )
+            workflow_synced, workflow_warnings = self._sync_repair_management_workflow(
+                record_id=summary_id,
+                workflow=workflow,
+                meta_by_name=meta_by_name,
+                current_record=existing,
+            )
+            if not workflow_synced:
+                raise PortalError("；".join(workflow_warnings) or "维修项目流程状态回退失败。")
+            self._invalidate_repair_management_status_cache()
+            return {
+                "restored": True,
+                "skipped": False,
+                "summary_record_id": summary_id,
+                "target_record_id": str(target_record_id or undo.get("target_record_id") or ""),
+                "followup_count": int(followup_sync.get("synced_count") or 0),
+                "workflow": workflow,
+                "warnings": list(dict.fromkeys([*warnings, *followup_warnings, *workflow_warnings])),
+            }
+
+    def _restore_repair_source_after_applied_end_undo(
+        self,
+        request_payload: dict[str, Any],
+        source_record: dict[str, Any],
+        *,
+        source_record_id: str,
+        target_record_id: str,
+        scope: str,
+    ) -> dict[str, Any]:
+        if not self._repair_has_ended(source_record):
+            return source_record
+        applied_undo = self._applied_end_undo_for_context(
+            request_payload,
+            work_type=WORK_TYPE_REPAIR,
+            scope=scope,
+        )
+        if applied_undo is None:
+            return source_record
+        try:
+            related_remote = self.restore_notice_undo_related_remote(
+                applied_undo,
+                target_record_id=target_record_id,
+            )
+            if not bool(related_remote.get("restored")):
+                raise PortalError("未找到需要恢复的关联维修单。")
+            self._state_store.mark_notice_undo_action(
+                str(applied_undo.get("undo_id") or ""),
+                "undone",
+                payload_patch={
+                    "related_remote": related_remote,
+                    "related_remote_repaired_at": time.time(),
+                },
+            )
+            return self._find_record_by_id(source_record_id, WORK_TYPE_REPAIR)
+        except Exception as exc:
+            raise PortalError(f"检修结束回退未完整同步：{exc}") from exc
+
     def restore_notice_undo_local(
         self,
         undo: dict[str, Any],
@@ -27022,6 +27265,8 @@ class MaintenancePortalService:
             if action_type in {"update", "end"}:
                 qt_payload["action"] = "update"
                 qt_payload["status"] = "更新"
+                qt_payload["undo_restored_id"] = str(undo.get("undo_id") or "")
+                qt_payload["undo_restored_from_action"] = action_type
                 notice_text = str(qt_payload.get("text") or "")
                 if notice_text:
                     qt_payload["text"] = re.sub(
@@ -38355,8 +38600,17 @@ class MaintenancePortalService:
             work_type_label="检修通告",
             allow_scope_fallback=manual,
         )
-        if action != "start" and source_record is not None and self._repair_has_ended(source_record):
-            raise PortalError("该检修当前源状态已结束，不能更新/结束。")
+        if action != "start" and source_record is not None:
+            source_record = self._restore_repair_source_after_applied_end_undo(
+                request_payload,
+                source_record,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+                scope=scope,
+            )
+            fields = source_record.get("display_fields") or {}
+            if self._repair_has_ended(source_record):
+                raise PortalError("该检修当前源状态已结束，不能更新/结束。")
         if action != "start" and not target_record_id:
             raise PortalError("该检修缺少目标设备检修表 record_id，不能更新/结束。")
 
@@ -39341,6 +39595,75 @@ class MaintenancePortalService:
                 not task_version or task_version != current_template_version
             )
         return {"tasks": tasks, "count": len(tasks), "scope": normalized_scope}
+
+    def delete_critical_guard_task(self, task_id: str) -> dict[str, Any]:
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            raise PortalError("重保任务 ID 不能为空。")
+        deleted = self._state_store.delete_critical_guard_task(normalized_task_id)
+        if not deleted:
+            return {
+                "deleted": False,
+                "already_deleted": True,
+                "task_id": normalized_task_id,
+                "message": "重保任务已删除。",
+            }
+
+        artifact_paths = [
+            str(item or "").strip()
+            for item in deleted.pop("artifact_paths", []) or []
+            if str(item or "").strip()
+        ]
+        removed_artifacts = 0
+        cleanup_errors: list[str] = []
+        try:
+            data_root = Path(get_data_file_path("critical_guard")).resolve()
+            for raw_path in artifact_paths:
+                try:
+                    artifact_path = Path(raw_path).resolve()
+                    if not artifact_path.is_relative_to(data_root):
+                        cleanup_errors.append("检测到不安全的生成文件路径")
+                        continue
+                    if artifact_path.is_file():
+                        artifact_path.unlink()
+                        removed_artifacts += 1
+                except (OSError, RuntimeError, ValueError) as exc:
+                    cleanup_errors.append(str(exc))
+
+            generated_root = (data_root / "generated").resolve()
+            task_root = (
+                generated_root
+                / safe_critical_guard_path_part(normalized_task_id, "task")
+            ).resolve()
+            if (
+                task_root != generated_root
+                and task_root.is_relative_to(generated_root)
+                and task_root.exists()
+            ):
+                shutil.rmtree(task_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            cleanup_errors.append(str(exc))
+
+        if cleanup_errors:
+            logging.getLogger(__name__).warning(
+                "重保任务已删除，但生成文件清理不完整: task_id=%s errors=%s",
+                normalized_task_id,
+                "; ".join(cleanup_errors[:5]),
+            )
+        return {
+            "deleted": True,
+            "already_deleted": False,
+            "task_id": normalized_task_id,
+            "name": str(deleted.get("name") or ""),
+            "response_count": int(deleted.get("response_count") or 0),
+            "removed_artifact_count": removed_artifacts,
+            "cleanup_warning": (
+                "任务已删除，但部分本地生成文件稍后清理。"
+                if cleanup_errors
+                else ""
+            ),
+            "message": "重保任务已删除。",
+        }
 
     @staticmethod
     def _ensure_critical_guard_template_current(task: dict[str, Any]) -> None:

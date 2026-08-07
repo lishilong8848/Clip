@@ -30,6 +30,7 @@ from .portal_service import (
     PortalError,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
+    WORK_TYPE_REPAIR,
     engineer_mop_fill_kwargs_from_payload,
     engineer_mop_upload_signed_kwargs_from_payload,
     external_real_write_guard,
@@ -4800,6 +4801,17 @@ class PortalRuntime:
         )
 
     @staticmethod
+    def _remote_record_data_not_ready(message: object) -> bool:
+        text = str(message or "").lower()
+        return (
+            "1254607" in text
+            or "data not ready" in text
+            or "数据未就绪" in text
+            or "数据暂时未准备好" in text
+            or "多维表正在计算" in text
+        )
+
+    @staticmethod
     def _candidate_target_record_id(candidate: dict) -> str:
         if not isinstance(candidate, dict):
             return ""
@@ -6153,7 +6165,22 @@ class PortalRuntime:
         )
         restored_record_id = target_record_id
         remote_message = ""
+        related_remote_result: dict[str, Any] = {
+            "restored": False,
+            "skipped": True,
+            "warnings": [],
+        }
         guard = external_real_write_guard()
+        is_repair_end = (
+            action_type == "end"
+            and str(undo.get("work_type") or "").strip() == WORK_TYPE_REPAIR
+        )
+        if (
+            is_repair_end
+            and not guard["mock_external"]
+            and (not remote_fields or bool(remote.get("missing")))
+        ):
+            raise PortalError("检修结束回退缺少目标多维快照，未执行回退。")
         if remote_fields and not bool(remote.get("missing")):
             if guard["mock_external"]:
                 remote_message = "mock external undo skipped"
@@ -6193,6 +6220,29 @@ class PortalRuntime:
         else:
             remote_message = "远端记录不可恢复，仅恢复本地状态。"
 
+        if is_repair_end:
+            if guard["mock_external"]:
+                related_remote_result = {
+                    "restored": False,
+                    "skipped": True,
+                    "mock_external": True,
+                    "warnings": [],
+                }
+            elif not guard["real_write_allowed"]:
+                raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
+            else:
+                related_remote_result = cls.service.restore_notice_undo_related_remote(
+                    undo,
+                    target_record_id=restored_record_id,
+                )
+                if not bool(related_remote_result.get("restored")):
+                    raise PortalError("检修结束回退未恢复关联维修单，未完成本次回退。")
+                remote_message = "；".join(
+                    item
+                    for item in (remote_message, "维修单及跟进记录已恢复")
+                    if item
+                )
+
         if job_id:
             cls.service.mark_job(job_id, phase="undoing_local", upload_message=remote_message)
         local_result = cls.service.restore_notice_undo_local(
@@ -6209,6 +6259,7 @@ class PortalRuntime:
                 "remote_message": remote_message,
                 "applied_by": requested_by,
                 "applied_job_id": job_id,
+                "related_remote": related_remote_result,
             },
         )
         event_payload = local_result.get("active_payload") if isinstance(local_result, dict) else {}
@@ -6239,6 +6290,7 @@ class PortalRuntime:
             "undo_id": undo_id,
             "record_id": restored_record_id,
             "message": remote_message,
+            "related_remote": related_remote_result,
             **(local_result if isinstance(local_result, dict) else {}),
         }
 
@@ -8602,10 +8654,16 @@ class PortalRuntime:
                                 target_record_id=target_record_id,
                                 checkpoint_id=checkpoint_id,
                             )
-                        message = (
-                            "已阻止删除：无法读取目标多维记录，"
-                            f"本地显示已保留。查询结果：{raw_query_result}"
-                        )
+                        if cls._remote_record_data_not_ready(raw_query_result):
+                            message = (
+                                "删除暂未执行：飞书多维表正在计算，系统已自动重试但数据仍未就绪。"
+                                "目标多维记录和本地显示均未删除，请稍后重试。"
+                            )
+                        else:
+                            message = (
+                                "已阻止删除：无法读取目标多维记录，"
+                                f"本地显示已保留。查询结果：{raw_query_result}"
+                            )
                         cls._mark_notice_remote_operation(
                             operation_id,
                             status="failed",
@@ -8691,27 +8749,33 @@ class PortalRuntime:
                         notice_type,
                     )
                 if not ok:
+                    result_message = str(result or "多维记录删除失败。")
+                    if cls._remote_record_data_not_ready(result_message):
+                        result_message = (
+                            "删除暂未执行：飞书多维表正在计算，系统已自动重试但仍未完成。"
+                            "目标多维记录和本地显示均未删除，请稍后重试。"
+                        )
                     if checkpoint_id:
                         cls.state_store.mark_notice_undo_action(
                             checkpoint_id,
                             "failed",
-                            error=str(result or "多维记录删除失败。"),
+                            error=result_message,
                         )
                     cls._mark_notice_remote_operation(
                         operation_id,
                         status="failed",
-                        error=str(result or "多维记录删除失败。"),
+                        error=result_message,
                     )
                     cls._record_event_notice_operation_result(
                         payload,
                         action_type="delete",
                         success=False,
                         record_id=target_record_id,
-                        message=str(result or "多维记录删除失败。"),
+                        message=result_message,
                     )
                     return {
                         "ok": False,
-                        "message": str(result or "多维记录删除失败。"),
+                        "message": result_message,
                         "record_id": target_record_id,
                         "active_item_id": active_item_id,
                         "remote_deleted": False,

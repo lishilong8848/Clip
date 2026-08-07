@@ -18872,6 +18872,301 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         self.assertEqual(expanded["record_id"], target_record_id)
                         self.assertEqual(expanded["action"], next_action)
 
+    def test_repair_end_undo_restores_summary_followups_and_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            summary_id = "rec-repair-summary-undo"
+            target_id = "rec-repair-target-undo"
+            existing = {
+                "record_id": summary_id,
+                "display_fields": {
+                    "维修开始时间": "2026-08-05 09:00",
+                    "维修结束时间（2026）": "2026-08-05 18:00",
+                    "流程": "维修完成",
+                },
+                "raw_fields": {
+                    "维修开始时间": "2026-08-05 09:00",
+                    "维修结束时间（2026）": "2026-08-05 18:00",
+                    "流程": "维修完成",
+                },
+            }
+            meta_by_name = {
+                "维修结束时间（2026）": FieldMeta(
+                    "fld-end",
+                    "维修结束时间（2026）",
+                    "DateTime",
+                    5,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
+                "检修通告名称": FieldMeta(
+                    "fld-title",
+                    "检修通告名称",
+                    "Text",
+                    1,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
+                "维修进展描述": FieldMeta(
+                    "fld-progress",
+                    "维修进展描述",
+                    "Text",
+                    1,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
+            }
+            undo = {
+                "undo_id": "undo-repair-related-remote",
+                "action_type": "end",
+                "scope": "A",
+                "work_type": WORK_TYPE_REPAIR,
+                "notice_type": "设备检修",
+                "source_record_id": summary_id,
+                "target_record_id": target_id,
+                "context": {"repair_management_record_id": summary_id},
+                "local": {
+                    "qt_active": {
+                        "payload": {
+                            "title": "A楼检修回退",
+                            "progress": "继续处理中",
+                        }
+                    }
+                },
+            }
+            followup = {"record_id": "rec-followup-undo"}
+
+            with patch.object(
+                service,
+                "_ensure_repair_management_record_in_scope",
+                return_value=existing,
+            ), patch.object(
+                service,
+                "_load_repair_management_project_records",
+                return_value=([], meta_by_name, [existing]),
+            ), patch.object(
+                service,
+                "_patch_record_fields",
+            ) as patch_record, patch.object(
+                service,
+                "_upsert_repair_snapshot_fields",
+            ), patch.object(
+                service,
+                "_load_repair_followups_for_summary",
+                return_value=([], {}, [followup]),
+            ), patch.object(
+                service,
+                "_repair_followup_parent_ids",
+                return_value=[summary_id],
+            ), patch.object(
+                service,
+                "_sync_repair_followups_from_summary",
+                return_value={
+                    "synced_count": 1,
+                    "failed_count": 0,
+                    "warnings": [],
+                },
+            ) as sync_followups, patch.object(
+                service,
+                "_repair_management_latest_followup_progress",
+                return_value=(True, 60.0),
+            ), patch.object(
+                service,
+                "_sync_repair_management_workflow",
+                return_value=(True, []),
+            ) as sync_workflow, patch.object(
+                service,
+                "_invalidate_repair_management_status_cache",
+            ):
+                restored = service.restore_notice_undo_related_remote(
+                    undo,
+                    target_record_id=target_id,
+                )
+
+            self.assertTrue(restored["restored"])
+            self.assertEqual(restored["followup_count"], 1)
+            self.assertEqual(restored["workflow"], "维修中")
+            patched_fields = patch_record.call_args.kwargs["fields"]
+            self.assertIsNone(patched_fields["维修结束时间（2026）"])
+            self.assertEqual(patched_fields["检修通告名称"], "A楼检修回退")
+            self.assertEqual(patched_fields["维修进展描述"], "继续处理中")
+            sync_followups.assert_called_once()
+            self.assertEqual(sync_workflow.call_args.kwargs["workflow"], "维修中")
+
+    def test_applied_repair_end_undo_matches_exact_ids_and_only_repairs_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            undo_id = service._state_store.create_notice_undo_action(
+                {
+                    "undo_id": "undo-repair-exact-id",
+                    "identity_key": "repair:rec-source-exact",
+                    "status": "undone",
+                    "action_type": "end",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_REPAIR,
+                    "notice_type": "设备检修",
+                    "active_item_id": "active-repair-exact",
+                    "source_record_id": "rec-source-exact",
+                    "target_record_id": "rec-target-exact",
+                }
+            )
+            matched = service._applied_end_undo_for_context(
+                {
+                    "active_item_id": "active-repair-exact",
+                    "source_record_id": "rec-source-exact",
+                    "target_record_id": "rec-target-exact",
+                },
+                work_type=WORK_TYPE_REPAIR,
+                scope="A",
+            )
+            self.assertEqual(matched["undo_id"], undo_id)
+            self.assertIsNone(
+                service._applied_end_undo_for_context(
+                    {
+                        "active_item_id": "active-other",
+                        "source_record_id": "rec-source-other",
+                        "target_record_id": "rec-target-other",
+                    },
+                    work_type=WORK_TYPE_REPAIR,
+                    scope="A",
+                )
+            )
+
+            service._state_store.mark_notice_undo_action(
+                undo_id,
+                "undone",
+                payload_patch={"related_remote": {"restored": True}},
+            )
+            self.assertIsNone(
+                service._applied_end_undo_for_context(
+                    {"undo_restored_id": undo_id},
+                    work_type=WORK_TYPE_REPAIR,
+                    scope="A",
+                )
+            )
+
+    def test_legacy_repair_end_undo_repairs_source_before_next_submit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            source_id = "rec-legacy-repair-source"
+            target_id = "rec-legacy-repair-target"
+            ended = {
+                "record_id": source_id,
+                "display_fields": {"维修结束时间（2026）": "2026-08-05 18:00"},
+                "raw_fields": {"维修结束时间（2026）": "2026-08-05 18:00"},
+            }
+            reopened = {
+                "record_id": source_id,
+                "display_fields": {"维修结束时间（2026）": None},
+                "raw_fields": {"维修结束时间（2026）": None},
+            }
+            undo = {
+                "undo_id": "undo-legacy-repair-source",
+                "action_type": "end",
+                "scope": "A",
+                "work_type": WORK_TYPE_REPAIR,
+                "source_record_id": source_id,
+                "target_record_id": target_id,
+            }
+
+            with patch.object(
+                service,
+                "_applied_end_undo_for_context",
+                return_value=undo,
+            ), patch.object(
+                service,
+                "restore_notice_undo_related_remote",
+                return_value={"restored": True, "summary_record_id": source_id},
+            ) as restore_related, patch.object(
+                service,
+                "_find_record_by_id",
+                return_value=reopened,
+            ), patch.object(
+                service._state_store,
+                "mark_notice_undo_action",
+                return_value=True,
+            ) as mark_undo:
+                result = service._restore_repair_source_after_applied_end_undo(
+                    {
+                        "active_item_id": "active-legacy-repair",
+                        "source_record_id": source_id,
+                        "target_record_id": target_id,
+                    },
+                    ended,
+                    source_record_id=source_id,
+                    target_record_id=target_id,
+                    scope="A",
+                )
+
+            self.assertFalse(service._repair_has_ended(result))
+            restore_related.assert_called_once_with(
+                undo,
+                target_record_id=target_id,
+            )
+            self.assertTrue(
+                mark_undo.call_args.kwargs["payload_patch"]["related_remote"]["restored"]
+            )
+
+    def test_execute_repair_end_undo_does_not_complete_when_related_restore_fails(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            PortalRuntime.service = service
+            PortalRuntime.state_store = service._state_store
+            undo_id = service._state_store.create_notice_undo_action(
+                {
+                    "undo_id": "undo-repair-related-failure",
+                    "identity_key": "repair:rec-related-failure",
+                    "action_type": "end",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_REPAIR,
+                    "notice_type": "设备检修",
+                    "active_item_id": "active-related-failure",
+                    "source_record_id": "rec-source-related-failure",
+                    "target_record_id": "rec-target-related-failure",
+                    "remote": {
+                        "missing": False,
+                        "fields": {"检修状态": "更新"},
+                    },
+                    "local": {},
+                }
+            )
+            try:
+                with patch(
+                    "lan_bitable_template_portal.server.external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch(
+                    "lan_bitable_template_portal.server.update_bitable_record_fields",
+                    return_value=(True, "rec-target-related-failure"),
+                ), patch.object(
+                    service,
+                    "restore_notice_undo_related_remote",
+                    side_effect=PortalError("跟进记录恢复失败"),
+                ), patch.object(
+                    service,
+                    "restore_notice_undo_local",
+                ) as restore_local:
+                    with self.assertRaisesRegex(PortalError, "跟进记录恢复失败"):
+                        PortalRuntime.execute_notice_undo(undo_id)
+
+                restore_local.assert_not_called()
+                stored = service._state_store.get_notice_undo_action(undo_id)
+                self.assertEqual(stored["status"], "available")
+            finally:
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
     def test_workbench_ongoing_rows_keep_canonical_identity_after_undo(self):
         from lan_bitable_template_portal.workbench_lite import (
             _detail_form,
@@ -18918,6 +19213,86 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("function keepUpdatedCurrentNoticeActive", source)
         self.assertIn(
             "keepUpdatedCurrentNoticeActive(draft, row)", source
+        )
+
+    def test_workbench_target_binding_uses_and_tracks_remote_target_id(self):
+        from lan_bitable_template_portal.workbench_lite import (
+            _detail_form,
+            _remote_target_record_id,
+        )
+
+        source_only = {
+            "active_item_id": "active-source-only",
+            "source_record_id": "rec-source-only",
+            "record_id": "rec-source-only",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "title": "源表记录不能冒充目标记录",
+        }
+        self.assertEqual(_remote_target_record_id(source_only), "")
+        source_only_html = _detail_form(
+            record=None,
+            ongoing_item=source_only,
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+        )
+        self.assertIn('name="target_record_id" value=""', source_only_html)
+        self.assertIn(
+            '<span id="lite-target-link-status">未绑定</span>',
+            source_only_html,
+        )
+
+        notice_types = {
+            "maintenance": "维保通告",
+            "change": "变更通告",
+            "repair": "设备检修",
+            "power": "上电通告",
+            "polling": "设备轮巡",
+            "adjust": "设备调整",
+        }
+        for work_type, notice_type in notice_types.items():
+            with self.subTest(work_type=work_type):
+                target_record_id = f"rec-{work_type}-target"
+                item = {
+                    "active_item_id": f"active-{work_type}",
+                    "source_record_id": f"rec-{work_type}-source",
+                    "target_record_id": target_record_id,
+                    "record_id": target_record_id,
+                    "work_type": work_type,
+                    "notice_type": notice_type,
+                    "title": f"{notice_type}绑定测试",
+                }
+                self.assertEqual(
+                    _remote_target_record_id(item), target_record_id
+                )
+                detail_html = _detail_form(
+                    record=None,
+                    ongoing_item=item,
+                    scope="E",
+                    work_type=work_type,
+                    manual=False,
+                )
+                self.assertIn(
+                    f'name="target_record_id" value="{target_record_id}"',
+                    detail_html,
+                )
+                self.assertIn(
+                    '<span id="lite-target-link-status">已绑定</span>',
+                    detail_html,
+                )
+
+        source = (
+            BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "if (name === 'target_record_id')", source
+        )
+        self.assertIn(
+            "syncTargetLinkDisplay(form, field.value)", source
+        )
+        self.assertIn(
+            "searchButton.textContent = linked ? '更换' : '查找'", source
         )
 
     def test_undo_command_business_fallback_does_not_guess_duplicate_titles(self):
