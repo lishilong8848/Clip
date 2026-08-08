@@ -2459,8 +2459,8 @@ def render_workbench_lite(
     body {{ margin:0; min-height:100vh; font-family:"Microsoft YaHei", Arial, sans-serif; color:#08204a; background:linear-gradient(180deg,#eaf3ff 0,#f6f9ff 42%,#eef5ff 100%); }}
     .visually-hidden {{ position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }}
     .topbar {{ min-height:96px; padding:18px 34px 28px; display:flex; justify-content:space-between; align-items:center; color:#fff; background:linear-gradient(120deg,#0c57d8,#07348d); background-image:linear-gradient(rgba(255,255,255,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.07) 1px,transparent 1px),linear-gradient(120deg,#0c57d8,#07348d); background-size:64px 64px,64px 64px,auto; border-bottom:1px solid rgba(255,255,255,.16); box-shadow:0 18px 42px rgba(7,52,141,.22); }}
-    .brand {{ display:flex; gap:24px; align-items:center; }}
-    .logo {{ font-weight:900; line-height:1.05; border-right:1px solid rgba(255,255,255,.35); padding-right:24px; }}
+    .brand {{ min-width:0; display:flex; gap:20px; align-items:center; }}
+    .brand-logo {{ width:clamp(108px,9vw,128px); height:48px; flex:0 0 auto; object-fit:contain; padding-right:20px; border-right:1px solid rgba(255,255,255,.38); filter:brightness(0) invert(1); }}
     .brand h1 {{ margin:0; font-size:27px; letter-spacing:0; line-height:1.16; }}
     .brand p {{ margin:5px 0 0; color:#dbeafe; line-height:1.45; font-size:13px; font-weight:700; }}
     .top-actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }}
@@ -2782,7 +2782,7 @@ def render_workbench_lite(
       .topbar {{ min-height:auto; padding:18px 20px; flex-direction:column; align-items:stretch; gap:16px; }}
       .brand {{ gap:14px; align-items:flex-start; }}
       .brand h1 {{ font-size:24px; line-height:1.2; }}
-      .logo {{ padding-right:14px; }}
+      .brand-logo {{ width:108px; height:42px; padding-right:16px; }}
       .top-actions {{ justify-content:flex-start; }}
       .scope-switch {{ flex:1 1 180px; justify-content:space-between; }}
       .top-actions .top-link,.top-actions .exit {{ flex:1 1 120px; }}
@@ -2810,7 +2810,7 @@ def render_workbench_lite(
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="logo brand-logo">世纪互联<br>VNET</div>
+      <img class="brand-logo" src="/assets/vnet-logo.png" alt="世纪互联官方标识">
       <div><h1>南通基地-运维灯塔工作台</h1><!--LITE_FRAGMENT:subtitle:START--><p id="lite-workbench-subtitle">{_e(WORK_TYPE_FILTER_LABELS.get(view_work, '通告'))} · 工作台</p><!--LITE_FRAGMENT:subtitle:END--></div>
     </div>
     <nav class="top-actions">

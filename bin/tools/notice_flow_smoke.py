@@ -66,6 +66,7 @@ def main() -> int:
         (server_py, 'data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)', "Qt 现场照片上传后回写计数"),
         (workbench_lite_py, "appliedOngoingLocally = isRow && navLink.matches('.ongoing-row')", "进行中通告本地切换"),
         (workbench_lite_py, "现场照片", "通告结束现场照片提示"),
+        (workbench_lite_py, '<img class="brand-logo" src="/assets/vnet-logo.png"', "通告工作台使用主页官方 Logo"),
         (workbench_lite_py, "mop-action-panel", "维保 MOP 后续动作入口"),
         (admin_status_vue, "Qt/网页一致性", "管理员页一致性展示"),
         (admin_status_vue, "通告链路自检", "管理员页通告链路自检展示"),
