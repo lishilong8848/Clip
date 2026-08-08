@@ -20,6 +20,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.critical_guard import (
     CRITICAL_GUARD_SHEET_NAMES,
+    CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION,
     CriticalGuardError,
     _compose_critical_guard_signatures,
     _excel_column_width_pixels,
@@ -54,6 +55,23 @@ class CriticalGuardHelperTests(unittest.TestCase):
         )
         self.assertNotIn("封面", [item["name"] for item in catalog["sheets"]])
         self.assertNotIn("说明", [item["name"] for item in catalog["sheets"]])
+
+    def test_source_file_preview_url_is_content_and_renderer_versioned(self) -> None:
+        source = MaintenancePortalService._critical_guard_public_scope_file(
+            {
+                "file_id": "guard_file_test",
+                "scope": "A",
+                "sheet_type": "物资检查清单",
+                "original_file_name": "物资检查清单.xlsx",
+                "sha256": "0123456789abcdef" * 4,
+                "size": 123,
+            }
+        )
+        self.assertIn("v=0123456789abcdef", source["preview_url"])
+        self.assertIn(
+            f"render={CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION}",
+            source["preview_url"],
+        )
 
     def test_abnormal_item_requires_note_and_signature(self) -> None:
         cells = default_response_cells("设备安全", "A", today="2026-08-03")
@@ -474,6 +492,45 @@ class CriticalGuardHelperTests(unittest.TestCase):
                         if max(pixel) < 120:
                             dark_pixels += 1
                 self.assertEqual(dark_pixels, 0)
+
+    def test_internal_renderer_repairs_unreadable_black_table_cells(self) -> None:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workbook_path = Path(temp_dir) / "black-cell-source.xlsx"
+            image_path = Path(temp_dir) / "black-cell-output.png"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "物资检查清单"
+            sheet.column_dimensions["A"].width = 12
+            sheet.row_dimensions[1].height = 18
+            sheet.row_dimensions[2].height = 18
+            black_fill = PatternFill(fill_type="solid", fgColor="FF000000")
+            sheet["A1"] = "黑底白字"
+            sheet["A1"].fill = black_fill
+            sheet["A1"].font = Font(color="FFFFFFFF")
+            sheet["A2"] = "异常黑底黑字"
+            sheet["A2"].fill = black_fill
+            sheet["A2"].font = Font(color="FF000000")
+            workbook.save(workbook_path)
+            workbook.close()
+
+            _render_workbook_sheet_to_png(
+                workbook_path=workbook_path,
+                sheet_name="物资检查清单",
+                range_address="A1:A2",
+                output_path=image_path,
+            )
+
+            margin = 4
+            row_height = int(round(_excel_row_height_pixels(18) * 2))
+            sample_x = margin + 6
+            with Image.open(image_path).convert("RGB") as image:
+                header_fill = image.getpixel((sample_x, margin + row_height - 6))
+                repaired_fill = image.getpixel((sample_x, margin + row_height * 2 - 6))
+                self.assertLess(max(header_fill), 48)
+                self.assertGreater(min(repaired_fill), 240)
 
 
 class CriticalGuardStateStoreTests(unittest.TestCase):

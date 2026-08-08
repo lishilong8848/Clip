@@ -335,32 +335,37 @@
 
                 <section v-if="effectiveSourceFile" class="scope-file-preview-card">
                   <header>
-                    <div>
-                      <span>文件内容预览</span>
+                    <div class="scope-file-preview-heading">
+                      <span class="scope-file-preview-kicker">
+                        <FileSpreadsheet :size="15" /> 上传文件核对
+                        <b>非生成结果</b>
+                      </span>
                       <strong>{{ effectiveSourceFile.file_name }}</strong>
                     </div>
                     <button
                       v-if="!sourceFilePreviewFailed"
                       type="button"
                       class="secondary-button"
-                      @click="openImage(sourceFilePreviewUrl, `${activeScope}楼 · ${activeResponse.sheet_type}`)"
+                      @click="openImage(sourceFilePreviewUrl, sourceFileViewerTitle)"
                     >
-                      <ZoomIn :size="16" /> 放大查看
+                      <ZoomIn :size="16" /> 查看源文件
                     </button>
                   </header>
                   <button
                     v-if="!sourceFilePreviewFailed"
                     type="button"
                     class="scope-file-preview-image"
-                    @click="openImage(sourceFilePreviewUrl, `${activeScope}楼 · ${activeResponse.sheet_type}`)"
+                    @click="openImage(sourceFilePreviewUrl, sourceFileViewerTitle)"
                   >
                     <img
+                      :key="sourceFilePreviewKey"
                       :src="sourceFilePreviewUrl"
-                      :alt="`${activeScope}楼${activeResponse.sheet_type}文件预览`"
+                      :alt="`${activeScope}楼${activeResponse.sheet_type}上传源文件核对预览`"
                       loading="lazy"
                       @error="sourceFilePreviewFailed = true"
                     />
-                    <span>点击放大</span>
+                    <span class="scope-file-preview-stamp">源文件预览 · 非生成结果</span>
+                    <span class="scope-file-preview-zoom">点击核对</span>
                   </button>
                   <div v-else class="scope-file-preview-error">
                     <span>文件已保存，预览暂时加载失败。</span>
@@ -441,12 +446,16 @@
 
               <section v-if="activeResponse.image_url" class="generated-preview">
                 <header>
-                  <div><strong>已生成图片</strong><span>{{ activeResponse.scope }}楼 · {{ activeResponse.sheet_type }}</span></div>
+                  <div>
+                    <span class="generated-preview-kicker"><CheckCircle2 :size="15" /> 正式生成结果</span>
+                    <strong>已生成图片</strong>
+                    <span>{{ activeResponse.scope }}楼 · {{ activeResponse.sheet_type }}</span>
+                  </div>
                   <a v-if="activeResponse.workbook_url" class="workbook-link" :href="activeResponse.workbook_url" download>
                     <Download :size="15" /> 下载原表
                   </a>
                 </header>
-                <button type="button" @click="openImage(activeResponse.image_url, `${activeResponse.scope}楼 · ${activeResponse.sheet_type}`)">
+                <button type="button" @click="openImage(activeResponse.image_url, `正式生成图片 · ${activeResponse.scope}楼 · ${activeResponse.sheet_type}`)">
                   <img :src="activeResponse.image_url" :alt="activeResponse.sheet_type" />
                   <ZoomIn :size="20" />
                 </button>
@@ -650,8 +659,16 @@ const effectiveSourceFile = computed<Dict | null>(() => {
 const sourceFilePreviewUrl = computed(() => {
   const base = String(effectiveSourceFile.value?.preview_url || "").trim();
   if (!base || sourceFilePreviewRevision.value <= 0) return base;
-  return `${base}${base.includes("?") ? "&" : "?"}retry=${sourceFilePreviewRevision.value}`;
+  return `${base}${base.includes("?") ? "&" : "?"}view=${sourceFilePreviewRevision.value}`;
 });
+const sourceFilePreviewKey = computed(() => [
+  String(effectiveSourceFile.value?.file_id || ""),
+  String(effectiveSourceFile.value?.sha256 || ""),
+  String(sourceFilePreviewRevision.value),
+].join(":"));
+const sourceFileViewerTitle = computed(() => (
+  `上传源文件核对 · ${activeScope.value}楼 · ${String(activeResponse.value?.sheet_type || "清单")}（非生成结果）`
+));
 const generateDisabledReason = computed(() => {
   if (saving.value) return "正在保存";
   if (templateOutdated.value) return "检查模板已更新，请管理员重新发布任务";
@@ -974,7 +991,12 @@ async function uploadSourceFile(file: File): Promise<void> {
     });
     const index = selectedTask.value?.responses?.findIndex((item: Dict) => item.response_id === updated.response_id) ?? -1;
     if (selectedTask.value && index >= 0) selectedTask.value.responses[index] = updated;
-    if (String(activeResponse.value?.response_id || "") === responseId) applyResponse(updated);
+    if (String(activeResponse.value?.response_id || "") === responseId) {
+      applyResponse(updated);
+      sourceFilePreviewFailed.value = false;
+      sourceFilePreviewRevision.value = Date.now();
+      if (imageViewerUrl.value) closeImage();
+    }
     setMessage(`${file.name} 已保存为${activeScope.value}楼${String(updated.sheet_type || "清单")}文件。`, "success");
     try {
       await loadTasks();
@@ -1228,10 +1250,10 @@ function requestPageExit(): void {
 }
 
 watch(
-  () => String(effectiveSourceFile.value?.file_id || ""),
+  () => `${String(effectiveSourceFile.value?.file_id || "")}:${String(effectiveSourceFile.value?.sha256 || "")}`,
   () => {
     sourceFilePreviewFailed.value = false;
-    sourceFilePreviewRevision.value = 0;
+    sourceFilePreviewRevision.value = Date.now();
   },
 );
 
@@ -1559,9 +1581,9 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .scope-file-preview-card {
   margin: -6px 16px 18px;
   overflow: hidden;
-  border: 1px solid #d7e5f3;
+  border: 1px dashed #bdcad9;
   border-radius: 10px;
-  background: #fff;
+  background: #fbfcfe;
 }
 .scope-file-preview-card > header {
   display: flex;
@@ -1571,12 +1593,13 @@ input[readonly] { background: #f3f7fc; color: #536987; }
   min-height: 56px;
   padding: 9px 12px;
   border-bottom: 1px solid #e0eaf5;
-  background: #f7faff;
+  background: #f4f6f9;
 }
-.scope-file-preview-card > header div { min-width: 0; }
+.scope-file-preview-heading { min-width: 0; }
 .scope-file-preview-card > header span,
 .scope-file-preview-card > header strong { display: block; }
-.scope-file-preview-card > header span { color: #607793; font-size: 12px; font-weight: 850; }
+.scope-file-preview-kicker { display: flex !important; align-items: center; gap: 6px; color: #52657b; font-size: 12px; font-weight: 850; }
+.scope-file-preview-kicker b { border: 1px solid #cbd5e1; border-radius: 999px; padding: 2px 7px; background: #fff; color: #64748b; font-size: 10px; line-height: 1.2; }
 .scope-file-preview-card > header strong { margin-top: 2px; overflow: hidden; color: #17345d; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .scope-file-preview-image {
   position: relative;
@@ -1601,17 +1624,17 @@ input[readonly] { background: #f3f7fc; color: #536987; }
   background: #fff;
   box-shadow: 0 4px 14px rgb(31 66 110 / 10%);
 }
-.scope-file-preview-image span {
+.scope-file-preview-stamp,
+.scope-file-preview-zoom {
   position: absolute;
-  right: 18px;
-  bottom: 16px;
   border-radius: 999px;
   padding: 5px 9px;
-  background: rgb(17 53 96 / 82%);
   color: #fff;
   font-size: 11px;
   font-weight: 850;
 }
+.scope-file-preview-stamp { top: 18px; left: 18px; background: rgb(71 85 105 / 88%); }
+.scope-file-preview-zoom { right: 18px; bottom: 16px; background: rgb(17 53 96 / 82%); }
 .scope-file-preview-error { min-height: 150px; display: grid; place-items: center; align-content: center; gap: 10px; padding: 20px; color: #8a5b16; font-size: 13px; }
 
 .sheet-table-shell,
@@ -1646,11 +1669,12 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .entry-table th:first-child,
 .entry-table td:first-child { width: 54px; text-align: center; background: #f4f8fd; }
 
-.generated-preview { margin: 0 16px 14px; border: 1px solid #d7e5f3; border-radius: 10px; padding: 10px; background: #f8fbff; }
+.generated-preview { margin: 0 16px 14px; border: 1px solid #a9dfca; border-left: 4px solid #16a477; border-radius: 10px; padding: 10px; background: #f3fbf7; box-shadow: 0 6px 18px rgba(16, 137, 98, .08); }
 .generated-preview > header { margin-bottom: 8px; }
 .generated-preview > header > div { min-width: 0; }
 .generated-preview > header strong,
 .generated-preview > header span { display: block; }
+.generated-preview-kicker { display: flex !important; align-items: center; gap: 5px; margin-bottom: 3px; color: #087f5b; font-size: 11px; font-weight: 900; }
 .workbook-link { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #b9d2f2; border-radius: 8px; padding: 0 10px; background: #fff; color: #175ab9; font-size: 12px; font-weight: 900; text-decoration: none; white-space: nowrap; }
 .workbook-link:hover { border-color: #4f8ff2; background: #eaf3ff; }
 .workbook-link.compact { min-height: 29px; margin: 0 10px 9px; }

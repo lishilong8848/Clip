@@ -39,6 +39,7 @@ CRITICAL_GUARD_MAX_SOURCE_COLUMNS = 80
 CRITICAL_GUARD_MAX_RENDER_PIXELS = 48_000_000
 CRITICAL_GUARD_MAX_RENDER_DIMENSION = 20_000
 CRITICAL_GUARD_MIN_RENDER_SCALE = 1.0
+CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION = "2"
 
 _CHECK_SHEET_RULES = {
     "设备安全": {
@@ -946,6 +947,23 @@ def _excel_color_rgb(
     return _apply_excel_tint((rgb[0], rgb[1], rgb[2]), getattr(color, "tint", 0.0))
 
 
+def _excel_visible_fill_rgb(
+    cell: Any,
+    theme: dict[int, str],
+) -> tuple[int, int, int]:
+    fill = _excel_color_rgb(cell.fill.fgColor, theme, default=(255, 255, 255))
+    if not _cell_display_text(cell).strip():
+        return fill
+    font = _excel_color_rgb(cell.font.color, theme, default=(0, 0, 0))
+    # Some WPS/Excel workbooks encode ordinary table cells as a solid theme-0
+    # fill while keeping theme-0 text. Rendering that literally creates an
+    # unreadable black block. Preserve intentional black backgrounds with light
+    # text, but render black-on-black cells as normal white table cells.
+    if max(fill) <= 48 and max(font) <= 80:
+        return 255, 255, 255
+    return fill
+
+
 @lru_cache(maxsize=256)
 def _excel_pillow_font(
     size_px: int,
@@ -1458,7 +1476,7 @@ def _render_workbook_sheet_to_png(
                     margin + y_positions[bottom + 1],
                 )
                 if str(getattr(cell.fill, "fill_type", "") or "").lower() == "solid":
-                    fill = _excel_color_rgb(cell.fill.fgColor, theme, default=(255, 255, 255))
+                    fill = _excel_visible_fill_rgb(cell, theme)
                     draw.rectangle(box, fill=(*fill, 255))
 
         # Text is drawn against the complete merged-cell box, matching Excel.

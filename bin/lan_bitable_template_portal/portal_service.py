@@ -62,6 +62,7 @@ from .critical_guard import (
     CRITICAL_GUARD_SCOPE_CODES,
     CRITICAL_GUARD_SCOPE_LABELS,
     CRITICAL_GUARD_SHEET_NAMES,
+    CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION,
     CriticalGuardError,
     critical_guard_catalog,
     default_response_cells,
@@ -39883,6 +39884,7 @@ class MaintenancePortalService:
             "preview_url": (
                 f"/api/critical-guard/source-files/{quote(file_id, safe='')}/preview"
                 f"?v={quote(str(source.get('sha256') or '')[:16], safe='')}"
+                f"&render={quote(CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION, safe='')}"
             ),
         }
 
@@ -40535,7 +40537,10 @@ class MaintenancePortalService:
             / "source_previews"
             / safe_critical_guard_path_part(str(item.get("scope") or "scope"), "scope")
             / safe_critical_guard_path_part(str(item.get("sheet_type") or "sheet"), "sheet")
-            / f"{safe_critical_guard_path_part(str(item.get('file_id') or 'file'), 'file')}_{digest[:16]}.png"
+            / (
+                f"{safe_critical_guard_path_part(str(item.get('file_id') or 'file'), 'file')}_"
+                f"{digest[:16]}_r{CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION}.png"
+            )
         )
         if not preview_path.is_file():
             lock = self._critical_guard_response_lock(f"source-preview:{file_id}")
