@@ -38,6 +38,7 @@ CRITICAL_GUARD_MAX_SOURCE_ROWS = 500
 CRITICAL_GUARD_MAX_SOURCE_COLUMNS = 80
 CRITICAL_GUARD_MAX_RENDER_PIXELS = 48_000_000
 CRITICAL_GUARD_MAX_RENDER_DIMENSION = 20_000
+CRITICAL_GUARD_MIN_RENDER_SCALE = 1.0
 
 _CHECK_SHEET_RULES = {
     "设备安全": {
@@ -103,6 +104,22 @@ def normalize_sheet_name(value: Any) -> str:
     if text not in CRITICAL_GUARD_SHEET_NAMES:
         raise CriticalGuardError(f"不支持的重保检查表：{text or '未选择'}")
     return text
+
+
+def _resolve_workbook_sheet_title(workbook: Any, sheet_name: str) -> str:
+    """Resolve an uploaded sheet while tolerating accidental outer spaces."""
+    normalized_sheet = normalize_sheet_name(sheet_name)
+    sheet_names = [str(item) for item in list(workbook.sheetnames or [])]
+    if normalized_sheet in sheet_names:
+        return normalized_sheet
+    matches = [item for item in sheet_names if item.strip() == normalized_sheet]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise CriticalGuardError(
+            f"上传文件中存在多个名称近似“{normalized_sheet}”的工作表，请只保留一个。"
+        )
+    raise CriticalGuardError(f"上传文件缺少“{normalized_sheet}”工作表。")
 
 
 def normalize_task_memory_key(value: Any) -> str:
@@ -1315,7 +1332,7 @@ def _render_workbook_sheet_to_png(
         keep_links=False,
     )
     try:
-        worksheet = workbook[normalize_sheet_name(sheet_name)]
+        worksheet = workbook[_resolve_workbook_sheet_title(workbook, sheet_name)]
         min_col, min_row, max_col, max_row = range_boundaries(range_address)
         default_column_width = float(
             getattr(worksheet.sheet_format, "defaultColWidth", None) or 8.43
@@ -1323,18 +1340,60 @@ def _render_workbook_sheet_to_png(
         default_row_height = float(
             getattr(worksheet.sheet_format, "defaultRowHeight", None) or 15.0
         )
-        column_widths: dict[int, float] = {}
-        row_heights: dict[int, float] = {}
+        base_column_widths: dict[int, float] = {}
+        base_row_heights: dict[int, float] = {}
         for column in range(min_col, max_col + 1):
             dimension = worksheet.column_dimensions[get_column_letter(column)]
-            column_widths[column] = 0.0 if dimension.hidden else _excel_column_width_pixels(
+            base_column_widths[column] = 0.0 if dimension.hidden else _excel_column_width_pixels(
                 dimension.width if dimension.width is not None else default_column_width
-            ) * scale
+            )
         for row in range(min_row, max_row + 1):
             dimension = worksheet.row_dimensions[row]
-            row_heights[row] = 0.0 if dimension.hidden else _excel_row_height_pixels(
+            base_row_heights[row] = 0.0 if dimension.hidden else _excel_row_height_pixels(
                 dimension.height if dimension.height is not None else default_row_height
-            ) * scale
+            )
+
+        requested_scale = max(0.1, float(scale or 2.0))
+        minimum_scale = min(requested_scale, CRITICAL_GUARD_MIN_RENDER_SCALE)
+        scale = requested_scale
+        base_width = sum(base_column_widths.values())
+        base_height = sum(base_row_heights.values())
+        for _ in range(6):
+            candidate_margin = max(2, int(round(2.0 * scale)))
+            candidate_width = max(
+                1,
+                int(round(base_width * scale)) + candidate_margin * 2,
+            )
+            candidate_height = max(
+                1,
+                int(round(base_height * scale)) + candidate_margin * 2,
+            )
+            if (
+                candidate_width <= CRITICAL_GUARD_MAX_RENDER_DIMENSION
+                and candidate_height <= CRITICAL_GUARD_MAX_RENDER_DIMENSION
+                and candidate_width * candidate_height <= CRITICAL_GUARD_MAX_RENDER_PIXELS
+            ):
+                break
+            ratios = [
+                CRITICAL_GUARD_MAX_RENDER_DIMENSION / candidate_width,
+                CRITICAL_GUARD_MAX_RENDER_DIMENSION / candidate_height,
+                (
+                    CRITICAL_GUARD_MAX_RENDER_PIXELS
+                    / float(candidate_width * candidate_height)
+                )
+                ** 0.5,
+            ]
+            next_scale = max(minimum_scale, scale * min(ratios) * 0.98)
+            if next_scale >= scale:
+                break
+            scale = next_scale
+
+        column_widths = {
+            column: width * scale for column, width in base_column_widths.items()
+        }
+        row_heights = {
+            row: height * scale for row, height in base_row_heights.items()
+        }
 
         x_positions: dict[int, int] = {min_col: 0}
         for column in range(min_col, max_col + 1):
@@ -1351,7 +1410,9 @@ def _render_workbook_sheet_to_png(
             or image_height > CRITICAL_GUARD_MAX_RENDER_DIMENSION
             or image_width * image_height > CRITICAL_GUARD_MAX_RENDER_PIXELS
         ):
-            raise CriticalGuardError("检查表尺寸过大，无法在程序内生成图片。")
+            raise CriticalGuardError(
+                "检查表尺寸过大，即使降低清晰度也无法在程序内生成图片。"
+            )
         canvas = Image.new("RGBA", (image_width, image_height), (255, 255, 255, 255))
         draw = ImageDraw.Draw(canvas)
         theme = _theme_colors(workbook)
@@ -1609,9 +1670,7 @@ def validate_critical_guard_source_workbook(
             read_only=True,
             keep_links=False,
         )
-        if normalized_sheet not in workbook.sheetnames:
-            raise CriticalGuardError(f"上传文件缺少“{normalized_sheet}”工作表。")
-        worksheet = workbook[normalized_sheet]
+        worksheet = workbook[_resolve_workbook_sheet_title(workbook, normalized_sheet)]
         if int(worksheet.max_row or 0) <= 0 or int(worksheet.max_column or 0) <= 0:
             raise CriticalGuardError(f"上传文件中的“{normalized_sheet}”工作表为空。")
         sheet_range = _source_sheet_range(worksheet, normalized_sheet)

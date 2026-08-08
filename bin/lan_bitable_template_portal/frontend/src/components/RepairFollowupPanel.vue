@@ -365,6 +365,7 @@ const WORKER_FIELD_NAME = "随工人员（我方维修人员）";
 const DEVICE_PRODUCTION_DATE_FIELD_NAME = "设备生产日期";
 const DEVICE_USAGE_YEARS_FIELD_NAME = "设备使用年限";
 const DEVICE_CAPACITY_FIELD_NAME = "设备容量KW/AH";
+const EVENT_EMERGENCY_FIELD_NAME = "事件应急措施";
 const SPARE_PART_FIELD_NAMES = new Set(["更换备件名称", "更换备件数量"]);
 const DEFAULT_FOLLOWUP_FIELD_VALUES: Record<string, string> = {
   [DEVICE_PRODUCTION_DATE_FIELD_NAME]: "2021-03-31T00:00",
@@ -396,7 +397,7 @@ const groupFields: Array<{ key: string; label: string; fields: string[] }> = [
   {
     key: "progress",
     label: "进展记录",
-    fields: ["维修进展描述", "维修进度", "跟进项（如有）", "后续整改措施（如有）"],
+    fields: [EVENT_EMERGENCY_FIELD_NAME, "维修进展描述", "维修进度", "跟进项（如有）", "后续整改措施（如有）"],
   },
 ];
 const visibleFollowupFieldNames = new Set(
@@ -412,6 +413,7 @@ const sourceRefreshing = ref(false);
 const saving = ref(false);
 const records = ref<LooseDict[]>([]);
 const fields = ref<LooseDict[]>([]);
+const sharedFields = ref<LooseDict>({});
 const editingRecordId = ref("");
 const selectedRecord = ref<LooseDict | null>(null);
 const draft = reactive<Record<string, string>>({});
@@ -537,6 +539,9 @@ const hasDraftContent = computed(() => Boolean(
   || editableFields.value.some((field) => {
     const fieldName = String(field.field_name || "");
     const value = String(draft[fieldName] || "").trim();
+    if (fieldName === EVENT_EMERGENCY_FIELD_NAME) {
+      return dirtyFieldNames.has(fieldName) && Boolean(value);
+    }
     if (Object.prototype.hasOwnProperty.call(DEFAULT_FOLLOWUP_FIELD_VALUES, fieldName)) {
       return Boolean(value && value !== DEFAULT_FOLLOWUP_FIELD_VALUES[fieldName]);
     }
@@ -845,6 +850,11 @@ function applyNewFollowupDefaults(): void {
       draft[fieldName] = defaultValue;
     }
   }
+  if (Object.prototype.hasOwnProperty.call(draft, EVENT_EMERGENCY_FIELD_NAME)) {
+    draft[EVENT_EMERGENCY_FIELD_NAME] = String(
+      sharedFields.value[EVENT_EMERGENCY_FIELD_NAME] || "",
+    );
+  }
 }
 
 function setDirty(value: boolean): void {
@@ -979,9 +989,14 @@ function selectRecord(record: LooseDict): void {
     if (name === WORKER_FIELD_NAME) continue;
     const fieldType = Number(field.field_type || 0);
     const prefersRaw = [2, 5, 15].includes(fieldType);
+    const fallbackValue = name === EVENT_EMERGENCY_FIELD_NAME
+      ? sharedFields.value[EVENT_EMERGENCY_FIELD_NAME]
+      : undefined;
     const value = prefersRaw && Object.prototype.hasOwnProperty.call(raw, name)
       ? raw[name]
-      : Object.prototype.hasOwnProperty.call(display, name) ? display[name] : raw[name];
+      : Object.prototype.hasOwnProperty.call(display, name)
+        ? display[name]
+        : Object.prototype.hasOwnProperty.call(raw, name) ? raw[name] : fallbackValue;
     draft[name] = repairDraftInputValue(field, value);
   }
   involvesSpareParts.value = Array.from(SPARE_PART_FIELD_NAMES).some(
@@ -1030,6 +1045,7 @@ function resetForParent(): void {
   binding.value = false;
   records.value = [];
   fields.value = [];
+  sharedFields.value = {};
   brandModelOptions.value = {};
   deviceBrandModelOptions.value = {};
   total.value = 0;
@@ -1161,6 +1177,9 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     ) return;
     records.value = Array.isArray(payload.records) ? payload.records : [];
     fields.value = Array.isArray(payload.fields) ? payload.fields : [];
+    sharedFields.value = payload.shared_fields && typeof payload.shared_fields === "object"
+      ? payload.shared_fields as LooseDict
+      : {};
     brandModelOptions.value = payload.brand_model_options && typeof payload.brand_model_options === "object"
       ? payload.brand_model_options as Record<string, string[]>
       : {};
@@ -1206,7 +1225,17 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
       clearDraft();
       if (creatingNewFollowup.value) applyNewFollowupDefaults();
     }
-    if (announce) showMessage(records.value.length ? "跟进记录已刷新。" : "暂无跟进记录。", records.value.length ? "success" : "warning");
+    const loadWarnings = Array.isArray(payload.warnings)
+      ? payload.warnings.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (loadWarnings.length && !silent) {
+      showMessage(loadWarnings.join("；"), "warning");
+    } else if (announce) {
+      showMessage(
+        records.value.length ? "跟进记录已刷新。" : "暂无跟进记录。",
+        records.value.length ? "success" : "warning",
+      );
+    }
   } catch (error: unknown) {
     if (
       requestVersion !== recordsRequestVersion
@@ -1253,6 +1282,12 @@ function applySavedFollowupRecord(
 ): void {
   const normalizedRecordId = String(recordId || "").trim();
   if (!normalizedRecordId) return;
+  if (Object.prototype.hasOwnProperty.call(savedFields, EVENT_EMERGENCY_FIELD_NAME)) {
+    sharedFields.value = {
+      ...sharedFields.value,
+      [EVENT_EMERGENCY_FIELD_NAME]: savedFields[EVENT_EMERGENCY_FIELD_NAME],
+    };
+  }
   const existing = (
     selectedRecord.value
     && String(selectedRecord.value.record_id || "").trim() === normalizedRecordId

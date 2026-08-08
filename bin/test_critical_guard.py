@@ -196,6 +196,70 @@ class CriticalGuardHelperTests(unittest.TestCase):
             self.assertGreater(preview["width"], 600)
             self.assertGreater(preview["height"], 600)
 
+    def test_uploaded_scope_file_accepts_sheet_name_with_outer_spaces(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "material-check.xlsx"
+            output_path = Path(temp_dir) / "material-check.png"
+            workbook = load_workbook(critical_guard_template_path(), keep_links=False)
+            workbook["物资检查清单"].title = "物资检查清单 "
+            workbook.save(source_path)
+            workbook.close()
+
+            metadata = validate_critical_guard_source_workbook(
+                source_path,
+                sheet_name="物资检查清单",
+            )
+            preview = render_critical_guard_source_file_preview(
+                source_path=source_path,
+                sheet_name="物资检查清单",
+                output_path=output_path,
+            )
+
+            self.assertEqual(metadata["sheet_type"], "物资检查清单")
+            self.assertTrue(output_path.is_file())
+            self.assertGreater(preview["width"], 600)
+            self.assertGreater(preview["height"], 600)
+
+    def test_uploaded_long_scope_file_reduces_render_scale(self) -> None:
+        from openpyxl import Workbook
+        from openpyxl.styles import PatternFill
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "long-material-check.xlsx"
+            output_path = Path(temp_dir) / "long-material-check.png"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "物资检查清单"
+            for column in ("A", "B", "C"):
+                worksheet.column_dimensions[column].width = 16
+            for row in range(1, 211):
+                worksheet.row_dimensions[row].height = 50
+                fill = PatternFill(
+                    fill_type="solid",
+                    fgColor="DDEBFA" if row % 2 else "FFFFFF",
+                )
+                for column in range(1, 4):
+                    cell = worksheet.cell(
+                        row=row,
+                        column=column,
+                        value=f"物资检查项目 {row}-{column}",
+                    )
+                    cell.fill = fill
+            workbook.save(source_path)
+            workbook.close()
+
+            preview = render_critical_guard_source_file_preview(
+                source_path=source_path,
+                sheet_name="物资检查清单",
+                output_path=output_path,
+            )
+
+            self.assertTrue(output_path.is_file())
+            self.assertLessEqual(preview["height"], 20_000)
+            self.assertGreater(preview["height"], 10_000)
+
     def test_uploaded_scope_file_uses_actual_range_and_rejects_oversized_sheet(self) -> None:
         from openpyxl import load_workbook
 
