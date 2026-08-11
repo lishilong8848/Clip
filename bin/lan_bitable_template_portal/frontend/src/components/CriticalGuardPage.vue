@@ -86,6 +86,61 @@
           </button>
         </div>
 
+        <section
+          class="weather-automation"
+          :class="{ running: weatherRunning, paused: weatherPaused, failed: weatherStatus?.last_error }"
+          role="status"
+          aria-live="polite"
+        >
+          <div class="weather-automation__identity">
+            <span class="weather-automation__icon"><CloudSun :size="22" /></span>
+            <div>
+              <strong>天气预警自动重保</strong>
+              <span>{{ weatherHeadline }}</span>
+            </div>
+          </div>
+          <div class="weather-automation__times">
+            <span>最近查询 <b>{{ formatWeatherTime(weatherStatus?.last_query_at) }}</b></span>
+            <span>最近成功 <b>{{ formatWeatherTime(weatherStatus?.last_success_at) }}</b></span>
+            <span>下次查询 <b>{{ weatherPaused ? "已暂停" : formatWeatherTime(weatherStatus?.next_query_at) }}</b></span>
+          </div>
+          <div class="weather-automation__action">
+            <span :class="weatherStatus?.last_error ? 'error' : ''">{{ weatherPhaseText }}</span>
+            <div class="weather-automation__buttons">
+              <button
+                type="button"
+                class="primary-button weather-refresh-button"
+                :disabled="weatherPaused || weatherRunning || weatherActionBusy"
+                @click="refreshWeatherNow"
+              >
+                <RefreshCw :size="16" :class="{ spinning: weatherRunning || weatherActionBusy }" />
+                {{ weatherRunning ? "正在检查天气" : "立即检查天气" }}
+              </button>
+              <button
+                type="button"
+                class="secondary-button weather-pause-button"
+                :disabled="weatherActionBusy"
+                @click="toggleWeatherPause"
+              >
+                <Play v-if="weatherPaused" :size="16" />
+                <Pause v-else :size="16" />
+                {{ weatherPaused ? "恢复自动查询" : "暂停自动查询" }}
+              </button>
+            </div>
+          </div>
+          <div v-if="weatherResultText" class="weather-automation__result">
+            {{ weatherResultText }}
+          </div>
+          <div v-if="weatherArchiveFailures.length" class="weather-archive-failures">
+            <div v-for="item in weatherArchiveFailures" :key="item.task_id">
+              <span>{{ item.warning_title }} · 归档失败：{{ item.archive_error }}</span>
+              <button type="button" :disabled="weatherActionBusy" @click="retryWeatherArchive(item)">
+                重试归档
+              </button>
+            </div>
+          </div>
+        </section>
+
         <form v-if="publishOpen" class="publish-panel" @submit.prevent="publishTask">
           <label class="field full">
             <span>任务名称</span>
@@ -376,13 +431,21 @@
 
               <section v-else-if="activeDefinition.kind === 'check'" class="sheet-table-shell">
                 <div class="table-actions">
-                  <span>异常 {{ abnormalCount }} 项</span>
-                  <button type="button" :disabled="templateOutdated" @click="markAllNormal"><ClipboardCheck :size="16" /> 一键全正常</button>
+                  <div>
+                    <span>异常 {{ abnormalCount }} 项</span>
+                    <small :class="{ customized: activeTemplateCustomized }">
+                      {{ activeTemplateCustomized ? `${activeScope}楼模板` : "默认模板" }} · {{ activeCheckItems.length }} 项
+                    </small>
+                  </div>
+                  <div>
+                    <button type="button" :disabled="templateOutdated || saving" @click="openTemplateEditor"><Settings2 :size="16" /> 编辑模板</button>
+                    <button type="button" :disabled="templateOutdated" @click="markAllNormal"><ClipboardCheck :size="16" /> 一键全正常</button>
+                  </div>
                 </div>
                 <table class="check-table">
                   <thead><tr><th>检查项</th><th>检查内容</th><th>检查结果</th><th>备注</th></tr></thead>
                   <tbody>
-                    <tr v-for="item in activeDefinition.items" :key="item.key" :class="{ abnormal: cells.checks[item.key]?.status === 'abnormal' }">
+                    <tr v-for="item in activeCheckItems" :key="item.key" :class="{ abnormal: cells.checks[item.key]?.status === 'abnormal' }">
                       <td>{{ item.category }}</td>
                       <td>{{ item.content }}</td>
                       <td>
@@ -482,6 +545,44 @@
       </div>
     </Teleport>
 
+    <Teleport to="body">
+      <div v-if="templateEditorOpen" class="template-editor-overlay" @click.self="requestCloseTemplateEditor">
+        <section class="template-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="guard-template-editor-title">
+          <header>
+            <div>
+              <span>{{ activeScope }}楼 · {{ String(activeResponse?.sheet_type || "检查表") }}</span>
+              <h3 id="guard-template-editor-title">检查模板</h3>
+            </div>
+            <button type="button" class="template-editor-close" aria-label="关闭" :disabled="templateSaving" @click="requestCloseTemplateEditor"><X :size="20" /></button>
+          </header>
+          <div class="template-editor-body" :aria-busy="templateLoading">
+            <div v-if="templateLoading" class="template-editor-loading"><RefreshCw :size="20" class="spinning" /> 正在读取楼栋模板</div>
+            <template v-else>
+            <div class="template-editor-table-head">
+              <span>序号</span><span>检查项</span><span>检查内容</span><span>操作</span>
+            </div>
+            <div class="template-editor-rows">
+              <div v-for="(item, index) in templateRows" :key="item.key" class="template-editor-row">
+                <b>{{ index + 1 }}</b>
+                <input v-model="item.category" maxlength="200" aria-label="检查项" @input="templateEditorTouched = true" />
+                <textarea v-model="item.content" rows="2" maxlength="2000" aria-label="检查内容" @input="templateEditorTouched = true"></textarea>
+                <button type="button" class="template-row-delete" :disabled="templateSaving || templateRows.length <= 1" :aria-label="`删除第 ${index + 1} 行`" @click="removeTemplateRow(index)"><Trash2 :size="17" /></button>
+              </div>
+            </div>
+            <button type="button" class="template-add-row" :disabled="templateSaving || templateRows.length >= 200" @click="addTemplateRow"><Plus :size="16" /> 添加一行</button>
+            </template>
+          </div>
+          <footer>
+            <button type="button" class="template-reset-button" :disabled="templateSaving || templateLoading || !templateEditorCustomized" @click="templateResetConfirmOpen = true">恢复默认模板</button>
+            <div>
+              <button type="button" class="secondary-button" :disabled="templateSaving" @click="requestCloseTemplateEditor">取消</button>
+              <button type="button" class="primary-button" :disabled="templateSaving || templateLoading || !templateEditorDirty" @click="saveScopeTemplate"><Save :size="16" /> {{ templateSaving ? "保存中" : "保存并应用" }}</button>
+            </div>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
+
     <ConfirmDialog
       :open="confirmOpen"
       tone="warning"
@@ -510,6 +611,24 @@
       @resolve="resolveDeleteTask"
     />
 
+    <ConfirmDialog
+      :open="templateResetConfirmOpen"
+      tone="warning"
+      title="恢复默认检查模板"
+      :message="`恢复后，${activeScope}楼后续发布的${String(activeResponse?.sheet_type || '检查表')}将使用系统默认检查项。`"
+      confirm-label="恢复默认"
+      @resolve="resolveTemplateReset"
+    />
+
+    <ConfirmDialog
+      :open="templateCloseConfirmOpen"
+      tone="warning"
+      title="模板修改尚未保存"
+      message="关闭后，本次检查项和检查内容修改将丢失。"
+      confirm-label="放弃修改"
+      @resolve="resolveTemplateClose"
+    />
+
     <CriticalGuardSignatureDrawer
       :open="signatureDrawerOpen"
       :scope="activeScope"
@@ -532,11 +651,14 @@ import {
   Building2,
   CheckCircle2,
   ChevronRight,
+  CloudSun,
   ClipboardCheck,
   Download,
   FileSpreadsheet,
   Image as ImageIcon,
+  Pause,
   PenLine,
+  Play,
   Plus,
   RefreshCw,
   Save,
@@ -579,6 +701,8 @@ const error = ref("");
 const message = ref("");
 const messageTone = ref("info");
 const publishOpen = ref(false);
+const weatherStatus = ref<Dict | null>(null);
+const weatherActionBusy = ref(false);
 const imageViewerUrl = ref("");
 const imageViewerTitle = ref("");
 const confirmOpen = ref(false);
@@ -586,6 +710,16 @@ const normalConfirmOpen = ref(false);
 const deleteConfirmOpen = ref(false);
 const pendingDeleteTask = ref<Dict | null>(null);
 const deletingTaskId = ref("");
+const templateEditorOpen = ref(false);
+const templateLoading = ref(false);
+const templateSaving = ref(false);
+const templateRows = ref<Dict[]>([]);
+const templateInitialRows = ref<Dict[]>([]);
+const templateEditorTouched = ref(false);
+const templateEditorRevision = ref(0);
+const templateEditorCustomized = ref(false);
+const templateResetConfirmOpen = ref(false);
+const templateCloseConfirmOpen = ref(false);
 const signatureDrawerOpen = ref(false);
 const sourceFileInput = ref<HTMLInputElement | null>(null);
 const sourceFileDragging = ref(false);
@@ -598,10 +732,16 @@ let editRevision = 0;
 let bootstrapGeneration = 0;
 let listGeneration = 0;
 let detailGeneration = 0;
+let templateLoadGeneration = 0;
+let templatePendingOperationFingerprint = "";
+let templatePendingOperationId = "";
 let publishOperationId = "";
 let bootstrapController: AbortController | null = null;
 let listController: AbortController | null = null;
 let detailController: AbortController | null = null;
+let weatherPollTimer: ReturnType<typeof setTimeout> | null = null;
+let weatherStatusLoading = false;
+let weatherTaskRefreshJobId = "";
 const publishForm = ref({
   name: "",
   sheetTypes: ["设备安全", "环境安全"],
@@ -630,12 +770,90 @@ const orderedResponses = computed(() => {
 const activeDefinition = computed<Dict | null>(() => (
   activeResponse.value ? catalogSheets.value.find((item) => item.name === activeResponse.value?.sheet_type) || null : null
 ));
+const activeCheckItems = computed<Dict[]>(() => {
+  const responseItems = Array.isArray(cells.value?.template_items)
+    ? cells.value.template_items
+    : [];
+  if (responseItems.length) return responseItems;
+  return Array.isArray(activeDefinition.value?.items) ? activeDefinition.value!.items : [];
+});
+const activeTemplateRevision = computed(() => Math.max(
+  0,
+  Number(cells.value?.template_revision ?? activeResponse.value?.template_revision ?? 0) || 0,
+));
+const activeTemplateCustomized = computed(() => Boolean(
+  cells.value?.template_customized
+  ?? activeResponse.value?.template_customized
+  ?? (activeTemplateRevision.value > 0),
+));
+const templateEditorDirty = computed(() => (
+  templateEditorTouched.value
+  || JSON.stringify(templateRows.value) !== JSON.stringify(templateInitialRows.value)
+));
 const abnormalCount = computed(() => Object.values(cells.value.checks || {}).filter((item: any) => item?.status === "abnormal").length);
 const buildingPendingCount = computed(() => tasks.value.filter((item) => !item.complete).length);
 const buildingCompletedCount = computed(() => tasks.value.filter((item) => item.complete).length);
 const adminResponseTotal = computed(() => selectedTask.value?.responses?.length || tasks.value.reduce((total, item) => total + Number(item.response_count || 0), 0));
 const adminSubmittedTotal = computed(() => selectedTask.value ? selectedTask.value.responses.filter((item: Dict) => item.status === "submitted").length : tasks.value.reduce((total, item) => total + Number(item.submitted_count || 0), 0));
 const adminSheetHasImages = computed(() => adminSheetResponses(adminActiveSheet.value).some((item) => item.image_url));
+const weatherRunning = computed(() => Boolean(weatherStatus.value?.running));
+const weatherPaused = computed(() => Boolean(weatherStatus.value?.paused));
+const weatherWarnings = computed<Dict[]>(() => (
+  Array.isArray(weatherStatus.value?.current_warnings)
+    ? weatherStatus.value!.current_warnings
+    : []
+));
+const weatherHeadline = computed(() => {
+  const warning = weatherWarnings.value[0];
+  if (warning) {
+    return `${String(warning.title || "当前预警")} · ${String(warning.guard_level || weatherStatus.value?.current_guard_level || "")}`;
+  }
+  if (weatherStatus.value?.last_error) return "最近查询失败，已保留上次成功数据";
+  return "当前无新增天气重保任务";
+});
+const weatherPhaseText = computed(() => {
+  if (weatherPaused.value) {
+    return weatherRunning.value ? "已暂停后续查询，当前检查正在收尾" : "天气自动查询已暂停";
+  }
+  if (weatherStatus.value?.last_error && !weatherRunning.value) {
+    return String(weatherStatus.value.last_error);
+  }
+  const phase = String(weatherStatus.value?.phase || "idle");
+  return ({
+    queued: "已加入天气检查队列",
+    fetching: "正在读取天气",
+    evaluating: "正在判断戒备任务",
+    notifying: "正在检查通知与归档",
+    completed: "已检查通知与归档",
+    failed: "查询失败，仍保留上次成功数据",
+    idle: "等待自动查询",
+  } as Record<string, string>)[phase] || "等待自动查询";
+});
+const weatherResultText = computed(() => {
+  const result = weatherStatus.value?.last_result;
+  if (!result || typeof result !== "object" || weatherRunning.value || weatherStatus.value?.last_error) return "";
+  const created = Number(result.new_tasks || 0);
+  const existing = Number(result.existing_tasks || 0);
+  const processed = Number(result.processed_tasks ?? existing);
+  const sent = Number(result.notifications_sent || 0);
+  const failed = Number(result.notifications_failed || 0);
+  const archived = Number(result.archived || 0);
+  const archiveFailed = Number(result.archive_failed || 0);
+  const taskFailed = Number(result.task_failed || 0);
+  const warnings = [
+    failed ? `通知失败 ${failed} 次` : "",
+    archiveFailed ? `归档失败 ${archiveFailed} 条` : "",
+    taskFailed ? `任务处理失败 ${taskFailed} 个` : "",
+  ].filter(Boolean).join("，");
+  return created
+    ? `本次新建 ${created} 个任务，处理 ${processed} 个任务，通知成功 ${sent} 次，归档 ${archived} 条${warnings ? `，${warnings}` : ""}`
+    : `数据已刷新，无新增任务；处理 ${processed} 个任务，通知成功 ${sent} 次，归档 ${archived} 条${warnings ? `，${warnings}` : ""}`;
+});
+const weatherArchiveFailures = computed<Dict[]>(() => (
+  Array.isArray(weatherStatus.value?.tasks)
+    ? weatherStatus.value!.tasks.filter((item: Dict) => item.archive_status === "failed")
+    : []
+));
 const signatureContextKey = computed(() => (
   activeResponse.value
     ? `critical_guard:${String(activeResponse.value.task_id || selectedTask.value?.task_id || "")}:${activeScope.value}`
@@ -730,6 +948,7 @@ async function loadBootstrap(): Promise<void> {
     if (generation !== bootstrapGeneration) return;
     bootstrap.value = data;
     await loadTasks();
+    if (viewMode.value === "admin") void loadWeatherStatus(true);
   } catch (loadError: any) {
     if (controller.signal.aborted || generation !== bootstrapGeneration) return;
     error.value = loadError?.message || "重保管理读取失败。";
@@ -763,7 +982,105 @@ async function loadTasks(): Promise<void> {
     clearTaskSelection();
   }
   if (!selectedTask.value && tasks.value.length) {
-    await selectTask(tasks.value[0].task_id, viewMode.value === "admin");
+    const requestedTaskId = new URLSearchParams(window.location.search).get("task_id") || "";
+    const requested = tasks.value.find((item) => item.task_id === requestedTaskId);
+    await selectTask((requested || tasks.value[0]).task_id, viewMode.value === "admin");
+  }
+}
+
+function scheduleWeatherStatus(delay = 30_000): void {
+  if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
+  weatherPollTimer = null;
+  if (viewMode.value !== "admin") return;
+  weatherPollTimer = window.setTimeout(() => void loadWeatherStatus(true), delay);
+}
+
+async function loadWeatherStatus(silent = false): Promise<void> {
+  if (viewMode.value !== "admin" || weatherStatusLoading) return;
+  weatherStatusLoading = true;
+  try {
+    const nextStatus = await requestJson("/api/critical-guard/weather-status", {
+      cache: "no-store",
+      timeoutMs: 15_000,
+    });
+    weatherStatus.value = nextStatus;
+    const jobId = String(nextStatus?.job?.job_id || "");
+    const jobFinished = ["completed", "failed"].includes(String(nextStatus?.job?.status || ""));
+    if (jobId && jobFinished && jobId !== weatherTaskRefreshJobId) {
+      weatherTaskRefreshJobId = jobId;
+      await loadTasks();
+    }
+  } catch (loadError: any) {
+    if (!silent) setMessage(loadError?.message || "天气任务状态读取失败。", "error");
+  } finally {
+    weatherStatusLoading = false;
+    scheduleWeatherStatus(weatherRunning.value ? 1_000 : 30_000);
+  }
+}
+
+async function refreshWeatherNow(): Promise<void> {
+  if (weatherPaused.value || weatherRunning.value || weatherActionBusy.value) return;
+  weatherActionBusy.value = true;
+  setMessage("正在检查天气。", "info");
+  try {
+    const job = await requestJson("/api/critical-guard/weather-refresh", {
+      method: "POST",
+      body: JSON.stringify({ operation_id: operationId() }),
+      timeoutMs: 15_000,
+    });
+    weatherStatus.value = {
+      ...(weatherStatus.value || {}),
+      running: true,
+      phase: String(job.phase || "queued"),
+    };
+    scheduleWeatherStatus(300);
+  } catch (refreshError: any) {
+    setMessage(refreshError?.message || "天气检查启动失败。", "error");
+  } finally {
+    weatherActionBusy.value = false;
+  }
+}
+
+async function toggleWeatherPause(): Promise<void> {
+  if (weatherActionBusy.value) return;
+  const paused = !weatherPaused.value;
+  weatherActionBusy.value = true;
+  try {
+    weatherStatus.value = await requestJson("/api/critical-guard/weather-pause", {
+      method: "POST",
+      body: JSON.stringify({ paused, operation_id: operationId() }),
+      timeoutMs: 15_000,
+    });
+    setMessage(
+      paused
+        ? weatherRunning.value
+          ? "已暂停后续天气查询，当前检查完成后不再自动请求。"
+          : "天气自动查询已暂停。"
+        : "天气自动查询已恢复。",
+      "success",
+    );
+    scheduleWeatherStatus(paused ? 30_000 : 1_000);
+  } catch (pauseError: any) {
+    setMessage(pauseError?.message || "天气自动查询状态修改失败。", "error");
+  } finally {
+    weatherActionBusy.value = false;
+  }
+}
+
+async function retryWeatherArchive(item: Dict): Promise<void> {
+  if (weatherActionBusy.value) return;
+  weatherActionBusy.value = true;
+  try {
+    await requestJson(
+      `/api/critical-guard/tasks/${encodeURIComponent(String(item.task_id || ""))}/archive-retry`,
+      { method: "POST", timeoutMs: 120_000 },
+    );
+    setMessage("重保汇总已归档。", "success");
+    await loadWeatherStatus(true);
+  } catch (retryError: any) {
+    setMessage(retryError?.message || "归档重试失败。", "error");
+  } finally {
+    weatherActionBusy.value = false;
   }
 }
 
@@ -806,7 +1123,38 @@ async function selectTask(taskId: string, admin = false): Promise<void> {
 
 function applyResponse(response: Dict | null): void {
   activeResponse.value = response;
-  cells.value = clone(response?.cells || {});
+  const nextCells = clone(response?.cells || {});
+  const definition = catalogSheets.value.find((item) => item.name === response?.sheet_type);
+  if (definition?.kind === "check") {
+    const items = Array.isArray(nextCells.template_items) && nextCells.template_items.length
+      ? nextCells.template_items
+      : clone(Array.isArray(definition.items) ? definition.items : []);
+    nextCells.template_items = items;
+    nextCells.template_revision = Math.max(
+      0,
+      Number(nextCells.template_revision ?? response?.template_revision ?? 0) || 0,
+    );
+    nextCells.template_customized = Boolean(
+      nextCells.template_customized
+      ?? response?.template_customized
+      ?? (nextCells.template_revision > 0),
+    );
+    if (!nextCells.checks || typeof nextCells.checks !== "object") nextCells.checks = {};
+    const validChecks: Dict = {};
+    for (const item of items) {
+      const key = String(item?.key || "");
+      if (!key) continue;
+      const saved = nextCells.checks[key] && typeof nextCells.checks[key] === "object"
+        ? nextCells.checks[key]
+        : {};
+      validChecks[key] = {
+        status: saved.status === "abnormal" ? "abnormal" : "normal",
+        note: String(saved.note || ""),
+      };
+    }
+    nextCells.checks = validChecks;
+  }
+  cells.value = nextCells;
   selectedSigners.value = clone(
     Array.isArray(response?.selected_signers)
       ? response.selected_signers
@@ -815,6 +1163,9 @@ function applyResponse(response: Dict | null): void {
         : [],
   );
   signatureDrawerOpen.value = false;
+  templateEditorOpen.value = false;
+  templateResetConfirmOpen.value = false;
+  templateCloseConfirmOpen.value = false;
   dirty.value = false;
   editRevision += 1;
 }
@@ -935,6 +1286,241 @@ function applyAllNormal(): void {
 function resolveMarkAllNormal(confirmed: boolean): void {
   normalConfirmOpen.value = false;
   if (confirmed) applyAllNormal();
+}
+
+function newTemplateItemKey(): string {
+  const suffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  return `custom_${suffix.replace(/[^0-9A-Za-z_-]/g, "")}`;
+}
+
+async function openTemplateEditor(): Promise<void> {
+  if (templateOutdated.value || saving.value || activeDefinition.value?.kind !== "check") return;
+  const generation = ++templateLoadGeneration;
+  const fallbackRows = activeCheckItems.value.map((item) => ({
+    key: String(item.key || newTemplateItemKey()),
+    category: String(item.category || ""),
+    content: String(item.content || ""),
+  }));
+  templateRows.value = clone(fallbackRows);
+  templateInitialRows.value = clone(fallbackRows);
+  templateEditorRevision.value = activeTemplateRevision.value;
+  templateEditorCustomized.value = activeTemplateCustomized.value;
+  templateEditorTouched.value = false;
+  templateEditorOpen.value = true;
+  templateLoading.value = true;
+  try {
+    const query = new URLSearchParams({
+      scope: activeScope.value,
+      sheet_type: String(activeResponse.value?.sheet_type || ""),
+    });
+    const template = await requestJson(`/api/critical-guard/scope-template?${query.toString()}`, {
+      cache: "no-store",
+    });
+    if (generation !== templateLoadGeneration || !templateEditorOpen.value) return;
+    const rows = Array.isArray(template.items) ? template.items.map((item: Dict) => ({
+      key: String(item.key || newTemplateItemKey()),
+      category: String(item.category || ""),
+      content: String(item.content || ""),
+    })) : fallbackRows;
+    templateRows.value = clone(rows);
+    templateInitialRows.value = clone(rows);
+    templateEditorRevision.value = Math.max(0, Number(template.revision || 0));
+    templateEditorCustomized.value = Boolean(template.customized);
+    templateEditorTouched.value = false;
+  } catch (loadError: any) {
+    if (generation !== templateLoadGeneration) return;
+    closeTemplateEditor();
+    setMessage(loadError?.message || "楼栋检查模板读取失败。", "error");
+  } finally {
+    if (generation === templateLoadGeneration) templateLoading.value = false;
+  }
+}
+
+function addTemplateRow(): void {
+  if (templateSaving.value || templateRows.value.length >= 200) return;
+  templateRows.value.push({ key: newTemplateItemKey(), category: "", content: "" });
+  templateEditorTouched.value = true;
+}
+
+function removeTemplateRow(index: number): void {
+  if (templateSaving.value || templateRows.value.length <= 1) return;
+  templateRows.value.splice(index, 1);
+  templateEditorTouched.value = true;
+}
+
+function closeTemplateEditor(): void {
+  templateLoadGeneration += 1;
+  templateEditorOpen.value = false;
+  templateLoading.value = false;
+  templateRows.value = [];
+  templateInitialRows.value = [];
+  templateEditorTouched.value = false;
+  templateEditorRevision.value = 0;
+  templateEditorCustomized.value = false;
+}
+
+function requestCloseTemplateEditor(): void {
+  if (templateSaving.value) return;
+  if (templateEditorDirty.value) {
+    templateCloseConfirmOpen.value = true;
+    return;
+  }
+  closeTemplateEditor();
+}
+
+function resolveTemplateClose(confirmed: boolean): void {
+  templateCloseConfirmOpen.value = false;
+  if (confirmed) closeTemplateEditor();
+}
+
+function normalizedTemplateRows(): Dict[] | null {
+  if (!templateRows.value.length) {
+    setMessage("检查模板至少需要保留一条检查内容。", "error");
+    return null;
+  }
+  const rows = templateRows.value.map((item) => ({
+    key: String(item.key || newTemplateItemKey()),
+    category: String(item.category || "").trim(),
+    content: String(item.content || "").trim(),
+  }));
+  const emptyIndex = rows.findIndex((item) => !item.content);
+  if (emptyIndex >= 0) {
+    setMessage(`第 ${emptyIndex + 1} 条检查内容不能为空。`, "error");
+    return null;
+  }
+  return rows;
+}
+
+function scopeTemplateOperationId(kind: "save" | "reset", rows: Dict[]): string {
+  const fingerprint = JSON.stringify({
+    kind,
+    scope: activeScope.value,
+    sheetType: String(activeResponse.value?.sheet_type || ""),
+    responseId: String(activeResponse.value?.response_id || ""),
+    responseVersion: Number(activeResponse.value?.version || 0),
+    templateRevision: templateEditorRevision.value,
+    rows,
+  });
+  if (
+    fingerprint !== templatePendingOperationFingerprint
+    || !templatePendingOperationId
+  ) {
+    templatePendingOperationFingerprint = fingerprint;
+    templatePendingOperationId = operationId();
+  }
+  return templatePendingOperationId;
+}
+
+function clearScopeTemplateOperation(): void {
+  templatePendingOperationFingerprint = "";
+  templatePendingOperationId = "";
+}
+
+function applyTemplateUpdate(result: Dict): void {
+  if (result?.template) {
+    templateEditorRevision.value = Math.max(0, Number(result.template.revision || 0));
+    templateEditorCustomized.value = Boolean(result.template.customized);
+  }
+  const updated = result?.response;
+  if (!updated?.response_id) return;
+  const index = selectedTask.value?.responses?.findIndex(
+    (item: Dict) => item.response_id === updated.response_id,
+  ) ?? -1;
+  if (selectedTask.value && index >= 0) selectedTask.value.responses[index] = updated;
+  if (String(activeResponse.value?.response_id || "") === String(updated.response_id)) {
+    applyResponse(updated);
+  }
+}
+
+async function saveScopeTemplate(): Promise<void> {
+  if (!activeResponse.value || templateSaving.value || !templateEditorDirty.value) return;
+  const rows = normalizedTemplateRows();
+  if (!rows) return;
+  const pendingOperationId = scopeTemplateOperationId("save", rows);
+  let savedSuccessfully = false;
+  templateSaving.value = true;
+  try {
+    const result = await requestJson("/api/critical-guard/scope-template", {
+      method: "PUT",
+      body: JSON.stringify({
+        scope: activeScope.value,
+        sheet_type: String(activeResponse.value.sheet_type || ""),
+        items: rows,
+        response_id: String(activeResponse.value.response_id || ""),
+        cells: clone(cells.value),
+        expected_revision: templateEditorRevision.value,
+        expected_response_version: activeResponse.value.version,
+        operation_id: pendingOperationId,
+      }),
+      timeoutMs: 60_000,
+    });
+    applyTemplateUpdate(result);
+    clearScopeTemplateOperation();
+    savedSuccessfully = true;
+    setMessage(`${activeScope.value}楼检查模板已保存并应用。`, "success");
+  } catch (saveError: any) {
+    setMessage(saveError?.message || "楼栋检查模板保存失败。", "error");
+  } finally {
+    templateSaving.value = false;
+  }
+  if (savedSuccessfully) {
+    try {
+      await loadTasks();
+    } catch (refreshError: any) {
+      setMessage(
+        `检查模板已保存，但任务统计刷新失败：${refreshError?.message || "请稍后刷新"}`,
+        "warning",
+      );
+    }
+  }
+}
+
+function resolveTemplateReset(confirmed: boolean): void {
+  templateResetConfirmOpen.value = false;
+  if (confirmed) void resetScopeTemplate();
+}
+
+async function resetScopeTemplate(): Promise<void> {
+  if (!activeResponse.value || templateSaving.value) return;
+  const pendingOperationId = scopeTemplateOperationId("reset", []);
+  let resetSuccessfully = false;
+  templateSaving.value = true;
+  try {
+    const result = await requestJson("/api/critical-guard/scope-template/reset", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: activeScope.value,
+        sheet_type: String(activeResponse.value.sheet_type || ""),
+        items: [],
+        response_id: String(activeResponse.value.response_id || ""),
+        cells: clone(cells.value),
+        expected_revision: templateEditorRevision.value,
+        expected_response_version: activeResponse.value.version,
+        operation_id: pendingOperationId,
+      }),
+      timeoutMs: 60_000,
+    });
+    applyTemplateUpdate(result);
+    clearScopeTemplateOperation();
+    resetSuccessfully = true;
+    setMessage(`${activeScope.value}楼已恢复系统默认检查模板。`, "success");
+  } catch (resetError: any) {
+    setMessage(resetError?.message || "恢复默认检查模板失败。", "error");
+  } finally {
+    templateSaving.value = false;
+  }
+  if (resetSuccessfully) {
+    try {
+      await loadTasks();
+    } catch (refreshError: any) {
+      setMessage(
+        `已恢复默认模板，但任务统计刷新失败：${refreshError?.message || "请稍后刷新"}`,
+        "warning",
+      );
+    }
+  }
 }
 
 function openSourceFilePicker(): void {
@@ -1220,6 +1806,18 @@ function formatDateTime(value: unknown): string {
   return new Date(numeric * 1000).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function formatWeatherTime(value: unknown): string {
+  const numeric = Number(value || 0);
+  if (!numeric) return "未查询";
+  return new Date(numeric * 1000).toLocaleString("zh-CN", {
+    hour12: false,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function formatFileSize(value: unknown): string {
   const size = Math.max(0, Number(value || 0));
   if (size < 1024) return `${Math.round(size)} B`;
@@ -1274,6 +1872,10 @@ watch(() => [props.scope, props.adminMode], () => {
   selectedTask.value = null;
   activeResponse.value = null;
   dirty.value = false;
+  weatherStatus.value = null;
+  weatherTaskRefreshJobId = "";
+  if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
+  weatherPollTimer = null;
   void loadBootstrap();
 });
 
@@ -1286,6 +1888,8 @@ onBeforeUnmount(() => {
   bootstrapController?.abort();
   listController?.abort();
   detailController?.abort();
+  if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
+  weatherPollTimer = null;
 });
 </script>
 
@@ -1453,6 +2057,42 @@ onBeforeUnmount(() => {
 .building-summary > span { display: inline-flex; align-items: center; gap: 8px; color: #164f9c; font-weight: 900; }
 .building-summary strong { margin-left: auto; color: #b45309; }
 .building-summary b { color: #087f5b; }
+
+.weather-automation {
+  display: grid;
+  grid-template-columns: minmax(250px, 1fr) minmax(390px, 1.45fr) auto;
+  align-items: center;
+  gap: 14px 20px;
+  margin-top: 14px;
+  border: 1px solid #c9ddf5;
+  border-left: 4px solid #2f73e7;
+  border-radius: 11px;
+  padding: 12px 14px;
+  background: #fff;
+}
+.weather-automation.running { border-left-color: #0ea5a8; background: #f8ffff; }
+.weather-automation.paused { border-left-color: #71839a; background: #f7f9fc; }
+.weather-automation.failed { border-left-color: #e05263; }
+.weather-automation__identity { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.weather-automation__identity > div { min-width: 0; }
+.weather-automation__identity strong,
+.weather-automation__identity span { display: block; }
+.weather-automation__identity strong { color: #173259; font-size: 14px; }
+.weather-automation__identity > div span { margin-top: 3px; overflow: hidden; color: #607590; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.weather-automation__icon { display: grid !important; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border-radius: 9px; background: #e9f3ff; color: #2368d9 !important; }
+.weather-automation__times { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.weather-automation__times span { min-width: 0; border-left: 1px solid #e1eaf5; padding-left: 10px; color: #71839a; font-size: 11px; }
+.weather-automation__times b { display: block; margin-top: 2px; overflow: hidden; color: #29486f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.weather-automation__action { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.weather-automation__action > span { max-width: 260px; overflow-wrap: anywhere; color: #3970b9; font-size: 12px; font-weight: 850; }
+.weather-automation__action > span.error { color: #b42318; }
+.weather-automation__buttons { display: flex; align-items: center; gap: 8px; }
+.weather-refresh-button { white-space: nowrap; }
+.weather-pause-button { white-space: nowrap; }
+.weather-automation__result { grid-column: 1 / -1; border-top: 1px solid #e5edf7; padding-top: 9px; color: #426181; font-size: 12px; }
+.weather-archive-failures { grid-column: 1 / -1; display: grid; gap: 6px; }
+.weather-archive-failures > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid #fecdd3; border-radius: 8px; padding: 7px 9px; background: #fff5f6; color: #a8293b; font-size: 12px; }
+.weather-archive-failures button { flex: 0 0 auto; border: 1px solid #e99aa8; border-radius: 7px; padding: 5px 9px; background: #fff; color: #ad263d; font: inherit; font-size: 11px; font-weight: 850; cursor: pointer; }
 
 .publish-panel {
   display: grid;
@@ -1639,8 +2279,11 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 
 .sheet-table-shell,
 .structured-sections { padding: 0 16px 16px; }
-.table-actions { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 8px; }
+.table-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 2px 0 8px; }
+.table-actions > div { display: flex; align-items: center; gap: 8px; }
 .table-actions span { color: #b45309; font-size: 12px; font-weight: 900; }
+.table-actions small { border: 1px solid #d6e1ed; border-radius: 999px; padding: 3px 8px; background: #f8fafc; color: #64748b; font-size: 11px; font-weight: 800; }
+.table-actions small.customized { border-color: #b7d4fa; background: #eef6ff; color: #1f65c2; }
 .table-actions button { min-height: 32px; border: 1px solid #bdd5f3; background: #fff; color: #1d5ebc; }
 .check-table,
 .entry-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
@@ -1692,6 +2335,57 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .image-viewer > div { overflow: auto; text-align: center; }
 .image-viewer img { max-width: 100%; height: auto; border-radius: 8px; background: #fff; box-shadow: 0 20px 80px rgba(0,0,0,.35); }
 
+.template-editor-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(7 25 52 / 58%);
+  backdrop-filter: blur(5px);
+}
+.template-editor-dialog {
+  width: min(1120px, calc(100vw - 48px));
+  max-height: min(820px, calc(100vh - 48px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #c9d9ec;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(8 35 75 / 26%);
+}
+.template-editor-dialog > header,
+.template-editor-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; }
+.template-editor-dialog > header { border-bottom: 1px solid #dce7f3; background: #f8fbff; }
+.template-editor-dialog > header span { color: #5e7189; font-size: 12px; font-weight: 800; }
+.template-editor-dialog > header h3 { margin: 2px 0 0; color: #142f54; font-size: 18px; }
+.template-editor-close,
+.template-row-delete { display: grid; place-items: center; border: 1px solid #d5e0ec; background: #fff; color: #52677f; cursor: pointer; }
+.template-editor-close { width: 36px; height: 36px; border-radius: 50%; }
+.template-editor-body { min-height: 0; overflow: auto; padding: 14px 18px 18px; background: #f5f8fc; }
+.template-editor-loading { min-height: 260px; display: flex; align-items: center; justify-content: center; gap: 9px; color: #4f6680; font-size: 13px; font-weight: 850; }
+.template-editor-table-head,
+.template-editor-row { display: grid; grid-template-columns: 54px minmax(170px, .7fr) minmax(360px, 1.6fr) 48px; align-items: center; gap: 8px; }
+.template-editor-table-head { position: sticky; top: -14px; z-index: 2; padding: 10px 8px; border-bottom: 1px solid #cbd9e8; background: #eaf2fb; color: #315f96; font-size: 12px; font-weight: 900; }
+.template-editor-rows { display: grid; gap: 7px; margin-top: 8px; }
+.template-editor-row { border: 1px solid #d8e3ef; border-radius: 8px; padding: 7px 8px; background: #fff; }
+.template-editor-row > b { color: #6b7f96; font-size: 12px; text-align: center; }
+.template-editor-row input,
+.template-editor-row textarea { width: 100%; border: 1px solid #cbd8e7; border-radius: 7px; padding: 7px 9px; background: #fff; color: #17304f; font: inherit; font-size: 13px; resize: vertical; }
+.template-editor-row input { height: 36px; }
+.template-editor-row textarea { min-height: 48px; max-height: 120px; }
+.template-editor-row input:focus,
+.template-editor-row textarea:focus { border-color: #3b82f6; outline: 3px solid rgb(59 130 246 / 12%); }
+.template-row-delete { width: 34px; height: 34px; border-radius: 8px; color: #b42318; }
+.template-row-delete:hover:not(:disabled) { border-color: #f2b8b5; background: #fff2f1; }
+.template-add-row { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; border: 1px dashed #7fb0ee; border-radius: 8px; padding: 0 13px; background: #f3f8ff; color: #1c64bd; font-weight: 850; cursor: pointer; }
+.template-editor-dialog > footer { border-top: 1px solid #dce7f3; background: #fff; }
+.template-editor-dialog > footer > div { display: flex; gap: 8px; }
+.template-reset-button { min-height: 36px; border: 1px solid #f0c4bd; border-radius: 8px; padding: 0 12px; background: #fff8f6; color: #a53a2d; font-weight: 850; cursor: pointer; }
+.template-editor-dialog button:disabled { cursor: not-allowed; opacity: .5; }
+
 @media (max-width: 1180px) {
   .building-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .publish-panel { grid-template-columns: 1fr; }
@@ -1699,6 +2393,8 @@ input[readonly] { background: #f3f7fc; color: #536987; }
   .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sheet-meta { grid-template-columns: 1fr 180px; }
   .signer-box { grid-column: 1 / -1; }
+  .weather-automation { grid-template-columns: 1fr auto; }
+  .weather-automation__times { grid-column: 1 / -1; grid-row: 2; }
 }
 
 @media (max-width: 820px) {
@@ -1712,6 +2408,12 @@ input[readonly] { background: #f3f7fc; color: #536987; }
   .result-grid,
   .weather-fields,
   .sheet-meta { grid-template-columns: 1fr; }
+  .weather-automation { grid-template-columns: 1fr; }
+  .weather-automation__times { grid-column: auto; grid-row: auto; grid-template-columns: 1fr; }
+  .weather-automation__action { align-items: stretch; flex-direction: column; }
+  .weather-automation__buttons { display: grid; grid-template-columns: 1fr; }
+  .weather-refresh-button,
+  .weather-pause-button { width: 100%; }
   .task-list { max-height: 240px; }
   .choice-grid.sheets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .check-table { min-width: 980px; }
@@ -1726,5 +2428,12 @@ input[readonly] { background: #f3f7fc; color: #536987; }
   .scope-file-preview-card { margin-inline: 10px; }
   .scope-file-preview-card > header { align-items: flex-start; flex-direction: column; }
   .scope-file-preview-card > header button { width: 100%; }
+  .template-editor-overlay { padding: 8px; }
+  .template-editor-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .template-editor-table-head { display: none; }
+  .template-editor-row { grid-template-columns: 34px minmax(0, 1fr) 38px; }
+  .template-editor-row textarea { grid-column: 2 / -1; }
+  .template-editor-dialog > footer { align-items: stretch; flex-direction: column; }
+  .template-editor-dialog > footer > div { display: grid; grid-template-columns: 1fr 1fr; }
 }
 </style>

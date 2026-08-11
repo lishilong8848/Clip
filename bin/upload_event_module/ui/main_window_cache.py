@@ -11,7 +11,7 @@ from lan_bitable_template_portal.identity_utils import (
 )
 from ..core.parser import extract_event_info
 from ..utils import ACTIVE_CACHE_FILE
-from .display_state import normalize_active_item_data
+from .display_state import persistent_active_item_data
 
 
 class ActiveCacheMixin:
@@ -36,8 +36,11 @@ class ActiveCacheMixin:
                 data = entry.get("payload") if isinstance(entry, dict) else {}
                 if not isinstance(data, dict):
                     continue
+                persistent_data = persistent_active_item_data(data)
+                if not str(persistent_data.get("text") or "").strip():
+                    continue
                 self.add_active_item(
-                    normalize_active_item_data(dict(data)),
+                    persistent_data,
                     insert_top=False,
                     skip_cache=True,
                 )
@@ -154,13 +157,14 @@ class ActiveCacheMixin:
         store = getattr(self, "cache_store", None)
         if not store or not hasattr(store, "upsert_record"):
             return False
+        persistent_data = persistent_active_item_data(data_dict)
         try:
-            if store.upsert_record(data_dict):
+            if store.upsert_record(persistent_data):
                 self._active_cache_last_save_at = time.time()
                 self._active_cache_dirty = False
                 if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
                     self._schedule_lan_ongoing_snapshot_refresh()
-                self._post_qt_active_items_delta(upserts=[{"data": data_dict}])
+                self._post_qt_active_items_delta(upserts=[{"data": persistent_data}])
                 return True
         except Exception:
             return False
@@ -226,7 +230,7 @@ class ActiveCacheMixin:
                         source_data["level"] = cached_level
                     else:
                         source_data.pop("level", None)
-            cleaned_data = normalize_active_item_data(source_data)
+            cleaned_data = persistent_active_item_data(source_data)
             cleaned_data.pop("last_response_time", None)
             cleaned_data.pop("draft_response_time", None)
             if "_has_unuploaded_changes" not in cleaned_data:
@@ -351,7 +355,7 @@ class ActiveCacheMixin:
             meta = {}
         if not data:
             return False
-        data = normalize_active_item_data(data)
+        data = persistent_active_item_data(data)
         if self._is_ended_active_cache_record(data):
             return True
         if "_has_unuploaded_changes" not in data and "has_unuploaded_changes" in meta:

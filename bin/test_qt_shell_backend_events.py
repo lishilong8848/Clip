@@ -1,4 +1,5 @@
 import datetime as dt
+import queue
 import sys
 import tempfile
 import threading
@@ -172,6 +173,28 @@ class _RecordsHarness(MainWindowRecordsMixin):
     pass
 
 
+class _PriorityMutationHarness(MainWindowRuntimeMixin):
+    def __init__(self, *, priority_size: int = 2):
+        self._closing = False
+        self._ui_update_in_progress = False
+        self._ui_priority_mutation_queue = queue.Queue(maxsize=priority_size)
+        self._ui_mutation_queue = queue.Queue(maxsize=2)
+        self._ui_mutation_max_per_tick = 1
+        self._ui_mutation_budget_ms = 40.0
+        self._ui_slow_threshold_ms = 120.0
+        self.executed = []
+
+    def _set_last_ui_op(self, *_args, **_kwargs):
+        return None
+
+    def _record_slow_ui_operation(self, *_args, **_kwargs):
+        return None
+
+    def _apply_backend_active_upsert(self, _payload):
+        self.executed.append("active_upsert")
+        return {"ok": True}
+
+
 class _ActiveUpsertVisibilityHarness(MainWindowRuntimeMixin):
     def __init__(self):
         self.added = []
@@ -198,6 +221,91 @@ class _ActiveUpsertVisibilityHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_qt_local_event_match_normalizes_iso_time_and_building_code(self):
+        harness = _RecordsHarness()
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房B楼I3级事件通报；\n"
+            "【来源】巡检发现；\n"
+            "【时间】2026年8月11日09:37分；\n"
+            "【概述】巡检发现B-127冷冻站A区变频补水环网管道有渗水现象\n"
+            "【进展】人员已经到达现场，正在排查"
+        )
+        incoming = {"notice_type": "事件通告", "text": update_text}
+        candidate = {
+            "notice_type": "事件通告",
+            "title": "巡检发现B-127冷冻站A区变频补水环网管道有渗水现象",
+            "start_time": "2026-08-11T09:37",
+            "building_codes": ["B"],
+            "event_source": "巡检发现",
+            "level": "I3",
+        }
+
+        incoming_fields = harness._event_sparse_match_fields(incoming)
+        candidate_fields = harness._event_sparse_match_fields(candidate)
+
+        self.assertEqual(incoming_fields["time"], "202608110937")
+        self.assertEqual(candidate_fields["time"], "202608110937")
+        self.assertEqual(incoming_fields["building"], "B")
+        self.assertEqual(candidate_fields["building"], "B")
+        self.assertTrue(harness._event_sparse_identity_matches(incoming, candidate))
+
+        class _Store:
+            @staticmethod
+            def candidates_by_exact_text(_text):
+                return []
+
+            @staticmethod
+            def candidates_by_match_key(_key):
+                return []
+
+            @staticmethod
+            def candidates_by_match_title(_title):
+                return []
+
+            @staticmethod
+            def entries():
+                return [("event-list", "event-item", candidate)]
+
+        harness._active_notice_store = lambda: _Store()
+        list_widget, item = harness._find_active_item_by_content_or_title(
+            update_text,
+            "EA118机房B楼I3级事件通报",
+            "事件通告",
+        )
+        self.assertEqual((list_widget, item), ("event-list", "event-item"))
+
+    def test_live_active_upsert_runs_before_bulk_snapshot_mutation(self):
+        harness = _PriorityMutationHarness()
+        self.assertTrue(
+            harness._enqueue_ui_mutation(
+                "backend_active_sync",
+                lambda: harness.executed.append("snapshot"),
+            )
+        )
+        self.assertTrue(
+            harness._enqueue_ui_mutation(
+                "active_upsert",
+                lambda: harness.executed.append("live"),
+            )
+        )
+
+        harness._drain_ui_mutations()
+
+        self.assertEqual(harness.executed, ["live"])
+
+    def test_full_live_mutation_queue_rejects_event_for_backend_retry(self):
+        harness = _PriorityMutationHarness(priority_size=1)
+        self.assertTrue(harness._enqueue_ui_mutation("active_upsert", lambda: None))
+
+        result = harness.handle_qt_shell_event(
+            "active_upsert",
+            {"source": "qt_event", "item": {"payload": {"text": "test"}}},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("队列已满", result["error"])
+
     def test_scoped_qt_active_identities_drop_deleted_local_event(self):
         previous_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
@@ -614,6 +722,368 @@ class QtShellBackendEventTests(unittest.TestCase):
                 payload = items[0]["payload"]
                 self.assertEqual(payload["target_record_id"], "rec-event-target")
                 self.assertIn("状态：更新", payload["text"])
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_event_target_snapshot_keeps_stable_clipboard_active_id(self):
+        stable_active_id = "e3a873cda97073fa9897e90c3ee5ca62"
+        target_record_id = "rec-event-stable-target"
+        start_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房B楼I3级事件通报\n"
+            "【来源】巡检发现\n"
+            "【时间】2026-08-11 09:37\n"
+            "【概述】B-127冷冻站补水管道渗水"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": stable_active_id,
+                    "record_id": f"local_{stable_active_id}",
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "text": start_text,
+                    "_is_placeholder_record": True,
+                },
+                section="event",
+                origin="clipboard",
+            )
+            store.upsert_notice_identity(
+                {
+                    "active_item_id": stable_active_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "text": start_text,
+                    "_is_placeholder_record": False,
+                },
+                origin="qt_upload",
+            )
+
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "text": start_text,
+                    "_is_placeholder_record": False,
+                },
+                section="event",
+                origin="target_snapshot_refresh",
+            )
+
+            items = store.list_visible_qt_active_items()
+            identity = store.resolve_notice_identity(
+                work_type="event",
+                target_record_id=target_record_id,
+            )
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["active_item_id"], stable_active_id)
+            self.assertEqual(items[0]["payload"]["active_item_id"], stable_active_id)
+            self.assertEqual(items[0]["record_id"], target_record_id)
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity["active_item_id"], stable_active_id)
+
+    def test_runtime_live_event_delta_wins_over_stale_target_snapshot(self):
+        target_record_id = "rec-event-canonical-race"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "text": "【事件通告】状态：新增\n【概述】旧进展",
+                },
+                section="event",
+                origin="target_snapshot_refresh",
+            )
+            harness = _ActiveUpsertVisibilityHarness()
+            harness.cache_store = type(
+                "CacheStore",
+                (),
+                {"_state_store": store},
+            )()
+
+            merged = harness._canonical_backend_active_payload(
+                {
+                    "active_item_id": "stable-event-ui-id",
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "notice_type": "事件通告",
+                    "work_type": "event",
+                    "text": "【事件通告】状态：更新\n【概述】最新进展",
+                }
+            )
+
+            self.assertEqual(merged["active_item_id"], "stable-event-ui-id")
+            self.assertIn("状态：更新", merged["text"])
+            self.assertIn("最新进展", merged["text"])
+
+    def test_qt_identity_keeps_backend_event_identity_key(self):
+        strict_identity = "event:strict:summary-time-building-source-level"
+        ensured = _RecordsHarness()._ensure_active_item_identity(
+            {
+                "active_item_id": "event-stable-id",
+                "notice_type": "事件通告",
+                "event_identity_key": strict_identity,
+                "text": (
+                    "【事件通告】状态：更新\n"
+                    "【标题】EA118机房B楼I3级事件通报\n"
+                    "【来源】巡检发现\n"
+                    "【时间】2026-08-11 09:37\n"
+                    "【概述】B-127冷冻站补水管道渗水"
+                ),
+            }
+        )
+
+        self.assertEqual(ensured["event_identity_key"], strict_identity)
+        self.assertTrue(ensured.get("match_key"))
+
+    def test_event_clipboard_update_and_end_inherit_dialog_fields_and_target(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
+        first_text = (
+            "【事件通告】状态：开始\n"
+            "【标题】EA118机房B楼I3级事件通报\n"
+            "【来源】BMS系统\n"
+            f"【时间】{current_month}-24 10:00\n"
+            "【概述】BMS报B-301支路功率过高报警\n"
+            "【进展】值班工程师正在前往查看"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            try:
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "event-active-sparse",
+                        "record_id": "rec-event-sparse",
+                        "target_record_id": "rec-event-sparse",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "EA118机房B楼I3级事件通报",
+                        "text": first_text,
+                        "building_codes": ["B"],
+                        "level": "I3",
+                        "source": "BMS系统",
+                        "event_source": "BMS系统",
+                        "_is_placeholder_record": False,
+                    },
+                    section="event",
+                    origin="clipboard",
+                )
+
+                for status in ("更新", "结束"):
+                    text = (
+                        f"【事件通告】状态：{status}\n"
+                        "【标题】EA118机房B楼I3级事件通报\n"
+                        "【来源】BMS系统\n"
+                        f"【时间】{current_month}-24 10:00\n"
+                        "【概述】BMS报B-301支路功率过高报警\n"
+                        f"【进展】事件{status}内容"
+                    )
+                    entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                    self.assertIsNotNone(entry)
+                    self.assertEqual(entry.get("level"), "I3")
+
+                    result = FastAPIPortalController._project_clipboard_entry_to_active(
+                        entry or {}
+                    )
+
+                    self.assertFalse(result.get("ignored"))
+                    self.assertEqual(result["active_item_id"], "event-active-sparse")
+                    self.assertEqual(result["record_id"], "rec-event-sparse")
+                    payload = result["item"]["payload"]
+                    self.assertEqual(payload["target_record_id"], "rec-event-sparse")
+                    self.assertEqual(payload["level"], "I3")
+                    self.assertEqual(payload["event_source"], "BMS系统")
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_event_clipboard_update_reuses_target_snapshot_for_exact_user_sample(self):
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房B楼I3级事件通报；\n"
+            "【来源】巡检发现；\n"
+            "【时间】2026年8月11日09:37分；\n"
+            "【概述】巡检发现B-127冷冻站A区变频补水环网管道有渗水现象\n"
+            "【影响】对IT业务暂无影响；\n"
+            "【进展】人员已经到达现场，正在排查，请知晓"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            try:
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "rec-event-target-snapshot",
+                        "record_id": "rec-event-target-snapshot",
+                        "target_record_id": "rec-event-target-snapshot",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "巡检发现B-127冷冻站A区变频补水环网管道有渗水现象",
+                        "start_time": "2026-08-11T09:37",
+                        "time_str": "2026-08-11T09:37",
+                        "building": "B楼",
+                        "building_codes": ["B"],
+                        "source": "巡检发现",
+                        "event_source": "巡检发现",
+                        "level": "I3",
+                        "_is_placeholder_record": False,
+                    },
+                    section="event",
+                    origin="target_snapshot_refresh",
+                )
+
+                entry = FastAPIPortalController._clipboard_entry_from_content(update_text)
+                self.assertIsNotNone(entry)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(
+                    entry or {}
+                )
+
+                self.assertFalse(result.get("ignored"))
+                self.assertEqual(result["active_item_id"], "rec-event-target-snapshot")
+                self.assertEqual(result["record_id"], "rec-event-target-snapshot")
+                payload = result["item"]["payload"]
+                self.assertEqual(payload["target_record_id"], "rec-event-target-snapshot")
+                self.assertEqual(payload["building_codes"], ["B"])
+                self.assertEqual(payload["event_source"], "巡检发现")
+                self.assertEqual(payload["level"], "I3")
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_event_clipboard_exact_c_building_sample_updates_same_uploaded_item(self):
+        texts = (
+            (
+                "【事件通告】状态：新增\n"
+                "【标题】EA118机房C楼I3级事件通报\n"
+                "【来源】BMS发现\n"
+                "【时间】2026-08-11 13:24分\n"
+                "【概述】BMS发现C楼311空调间漏水告警\n"
+                "【影响】IT业务暂无影响\n"
+                "【进展】1、值班工程师已前往现场查看,请知晓!@I3通报组"
+            ),
+            (
+                "【事件通告】状态：更新\n"
+                "【标题】EA118机房C楼I3级事件通报\n"
+                "【来源】BMS发现\n"
+                "【时间】2026-08-11 13:24分\n"
+                "【概述】BMS发现C楼311空调间漏水告警\n"
+                "【影响】IT业务暂无影响\n"
+                "【进展】1、值班工程师已前往现场查看,请知晓!\n"
+                "2、现场正在处理积水中@I3通报组"
+            ),
+            (
+                "【事件通告】状态：结束\n"
+                "【标题】EA118机房C楼I3级事件通报\n"
+                "【来源】BMS发现\n"
+                "【时间】2026-08-11 13:24分\n"
+                "【概述】BMS发现C楼311空调间漏水告警\n"
+                "【影响】IT业务暂无影响\n"
+                "【进展】1、值班工程师已前往现场查看,请知晓!\n"
+                "2、现场正在处理积水中\n"
+                "3、现场为天花板积水，清理完成，告警已恢复，"
+                "后续加强巡检@I3通报组"
+            ),
+        )
+        target_record_id = "rec-event-c-building-sample"
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                first_entry = FastAPIPortalController._clipboard_entry_from_content(
+                    texts[0]
+                )
+                first = FastAPIPortalController._project_clipboard_entry_to_active(
+                    first_entry or {}
+                )
+                stable_active_id = first["active_item_id"]
+                first_payload = dict(first["item"]["payload"])
+                bound_payload = {
+                    **first_payload,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "_is_placeholder_record": False,
+                }
+                store.upsert_qt_active_item(
+                    bound_payload,
+                    section="event",
+                    origin="qt_upload",
+                )
+                store.upsert_notice_identity(bound_payload, origin="qt_upload")
+
+                for expected_status, text_value in zip(
+                    ("更新", "结束"), texts[1:]
+                ):
+                    entry = FastAPIPortalController._clipboard_entry_from_content(
+                        text_value
+                    )
+                    result = FastAPIPortalController._project_clipboard_entry_to_active(
+                        entry or {}
+                    )
+                    payload = result["item"]["payload"]
+                    self.assertEqual(result["active_item_id"], stable_active_id)
+                    self.assertEqual(result["record_id"], target_record_id)
+                    self.assertEqual(payload["target_record_id"], target_record_id)
+                    self.assertEqual(payload["status"], expected_status)
+                    self.assertEqual(payload["building_codes"], ["C"])
+                    self.assertEqual(payload["event_source"], "BMS发现")
+                    self.assertEqual(payload["level"], "I3")
+                    self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_sparse_event_clipboard_update_refuses_ambiguous_targets(self):
+        current_month = dt.datetime.now().strftime("%Y-%m")
+        first_text = (
+            "【事件通告】状态：开始\n"
+            "【标题】EA118机房事件通报\n"
+            "【来源】BMS系统\n"
+            f"【时间】{current_month}-24 10:00\n"
+            "【概述】公共告警描述"
+        )
+        update_text = first_text.replace("状态：开始", "状态：更新")
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            try:
+                for code in ("A", "B"):
+                    PortalRuntime.state_store.upsert_qt_active_item(
+                        {
+                            "active_item_id": f"event-active-{code}",
+                            "record_id": f"rec-event-{code}",
+                            "target_record_id": f"rec-event-{code}",
+                            "notice_type": "事件通告",
+                            "work_type": "event",
+                            "text": f"{first_text}\n【进展】候选{code}",
+                            "building_codes": [code],
+                            "level": "I3",
+                            "source": "BMS系统",
+                            "event_source": "BMS系统",
+                            "_is_placeholder_record": False,
+                        },
+                        section="event",
+                        origin="clipboard",
+                    )
+
+                entry = FastAPIPortalController._clipboard_entry_from_content(update_text)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(
+                    entry or {}
+                )
+
+                self.assertTrue(result.get("ignored"))
+                self.assertEqual(len(PortalRuntime.state_store.list_qt_active_items()), 2)
+                self.assertEqual(
+                    len(PortalRuntime.state_store.list_visible_qt_active_items()),
+                    2,
+                )
             finally:
                 PortalRuntime.state_store = original_store
 

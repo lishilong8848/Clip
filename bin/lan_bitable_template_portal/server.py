@@ -4912,6 +4912,7 @@ class PortalRuntime:
             or data.get("time_str")
             or data.get("occurrence_date")
             or data.get("event_time")
+            or data.get("start_time")
             or ""
         ).strip()
         if not raw_time:
@@ -4930,28 +4931,44 @@ class PortalRuntime:
     @classmethod
     def _event_notice_building_key(cls, data: dict) -> str:
         data = data if isinstance(data, dict) else {}
-        values: list[Any] = []
-        for key in ("building_codes", "buildings"):
+        explicit_values: list[Any] = []
+        for key in ("building_codes", "buildings", "building", "机楼", "楼栋"):
             raw = data.get(key)
             if isinstance(raw, list):
-                values.extend(raw)
+                explicit_values.extend(raw)
             elif raw:
-                values.append(raw)
-        for key in ("building", "机楼", "楼栋", "title", "name", "event_title"):
-            if data.get(key):
-                values.append(data.get(key))
-        codes: list[str] = []
-        for value in values:
-            try:
-                for code in cls.service._building_codes_from_value(value):
-                    normalized = str(code or "").strip().upper()
-                    if normalized and normalized not in codes:
-                        codes.append(normalized)
-            except Exception:
-                continue
+                explicit_values.append(raw)
+
+        def collect_codes(values: list[Any]) -> list[str]:
+            found: list[str] = []
+            for value in values:
+                try:
+                    for code in cls.service._building_codes_from_value(value):
+                        normalized = str(code or "").strip().upper()
+                        if normalized and normalized not in found:
+                            found.append(normalized)
+                except Exception:
+                    continue
+            return found
+
+        # Explicit fields are authoritative. A title or description may contain
+        # equipment-area text such as "A区" even when the event belongs to B楼.
+        codes = collect_codes(explicit_values)
         if codes:
             return ",".join(sorted(codes))
+
+        fallback_values = [
+            data.get(key)
+            for key in ("title", "name", "event_title")
+            if data.get(key)
+        ]
         text = str(data.get("text") or "")
+        parsed_title = str((extract_event_info(text) or {}).get("title") or "").strip()
+        if parsed_title:
+            fallback_values.append(parsed_title)
+        codes = collect_codes(fallback_values)
+        if codes:
+            return ",".join(sorted(codes))
         if text:
             try:
                 for code in cls.service._building_codes_from_value(text):
@@ -4976,6 +4993,7 @@ class PortalRuntime:
         if not source and text:
             match = re.search(r"【(?:来源|事件发现来源)】(.*?)(?:【|$)", text, re.DOTALL)
             source = str(match.group(1) if match else "").strip()
+        source = re.sub(r"[;；]+$", "", source).strip()
         return re.sub(r"\s+", "", source).upper()
 
     @classmethod
@@ -4986,16 +5004,31 @@ class PortalRuntime:
             data.get("level")
             or data.get("事件等级")
             or data.get("等级")
+            or (extract_event_info(text) or {}).get("level")
             or ""
         ).strip()
         if not level and text:
             match = re.search(r"【(?:等级|事件等级)】(.*?)(?:【|$)", text, re.DOTALL)
             level = str(match.group(1) if match else "").strip()
-        upper = level.upper()
-        match = re.search(r"(I3\s*[→>\-]\s*I2|I3\s*[→>\-]\s*I1|I3|I2|I1|E4|E3|E2|E1|E0)", upper)
+        level_pattern = r"(I3\s*[→>\-]\s*I2|I3\s*[→>\-]\s*I1|I3|I2|I1|E4|E3|E2|E1|E0)"
+        match = re.search(level_pattern, level.upper())
         if match:
             return re.sub(r"\s+", "", match.group(1).upper())
-        return re.sub(r"\s+", "", level).upper()
+        if level:
+            return re.sub(r"\s+", "", level).upper()
+        title = str(
+            data.get("title")
+            or data.get("name")
+            or data.get("event_title")
+            or ""
+        ).strip()
+        if not title and text:
+            match = re.search(r"【标题】(.*?)(?:【|$)", text, re.DOTALL)
+            title = str(match.group(1) if match else "").strip()
+        match = re.search(level_pattern, title.upper())
+        if match:
+            return re.sub(r"\s+", "", match.group(1).upper())
+        return ""
 
     @classmethod
     def _event_notice_identity_key(cls, data: dict) -> str:
@@ -5017,6 +5050,31 @@ class PortalRuntime:
             "source": cls._event_notice_source_key(data),
             "level": cls._event_notice_level_key(data),
         }
+
+    @classmethod
+    def _resolved_event_match_fields(cls, data: dict) -> dict[str, str]:
+        data = data if isinstance(data, dict) else {}
+        computed = cls._event_match_fields(data)
+        stored = data.get("event_match_fields")
+        stored = stored if isinstance(stored, dict) else {}
+        return {
+            key: str(computed.get(key) or stored.get(key) or "").strip()
+            for key in ("title", "time", "building", "source", "level")
+        }
+
+    @classmethod
+    def _event_partial_identity_matches(cls, incoming: dict, candidate: dict) -> bool:
+        """Match a sparse event update without falling back to title-only routing."""
+
+        incoming_fields = cls._resolved_event_match_fields(incoming)
+        candidate_fields = cls._resolved_event_match_fields(candidate)
+        for key in ("title", "time", "source"):
+            if not incoming_fields[key] or incoming_fields[key] != candidate_fields[key]:
+                return False
+        for key in ("building", "level"):
+            if incoming_fields[key] and incoming_fields[key] != candidate_fields[key]:
+                return False
+        return True
 
     @classmethod
     def _event_operation_lock_key(
@@ -5310,13 +5368,12 @@ class PortalRuntime:
             cls._event_notice_identity_key(data)
             or str((data or {}).get("event_identity_key") or "").strip()
         )
-        if not identity_key:
-            return ""
         try:
             active_items = cls.state_store.list_qt_active_items(include_deleted=False)
         except Exception:
             active_items = []
         matched_targets: list[str] = []
+        partial_targets: list[str] = []
         for row in active_items:
             if not isinstance(row, dict):
                 continue
@@ -5327,15 +5384,18 @@ class PortalRuntime:
                 cls._event_notice_identity_key(payload)
                 or str(payload.get("event_identity_key") or "").strip()
             )
-            if payload_identity_key != identity_key:
-                continue
             target_record_id = (
                 canonical_target_record_id(payload)
                 or str(row.get("record_id") or "").strip()
             )
-            if target_record_id and not is_local_record_id(target_record_id):
+            if not target_record_id or is_local_record_id(target_record_id):
+                continue
+            if identity_key and payload_identity_key == identity_key:
                 if target_record_id not in matched_targets:
                     matched_targets.append(target_record_id)
+            if cls._event_partial_identity_matches(data, payload):
+                if target_record_id not in partial_targets:
+                    partial_targets.append(target_record_id)
         if len(matched_targets) == 1:
             return matched_targets[0]
         if len(matched_targets) > 1:
@@ -5344,10 +5404,19 @@ class PortalRuntime:
                 f"event_identity_key={identity_key} targets={matched_targets[:5]}"
             )
             return ""
+        if len(partial_targets) == 1:
+            return partial_targets[0]
+        if len(partial_targets) > 1:
+            log_warning(
+                "事件通告稀疏活动记录匹配到多条，已阻止自动复用: "
+                f"fields={cls._resolved_event_match_fields(data)} "
+                f"targets={partial_targets[:5]}"
+            )
+            return ""
         identity_target = cls._event_target_from_identity_map(data)
         if identity_target:
             return identity_target
-        return ""
+        return cls._event_target_from_partial_identity_map(data)
 
     @classmethod
     def _event_target_from_identity_map(cls, data: dict) -> str:
@@ -5404,6 +5473,62 @@ class PortalRuntime:
             log_warning(
                 "事件通告身份映射匹配到多条目标记录，已阻止自动复用: "
                 f"event_identity_key={identity_key} targets={matched_targets[:5]}"
+            )
+        return ""
+
+    @classmethod
+    def _event_target_from_partial_identity_map(cls, data: dict) -> str:
+        """Resolve a sparse clipboard update only when one target is unambiguous."""
+
+        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
+            return ""
+        incoming_fields = cls._resolved_event_match_fields(data)
+        if not all(incoming_fields.get(key) for key in ("title", "time", "source")):
+            return ""
+        try:
+            identities = cls.state_store.list_notice_identities(
+                include_deleted=False,
+                limit=5000,
+            )
+        except Exception as exc:
+            log_warning(f"事件通告身份映射读取失败: {exc}")
+            return ""
+        matched_targets: list[str] = []
+        for identity in identities:
+            if not isinstance(identity, dict):
+                continue
+            if str(identity.get("notice_type") or "").strip() != "事件通告":
+                continue
+            payload = identity.get("payload") if isinstance(identity.get("payload"), dict) else {}
+            candidate = {
+                **payload,
+                "notice_type": "事件通告",
+                "target_record_id": str(
+                    identity.get("target_record_id")
+                    or payload.get("target_record_id")
+                    or ""
+                ),
+                "record_id": str(
+                    identity.get("target_record_id")
+                    or payload.get("record_id")
+                    or ""
+                ),
+            }
+            if not cls._event_partial_identity_matches(data, candidate):
+                continue
+            target_record_id = str(identity.get("target_record_id") or "").strip()
+            if (
+                target_record_id
+                and not is_local_record_id(target_record_id)
+                and target_record_id not in matched_targets
+            ):
+                matched_targets.append(target_record_id)
+        if len(matched_targets) == 1:
+            return matched_targets[0]
+        if len(matched_targets) > 1:
+            log_warning(
+                "事件通告稀疏身份匹配到多条目标记录，已阻止自动复用: "
+                f"fields={incoming_fields} targets={matched_targets[:5]}"
             )
         return ""
 
@@ -7436,7 +7561,10 @@ class PortalRuntime:
         if notice_type == "事件通告":
             data.update(cls._event_identity_payload_patch(data))
             if action_type in {"update", "end"} and not target_record_id:
-                target_record_id = cls._event_target_from_identity_map(data)
+                target_record_id = (
+                    cls._event_target_from_identity_map(data)
+                    or cls._event_target_from_partial_identity_map(data)
+                )
                 if target_record_id:
                     data["target_record_id"] = target_record_id
                     data["record_id"] = target_record_id

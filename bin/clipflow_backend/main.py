@@ -46,7 +46,9 @@ from clipflow_backend.api_models import (
     ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
     CriticalGuardResponseRequest,
+    CriticalGuardScopeTemplateRequest,
     CriticalGuardTaskRequest,
+    CriticalGuardWeatherPauseRequest,
     EngineerMopBindRequest,
     EngineerMopFillRequest,
     EngineerMopResetRequest,
@@ -2596,6 +2598,7 @@ class FastAPIPortalController:
                     or self._request_base_url(request),
                     operator_open_id=str(user.get("open_id") or ""),
                     operator_name=str(user.get("name") or user.get("en_name") or ""),
+                    operation_id=str(payload.get("operation_id") or ""),
                 )
                 messages = list(data.get("messages") or [])
                 results: list[dict[str, Any]] = []
@@ -3371,6 +3374,157 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/critical-guard/weather-status")
+        async def critical_guard_weather_status(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.critical_guard_weather_status
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/critical-guard/weather-refresh")
+        async def critical_guard_weather_refresh(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = PortalRuntime.service.start_critical_guard_weather_job(
+                    trigger_type="manual",
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/critical-guard/weather-pause")
+        async def critical_guard_weather_pause(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, CriticalGuardWeatherPauseRequest
+                    )
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.set_critical_guard_weather_query_paused,
+                    paused=payload["paused"],
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/critical-guard/template")
+        async def critical_guard_template_download(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                allowed = await asyncio.to_thread(
+                    PortalRuntime.service.can_download_critical_guard_template,
+                    task_id=str(request.query_params.get("task_id") or ""),
+                    token=str(request.query_params.get("token") or ""),
+                )
+                if not allowed:
+                    return self._auth_required_response()
+            try:
+                content, file_name = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_template_bytes
+                )
+                return Response(
+                    content=content,
+                    media_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    headers={
+                        "Cache-Control": "private, max-age=300",
+                        "Content-Disposition": (
+                            "attachment; filename*=UTF-8''"
+                            f"{quote(file_name, safe='')}"
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.get("/api/critical-guard/scope-template")
+        async def critical_guard_scope_template_get(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_critical_guard_scope_template,
+                    scope=scope,
+                    sheet_type=str(request.query_params.get("sheet_type") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        async def update_scope_template(
+            request: Request,
+            *,
+            reset_to_default: bool,
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, CriticalGuardScopeTemplateRequest
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "")
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.update_critical_guard_scope_template,
+                    scope=scope,
+                    sheet_type=str(payload.get("sheet_type") or ""),
+                    items=[
+                        dict(item)
+                        for item in (payload.get("items") or [])
+                        if isinstance(item, dict)
+                    ],
+                    reset_to_default=reset_to_default,
+                    expected_revision=payload.get("expected_revision"),
+                    response_id=str(payload.get("response_id") or ""),
+                    response_cells=dict(payload.get("cells") or {}),
+                    expected_response_version=payload.get(
+                        "expected_response_version"
+                    ),
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                    operation_id=str(payload.get("operation_id") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.put("/api/critical-guard/scope-template")
+        async def critical_guard_scope_template_save(request: Request):
+            return await update_scope_template(request, reset_to_default=False)
+
+        @app.post("/api/critical-guard/scope-template/reset")
+        async def critical_guard_scope_template_reset(request: Request):
+            return await update_scope_template(request, reset_to_default=True)
+
         @app.get("/api/critical-guard/tasks")
         async def critical_guard_tasks(request: Request):
             session = self._current_session(request)
@@ -3439,6 +3593,20 @@ class FastAPIPortalController:
                     audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
                     audit_metadata={"task_id": str(task_id or "")},
                     audit_remote_written_on_success=False,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/critical-guard/tasks/{task_id}/archive-retry")
+        async def critical_guard_archive_retry(task_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.retry_critical_guard_weather_archive,
+                    task_id,
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -6102,6 +6270,34 @@ class FastAPIPortalController:
                         "mode": "all_active",
                     },
                     "qt_bridge": PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {},
+                },
+            }
+
+        @app.get("/api/qt/notice-operations/{operation_id}")
+        async def qt_notice_operation(operation_id: str, request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            operation = PortalRuntime.state_store.get_notice_remote_operation(
+                str(operation_id or "").strip()
+            )
+            if not isinstance(operation, dict):
+                return {"ok": True, "data": None}
+            return {
+                "ok": True,
+                "data": {
+                    "operation_id": str(operation.get("operation_id") or ""),
+                    "operation_type": str(operation.get("operation_type") or ""),
+                    "status": str(operation.get("status") or ""),
+                    "target_record_id": str(
+                        operation.get("target_record_id") or ""
+                    ),
+                    "observed_record_version": str(
+                        operation.get("observed_record_version") or ""
+                    ),
+                    "result": dict(operation.get("result") or {}),
+                    "error": str(operation.get("error") or ""),
+                    "updated_at": float(operation.get("updated_at") or 0),
                 },
             }
 
@@ -8949,7 +9145,24 @@ class FastAPIPortalController:
             return None
         normalized_title = cls._normalize_clipboard_event_title(title)
         event_title_matches = []
-        for item in PortalRuntime.state_store.list_visible_qt_active_items():
+        event_exact_matches = []
+        event_partial_matches = []
+        incoming_event_identity_key = ""
+        incoming_event_data: dict[str, Any] = {}
+        if notice_type == "事件通告":
+            incoming_event_data = {
+                **entry,
+                "notice_type": notice_type,
+                "text": str(entry.get("content") or ""),
+                "event_source": str(entry.get("source") or "").strip(),
+            }
+            try:
+                incoming_event_identity_key = PortalRuntime._event_notice_identity_key(
+                    incoming_event_data
+                )
+            except Exception:
+                incoming_event_identity_key = ""
+        for item in PortalRuntime.state_store.list_qt_active_items():
             payload = item.get("payload") if isinstance(item, dict) else {}
             payload = payload if isinstance(payload, dict) else {}
             if str(payload.get("notice_type") or item.get("notice_type") or "").strip() != notice_type:
@@ -8963,14 +9176,6 @@ class FastAPIPortalController:
             info = extract_event_info(str(payload.get("text") or "")) or {}
             item_key = str(info.get("unique_key") or "").strip()
             item_event_identity_key = str(payload.get("event_identity_key") or "").strip()
-            incoming_event_identity_key = ""
-            if notice_type == "事件通告":
-                try:
-                    incoming_event_identity_key = PortalRuntime._event_notice_identity_key(
-                        {"notice_type": notice_type, "text": str(entry.get("content") or "")}
-                    )
-                except Exception:
-                    incoming_event_identity_key = ""
             item_title = str(
                 payload.get("match_title")
                 or info.get("title")
@@ -8979,14 +9184,24 @@ class FastAPIPortalController:
             ).strip()
             item_reason = str(info.get("reason") or payload.get("reason") or "").strip()
             if unique_key and item_key and item_key == unique_key:
-                return item
+                if notice_type != "事件通告":
+                    return item
             if (
                 notice_type == "事件通告"
                 and incoming_event_identity_key
                 and item_event_identity_key
                 and incoming_event_identity_key == item_event_identity_key
             ):
-                return item
+                event_exact_matches.append(item)
+            if notice_type == "事件通告":
+                try:
+                    if PortalRuntime._event_partial_identity_matches(
+                        incoming_event_data,
+                        payload,
+                    ):
+                        event_partial_matches.append(item)
+                except Exception:
+                    pass
             if (
                 normalized_title
                 and item_title
@@ -9000,12 +9215,41 @@ class FastAPIPortalController:
                 if notice_type == "维保通告" and reason and not item_reason:
                     continue
                 return item
+
+        def _unique_event_matches(items: list[dict]) -> list[dict]:
+            unique: dict[str, dict] = {}
+            for item in items:
+                payload = item.get("payload") if isinstance(item, dict) else {}
+                payload = payload if isinstance(payload, dict) else {}
+                key = (
+                    canonical_target_record_id(payload)
+                    or str(payload.get("active_item_id") or item.get("active_item_id") or "").strip()
+                )
+                if key:
+                    unique.setdefault(key, item)
+            return list(unique.values())
+
+        if notice_type == "事件通告":
+            exact_matches = _unique_event_matches(event_exact_matches)
+            if len(exact_matches) == 1:
+                return exact_matches[0]
+            if len(exact_matches) > 1:
+                log_warning("事件剪贴板严格身份匹配到多条活动记录，已阻止自动绑定。")
+                return None
+            partial_matches = _unique_event_matches(event_partial_matches)
+            if len(partial_matches) == 1:
+                return partial_matches[0]
+            if len(partial_matches) > 1:
+                log_warning(
+                    "事件剪贴板更新匹配到多条活动记录，已阻止自动绑定: "
+                    f"fields={PortalRuntime._resolved_event_match_fields(incoming_event_data)}"
+                )
+                return None
         if notice_type == "事件通告" and event_title_matches:
             # Event notices often share the same alarm title across different
             # occurrence times.  Title-only matching can bind a new local event
-            # to an old target_record_id, and deletion can then remove the
-            # wrong remote bitable row.  Only exact unique_key or explicit
-            # target_record_id matches are allowed for events.
+            # to an old target_record_id. Strict or unambiguous sparse identity
+            # matching above is required before a target can be reused.
             return None
         return None
 
@@ -9157,12 +9401,24 @@ class FastAPIPortalController:
             "cabinet": value(["柜号"]),
             "quantity": value(["数量"]),
         }
-        building_codes = PortalRuntime.service._building_codes_from_notice_text(
-            value(["楼栋", "变更楼栋", "所属楼栋"]),
-            projected.get("location"),
-            title,
-            text,
-        )
+        if work_type == "event" or notice_type == "事件通告":
+            event_building_key = PortalRuntime._event_notice_building_key(
+                {
+                    "text": text,
+                    "title": str(entry.get("title") or title or ""),
+                    "building": value(["楼栋", "机楼", "所属楼栋"]),
+                }
+            )
+            building_codes = [
+                code for code in event_building_key.split(",") if code
+            ]
+        else:
+            building_codes = PortalRuntime.service._building_codes_from_notice_text(
+                value(["楼栋", "变更楼栋", "所属楼栋"]),
+                projected.get("location"),
+                title,
+                text,
+            )
         if building_codes:
             projected["building_codes"] = building_codes
         if work_type == "repair":
@@ -9302,6 +9558,8 @@ class FastAPIPortalController:
                 }
                 entry_target_record_id = PortalRuntime._event_target_from_identity_map(
                     lookup_payload
+                ) or PortalRuntime._event_target_from_partial_identity_map(
+                    lookup_payload
                 )
                 if entry_target_record_id:
                     data = {
@@ -9394,7 +9652,10 @@ class FastAPIPortalController:
             else:
                 data.pop("event_source", None)
             data.update(PortalRuntime._event_identity_payload_patch(data))
-            recovered_target_record_id = PortalRuntime._event_target_from_identity_map(data)
+            recovered_target_record_id = (
+                PortalRuntime._event_target_from_identity_map(data)
+                or PortalRuntime._event_target_from_partial_identity_map(data)
+            )
             current_target_record_id = str(data.get("target_record_id") or "").strip()
             if (
                 recovered_target_record_id
@@ -9597,6 +9858,17 @@ class FastAPIPortalController:
             PortalRuntime.service.start_water_consumption_refresh_async(force=False)
         except Exception as exc:
             log_warning(f"水耗快照后台刷新触发失败: {exc}")
+
+    def _run_scheduled_critical_guard_weather(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            PortalRuntime.service.start_critical_guard_weather_job(
+                trigger_type="scheduled",
+                operator_name="天气预警自动任务",
+            )
+        except Exception as exc:
+            log_warning(f"天气重保后台检查触发失败: {exc}")
 
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
@@ -9818,6 +10090,15 @@ class FastAPIPortalController:
             coalesce=True,
         )
         scheduler.add_job(
+            self._run_scheduled_critical_guard_weather,
+            "interval",
+            minutes=10,
+            id="critical_guard_weather",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
@@ -9839,6 +10120,14 @@ class FastAPIPortalController:
                 "date",
                 run_date=dt.datetime.now() + dt.timedelta(seconds=20),
                 id="water_consumption_refresh_startup",
+                replace_existing=True,
+                max_instances=1,
+            )
+            scheduler.add_job(
+                self._run_scheduled_critical_guard_weather,
+                "date",
+                run_date=dt.datetime.now() + dt.timedelta(seconds=35),
+                id="critical_guard_weather_startup",
                 replace_existing=True,
                 max_instances=1,
             )

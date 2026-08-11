@@ -2023,6 +2023,12 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}
             await parseSubmitButton.click();
             await page.waitForSelector('text=EA118机房A楼制冷单元轮巡通告', {{ timeout: 10000 }});
+            const parsedBuildingCodes = await page.locator(
+              '#lite-notice-form input[name="building_codes"]:checked'
+            ).evaluateAll(nodes => nodes.map(node => node.value));
+            if (parsedBuildingCodes.length !== 1 || parsedBuildingCodes[0] !== 'A') {{
+              throw new Error(`lite paste parse lost building selection: ${{JSON.stringify(parsedBuildingCodes)}}`);
+            }}
             const markerAfterParse = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
             if (markerAfterParse !== 'alive') {{
               throw new Error('lite paste parse caused full page reload');

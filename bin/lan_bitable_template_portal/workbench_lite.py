@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from lan_bitable_template_portal.identity_utils import is_local_record_id
+from upload_event_module.building_normalizer import extract_building_codes
 
 
 WORK_TYPE_LABELS: dict[str, str] = {
@@ -58,6 +59,15 @@ MAINTENANCE_CYCLE_OPTIONS = ("/", "每月", "每季", "每年", "半年", "每�
 SITE_PHOTO_REQUIRED_WORK_TYPES = {"maintenance", "change", "repair"}
 BINDABLE_TARGET_WORK_TYPES = {"maintenance", "change", "repair", "power", "polling", "adjust"}
 BUILDING_SCOPE_CODES = ("110", "A", "B", "C", "D", "E", "H")
+BUILDING_FORM_OPTIONS = (
+    ("110", "110站"),
+    ("A", "A楼"),
+    ("B", "B楼"),
+    ("C", "C楼"),
+    ("D", "D楼"),
+    ("E", "E楼"),
+    ("H", "H楼"),
+)
 PENDING_PAGE_SIZE = 24
 ONGOING_PAGE_SIZE = 18
 LITE_FRAGMENT_NAMES = (
@@ -422,11 +432,8 @@ def _record_building_code(record: dict[str, Any], title: str = "") -> str:
             str(title or ""),
         ]
     )
-    text = " ".join(value.strip() for value in values if value and value.strip()).upper()
-    if "110" in text:
-        return "110"
-    match = re.search(r"[ABCDEH]", text)
-    return match.group(0) if match else ""
+    codes = extract_building_codes(values)
+    return codes[0] if codes else ""
 
 
 def _maintenance_prefixed_title(record: dict[str, Any], raw_title: str) -> str:
@@ -1114,7 +1121,7 @@ def parse_pasted_notice_to_draft(
     text: str,
     *,
     fallback_work_type: str = "",
-) -> tuple[str, str, dict[str, str]]:
+) -> tuple[str, str, dict[str, Any]]:
     sections = _parse_notice_sections(text)
     work = _pasted_work_type(
         text,
@@ -1128,9 +1135,18 @@ def parse_pasted_notice_to_draft(
     if work == "repair":
         start_time = _to_datetime_local(_section_value(sections, "期望完成时间"))
         end_time = _to_datetime_local(_section_value(sections, "发现故障时间"))
+    explicit_building = _section_value(
+        sections,
+        "楼栋/范围",
+        "楼栋范围",
+        "楼栋",
+        "机楼",
+        "范围",
+    )
     draft = {
         "work_type": work,
         "title": _section_value(sections, "名称", "标题", "通告名称", "维修名称"),
+        "building": explicit_building,
         "level": _section_value(sections, "等级", "紧急程度"),
         "start_time": start_time,
         "end_time": end_time,
@@ -1154,6 +1170,20 @@ def parse_pasted_notice_to_draft(
     }
     if notice_type:
         draft["notice_type"] = notice_type
+    building_codes = extract_building_codes(
+        [draft.get("title"), draft.get("location"), explicit_building]
+    )
+    if not building_codes:
+        # Some pasted notices use a non-standard section label or only mention the
+        # scope in the content. Keep this as a fallback so explicit form fields stay
+        # authoritative when they are available.
+        building_codes = extract_building_codes(text)
+    if building_codes:
+        draft["building_codes"] = building_codes
+        draft["building"] = "、".join(
+            dict(BUILDING_FORM_OPTIONS).get(code, code)
+            for code in building_codes
+        )
     return work, action, {key: value for key, value in draft.items() if str(value or "").strip()}
 
 
@@ -1165,21 +1195,30 @@ def _pasted_notice_type(text: str) -> str:
     return notice_type if notice_type in WORK_TYPE_BY_NOTICE_TYPE else ""
 
 
-def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_type: str = "") -> dict[str, str]:
+def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_type: str = "") -> dict[str, Any]:
     work = _work_type(work_type) if work_type else _item_work_type(record)
     title = _record_title(record)
     if manual:
         title = ""
+    location = _first(record.get("location"), _field(record, "位置", "地点"))
     draft = {
         "title": title,
         "notice_type": str(record.get("notice_type") or "").strip(),
         "building": _record_building(record),
+        "building_codes": extract_building_codes(
+            [
+                record.get("building_codes"),
+                _record_building(record),
+                location,
+                title,
+            ]
+        ),
         "specialty": _record_specialty(record),
         "maintenance_cycle": _first(record.get("maintenance_cycle"), _field(record, "维护周期")),
         "level": _first(record.get("level"), _field(record, "变更等级（阿里）", "紧急程度"), "I3" if work == "change" else ""),
         "start_time": _datetime_local(_first(record.get("start_time"), _field(record, "计划开始时间", "计划开始", "变更开始日期（阿里）"))),
         "end_time": _datetime_local(_first(record.get("end_time"), _field(record, "计划结束时间", "计划结束", "变更结束日期（阿里）"))),
-        "location": _first(record.get("location"), _field(record, "位置", "地点")),
+        "location": location,
         "content": _first(record.get("content"), _field(record, "内容", "标题/补充内容", "标题补充内容")),
         "reason": _first(record.get("reason"), _field(record, "原因", "故障原因", "故障维修原因")),
         "impact": _first(record.get("impact"), _field(record, "影响", "影响范围")),
@@ -1286,6 +1325,42 @@ def _select(
     )
 
 
+def _building_scope_field(draft: dict[str, Any], *, scope: str) -> str:
+    selected_codes = extract_building_codes(
+        [
+            draft.get("building_codes"),
+            draft.get("building"),
+            draft.get("location"),
+            draft.get("title"),
+        ]
+    )
+    normalized_scope = str(scope or "").strip().upper()
+    if not selected_codes and normalized_scope in BUILDING_SCOPE_CODES:
+        selected_codes = [normalized_scope]
+    elif not selected_codes and normalized_scope == "CAMPUS":
+        selected_codes = ["A", "B", "C", "D", "E"]
+    labels = dict(BUILDING_FORM_OPTIONS)
+    building_text = "、".join(labels.get(code, code) for code in selected_codes)
+    options = "".join(
+        (
+            f'<label class="building-scope-option">'
+            f'<input type="checkbox" name="building_codes" value="{_e(code)}"'
+            f'{" checked" if code in selected_codes else ""}>'
+            f'<span>{_e(label)}</span></label>'
+        )
+        for code, label in BUILDING_FORM_OPTIONS
+    )
+    summary = building_text or "未选择"
+    return (
+        '<fieldset class="building-scope-field required" data-building-picker>'
+        '<legend>楼栋/范围</legend>'
+        f'<div class="building-scope-options">{options}</div>'
+        f'<input type="hidden" name="building" value="{_e(building_text)}">'
+        f'<output data-building-summary>{_e(summary)}</output>'
+        '</fieldset>'
+    )
+
+
 def _is_required_upload_field(work_type: str, name: str) -> bool:
     return name in REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE.get(_work_type(work_type), set())
 
@@ -1304,12 +1379,13 @@ def _field_group(title: str, description: str, fields: list[str]) -> str:
     )
 
 
-def _form_fields(work_type: str, draft: dict[str, str]) -> str:
+def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
     def field(name: str, label: str, value: Any = "", **kwargs: Any) -> str:
         return _input(name, label, value, required=_is_required_upload_field(work_type, name), **kwargs)
 
     primary_fields: list[str] = [
         field("title", "名称" if work_type not in {"repair", "polling"} else "标题", draft.get("title")),
+        _building_scope_field(draft, scope=scope),
         field("start_time", "开始时间" if work_type != "repair" else "期望完成时间", draft.get("start_time"), input_type="datetime-local"),
         field("end_time", "结束时间" if work_type != "repair" else "发现故障时间", draft.get("end_time"), input_type="datetime-local"),
         _select(
@@ -1954,7 +2030,7 @@ def _detail_form(
     work_type: str,
     manual: bool,
     source_month: str = "",
-    parsed_draft: dict[str, str] | None = None,
+    parsed_draft: dict[str, Any] | None = None,
     parsed_action: str = "",
     source_link_options: list[dict[str, str]] | None = None,
     is_admin: bool = False,
@@ -2182,7 +2258,7 @@ def _detail_form(
         {source_link_html}
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
-        {_form_fields(work, draft)}
+        {_form_fields(work, draft, scope=scope)}
         {_site_photo_uploader(work, site_photo_count)}
         <section class="notice-preview" aria-live="polite">
           <div class="preview-head">
@@ -2694,6 +2770,17 @@ def render_workbench_lite(
     label.required > span::after {{ content:"必填"; display:inline-flex; margin-left:6px; border-radius:999px; padding:1px 6px; color:#b42318; background:#fff1f0; font-size:10px; font-weight:950; vertical-align:middle; }}
     input:required:invalid,textarea:required:invalid {{ border-color:#ffc7bf; background:#fffafa; }}
     .form-grid > label {{ min-width:0; }}
+    .building-scope-field {{ min-width:0; margin:0; border:1px solid #d5e3f4; border-radius:10px; padding:6px 8px; background:#fbfdff; }}
+    .building-scope-field legend {{ padding:0 3px; color:#51677f; font-size:11px; font-weight:900; }}
+    .building-scope-field.required legend::after {{ content:"必填"; display:inline-flex; margin-left:6px; border-radius:999px; padding:1px 6px; color:#b42318; background:#fff1f0; font-size:10px; font-weight:950; vertical-align:middle; }}
+    .building-scope-options {{ display:flex; flex-wrap:wrap; gap:5px; }}
+    .building-scope-option {{ min-width:0; cursor:pointer; }}
+    .building-scope-option input {{ position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }}
+    .building-scope-option span {{ display:inline-flex; align-items:center; justify-content:center; min-height:27px; margin:0; border:1px solid #cbdcf0; border-radius:999px; padding:4px 9px; color:#48627f; background:#fff; font-size:11px; font-weight:900; transition:border-color .14s ease,background .14s ease,color .14s ease,box-shadow .14s ease; }}
+    .building-scope-option:hover span {{ border-color:#79aef6; color:#0a57d8; }}
+    .building-scope-option input:focus-visible + span {{ outline:2px solid rgba(31,99,255,.28); outline-offset:2px; }}
+    .building-scope-option input:checked + span {{ border-color:#1f63ff; color:#fff; background:#1f63ff; box-shadow:0 5px 12px rgba(31,99,255,.2); }}
+    .building-scope-field output {{ display:block; margin-top:5px; overflow:hidden; color:#60758d; font-size:10px; font-weight:850; text-overflow:ellipsis; white-space:nowrap; }}
     .source-link-field {{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; width:max-content; max-width:100%; margin:0 0 5px; border:1px solid #a8cdfa; border-radius:999px; padding:4px 6px; background:linear-gradient(135deg,#f5fbff,#eef6ff); }}
     .source-link-field span {{ margin:0; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; font-size:10px; font-weight:950; }}
     .source-link-title {{ color:#0c244d; font-size:11px; font-weight:950; line-height:1.2; }}
@@ -3637,7 +3724,7 @@ def render_workbench_lite(
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
     const noticeFormValueKeys = [
-      'notice_type', 'title', 'specialty', 'maintenance_cycle', 'level',
+      'notice_type', 'title', 'building', 'specialty', 'maintenance_cycle', 'level',
       'start_time', 'end_time', 'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
       'symptom', 'solution', 'spare_parts', 'cabinet', 'quantity', 'device',
@@ -3651,6 +3738,7 @@ def render_workbench_lite(
         if (!field || typeof field.value === 'undefined') continue;
         values[name] = String(field.value == null ? '' : field.value);
       }}
+      values.building_codes = selectedBuildingCodes(form).join(',');
       return values;
     }}
     function compactCommandPatch(patch) {{
@@ -3787,6 +3875,18 @@ def render_workbench_lite(
       }}
     }}
     function setFormValue(form, name, value) {{
+      if (name === 'building_codes') {{
+        const selected = new Set(
+          (Array.isArray(value) ? value : String(value || '').split(/[,，、;；\\s]+/))
+            .map(item => String(item || '').trim().toUpperCase())
+            .filter(Boolean)
+        );
+        form.querySelectorAll('[name="building_codes"]').forEach(field => {{
+          field.checked = selected.has(String(field.value || '').trim().toUpperCase());
+        }});
+        syncBuildingSelection(form);
+        return;
+      }}
       const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
       if (!field) return;
       field.value = value == null ? '' : String(value);
@@ -3815,6 +3915,11 @@ def render_workbench_lite(
       let changed = 0;
       for (const [name, rawValue] of Object.entries(values)) {{
         if (TARGET_FORM_PROTECTED_FIELDS.has(name)) continue;
+        if (name === 'building_codes') {{
+          setFormValue(form, name, rawValue);
+          changed += 1;
+          continue;
+        }}
         const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
         if (!field) continue;
         const value = rawValue == null ? '' : String(rawValue);
@@ -4196,6 +4301,24 @@ def render_workbench_lite(
       const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
       return field ? String(field.value || '').trim() : '';
     }}
+    function selectedBuildingCodes(form) {{
+      if (!form) return [];
+      return Array.from(form.querySelectorAll('[name="building_codes"]:checked'))
+        .map(field => String(field.value || '').trim().toUpperCase())
+        .filter((code, index, values) => ['110', 'A', 'B', 'C', 'D', 'E', 'H'].includes(code) && values.indexOf(code) === index);
+    }}
+    function buildingLabelFromCode(code) {{
+      return code === '110' ? '110站' : `${{code}}楼`;
+    }}
+    function syncBuildingSelection(form) {{
+      const codes = selectedBuildingCodes(form);
+      const buildingText = codes.map(buildingLabelFromCode).join('、');
+      const hidden = form?.querySelector('[name="building"]');
+      if (hidden) hidden.value = buildingText;
+      const summary = form?.querySelector('[data-building-summary]');
+      if (summary) summary.textContent = buildingText || '未选择';
+      return codes;
+    }}
     function previewDate(value) {{
       return String(value || '').trim().replace('T', ' ');
     }}
@@ -4243,9 +4366,11 @@ def render_workbench_lite(
     }}
     function missingRequiredFields(form) {{
       const workType = form?.querySelector('[name="work_type"]')?.value || form?.dataset.workType || 'maintenance';
-      return requiredFieldsFor(workType)
+      const missing = requiredFieldsFor(workType)
         .filter(([name]) => !previewValue(form, name))
         .map(([, label]) => label);
+      if (!selectedBuildingCodes(form).length) missing.unshift('楼栋/范围');
+      return missing;
     }}
     function manualBindingIssue(form) {{
       if (!form || previewValue(form, 'manual') !== '1' || previewValue(form, 'manual_binding_required') !== '1') return '';
@@ -6151,9 +6276,12 @@ def render_workbench_lite(
     function formPayload(form, submitter, actionOverride) {{
       const actualActionTime = ensureActualActionTime(form);
       const formValues = captureNoticeFormValues(form);
+      const buildingCodes = syncBuildingSelection(form);
       const fd = new FormData(form);
       const action = actionOverride || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
       const patch = Object.assign(Object.fromEntries(fd.entries()), formValues);
+      patch.building_codes = buildingCodes;
+      patch.building = buildingCodes.map(buildingLabelFromCode).join('、');
       const photos = sitePhotoPayload(form);
       const sourceRecordId = String(patch.source_record_id || '').trim();
       const repairManagementRecordId = String(
@@ -6832,6 +6960,9 @@ def render_workbench_lite(
         return;
       }}
       if (event.target && event.target.closest('#lite-notice-form')) {{
+        if (event.target.name === 'building_codes') {{
+          syncBuildingSelection(event.target.closest('#lite-notice-form'));
+        }}
         if (event.target.name === 'actual_action_time') {{
           event.target.dataset.autoActualTime = event.target.value ? '0' : '1';
         }}

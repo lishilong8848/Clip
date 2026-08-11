@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 36
+    SCHEMA_VERSION = 39
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     _live_portal_restore_last: dict[str, float] = {}
@@ -131,6 +131,10 @@ class LanPortalStateStore:
         "critical_guard_signature_sets",
         "critical_guard_memories",
         "critical_guard_scope_files",
+        "critical_guard_scope_templates",
+        "critical_guard_weather_state",
+        "critical_guard_weather_tasks",
+        "critical_guard_weather_jobs",
         "repair_project_status_index",
         "repair_management_change_log",
         "business_operation_audits",
@@ -188,6 +192,10 @@ class LanPortalStateStore:
         "idx_critical_guard_signature_sets_updated",
         "idx_critical_guard_memories_updated",
         "idx_critical_guard_scope_files_latest",
+        "idx_critical_guard_scope_templates_updated",
+        "idx_critical_guard_weather_tasks_task",
+        "idx_critical_guard_weather_tasks_status",
+        "idx_critical_guard_weather_jobs_updated",
         "idx_repair_project_status_state",
         "idx_repair_project_status_completed",
         "idx_repair_management_change_created",
@@ -1911,6 +1919,118 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_critical_guard_scope_files_latest
             ON critical_guard_scope_files(scope_code, sheet_type, updated_at DESC, file_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_scope_templates (
+                scope_code TEXT NOT NULL,
+                sheet_type TEXT NOT NULL,
+                template_version TEXT NOT NULL DEFAULT '',
+                revision INTEGER NOT NULL DEFAULT 1,
+                is_customized INTEGER NOT NULL DEFAULT 1,
+                items_json TEXT NOT NULL DEFAULT '[]',
+                last_operation_id TEXT NOT NULL DEFAULT '',
+                last_operation_response_id TEXT NOT NULL DEFAULT '',
+                updated_by_open_id TEXT NOT NULL DEFAULT '',
+                updated_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(scope_code, sheet_type)
+            )
+            """
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_scope_templates",
+            "is_customized",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_scope_templates",
+            "last_operation_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column_locked(
+            conn,
+            "critical_guard_scope_templates",
+            "last_operation_response_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_scope_templates_updated
+            ON critical_guard_scope_templates(updated_at DESC, scope_code, sheet_type)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_weather_state (
+                state_key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL DEFAULT '{}',
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_weather_tasks (
+                weather_key TEXT PRIMARY KEY,
+                warning_id TEXT NOT NULL DEFAULT '',
+                warning_title TEXT NOT NULL DEFAULT '',
+                warning_type TEXT NOT NULL DEFAULT '',
+                warning_color TEXT NOT NULL DEFAULT '',
+                guard_level TEXT NOT NULL DEFAULT '',
+                sheet_types_json TEXT NOT NULL DEFAULT '[]',
+                task_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'active',
+                source_payload_json TEXT NOT NULL DEFAULT '{}',
+                scope_state_json TEXT NOT NULL DEFAULT '{}',
+                archive_status TEXT NOT NULL DEFAULT 'pending',
+                archive_record_id TEXT NOT NULL DEFAULT '',
+                archive_error TEXT NOT NULL DEFAULT '',
+                archive_attempted_at REAL NOT NULL DEFAULT 0,
+                archived_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_weather_tasks_task
+            ON critical_guard_weather_tasks(task_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_weather_tasks_status
+            ON critical_guard_weather_tasks(status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS critical_guard_weather_jobs (
+                job_id TEXT PRIMARY KEY,
+                trigger_type TEXT NOT NULL DEFAULT 'scheduled',
+                phase TEXT NOT NULL DEFAULT 'queued',
+                status TEXT NOT NULL DEFAULT 'queued',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '',
+                created_by_open_id TEXT NOT NULL DEFAULT '',
+                created_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                started_at REAL NOT NULL DEFAULT 0,
+                finished_at REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_critical_guard_weather_jobs_updated
+            ON critical_guard_weather_jobs(status, updated_at DESC)
             """
         )
         conn.execute(
@@ -8424,6 +8544,16 @@ class LanPortalStateStore:
                 if previous is None:
                     owner_by_key[key] = index
                     continue
+                current_target = canonical_target_record_id(payloads[index])
+                previous_target = canonical_target_record_id(payloads[previous])
+                if (
+                    self._text(payloads[index].get("notice_type")) == "事件通告"
+                    and self._text(payloads[previous].get("notice_type")) == "事件通告"
+                    and current_target
+                    and previous_target
+                    and current_target != previous_target
+                ):
+                    continue
                 union(index, previous)
 
         groups: dict[int, list[int]] = {}
@@ -8526,12 +8656,25 @@ class LanPortalStateStore:
                     existing_active_item_id = self._text(
                         existing_identity_data.get("active_item_id")
                     )
-                    if existing_active_item_id and not explicit_active_item_id:
-                        active_item_id = existing_active_item_id
-                        normalized["active_item_id"] = active_item_id
                     existing_target_record_id = self._text(
                         existing_identity_data.get("target_record_id")
                     )
+                    existing_source_record_id = self._text(
+                        existing_identity_data.get("source_record_id")
+                    )
+                    source_record_id = canonical_source_record_id(normalized)
+                    same_remote_identity = bool(
+                        (record_id and record_id == existing_target_record_id)
+                        or (
+                            source_record_id
+                            and source_record_id == existing_source_record_id
+                        )
+                    )
+                    if existing_active_item_id and (
+                        not explicit_active_item_id or same_remote_identity
+                    ):
+                        active_item_id = existing_active_item_id
+                        normalized["active_item_id"] = active_item_id
                     if existing_target_record_id and not record_id:
                         record_id = existing_target_record_id
                         normalized["record_id"] = existing_target_record_id
@@ -8570,6 +8713,17 @@ class LanPortalStateStore:
                 if int(cursor.rowcount or 0) <= 0:
                     conn.commit()
                     return False
+                if record_id:
+                    conn.execute(
+                        """
+                        UPDATE qt_active_items
+                        SET deleted_at = ?
+                        WHERE record_id = ?
+                          AND active_item_id <> ?
+                          AND deleted_at IS NULL
+                        """,
+                        (now, record_id, active_item_id),
+                    )
                 self._upsert_notice_identity_locked(conn, normalized, origin=origin)
                 conn.commit()
         return True
@@ -8968,6 +9122,20 @@ class LanPortalStateStore:
         existing_target_record_id = self._text(existing.get("target_record_id"))
         if is_local_record_id(existing_target_record_id):
             existing_target_record_id = ""
+        existing_source_record_id = self._text(existing.get("source_record_id"))
+        existing_active_item_id = self._text(existing.get("active_item_id"))
+        same_remote_identity = bool(
+            (target_record_id and target_record_id == existing_target_record_id)
+            or (
+                source_record_id
+                and source_record_id == existing_source_record_id
+            )
+        )
+        if existing_active_item_id and (
+            not active_item_id or same_remote_identity
+        ):
+            active_item_id = existing_active_item_id
+            payload["active_item_id"] = active_item_id
         identity_id = self._text(existing.get("identity_id")) or self._notice_identity_id_for_payload(
             work_type=work_type,
             active_item_id=active_item_id,
@@ -8980,6 +9148,8 @@ class LanPortalStateStore:
         old_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
         merged_payload = dict(old_payload)
         merged_payload.update(dict(payload))
+        if active_item_id:
+            merged_payload["active_item_id"] = active_item_id
         values = {
             "work_type": work_type or existing.get("work_type", ""),
             "notice_type": notice_type or existing.get("notice_type", ""),
@@ -13859,6 +14029,91 @@ class LanPortalStateStore:
             "updated_at": float(row["updated_at"] or 0),
         }
 
+    @classmethod
+    def _critical_guard_scope_template_from_row(
+        cls, row: sqlite3.Row | dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not row:
+            return None
+        row_keys = set(row.keys()) if hasattr(row, "keys") else set(row)
+        items = cls._loads(str(row["items_json"] or ""), [])
+        return {
+            "scope": cls._text(row["scope_code"]).upper(),
+            "sheet_type": cls._text(row["sheet_type"]),
+            "template_version": cls._text(row["template_version"]),
+            "revision": max(1, int(row["revision"] or 1)),
+            "items": items if isinstance(items, list) else [],
+            "customized": (
+                bool(int(row["is_customized"] or 0))
+                if "is_customized" in row_keys
+                else True
+            ),
+            "last_operation_id": (
+                cls._text(row["last_operation_id"])
+                if "last_operation_id" in row_keys
+                else ""
+            ),
+            "last_operation_response_id": (
+                cls._text(row["last_operation_response_id"])
+                if "last_operation_response_id" in row_keys
+                else ""
+            ),
+            "updated_by_open_id": cls._text(row["updated_by_open_id"]),
+            "updated_by_name": cls._text(row["updated_by_name"]),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    @classmethod
+    def _critical_guard_weather_task_from_row(
+        cls, row: sqlite3.Row | dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "weather_key": cls._text(row["weather_key"]),
+            "warning_id": cls._text(row["warning_id"]),
+            "warning_title": cls._text(row["warning_title"]),
+            "warning_type": cls._text(row["warning_type"]),
+            "warning_color": cls._text(row["warning_color"]),
+            "guard_level": cls._text(row["guard_level"]),
+            "sheet_types": cls._loads(str(row["sheet_types_json"] or ""), []),
+            "task_id": cls._text(row["task_id"]),
+            "status": cls._text(row["status"]),
+            "source_payload": cls._loads(
+                str(row["source_payload_json"] or ""), {}
+            ),
+            "scope_state": cls._loads(str(row["scope_state_json"] or ""), {}),
+            "archive_status": cls._text(row["archive_status"]),
+            "archive_record_id": cls._text(row["archive_record_id"]),
+            "archive_error": cls._text(row["archive_error"]),
+            "archive_attempted_at": float(row["archive_attempted_at"] or 0),
+            "archived_at": float(row["archived_at"] or 0),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    @classmethod
+    def _critical_guard_weather_job_from_row(
+        cls, row: sqlite3.Row | dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "job_id": cls._text(row["job_id"]),
+            "trigger_type": cls._text(row["trigger_type"]),
+            "phase": cls._text(row["phase"]),
+            "status": cls._text(row["status"]),
+            "result": cls._loads(str(row["result_json"] or ""), {}),
+            "error": cls._text(row["error"]),
+            "created_by_open_id": cls._text(row["created_by_open_id"]),
+            "created_by_name": cls._text(row["created_by_name"]),
+            "created_at": float(row["created_at"] or 0),
+            "started_at": float(row["started_at"] or 0),
+            "finished_at": float(row["finished_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
     def put_critical_guard_scope_file(
         self,
         *,
@@ -13961,6 +14216,348 @@ class LanPortalStateStore:
                 ).fetchone()
         return self._critical_guard_scope_file_from_row(row)
 
+    def get_critical_guard_weather_state(self, state_key: str = "runtime") -> dict[str, Any]:
+        key = self._text(state_key) or "runtime"
+        if not self.db_path.exists():
+            return {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT value_json, updated_at FROM critical_guard_weather_state WHERE state_key=?",
+                    (key,),
+                ).fetchone()
+        if not row:
+            return {}
+        value = self._loads(str(row["value_json"] or ""), {})
+        result = dict(value) if isinstance(value, dict) else {}
+        result["updated_at"] = float(row["updated_at"] or 0)
+        return result
+
+    def put_critical_guard_weather_state(
+        self, value: dict[str, Any], *, state_key: str = "runtime"
+    ) -> dict[str, Any]:
+        key = self._text(state_key) or "runtime"
+        normalized = dict(value or {})
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_weather_state(state_key, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        value_json=excluded.value_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (key, self._json(normalized), now),
+                )
+                conn.commit()
+        return {**normalized, "updated_at": now}
+
+    def create_critical_guard_weather_job(
+        self,
+        *,
+        job_id: str,
+        trigger_type: str,
+        created_by_open_id: str = "",
+        created_by_name: str = "",
+    ) -> dict[str, Any]:
+        normalized_job_id = self._text(job_id)
+        if not normalized_job_id:
+            raise ValueError("critical guard weather job_id is required")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO critical_guard_weather_jobs(
+                        job_id, trigger_type, phase, status,
+                        created_by_open_id, created_by_name, created_at, updated_at
+                    ) VALUES (?, ?, 'queued', 'queued', ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_job_id,
+                        self._text(trigger_type) or "scheduled",
+                        self._text(created_by_open_id),
+                        self._text(created_by_name),
+                        now,
+                        now,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_weather_jobs WHERE job_id=?",
+                    (normalized_job_id,),
+                ).fetchone()
+                conn.commit()
+        return self._critical_guard_weather_job_from_row(row) or {}
+
+    def update_critical_guard_weather_job(
+        self,
+        job_id: str,
+        *,
+        phase: str,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: str = "",
+        started: bool = False,
+        finished: bool = False,
+    ) -> dict[str, Any]:
+        normalized_job_id = self._text(job_id)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_weather_jobs WHERE job_id=?",
+                    (normalized_job_id,),
+                ).fetchone()
+                if not row:
+                    raise KeyError(f"critical guard weather job not found: {normalized_job_id}")
+                started_at = float(row["started_at"] or 0)
+                finished_at = float(row["finished_at"] or 0)
+                if started and not started_at:
+                    started_at = now
+                if finished:
+                    finished_at = now
+                conn.execute(
+                    """
+                    UPDATE critical_guard_weather_jobs
+                    SET phase=?, status=?, result_json=?, error=?,
+                        started_at=?, finished_at=?, updated_at=?
+                    WHERE job_id=?
+                    """,
+                    (
+                        self._text(phase),
+                        self._text(status),
+                        self._json(dict(result or {})),
+                        self._text(error),
+                        started_at,
+                        finished_at,
+                        now,
+                        normalized_job_id,
+                    ),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM critical_guard_weather_jobs WHERE job_id=?",
+                    (normalized_job_id,),
+                ).fetchone()
+                conn.commit()
+        return self._critical_guard_weather_job_from_row(updated) or {}
+
+    def get_critical_guard_weather_job(self, job_id: str) -> dict[str, Any] | None:
+        normalized_job_id = self._text(job_id)
+        if not normalized_job_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_weather_jobs WHERE job_id=?",
+                    (normalized_job_id,),
+                ).fetchone()
+        return self._critical_guard_weather_job_from_row(row)
+
+    def get_latest_critical_guard_weather_job(self) -> dict[str, Any] | None:
+        if not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT * FROM critical_guard_weather_jobs
+                    ORDER BY updated_at DESC, job_id DESC LIMIT 1
+                    """
+                ).fetchone()
+        return self._critical_guard_weather_job_from_row(row)
+
+    def cleanup_critical_guard_weather_jobs(self, *, keep_count: int = 200) -> int:
+        keep = max(10, min(int(keep_count or 200), 2000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM critical_guard_weather_jobs
+                    WHERE status IN ('completed', 'failed')
+                      AND job_id NOT IN (
+                          SELECT job_id
+                          FROM critical_guard_weather_jobs
+                          WHERE status IN ('completed', 'failed')
+                          ORDER BY updated_at DESC, job_id DESC
+                          LIMIT ?
+                      )
+                    """,
+                    (keep,),
+                )
+                removed = max(0, int(cursor.rowcount or 0))
+                conn.commit()
+        return removed
+
+    def put_critical_guard_weather_task(
+        self,
+        *,
+        weather_key: str,
+        warning_id: str,
+        warning_title: str,
+        warning_type: str,
+        warning_color: str,
+        guard_level: str,
+        sheet_types: list[str],
+        task_id: str,
+        source_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        key = self._text(weather_key)
+        normalized_task_id = self._text(task_id)
+        if not key or not normalized_task_id:
+            raise ValueError("critical guard weather task identity is required")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_weather_tasks(
+                        weather_key, warning_id, warning_title, warning_type,
+                        warning_color, guard_level, sheet_types_json, task_id,
+                        status, source_payload_json, scope_state_json,
+                        archive_status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, '{}', 'pending', ?, ?)
+                    ON CONFLICT(weather_key) DO UPDATE SET
+                        warning_id=excluded.warning_id,
+                        warning_title=excluded.warning_title,
+                        warning_type=excluded.warning_type,
+                        warning_color=excluded.warning_color,
+                        guard_level=excluded.guard_level,
+                        sheet_types_json=excluded.sheet_types_json,
+                        task_id=excluded.task_id,
+                        source_payload_json=excluded.source_payload_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        key,
+                        self._text(warning_id),
+                        self._text(warning_title),
+                        self._text(warning_type),
+                        self._text(warning_color),
+                        self._text(guard_level),
+                        self._json(list(sheet_types or [])),
+                        normalized_task_id,
+                        self._json(dict(source_payload or {})),
+                        now,
+                        now,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_weather_tasks WHERE weather_key=?",
+                    (key,),
+                ).fetchone()
+                conn.commit()
+        return self._critical_guard_weather_task_from_row(row) or {}
+
+    def get_critical_guard_weather_task(
+        self, *, weather_key: str = "", task_id: str = ""
+    ) -> dict[str, Any] | None:
+        key = self._text(weather_key)
+        normalized_task_id = self._text(task_id)
+        if not key and not normalized_task_id:
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if key:
+                    row = conn.execute(
+                        "SELECT * FROM critical_guard_weather_tasks WHERE weather_key=?",
+                        (key,),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT * FROM critical_guard_weather_tasks WHERE task_id=?",
+                        (normalized_task_id,),
+                    ).fetchone()
+        return self._critical_guard_weather_task_from_row(row)
+
+    def list_critical_guard_weather_tasks(
+        self, *, status: str = "active"
+    ) -> list[dict[str, Any]]:
+        normalized_status = self._text(status)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if normalized_status and normalized_status != "all":
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM critical_guard_weather_tasks
+                        WHERE status=? ORDER BY created_at DESC, weather_key DESC
+                        """,
+                        (normalized_status,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM critical_guard_weather_tasks
+                        ORDER BY created_at DESC, weather_key DESC
+                        """
+                    ).fetchall()
+        return [
+            item
+            for row in rows
+            if (item := self._critical_guard_weather_task_from_row(row)) is not None
+        ]
+
+    def update_critical_guard_weather_task(
+        self,
+        weather_key: str,
+        *,
+        scope_state: dict[str, Any] | None = None,
+        status: str | None = None,
+        archive_status: str | None = None,
+        archive_record_id: str | None = None,
+        archive_error: str | None = None,
+        archive_attempted_at: float | None = None,
+        archived_at: float | None = None,
+    ) -> dict[str, Any]:
+        key = self._text(weather_key)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM critical_guard_weather_tasks WHERE weather_key=?",
+                    (key,),
+                ).fetchone()
+                if not row:
+                    raise KeyError(f"critical guard weather task not found: {key}")
+                conn.execute(
+                    """
+                    UPDATE critical_guard_weather_tasks
+                    SET scope_state_json=?, status=?, archive_status=?,
+                        archive_record_id=?, archive_error=?, archive_attempted_at=?,
+                        archived_at=?, updated_at=?
+                    WHERE weather_key=?
+                    """,
+                    (
+                        self._json(scope_state if scope_state is not None else self._loads(str(row["scope_state_json"] or ""), {})),
+                        self._text(status) if status is not None else self._text(row["status"]),
+                        self._text(archive_status) if archive_status is not None else self._text(row["archive_status"]),
+                        self._text(archive_record_id) if archive_record_id is not None else self._text(row["archive_record_id"]),
+                        self._text(archive_error) if archive_error is not None else self._text(row["archive_error"]),
+                        float(archive_attempted_at) if archive_attempted_at is not None else float(row["archive_attempted_at"] or 0),
+                        float(archived_at) if archived_at is not None else float(row["archived_at"] or 0),
+                        now,
+                        key,
+                    ),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM critical_guard_weather_tasks WHERE weather_key=?",
+                    (key,),
+                ).fetchone()
+                conn.commit()
+        return self._critical_guard_weather_task_from_row(updated) or {}
+
     def get_critical_guard_memory(
         self,
         *,
@@ -14007,6 +14604,258 @@ class LanPortalStateStore:
             "updated_by_name": self._text(row["updated_by_name"]),
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def get_critical_guard_scope_template(
+        self,
+        *,
+        scope: str,
+        sheet_type: str,
+    ) -> dict[str, Any] | None:
+        scope_code = self._text(scope).upper()
+        sheet = self._text(sheet_type)
+        if not scope_code or not sheet or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT * FROM critical_guard_scope_templates
+                    WHERE scope_code=? AND sheet_type=?
+                    """,
+                    (scope_code, sheet),
+                ).fetchone()
+        return self._critical_guard_scope_template_from_row(row)
+
+    def update_critical_guard_scope_template(
+        self,
+        *,
+        scope: str,
+        sheet_type: str,
+        template_version: str,
+        items: list[dict[str, Any]] | None,
+        expected_revision: int | str | None,
+        actor_open_id: str,
+        actor_name: str,
+        response_id: str = "",
+        response_cells: dict[str, Any] | None = None,
+        expected_response_version: int | str | None = None,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        scope_code = self._text(scope).upper()
+        sheet = self._text(sheet_type)
+        normalized_response_id = self._text(response_id)
+        normalized_operation_id = self._text(operation_id)
+        if not scope_code or not sheet:
+            raise ValueError("critical guard scope template identity is required")
+        now = time.time()
+        stale_paths: list[str] = []
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    """
+                    SELECT * FROM critical_guard_scope_templates
+                    WHERE scope_code=? AND sheet_type=?
+                    """,
+                    (scope_code, sheet),
+                ).fetchone()
+                current_revision = int(current["revision"] or 0) if current else 0
+                if (
+                    current
+                    and normalized_operation_id
+                    and self._text(current["last_operation_id"])
+                    == normalized_operation_id
+                ):
+                    if (
+                        self._text(current["last_operation_response_id"])
+                        != normalized_response_id
+                    ):
+                        conn.rollback()
+                        raise ValueError("模板操作标识已用于其他填报，请重新操作。")
+                    replay_response = None
+                    if normalized_response_id:
+                        replay_response = conn.execute(
+                            """
+                            SELECT r.*,
+                                   s.signatures_json AS shared_signatures_json,
+                                   s.version AS signature_set_version
+                            FROM critical_guard_responses r
+                            LEFT JOIN critical_guard_signature_sets s
+                              ON s.task_id=r.task_id AND s.scope_code=r.scope_code
+                            WHERE r.response_id=?
+                            """,
+                            (normalized_response_id,),
+                        ).fetchone()
+                    conn.rollback()
+                    return {
+                        "template": self._critical_guard_scope_template_from_row(
+                            current
+                        ),
+                        "response": (
+                            self._critical_guard_response_from_row(replay_response)
+                            if replay_response
+                            else None
+                        ),
+                        "reset": not bool(int(current["is_customized"] or 0)),
+                        "revision": current_revision,
+                        "idempotent_replay": True,
+                        "_stale_artifact_paths": [],
+                    }
+                if expected_revision not in (None, ""):
+                    try:
+                        requested_revision = int(expected_revision)
+                    except (TypeError, ValueError) as exc:
+                        conn.rollback()
+                        raise ValueError("楼栋检查模板版本无效，请重新读取。") from exc
+                    if requested_revision != current_revision:
+                        conn.rollback()
+                        raise ValueError("该楼栋检查模板已被其他用户修改，请重新读取。")
+
+                reset_to_default = items is None
+                next_revision = current_revision + 1
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_scope_templates(
+                        scope_code, sheet_type, template_version, revision,
+                        is_customized, items_json,
+                        last_operation_id, last_operation_response_id,
+                        updated_by_open_id, updated_by_name,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scope_code, sheet_type) DO UPDATE SET
+                        template_version=excluded.template_version,
+                        revision=excluded.revision,
+                        is_customized=excluded.is_customized,
+                        items_json=excluded.items_json,
+                        last_operation_id=excluded.last_operation_id,
+                        last_operation_response_id=excluded.last_operation_response_id,
+                        updated_by_open_id=excluded.updated_by_open_id,
+                        updated_by_name=excluded.updated_by_name,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        scope_code,
+                        sheet,
+                        self._text(template_version),
+                        next_revision,
+                        0 if reset_to_default else 1,
+                        self._json([] if reset_to_default else (items or [])),
+                        normalized_operation_id,
+                        normalized_response_id,
+                        self._text(actor_open_id),
+                        self._text(actor_name),
+                        float(current["created_at"] or now) if current else now,
+                        now,
+                    ),
+                )
+
+                updated_response = None
+                if normalized_response_id:
+                    response_row = conn.execute(
+                        """
+                        SELECT * FROM critical_guard_responses WHERE response_id=?
+                        """,
+                        (normalized_response_id,),
+                    ).fetchone()
+                    if not response_row:
+                        conn.rollback()
+                        raise KeyError(
+                            f"critical guard response not found: {normalized_response_id}"
+                        )
+                    if (
+                        self._text(response_row["scope_code"]).upper() != scope_code
+                        or self._text(response_row["sheet_type"]) != sheet
+                    ):
+                        conn.rollback()
+                        raise ValueError("当前填报与楼栋检查模板不匹配。")
+                    current_response_version = int(response_row["version"] or 1)
+                    if expected_response_version not in (None, ""):
+                        try:
+                            requested_response_version = int(expected_response_version)
+                        except (TypeError, ValueError) as exc:
+                            conn.rollback()
+                            raise ValueError("重保填报版本无效，请重新读取。") from exc
+                        if requested_response_version != current_response_version:
+                            conn.rollback()
+                            raise ValueError(
+                                "该重保填报已被其他用户修改，请重新读取后再保存。"
+                            )
+                    next_cells = dict(response_cells or {})
+                    next_cells["template_revision"] = next_revision
+                    next_cells["template_customized"] = not reset_to_default
+                    stale_paths.extend(
+                        self._text(response_row[key])
+                        for key in (
+                            "generated_image_path",
+                            "generated_workbook_path",
+                        )
+                        if self._text(response_row[key])
+                    )
+                    next_status = (
+                        "pending"
+                        if self._text(response_row["status"]) == "pending"
+                        else "draft"
+                    )
+                    conn.execute(
+                        """
+                        UPDATE critical_guard_responses
+                        SET status=?, check_date=?, cells_json=?,
+                            generated_image_path='', generated_image_sha256='',
+                            generated_image_size=0, generated_image_width=0,
+                            generated_image_height=0,
+                            generated_workbook_path='', generated_workbook_sha256='',
+                            generated_workbook_size=0, submitted_at=NULL,
+                            version=?, submitted_by_open_id=?, submitted_by_name=?,
+                            updated_at=?
+                        WHERE response_id=?
+                        """,
+                        (
+                            next_status,
+                            self._text(next_cells.get("check_date")),
+                            self._json(next_cells),
+                            current_response_version + 1,
+                            self._text(actor_open_id),
+                            self._text(actor_name),
+                            now,
+                            normalized_response_id,
+                        ),
+                    )
+                    updated_response = conn.execute(
+                        """
+                        SELECT r.*,
+                               s.signatures_json AS shared_signatures_json,
+                               s.version AS signature_set_version
+                        FROM critical_guard_responses r
+                        LEFT JOIN critical_guard_signature_sets s
+                          ON s.task_id=r.task_id AND s.scope_code=r.scope_code
+                        WHERE r.response_id=?
+                        """,
+                        (normalized_response_id,),
+                    ).fetchone()
+
+                template_row = conn.execute(
+                    """
+                    SELECT * FROM critical_guard_scope_templates
+                    WHERE scope_code=? AND sheet_type=?
+                    """,
+                    (scope_code, sheet),
+                ).fetchone()
+                conn.commit()
+
+        return {
+            "template": self._critical_guard_scope_template_from_row(template_row),
+            "response": (
+                self._critical_guard_response_from_row(updated_response)
+                if updated_response
+                else None
+            ),
+            "reset": reset_to_default,
+            "revision": next_revision,
+            "idempotent_replay": False,
+            "_stale_artifact_paths": stale_paths,
         }
 
     def create_critical_guard_task(

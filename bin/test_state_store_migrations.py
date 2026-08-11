@@ -158,6 +158,69 @@ class StateStoreMigrationTests(unittest.TestCase):
             self.assertIn("completed_at", columns)
             self.assertEqual(row, ("rec_old_index", 0.0))
 
+    def test_scope_template_revision_columns_upgrade_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.sqlite3"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE critical_guard_scope_templates (
+                        scope_code TEXT NOT NULL,
+                        sheet_type TEXT NOT NULL,
+                        template_version TEXT NOT NULL DEFAULT '',
+                        revision INTEGER NOT NULL DEFAULT 1,
+                        items_json TEXT NOT NULL DEFAULT '[]',
+                        updated_by_open_id TEXT NOT NULL DEFAULT '',
+                        updated_by_name TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY(scope_code, sheet_type)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO critical_guard_scope_templates(
+                        scope_code, sheet_type, template_version, revision,
+                        items_json, created_at, updated_at
+                    ) VALUES ('A', '设备安全', 'old-template', 4,
+                              '[{"key":"old","category":"旧项","content":"保留"}]',
+                              1, 1)
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = LanPortalStateStore(db_path)
+            template = store.get_critical_guard_scope_template(
+                scope="A",
+                sheet_type="设备安全",
+            )
+            conn = sqlite3.connect(db_path)
+            try:
+                columns = {
+                    str(row[1])
+                    for row in conn.execute(
+                        "PRAGMA table_info(critical_guard_scope_templates)"
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+
+            self.assertTrue(store.schema_health()["ok"])
+            self.assertTrue(template["customized"])
+            self.assertEqual(template["revision"], 4)
+            self.assertEqual(template["items"][0]["content"], "保留")
+            self.assertTrue(
+                {
+                    "is_customized",
+                    "last_operation_id",
+                    "last_operation_response_id",
+                }.issubset(columns)
+            )
+
     def test_runtime_health_report_includes_schema_and_database(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")

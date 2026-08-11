@@ -433,12 +433,16 @@ class MainWindowWorkflowMixin:
         robot_group_choice: str,
     ) -> None:
         target_record_id = str((selected_data or {}).get("record_id") or "").strip()
+        operation_id = str(
+            (selected_data or {}).get("_upload_operation_id") or ""
+        ).strip()
         if not target_record_id:
             self._post_request_finished(
                 self._backend_upload_action_name(action_type),
                 False,
                 "所选目标记录缺少 record_id。",
                 "",
+                operation_id,
             )
             return
 
@@ -454,10 +458,16 @@ class MainWindowWorkflowMixin:
                 allow_target_selection=False,
             )
 
-        self._dispatch_backend_notice_upload(target_record_id, backend_task)
+        self._dispatch_backend_notice_upload(
+            target_record_id,
+            backend_task,
+            operation_id=operation_id,
+        )
         self.show_message("已选择对应多维记录，正在后台继续处理。")
 
-    def _dispatch_backend_notice_upload(self, record_id: str, task) -> None:
+    def _dispatch_backend_notice_upload(
+        self, record_id: str, task, *, operation_id: str = ""
+    ) -> None:
         """Submit a Qt-originated notice command to the backend without a Qt-side queue."""
         record_id = str(record_id or "").strip()
         if not callable(task):
@@ -468,6 +478,7 @@ class MainWindowWorkflowMixin:
                 False,
                 "程序正在关闭，本次上传命令未提交。",
                 record_id,
+                operation_id,
             )
             return
 
@@ -481,6 +492,7 @@ class MainWindowWorkflowMixin:
                     False,
                     f"后端命令异常: {exc}",
                     record_id,
+                    operation_id,
                 )
 
         executor = getattr(self, "_qt_backend_command_executor", None)
@@ -499,6 +511,7 @@ class MainWindowWorkflowMixin:
                     False,
                     f"后端命令后台线程创建失败: {exc}",
                     record_id,
+                    operation_id,
                 )
                 return
         try:
@@ -509,6 +522,7 @@ class MainWindowWorkflowMixin:
                 False,
                 f"后端命令提交失败: {exc}",
                 record_id,
+                operation_id,
             )
 
     def _handle_backend_target_selection(
@@ -526,6 +540,9 @@ class MainWindowWorkflowMixin:
         def select_and_continue() -> None:
             candidate = self._prompt_target_record_candidate(result)
             old_id = str((data_snapshot or {}).get("record_id") or "").strip()
+            operation_id = str(
+                (data_snapshot or {}).get("_upload_operation_id") or ""
+            ).strip()
             action_name = self._backend_upload_action_name(action_type, result)
             if not candidate:
                 self._post_request_finished(
@@ -533,6 +550,7 @@ class MainWindowWorkflowMixin:
                     False,
                     "已取消选择目标多维记录，本次未继续上传。",
                     old_id,
+                    operation_id,
                 )
                 return
             target_record_id = self._candidate_record_id(candidate)
@@ -542,6 +560,7 @@ class MainWindowWorkflowMixin:
                     False,
                     "所选目标记录缺少 record_id。",
                     old_id,
+                    operation_id,
                 )
                 return
             selected_data = dict(data_snapshot or {})
@@ -594,19 +613,37 @@ class MainWindowWorkflowMixin:
                 data_snapshot,
                 action_type,
             )
-        if controller is None or not hasattr(controller, "execute_qt_notice_upload"):
+        operation_id = str(
+            (data_snapshot or {}).get("_upload_operation_id")
+            or (data_snapshot or {}).get("operation_id")
+            or ""
+        ).strip()
+
+        def _finish(name, success, message, record_id):
             self._post_request_finished(
+                name,
+                success,
+                message,
+                record_id,
+                operation_id,
+            )
+
+        if controller is None or not hasattr(controller, "execute_qt_notice_upload"):
+            _finish(
                 self._backend_upload_action_name(action_type),
                 False,
                 "本机后端未连接，Qt 不再直接执行多维写入。",
                 str((data_snapshot or {}).get("record_id") or ""),
             )
             return True
+        command_data = self._strip_inline_image_command_fields(
+            dict(data_snapshot or {})
+        )
+        command_data.pop("_upload_operation_id", None)
         request_payload = {
             "action_type": str(action_type or "").strip(),
-            "data_dict": self._strip_inline_image_command_fields(
-                dict(data_snapshot or {})
-            ),
+            "operation_id": operation_id,
+            "data_dict": command_data,
             "response_time": str(response_time or ""),
             "recover_selected": bool(recover_selected),
             "robot_group_choice": str(robot_group_choice or "auto").strip() or "auto",
@@ -619,7 +656,7 @@ class MainWindowWorkflowMixin:
                     "notice_screenshot.png",
                 )
             except Exception as exc:
-                self._post_request_finished(
+                _finish(
                     self._backend_upload_action_name(action_type),
                     False,
                     f"截图暂存失败：{exc}",
@@ -653,7 +690,7 @@ class MainWindowWorkflowMixin:
                     str(file_name or f"extra_{index}.png"),
                 )
             except Exception as exc:
-                self._post_request_finished(
+                _finish(
                     self._backend_upload_action_name(action_type),
                     False,
                     f"现场照片暂存失败：{exc}",
@@ -675,7 +712,7 @@ class MainWindowWorkflowMixin:
         try:
             result = controller.execute_qt_notice_upload(request_payload)
         except Exception as exc:
-            self._post_request_finished(
+            _finish(
                 self._backend_upload_action_name(action_type),
                 False,
                 f"本机后端执行失败：{exc}",
@@ -683,7 +720,7 @@ class MainWindowWorkflowMixin:
             )
             return True
         if not isinstance(result, dict):
-            self._post_request_finished(
+            _finish(
                 self._backend_upload_action_name(action_type),
                 False,
                 "本机后端返回格式异常。",
@@ -698,7 +735,7 @@ class MainWindowWorkflowMixin:
         message = str(result.get("message") or "")
         if result.get("needs_target_selection"):
             if not allow_target_selection:
-                self._post_request_finished(
+                _finish(
                     self._backend_upload_action_name(action_type, result),
                     False,
                     message or "所选目标记录仍无法绑定，请重新选择后再试。",
@@ -768,7 +805,7 @@ class MainWindowWorkflowMixin:
                 self.show_message(message_warning)
             except Exception:
                 pass
-        self._post_request_finished(
+        _finish(
             name or self._backend_upload_action_name(action_type),
             success,
             message,
@@ -2238,6 +2275,7 @@ class MainWindowWorkflowMixin:
 
         self.pending_action_record_ids.add(record_id)
         self.pending_action_types[record_id] = action_type
+        data_dict["_upload_operation_id"] = f"qt_notice:{uuid.uuid4().hex}"
         pending_hash = self._calc_text_hash(data_dict.get("text", ""))
         data_dict["_pending_upload_hash"] = pending_hash
         data_dict["_has_unuploaded_changes"] = False
@@ -2435,6 +2473,10 @@ class MainWindowWorkflowMixin:
         elif resolved_level:
             data_dict["level"] = resolved_level
         record_id = data_dict.get("record_id")
+        operation_id = str(data_dict.get("_upload_operation_id") or "").strip()
+        if not operation_id:
+            operation_id = f"qt_notice:{uuid.uuid4().hex}"
+            data_dict["_upload_operation_id"] = operation_id
         if record_id:
             data_dict["_upload_in_progress"] = True
             data_dict.pop("_upload_pending_dialog", None)
@@ -2447,6 +2489,7 @@ class MainWindowWorkflowMixin:
             if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 data["_upload_in_progress"] = True
+                data["_upload_operation_id"] = operation_id
                 data.pop("_upload_pending_dialog", None)
                 data["_upload_started_monotonic"] = time.monotonic()
                 data.pop("_last_upload_error", None)
@@ -2539,7 +2582,11 @@ class MainWindowWorkflowMixin:
                 robot_group_choice=robot_group_choice,
             )
 
-        self._dispatch_backend_notice_upload(record_id, backend_task)
+        self._dispatch_backend_notice_upload(
+            record_id,
+            backend_task,
+            operation_id=operation_id,
+        )
         if self.current_screenshot_record_id == record_id:
             self.current_screenshot_record_id = None
             self.current_screenshot_action_type = None
@@ -2961,16 +3008,40 @@ class MainWindowWorkflowMixin:
             data,
         )
 
-    def on_request_finished(self, name, success, msg, record_id=None):
+    def on_request_finished(
+        self, name, success, msg, record_id=None, operation_id=""
+    ):
         self._set_last_ui_op(
-            "on_request_finished", name=name, success=success, record_id=record_id
+            "on_request_finished",
+            name=name,
+            success=success,
+            record_id=record_id,
+            operation_id=operation_id,
         )
 
         def _apply_updates():
             real_record_id = ""
+            stale_result = False
             try:
+                is_current = getattr(self, "_is_current_upload_operation", None)
+                if operation_id and callable(is_current) and not is_current(
+                    record_id, operation_id
+                ):
+                    stale_result = True
+                    log_warning(
+                        "已忽略过期的 Qt 上传结果: "
+                        f"name={name}, record_id={record_id or '-'}, "
+                        f"operation_id={operation_id}"
+                    )
+                    return
                 if name == "结束" and not success and record_id:
                     self._rollback_end(record_id)
+                    self.restore_button_state(
+                        success=False,
+                        name=name,
+                        record_id=record_id,
+                        mark_failed=True,
+                    )
                     self.show_message(f"「{name}」失败\n{msg}")
                     self._notify_lan_portal_upload_result(
                         name, success, msg, record_id, ""
@@ -3130,7 +3201,7 @@ class MainWindowWorkflowMixin:
                 log_error(f"on_request_finished异常: {exc}")
             finally:
                 clear_state = getattr(self, "clear_upload_runtime_state_for_ids", None)
-                if callable(clear_state):
+                if not stale_result and callable(clear_state):
                     clear_state(record_id, real_record_id)
 
         self._enqueue_ui_mutation("request_finished", _apply_updates)

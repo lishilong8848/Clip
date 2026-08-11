@@ -217,6 +217,56 @@ def _send_message_to_receive_id(
         return False, str(exc)
 
 
+def _send_interactive_to_receive_id(
+    tenant_access_token: str,
+    receive_id: str,
+    card: dict[str, Any],
+    *,
+    receive_id_type: str,
+) -> Tuple[bool, str]:
+    url = "https://open.feishu.cn/open-apis/im/v1/messages"
+    headers = {
+        "Authorization": f"Bearer {tenant_access_token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    payload = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+        "uuid": str(uuid.uuid4()),
+    }
+    params = {"receive_id_type": receive_id_type}
+    try:
+        result = _request_json(
+            "POST",
+            url,
+            headers=headers,
+            params=params,
+            json_payload=payload,
+            retries=2,
+        )
+        if _is_token_error_result(result):
+            tenant_access_token, token_err = _get_tenant_access_token(
+                force_refresh=True
+            )
+            if token_err:
+                return False, token_err
+            headers["Authorization"] = f"Bearer {tenant_access_token}"
+            result = _request_json(
+                "POST",
+                url,
+                headers=headers,
+                params=params,
+                json_payload=payload,
+                retries=2,
+            )
+        if result.get("code", 0) != 0:
+            return False, result.get("msg", "unknown error")
+        return True, "ok"
+    except FeishuHTTPError as exc:
+        return False, str(exc)
+
+
 def send_text_to_open_ids(
     text: str, open_ids: List[str]
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
@@ -266,6 +316,50 @@ def send_text_to_open_ids(
             "请在飞书应用后台确认机器人已启用且应用可用范围包含该用户。"
         )
     log_error(f"个人消息发送失败: {detail}")
+    return False, detail or "发送失败", results
+
+
+def send_interactive_to_open_ids(
+    card: dict[str, Any], open_ids: List[str]
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """向一个或多个 open_id 发送飞书交互卡片。"""
+    if not isinstance(card, dict) or not card:
+        return False, "卡片内容为空", []
+    recipients = list(dict.fromkeys([str(item or "").strip() for item in open_ids]))
+    recipients = [item for item in recipients if item]
+    if not recipients:
+        return False, "收件人为空", []
+    token, err = _get_tenant_access_token()
+    if err:
+        return False, err, []
+    results: List[Dict[str, Any]] = []
+    for open_id in recipients:
+        ok, message = _send_interactive_to_receive_id(
+            token,
+            open_id,
+            card,
+            receive_id_type="open_id",
+        )
+        results.append(
+            {
+                "open_id": open_id,
+                "ok": ok,
+                "message": message,
+                "failure_kind": (
+                    "bot_unavailable"
+                    if not ok and "no availability" in str(message or "").lower()
+                    else ""
+                ),
+            }
+        )
+    failed = [item for item in results if not item.get("ok")]
+    if not failed:
+        log_info(f"个人交互卡片发送成功: recipients={len(recipients)}")
+        return True, "ok", results
+    detail = "；".join(
+        f"{item.get('open_id')}: {item.get('message')}" for item in failed
+    )
+    log_error(f"个人交互卡片发送失败: {detail}")
     return False, detail or "发送失败", results
 
 

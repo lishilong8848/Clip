@@ -43,6 +43,9 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (34, "critical_guard_shared_signatures_and_template_artifacts"),
     (35, "critical_guard_scope_source_files"),
     (36, "critical_guard_template_scoped_memory"),
+    (37, "critical_guard_weather_automation"),
+    (38, "critical_guard_scope_templates"),
+    (39, "critical_guard_scope_template_revision_ledger"),
 )
 
 

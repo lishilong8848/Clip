@@ -1130,6 +1130,7 @@ class BackendProcessPortalController:
     def execute_qt_notice_upload(self, payload: dict[str, Any]) -> dict:
         payload = dict(payload or {})
         action_type = str(payload.get("action_type") or "").strip()
+        operation_id = str(payload.get("operation_id") or "").strip()
         command = {
             "upload": "notice_upload",
             "update": "notice_update",
@@ -1137,9 +1138,109 @@ class BackendProcessPortalController:
             "upload_replace": "notice_archive",
         }.get(action_type, "notice_upload")
         try:
-            return self.submit_qt_command(command, payload)
+            return self.submit_qt_command(
+                command,
+                payload,
+                timeout=float(
+                    _env_int(
+                        "CLIPFLOW_QT_NOTICE_UPLOAD_TIMEOUT_SECONDS",
+                        240,
+                        minimum=120,
+                        maximum=900,
+                    )
+                ),
+            )
         except Exception as exc:
+            recovered = self._recover_qt_notice_upload_result(
+                payload,
+                action_type=action_type,
+                operation_id=operation_id,
+            )
+            if recovered is not None:
+                return recovered
             raise RuntimeError(f"本机后端执行 Qt 上传失败: {exc}") from exc
+
+    def get_qt_notice_operation(self, operation_id: str) -> dict | None:
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            return None
+        try:
+            result = self._request_json(
+                "GET",
+                "/api/qt/notice-operations/"
+                + urllib.parse.quote(operation_id, safe=""),
+                timeout=5.0,
+            )
+        except Exception:
+            return None
+        data = result.get("data") if bool(result.get("ok")) else None
+        return data if isinstance(data, dict) else None
+
+    def _recover_qt_notice_upload_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        action_type: str,
+        operation_id: str,
+    ) -> dict | None:
+        if not operation_id:
+            return None
+        operation = None
+        for delay in (0.0, 0.5, 1.0, 2.0, 4.0, 8.0):
+            if delay:
+                time.sleep(delay)
+            operation = self.get_qt_notice_operation(operation_id)
+            status = str((operation or {}).get("status") or "").strip()
+            if status in {"completed", "remote_written", "failed"}:
+                break
+        if not isinstance(operation, dict):
+            return None
+        status = str(operation.get("status") or "").strip()
+        if status not in {"completed", "remote_written", "failed"}:
+            return None
+        data_dict = payload.get("data_dict")
+        data_dict = data_dict if isinstance(data_dict, dict) else {}
+        original_record_id = str(data_dict.get("record_id") or "").strip()
+        target_record_id = str(
+            operation.get("target_record_id")
+            or (operation.get("result") or {}).get("record_id")
+            or data_dict.get("target_record_id")
+            or original_record_id
+        ).strip()
+        action_name = {
+            "upload": "上传",
+            "update": "更新",
+            "end": "结束",
+            "upload_replace": "归档",
+        }.get(action_type, "上传")
+        if status == "failed":
+            return {
+                "ok": False,
+                "name": action_name,
+                "message": str(operation.get("error") or "上传失败。"),
+                "record_id": original_record_id or target_record_id,
+                "real_record_id": "",
+                "operation_recovered": True,
+            }
+        result_payload = dict(operation.get("result") or {})
+        message = str(result_payload.get("message") or target_record_id).strip()
+        response = {
+            "ok": True,
+            "name": action_name,
+            "message": message,
+            "record_id": original_record_id or target_record_id,
+            "real_record_id": target_record_id,
+            "record_version": str(
+                operation.get("observed_record_version") or ""
+            ),
+            "remote_written": True,
+            "operation_recovered": True,
+        }
+        if status == "remote_written":
+            response["message_warning"] = (
+                "多维写入已完成，后端正在收尾；界面已按成功状态恢复。"
+            )
+        return response
 
     def upload_notice_attachment(
         self,

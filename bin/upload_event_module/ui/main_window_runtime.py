@@ -408,10 +408,12 @@ class MainWindowRuntimeMixin:
         payload = {"item": item, "source": "clipboard_direct"}
         enqueue = getattr(self, "_enqueue_ui_mutation", None)
         if callable(enqueue):
-            enqueue(
+            accepted = enqueue(
                 "clipboard_projection",
                 lambda p=dict(payload): self._apply_backend_active_upsert(p),
             )
+            if accepted is False:
+                return {"ok": False, "error": "Qt 实时更新队列已满，请稍后重试。"}
             return {"ok": True, "queued": True}
         return self._apply_backend_active_upsert(payload)
 
@@ -486,8 +488,13 @@ class MainWindowRuntimeMixin:
         self._qt_shell_dialog_sessions = filtered[:200]
         return {"ok": True, "session_id": session_id}
 
-    def _canonical_backend_active_payload(self, data: dict) -> dict:
-        """Align one live Qt update with the shared SQLite display projection."""
+    def _canonical_backend_active_payload(
+        self,
+        data: dict,
+        *,
+        prefer_incoming: bool = True,
+    ) -> dict:
+        """Merge one live Qt delta with the shared SQLite projection."""
 
         cache_store = getattr(self, "cache_store", None)
         state_store = getattr(cache_store, "_state_store", None)
@@ -517,35 +524,13 @@ class MainWindowRuntimeMixin:
                 if isinstance(canonical_row.get("payload"), dict)
                 else dict(data)
             )
-            canonical_active_id = str(
-                canonical_data.get("active_item_id")
-                or canonical_row.get("active_item_id")
-                or ""
-            ).strip()
-            canonical_keys = state_store._identity_keys_for_item(canonical_data)
-            group_keys = incoming_keys | canonical_keys
-            if group_keys and canonical_active_id:
-                for list_widget, item, item_data in list(
-                    self._active_notice_store().entries()
-                ):
-                    if not self._is_valid_list_item(item) or not isinstance(
-                        item_data, dict
-                    ):
-                        continue
-                    item_active_id = str(
-                        item_data.get("active_item_id") or ""
-                    ).strip()
-                    if item_active_id == canonical_active_id:
-                        continue
-                    item_enriched = state_store._enrich_notice_payload_from_text(
-                        dict(item_data)
-                    )
-                    if (
-                        state_store._identity_keys_for_item(item_enriched)
-                        & group_keys
-                    ):
-                        self._remove_active_item_widget_only(list_widget, item)
-            return canonical_data
+            if not prefer_incoming:
+                return canonical_data
+            merged = dict(canonical_data)
+            for key, value in enriched.items():
+                if value not in (None, "", [], {}):
+                    merged[key] = value
+            return merged
         except Exception as exc:
             log_warning(f"Qt 活动通告权威投影失败，保留当前更新: {exc}")
             return dict(data)
@@ -582,23 +567,38 @@ class MainWindowRuntimeMixin:
         data = self._ensure_active_item_identity(data)
         list_widget = None
         item = None
+        visible_active_item_id = ""
         if active_item_id:
             list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
         if (not item or not self._is_valid_list_item(item)) and record_id:
             list_widget, item = self._find_active_item_by_record_id(record_id)
-        data = self._canonical_backend_active_payload(data)
+        if item and self._is_valid_list_item(item):
+            existing_data = self._active_item_data(item)
+            if isinstance(existing_data, dict):
+                visible_active_item_id = str(
+                    existing_data.get("active_item_id") or ""
+                ).strip()
+                data = self._inherit_active_runtime_fields(data, existing_data)
+        event_origin = str(item_payload.get("origin") or data.get("origin") or "").strip()
+        data = self._canonical_backend_active_payload(
+            data,
+            prefer_incoming=event_origin != "target_snapshot_refresh",
+        )
+        if visible_active_item_id:
+            data["active_item_id"] = visible_active_item_id
         active_item_id = str(data.get("active_item_id") or "").strip()
         record_id = str(
             data.get("target_record_id") or data.get("record_id") or ""
         ).strip()
-        list_widget = None
-        item = None
-        if active_item_id:
-            list_widget, item = self._find_active_item_by_active_item_id(
-                active_item_id
-            )
-        if (not item or not self._is_valid_list_item(item)) and record_id:
-            list_widget, item = self._find_active_item_by_record_id(record_id)
+        if not item or not self._is_valid_list_item(item):
+            list_widget = None
+            item = None
+            if active_item_id:
+                list_widget, item = self._find_active_item_by_active_item_id(
+                    active_item_id
+                )
+            if (not item or not self._is_valid_list_item(item)) and record_id:
+                list_widget, item = self._find_active_item_by_record_id(record_id)
         if item and self._is_valid_list_item(item):
             self._set_active_item_data(list_widget, item, data)
             self._upsert_active_notice_model_item(list_widget, item, data)
@@ -681,16 +681,22 @@ class MainWindowRuntimeMixin:
                 def _run():
                     result_holder.update(self._apply_backend_active_upsert(payload))
 
-                enqueue("active_upsert", _run)
+                source = str((payload or {}).get("source") or "").strip()
+                tag = "backend_active_sync" if source == "backend_active_sync" else "active_upsert"
+                accepted = enqueue(tag, _run)
+                if accepted is False:
+                    return {"ok": False, "error": "Qt 实时更新队列已满，请稍后重试。"}
                 return {"ok": True, "queued": True}
             return self._apply_backend_active_upsert(payload)
         if kind == "active_delete":
             enqueue = getattr(self, "_enqueue_ui_mutation", None)
             if callable(enqueue):
-                enqueue(
+                accepted = enqueue(
                     "active_delete",
                     lambda p=dict(payload or {}): self._apply_backend_active_delete(p),
                 )
+                if accepted is False:
+                    return {"ok": False, "error": "Qt 实时更新队列已满，请稍后重试。"}
                 return {"ok": True, "queued": True}
             return self._apply_backend_active_delete(payload)
         if kind in {"history_append", "status_banner"}:
@@ -2432,22 +2438,30 @@ class MainWindowRuntimeMixin:
 
     def _enqueue_ui_mutation(self, tag: str, fn):
         if self._closing:
-            return
+            return False
         tag = str(tag or "unknown")
+        priority_tags = {"active_upsert", "active_delete", "clipboard_projection"}
+        target_queue = self._ui_mutation_queue
+        if tag in priority_tags:
+            target_queue = getattr(self, "_ui_priority_mutation_queue", target_queue)
         try:
-            self._ui_mutation_queue.put_nowait((tag, fn, time.time()))
+            target_queue.put_nowait((tag, fn, time.time()))
+            return True
         except queue.Full:
             self._ui_mutation_drop_count = (
                 int(getattr(self, "_ui_mutation_drop_count", 0) or 0) + 1
             )
             if tag in {"record_binding_validation", "today_in_progress_sync"}:
-                return
+                return False
             try:
-                self._ui_mutation_queue.put((tag, fn, time.time()), timeout=0.05)
+                target_queue.put((tag, fn, time.time()), timeout=0.05)
+                return True
             except Exception:
-                pass
+                if tag in priority_tags:
+                    log_warning(f"Qt 实时 UI 变更队列已满，等待后端重试: tag={tag}")
+                return False
         except Exception:
-            pass
+            return False
 
     def _drain_ui_mutations(self):
         if self._closing or self._ui_update_in_progress:
@@ -2460,10 +2474,19 @@ class MainWindowRuntimeMixin:
             for _ in range(max_count):
                 if (time.perf_counter() - tick_started) * 1000.0 >= tick_budget_ms:
                     break
+                source_queue = getattr(
+                    self,
+                    "_ui_priority_mutation_queue",
+                    self._ui_mutation_queue,
+                )
                 try:
-                    tag, fn, _ = self._ui_mutation_queue.get_nowait()
+                    tag, fn, _ = source_queue.get_nowait()
                 except queue.Empty:
-                    break
+                    source_queue = self._ui_mutation_queue
+                    try:
+                        tag, fn, _ = source_queue.get_nowait()
+                    except queue.Empty:
+                        break
                 try:
                     self._set_last_ui_op(f"ui_mutation:{tag}")
                     started = time.perf_counter()
@@ -2475,14 +2498,16 @@ class MainWindowRuntimeMixin:
                     log_error(f"UI变更执行失败({tag}): {exc}")
                 finally:
                     try:
-                        self._ui_mutation_queue.task_done()
+                        source_queue.task_done()
                     except Exception:
                         pass
         finally:
             self._ui_update_in_progress = False
 
-    def _post_request_finished(self, name, success, msg, record_id):
-        item = (name, bool(success), msg, record_id)
+    def _post_request_finished(
+        self, name, success, msg, record_id, operation_id=""
+    ):
+        item = (name, bool(success), msg, record_id, str(operation_id or ""))
         try:
             self._ui_signal_queue.put_nowait(item)
             return
@@ -2531,12 +2556,18 @@ class MainWindowRuntimeMixin:
             except queue.Empty:
                 break
             try:
-                name, success, msg, record_id = item
+                if len(item) == 4:
+                    name, success, msg, record_id = item
+                    operation_id = ""
+                else:
+                    name, success, msg, record_id, operation_id = item
             except Exception:
                 continue
             try:
                 started = time.perf_counter()
-                self.request_finished.emit(name, success, msg, record_id)
+                self.request_finished.emit(
+                    name, success, msg, record_id, operation_id
+                )
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 if elapsed_ms >= float(getattr(self, "_ui_slow_threshold_ms", 120.0)):
                     self._record_slow_ui_operation(f"ui_signal:{name}", elapsed_ms)

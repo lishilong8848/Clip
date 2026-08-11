@@ -108,6 +108,8 @@ from .common import show_simple_message
 
 from ..building_normalizer import (
 
+    extract_building_codes,
+
     normalize_building_name,
 
     normalize_buildings_value as normalize_buildings_list,
@@ -3714,12 +3716,10 @@ class ScreenshotConfirmDialog(QDialog):
             saved_buildings = self._normalize_buildings_value(
                 (self.data_dict or {}).get("buildings")
             )
-            detected_building = self._detect_building_from_title(
+            detected_buildings = self._detect_buildings_from_notice_text(
                 (self.data_dict or {}).get("text", "")
             )
-            detected_buildings = self._normalize_buildings_value(
-                [detected_building] if detected_building else []
-            )
+            detected_buildings = self._normalize_buildings_value(detected_buildings)
 
             selected_buildings = []
 
@@ -3976,7 +3976,7 @@ class ScreenshotConfirmDialog(QDialog):
         return ""
 
 
-    def _detect_building_from_title(self, text: str) -> str:
+    def _detect_buildings_from_notice_text(self, text: str) -> list[str]:
 
         raw_text = text or ""
 
@@ -3988,17 +3988,21 @@ class ScreenshotConfirmDialog(QDialog):
 
 
 
-        # 先用标题识别；标题未命中时再用全文兜底，兼容维保通告中楼栋不在标题的场景。
+        # 110 标题具有最高优先级；其余通告优先使用位置中的完整楼栋范围。
 
-        candidates = []
+        title_codes = extract_building_codes(title)
+        if title_codes == ["110"]:
+            return [BUILDING_110]
 
-        if title:
+        location = self._extract_section(raw_text, "位置") or self._extract_section(
+            raw_text, "地点"
+        )
+        location_codes = extract_building_codes(location)
+        codes = location_codes or title_codes or extract_building_codes(raw_text)
+        if codes:
+            return [BUILDING_110 if code == "110" else f"{code}楼" for code in codes]
 
-            candidates.append(title)
-
-        if raw_text and raw_text != title:
-
-            candidates.append(raw_text)
+        candidates = [value for value in (title, raw_text) if value]
 
 
 
@@ -4028,15 +4032,15 @@ class ScreenshotConfirmDialog(QDialog):
 
                 if _normalize(keyword) in candidate_norm:
 
-                    return BUILDING_110
+                    return [BUILDING_110]
 
             for key, value in BUILDING_DETECT_ALIASES:
 
                 if _normalize(key) in candidate_norm:
 
-                    return value
+                    return [value]
 
-        return ""
+        return []
 
 
 

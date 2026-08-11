@@ -53,6 +53,7 @@ from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_EV
 from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_NOTICES  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_PROJECTS  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
+from lan_bitable_template_portal.portal_service import WORK_TYPE_EVENT  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_MAINTENANCE  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_POWER  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
@@ -238,8 +239,12 @@ class _WorkflowBackendDelegateHarness(MainWindowWorkflowMixin):
         self.finished = []
         self.today_in_progress_updates = []
 
-    def _post_request_finished(self, name, success, msg, record_id):
-        self.finished.append((name, bool(success), msg, record_id))
+    def _post_request_finished(
+        self, name, success, msg, record_id, operation_id=""
+    ):
+        self.finished.append(
+            (name, bool(success), msg, record_id, str(operation_id or ""))
+        )
 
     def _enqueue_ui_mutation(self, _name, callback):
         callback()
@@ -3599,31 +3604,38 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_local_event_update_and_end_reuse_created_target_across_new_local_ids(self):
         def event_text(status: str, progress: str = "测试测试测试") -> str:
+            identity_fields = (
+                "【机楼】A楼\n"
+                "【来源】BMS\n"
+                "【等级】I3\n"
+                if status == "开始"
+                else "【来源】BMS\n"
+            )
             return (
                 f"【事件通告】状态：{status}\n"
                 "【标题】测试测试测试事件\n"
                 "【事件发生时间】2026-05-24 09:30\n"
-                "【机楼】A楼\n"
-                "【来源】BMS\n"
-                "【等级】I3\n"
+                f"{identity_fields}"
                 "【概述】测试测试测试\n"
                 f"【进展】{progress}"
             )
 
         def payload(action_type: str, local_id: str, status: str) -> dict:
+            data_dict = {
+                "active_item_id": local_id,
+                "record_id": local_id,
+                "_is_placeholder_record": True,
+                "notice_type": "事件通告",
+                "text": event_text(status, f"{status}进展"),
+                "time_str": "2026-05-24 09:30",
+                "event_source": "BMS",
+            }
+            if status == "开始":
+                data_dict["building"] = "A楼"
+                data_dict["level"] = "I3"
             return {
                 "action_type": action_type,
-                "data_dict": {
-                    "active_item_id": local_id,
-                    "record_id": local_id,
-                    "_is_placeholder_record": True,
-                    "notice_type": "事件通告",
-                    "text": event_text(status, f"{status}进展"),
-                    "time_str": "2026-05-24 09:30",
-                    "building": "A楼",
-                    "event_source": "BMS",
-                    "level": "I3",
-                },
+                "data_dict": data_dict,
                 "response_time": "2026-05-24 09:30",
                 "recover_selected": False,
                 "robot_group_choice": "auto",
@@ -4791,7 +4803,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_workflow_delegate_qt_notice_upload_uses_backend_result(self):
         class _Controller:
+            def __init__(self):
+                self.payload = None
+
             def execute_qt_notice_upload(self, payload):
+                self.payload = dict(payload or {})
                 return {
                     "ok": True,
                     "name": "上传",
@@ -4800,12 +4816,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "real_record_id": "rec-backend-2",
                 }
 
-        harness = _WorkflowBackendDelegateHarness(_Controller())
+        controller = _Controller()
+        harness = _WorkflowBackendDelegateHarness(controller)
         handled = harness._delegate_qt_notice_upload_to_backend(
             data_snapshot={
                 "record_id": "placeholder-2",
                 "notice_type": "维保通告",
                 "text": "测试测试测试",
+                "_upload_operation_id": "qt_notice:delegate-test",
             },
             screenshot_bytes=None,
             extra_images=[],
@@ -4817,7 +4835,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(
             harness.finished,
-            [("上传", True, "rec-backend-2", "placeholder-2")],
+            [
+                (
+                    "上传",
+                    True,
+                    "rec-backend-2",
+                    "placeholder-2",
+                    "qt_notice:delegate-test",
+                )
+            ],
+        )
+        self.assertEqual(
+            controller.payload["operation_id"],
+            "qt_notice:delegate-test",
+        )
+        self.assertNotIn(
+            "_upload_operation_id",
+            controller.payload["data_dict"],
         )
 
     def test_workflow_delegate_applies_change_today_in_progress_result(self):
@@ -5386,6 +5420,51 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(payload["other"][0]["data"]["record_id"], "current-record")
             self.assertEqual([item["active_item_id"] for item in qt_items], ["current-active"])
+
+    def test_active_cache_store_never_restores_transient_upload_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "active_cache.json"
+            state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-upload-runtime",
+                    "record_id": "rec-upload-runtime",
+                    "target_record_id": "rec-upload-runtime",
+                    "notice_type": "事件通告",
+                    "text": "【事件通告】状态：更新\n【标题】缓存状态测试",
+                    "_upload_in_progress": True,
+                    "_upload_pending_dialog": True,
+                    "_upload_started_monotonic": 123.0,
+                    "_last_upload_error": "旧失败状态",
+                    "_pending_upload_hash": "old-hash",
+                    "_upload_operation_id": "qt_notice:old",
+                    "_has_unuploaded_changes": False,
+                },
+                section="event",
+                origin="qt",
+            )
+            cache_store = ActiveCacheStore(str(cache_path), state_store)
+
+            loaded = cache_store.load_payload()["event"][0]["data"]
+            for field in (
+                "_upload_in_progress",
+                "_upload_pending_dialog",
+                "_upload_started_monotonic",
+                "_last_upload_error",
+                "_pending_upload_hash",
+                "_upload_operation_id",
+            ):
+                self.assertNotIn(field, loaded)
+            self.assertFalse(loaded["_has_unuploaded_changes"])
+
+            loaded["_upload_in_progress"] = True
+            loaded["_last_upload_error"] = "再次失败"
+            loaded["_upload_operation_id"] = "qt_notice:new"
+            self.assertTrue(cache_store.upsert_record(loaded))
+            persisted = state_store.list_qt_active_items()[0]["payload"]
+            self.assertNotIn("_upload_in_progress", persisted)
+            self.assertNotIn("_last_upload_error", persisted)
+            self.assertNotIn("_upload_operation_id", persisted)
 
     def test_active_cache_store_keeps_cross_month_ongoing_items(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9832,6 +9911,30 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(mapped["reason"], "串口异常")
         self.assertEqual(mapped["symptom"], "通讯中断告警")
         self.assertEqual(mapped["progress"], "处理中")
+
+    def test_target_record_form_fields_preserve_event_identity_fields(self):
+        service = _TestMaintenancePortalService()
+        mapped = service._target_record_form_fields(
+            work_type="event",
+            notice_type="事件通告",
+            target_record={
+                "display_fields": {
+                    "告警描述": "巡检发现B-127冷冻站A区管道渗水",
+                    "机楼": "B楼",
+                    "事件等级": "I3",
+                    "事件发现来源": "巡检发现",
+                    "事件发生时间": "2026-08-11 09:37",
+                }
+            },
+        )
+
+        self.assertEqual(mapped["title"], "巡检发现B-127冷冻站A区管道渗水")
+        self.assertEqual(mapped["building"], "B楼")
+        self.assertEqual(mapped["level"], "I3")
+        self.assertEqual(mapped["source"], "巡检发现")
+        self.assertEqual(mapped["event_source"], "巡检发现")
+        self.assertEqual(mapped["start_time"], "2026-08-11T09:37")
+        self.assertEqual(mapped["time_str"], "2026-08-11T09:37")
 
     def test_notice_target_candidates_support_repair_source_lookup(self):
         service = _TestMaintenancePortalService()
@@ -19465,6 +19568,43 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "测试",
         )
 
+    def test_backend_process_controller_recovers_completed_upload_after_timeout(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
+        payload = {
+            "action_type": "upload",
+            "operation_id": "qt_notice:recover",
+            "data_dict": {
+                "record_id": "local-recover",
+                "notice_type": "事件通告",
+            },
+        }
+        operation = {
+            "status": "completed",
+            "target_record_id": "recv-recovered",
+            "observed_record_version": "version-recovered",
+            "result": {
+                "record_id": "recv-recovered",
+                "message": "recv-recovered",
+            },
+        }
+
+        with patch.object(
+            controller,
+            "submit_qt_command",
+            side_effect=TimeoutError("timed out"),
+        ), patch.object(
+            controller,
+            "get_qt_notice_operation",
+            return_value=operation,
+        ):
+            result = controller.execute_qt_notice_upload(payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["record_id"], "local-recover")
+        self.assertEqual(result["real_record_id"], "recv-recovered")
+        self.assertEqual(result["record_version"], "version-recovered")
+        self.assertTrue(result["operation_recovered"])
+
     def test_backend_process_controller_dispatches_notice_outbox_event(self):
         controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
         received: list[dict] = []
@@ -19756,6 +19896,29 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(change["source_app_token"], "")
         self.assertFalse(change["skip_personal_message"])
         self.assertGreaterEqual(len(change["recipients"]), 2)
+
+        campus_change = service.prepare_change_action(
+            {
+                "manual": True,
+                "manual_id": "manual:change:campus",
+                "action": "start",
+                "scope": "CAMPUS",
+                "title": "EA118园区测试变更",
+                "specialty": "电气",
+                "start_time": "2026-05-15T09:30",
+                "end_time": "2026-05-15T18:30",
+                "location": "EA118园区ABCDE楼",
+            },
+            job_id="job3-campus",
+        )
+        self.assertEqual(
+            campus_change["building_codes"],
+            ["A", "B", "C", "D", "E"],
+        )
+        self.assertEqual(
+            campus_change["building"],
+            "A楼、B楼、C楼、D楼、E楼",
+        )
 
         repair = service.prepare_repair_action(
             {
@@ -20050,6 +20213,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('data-work-type="change"', detail_html)
         self.assertIn('name="work_type" value="change"', detail_html)
         self.assertIn('name="notice_type" value="变更通告"', detail_html)
+
+    def test_workbench_lite_change_form_selects_compact_campus_buildings(self):
+        work_type, action, draft = parse_pasted_notice_to_draft(
+            "【变更通告】状态：开始\n"
+            "【名称】EA118园区测试变更\n"
+            "【位置】EA118园区ABCDE楼"
+        )
+        self.assertEqual(work_type, "change")
+        self.assertEqual(action, "start")
+        self.assertEqual(draft.get("building_codes"), ["A", "B", "C", "D", "E"])
+
+        detail_html = workbench_lite_module._detail_form(
+            record=None,
+            ongoing_item=None,
+            scope="CAMPUS",
+            work_type=work_type,
+            manual=True,
+            parsed_draft=draft,
+        )
+
+        self.assertIn("楼栋/范围", detail_html)
+        for code in ("A", "B", "C", "D", "E"):
+            self.assertIn(
+                f'name="building_codes" value="{code}" checked',
+                detail_html,
+            )
+        self.assertIn('name="building_codes" value="H">', detail_html)
+        self.assertIn(
+            'name="building" value="A楼、B楼、C楼、D楼、E楼"',
+            detail_html,
+        )
+
+    def test_workbench_lite_paste_accepts_building_scope_section(self):
+        work_type, action, draft = parse_pasted_notice_to_draft(
+            "【变更通告】状态：开始\n"
+            "【名称】园区测试变更\n"
+            "【楼栋/范围】EA118园区ABCDE楼\n"
+            "【内容】测试"
+        )
+
+        self.assertEqual(work_type, "change")
+        self.assertEqual(action, "start")
+        self.assertEqual(draft.get("building_codes"), ["A", "B", "C", "D", "E"])
+        self.assertEqual(draft.get("building"), "A楼、B楼、C楼、D楼、E楼")
+
+    def test_workbench_lite_paste_falls_back_to_full_text_for_buildings(self):
+        work_type, _action, draft = parse_pasted_notice_to_draft(
+            "【变更通告】状态：开始\n"
+            "【名称】园区测试变更\n"
+            "【内容】本次操作覆盖EA118园区ABCDE楼"
+        )
+
+        self.assertEqual(work_type, "change")
+        self.assertEqual(draft.get("building_codes"), ["A", "B", "C", "D", "E"])
+
+    def test_workbench_lite_old_record_recovers_buildings_from_location(self):
+        draft = workbench_lite_module._draft_from_record(
+            {
+                "work_type": "change",
+                "title": "EA118园区测试变更",
+                "location": "EA118园区ABCDE楼",
+            },
+            work_type="change",
+        )
+
+        self.assertEqual(draft.get("building_codes"), ["A", "B", "C", "D", "E"])
 
     def test_repair_cmdb_remote_snapshot_reads_more_than_first_page(self):
         service = _TestMaintenancePortalService()
@@ -29905,6 +30134,33 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "【名称】A楼多维手工修改后的名称",
                 payload["text"],
             )
+
+    def test_event_target_snapshot_builds_qt_text_from_remote_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            projected = service._target_snapshot_active_payload(
+                work_type=WORK_TYPE_EVENT,
+                notice_type="事件通告",
+                target_record={
+                    "record_id": "rec_event_remote_text",
+                    "display_fields": {
+                        "告警描述": "巡检发现A楼空调压差过大",
+                        "机楼": "A楼",
+                        "专业": "暖通",
+                        "事件发现来源": "巡检发现",
+                        "事件发生时间": "2026-08-11 11:05",
+                    },
+                    "raw_fields": {},
+                },
+            )
+
+            self.assertEqual(projected["status"], "更新")
+            self.assertEqual(projected["title"], "巡检发现A楼空调压差过大")
+            self.assertIn("【事件通告】状态：更新", projected["text"])
+            self.assertIn("【来源】巡检发现", projected["text"])
+            self.assertIn("【时间】2026-08-11 11:05", projected["text"])
+            self.assertIn("【概述】巡检发现A楼空调压差过大", projected["text"])
+            self.assertNotIn("rec_event_remote_text", projected["text"])
 
     def test_target_replica_missing_config_never_clears_active_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

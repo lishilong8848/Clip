@@ -15,6 +15,7 @@ from .display_state import (
     detect_level_from_notice_text,
     normalize_active_item_data,
     notice_supports_level_lock,
+    persistent_active_item_data,
 )
 
 
@@ -56,7 +57,7 @@ class ActiveCacheStore:
             data = item.get("payload")
             if not isinstance(data, dict):
                 continue
-            normalized = dict(data)
+            normalized = persistent_active_item_data(data)
             active_item_id = str(item.get("active_item_id") or "").strip()
             if active_item_id and not str(normalized.get("active_item_id") or "").strip():
                 normalized["active_item_id"] = active_item_id
@@ -69,6 +70,18 @@ class ActiveCacheStore:
         for section in self._SECTIONS:
             if not isinstance(payload.get(section), list):
                 payload[section] = []
+                continue
+            cleaned_entries = []
+            for entry in payload[section]:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data")
+                if not isinstance(data, dict):
+                    continue
+                cleaned_entry = dict(entry)
+                cleaned_entry["data"] = persistent_active_item_data(data)
+                cleaned_entries.append(cleaned_entry)
+            payload[section] = cleaned_entries
         if not isinstance(payload.get("clipboard_queue"), list):
             payload["clipboard_queue"] = []
         return payload
@@ -257,7 +270,7 @@ class ActiveCacheStore:
         )
         if len(matches) == 1:
             item = matches[0]
-            data = dict(item.get("payload") or {})
+            data = persistent_active_item_data(item.get("payload") or {})
             changed = False
             for key, value in patch.items():
                 old_value = data.get(key, None)
@@ -272,7 +285,7 @@ class ActiveCacheStore:
             if not changed:
                 return False
             return self._state_store.upsert_qt_active_item(
-                data,
+                persistent_active_item_data(data),
                 section=str(item.get("section") or ""),
                 sort_order=int(item.get("sort_order") or 0),
                 origin=str(item.get("origin") or ""),
@@ -283,7 +296,7 @@ class ActiveCacheStore:
         if not isinstance(data_dict, dict):
             return False
         normalized = normalize_notice_identity_payload(
-            normalize_active_item_data(data_dict)
+            persistent_active_item_data(data_dict)
         )
         record_id = self._normalize_key(
             canonical_target_record_id(normalized)
@@ -332,7 +345,7 @@ class ActiveCacheStore:
             try:
                 changed = False
                 for item in self._state_store.list_qt_active_items():
-                    data = dict(item.get("payload") or {})
+                    data = persistent_active_item_data(item.get("payload") or {})
                     if not self._record_matches_target_id(data, old_id):
                         continue
                     data["record_id"] = new_id

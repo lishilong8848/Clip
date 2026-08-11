@@ -8,6 +8,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from upload_event_module.building_normalizer import (  # noqa: E402
+    extract_building_codes,
     normalize_building_name,
     normalize_buildings_value,
 )
@@ -51,6 +52,19 @@ class QtBuildingPrefillTests(unittest.TestCase):
             MainWindowRecordsMixin._infer_buildings_from_notice_text(samples["110"]),
             ["110站"],
         )
+
+    def test_infers_compact_multi_building_without_misreading_ea118(self):
+        text = (
+            "【变更通告】状态：开始\n"
+            "【名称】EA118园区系统验证测试变更\n"
+            "【位置】EA118园区ABCDE楼"
+        )
+        self.assertEqual(
+            MainWindowRecordsMixin._infer_buildings_from_notice_text(text),
+            ["A楼", "B楼", "C楼", "D楼", "E楼"],
+        )
+        self.assertEqual(extract_building_codes("EA118机房"), [])
+        self.assertEqual(extract_building_codes("南通A"), ["A"])
 
 
 if __name__ == "__main__":

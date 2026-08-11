@@ -40,6 +40,7 @@ CRITICAL_GUARD_MAX_RENDER_PIXELS = 48_000_000
 CRITICAL_GUARD_MAX_RENDER_DIMENSION = 20_000
 CRITICAL_GUARD_MIN_RENDER_SCALE = 1.0
 CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION = "2"
+CRITICAL_GUARD_MAX_CHECK_ITEMS = 200
 
 _CHECK_SHEET_RULES = {
     "设备安全": {
@@ -295,7 +296,84 @@ def sheet_definition(sheet_name: Any) -> dict[str, Any]:
     raise CriticalGuardError(f"重保模板缺少 Sheet：{normalized}")
 
 
-def default_response_cells(sheet_name: Any, scope: Any, *, today: str = "") -> dict[str, Any]:
+def default_check_items(sheet_name: Any) -> list[dict[str, Any]]:
+    definition = sheet_definition(sheet_name)
+    if definition.get("kind") != "check":
+        return []
+    return [dict(item) for item in definition.get("items") or []]
+
+
+def normalize_check_items(
+    sheet_name: Any,
+    payload: Any,
+    *,
+    fallback_to_default: bool = True,
+) -> list[dict[str, Any]]:
+    definition = sheet_definition(sheet_name)
+    if definition.get("kind") != "check":
+        raise CriticalGuardError("该检查表不支持编辑检查项。")
+    source = payload if isinstance(payload, list) else []
+    if not source and fallback_to_default:
+        source = default_check_items(sheet_name)
+    if not source:
+        raise CriticalGuardError("检查模板至少需要保留一条检查内容。")
+    if len(source) > CRITICAL_GUARD_MAX_CHECK_ITEMS:
+        raise CriticalGuardError(
+            f"单张检查表最多支持 {CRITICAL_GUARD_MAX_CHECK_ITEMS} 条检查内容。"
+        )
+
+    normalized: list[dict[str, Any]] = []
+    used_keys: set[str] = set()
+    for index, source_item in enumerate(source):
+        item = source_item if isinstance(source_item, dict) else {}
+        category = _clean_text(item.get("category"), limit=200)
+        content = _clean_text(item.get("content"), limit=2000)
+        if not content:
+            raise CriticalGuardError(f"第 {index + 1} 条检查内容不能为空。")
+        raw_key = re.sub(
+            r"[^0-9A-Za-z_.:-]+",
+            "_",
+            _clean_text(item.get("key"), limit=128),
+        ).strip("_.:-")
+        if not raw_key or raw_key in used_keys:
+            seed = f"{index}\0{category}\0{content}".encode("utf-8")
+            raw_key = f"item_{hashlib.sha256(seed).hexdigest()[:20]}"
+            suffix = 2
+            candidate = raw_key
+            while candidate in used_keys:
+                candidate = f"{raw_key}_{suffix}"
+                suffix += 1
+            raw_key = candidate
+        used_keys.add(raw_key)
+        normalized.append(
+            {
+                "key": raw_key,
+                "category": category,
+                "content": content,
+            }
+        )
+    return normalized
+
+
+def response_check_items(sheet_name: Any, cells: Any) -> list[dict[str, Any]]:
+    source = cells if isinstance(cells, dict) else {}
+    items = source.get("template_items")
+    return normalize_check_items(
+        sheet_name,
+        items,
+        fallback_to_default=True,
+    )
+
+
+def default_response_cells(
+    sheet_name: Any,
+    scope: Any,
+    *,
+    today: str = "",
+    template_items: list[dict[str, Any]] | None = None,
+    template_revision: int = 0,
+    template_customized: bool = False,
+) -> dict[str, Any]:
     definition = sheet_definition(sheet_name)
     scope_code = normalize_scope(scope)
     date_text = str(today or dt.date.today().isoformat()).strip()
@@ -304,9 +382,17 @@ def default_response_cells(sheet_name: Any, scope: Any, *, today: str = "") -> d
         "check_date": date_text,
     }
     if definition["kind"] == "check":
+        items = normalize_check_items(
+            sheet_name,
+            template_items,
+            fallback_to_default=True,
+        )
+        base["template_items"] = items
+        base["template_revision"] = max(0, int(template_revision or 0))
+        base["template_customized"] = bool(template_customized)
         base["checks"] = {
             str(item["key"]): {"status": "normal", "note": ""}
-            for item in definition.get("items") or []
+            for item in items
         }
         base["suggestions"] = ""
         if definition.get("has_weather"):
@@ -354,9 +440,29 @@ def normalize_response_cells(
 ) -> dict[str, Any]:
     definition = sheet_definition(sheet_name)
     source = payload if isinstance(payload, dict) else {}
-    result = default_response_cells(sheet_name, scope)
     if isinstance(fallback, dict):
         source = {**fallback, **source}
+    template_items = (
+        source.get("template_items")
+        if definition.get("kind") == "check"
+        else None
+    )
+    try:
+        template_revision = max(0, int(source.get("template_revision") or 0))
+    except (TypeError, ValueError):
+        template_revision = 0
+    template_customized = source.get("template_customized")
+    if template_customized is None:
+        # Responses created before the explicit flag used a positive revision
+        # to represent a building-specific template.
+        template_customized = template_revision > 0
+    result = default_response_cells(
+        sheet_name,
+        scope,
+        template_items=template_items,
+        template_revision=template_revision,
+        template_customized=bool(template_customized),
+    )
     result["machine_room"] = f"南通机房{normalize_scope(scope)}楼"
     result["check_date"] = _normalize_date(source.get("check_date") or result["check_date"])
     if definition.get("input_mode") == "file":
@@ -373,7 +479,7 @@ def normalize_response_cells(
     if definition["kind"] == "check":
         source_checks = source.get("checks") if isinstance(source.get("checks"), dict) else {}
         checks: dict[str, dict[str, str]] = {}
-        for item in definition.get("items") or []:
+        for item in result.get("template_items") or []:
             key = str(item["key"])
             row = source_checks.get(key) if isinstance(source_checks.get(key), dict) else {}
             status = "abnormal" if str(row.get("status") or "").lower() == "abnormal" else "normal"
@@ -444,10 +550,10 @@ def validate_response_for_generation(
         return
     missing_notes: list[int] = []
     checks = cells.get("checks") if isinstance(cells.get("checks"), dict) else {}
-    for item in definition.get("items") or []:
+    for index, item in enumerate(response_check_items(sheet_name, cells), start=1):
         row = checks.get(str(item["key"])) if isinstance(checks.get(str(item["key"])), dict) else {}
         if row.get("status") == "abnormal" and not _clean_text(row.get("note")):
-            missing_notes.append(int(item["row"]))
+            missing_notes.append(index)
     if missing_notes:
         preview = "、".join(str(row) for row in missing_notes[:8])
         suffix = "等" if len(missing_notes) > 8 else ""
@@ -456,15 +562,67 @@ def validate_response_for_generation(
         raise CriticalGuardError("生成图片前请至少选择一名检查人签名。")
 
 
-def memory_cells_for_new_task(sheet_name: Any, scope: Any, memory: Any) -> dict[str, Any]:
+def reconcile_check_results(
+    sheet_name: Any,
+    previous_cells: Any,
+    next_cells: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep results only when a template row still describes the same check."""
+    previous_source = previous_cells if isinstance(previous_cells, dict) else {}
+    previous_items = {
+        str(item["key"]): item
+        for item in response_check_items(sheet_name, previous_source)
+    }
+    result = dict(next_cells or {})
+    result_checks = (
+        dict(result.get("checks")) if isinstance(result.get("checks"), dict) else {}
+    )
+    for item in response_check_items(sheet_name, result):
+        key = str(item["key"])
+        previous = previous_items.get(key)
+        unchanged = bool(previous) and all(
+            _clean_text(previous.get(field), limit=limit)
+            == _clean_text(item.get(field), limit=limit)
+            for field, limit in (("category", 200), ("content", 2000))
+        )
+        if not unchanged:
+            result_checks[key] = {"status": "normal", "note": ""}
+    result["checks"] = result_checks
+    return result
+
+
+def memory_cells_for_new_task(
+    sheet_name: Any,
+    scope: Any,
+    memory: Any,
+    *,
+    template_items: list[dict[str, Any]] | None = None,
+    template_revision: int = 0,
+    template_customized: bool = False,
+) -> dict[str, Any]:
     source = memory if isinstance(memory, dict) else {}
+    if sheet_definition(sheet_name).get("kind") == "check":
+        previous_cells = source
+        next_items = normalize_check_items(
+            sheet_name,
+            template_items,
+            fallback_to_default=True,
+        )
+        source = {
+            **source,
+            "template_items": next_items,
+            "template_revision": max(0, int(template_revision or 0)),
+            "template_customized": bool(template_customized),
+        }
     result = normalize_response_cells(sheet_name, scope, source)
+    if sheet_definition(sheet_name).get("kind") == "check":
+        result = reconcile_check_results(sheet_name, previous_cells, result)
     result["machine_room"] = f"南通机房{normalize_scope(scope)}楼"
     result["check_date"] = dt.date.today().isoformat()
     return result
 
 
-def critical_guard_sheet_range(sheet_name: Any) -> str:
+def critical_guard_sheet_range(sheet_name: Any, *, item_count: int | None = None) -> str:
     normalized = normalize_sheet_name(sheet_name)
     if normalized == "物资检查清单":
         return "A1:H18"
@@ -472,7 +630,12 @@ def critical_guard_sheet_range(sheet_name: Any) -> str:
         return "A1:J53"
     rule = _CHECK_SHEET_RULES[normalized]
     last_column = "F" if normalized == "灾害专项" else "E"
-    return f"B2:{last_column}{int(rule['suggestions_row']) + 1}"
+    default_count = len(default_check_items(normalized))
+    count = default_count if item_count is None else max(1, int(item_count or 0))
+    return (
+        f"B2:{last_column}"
+        f"{int(rule['suggestions_row']) + 1 + count - default_count}"
+    )
 
 
 def _validate_xlsx_archive(source_path: Path) -> None:
@@ -611,6 +774,14 @@ def _compose_critical_guard_signatures(
     return output.getvalue(), canvas.width, canvas.height, rows
 
 
+def _set_excel_text(cell: Any, value: Any, *, limit: int = 5000) -> None:
+    """Write user-controlled content as text, never as an Excel formula."""
+    text = _clean_text(value, limit=limit)
+    cell.value = text
+    if text:
+        cell.data_type = "s"
+
+
 def _write_value_right_of_label(ws: Any, label_text: str, value: Any) -> str:
     """Keep the template label in place and write its value in the cell to the right."""
     label_cell = None
@@ -651,8 +822,203 @@ def _write_value_right_of_label(ws: Any, label_text: str, value: Any) -> str:
             target_cell.border = target_border
         target_cell.alignment = copy(label_cell.alignment)
     label_cell.value = f"{normalized_label}："
-    target_cell.value = value
+    _set_excel_text(target_cell, value, limit=500)
     return target_cell.coordinate
+
+
+def _prepare_dynamic_check_rows(
+    ws: Any,
+    *,
+    sheet_name: str,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Resize the source check area while keeping its footer and styles intact."""
+    from openpyxl.utils import get_column_letter
+
+    rule = _CHECK_SHEET_RULES[sheet_name]
+    start_row = int(rule["start"])
+    original_end_row = int(rule["end"])
+    original_count = original_end_row - start_row + 1
+    item_count = len(items)
+    delta = item_count - original_count
+    footer_start_row = (
+        int(rule["suggestions_row"]) - 1
+        if sheet_name == "灾害专项"
+        else int(rule["suggestions_row"])
+    )
+    max_column = max(
+        int(rule["note_col"]),
+        max(int(value) for value in rule["category_cols"]),
+    )
+
+    default_items = normalize_check_items(
+        sheet_name,
+        default_check_items(sheet_name),
+        fallback_to_default=True,
+    )
+    comparable_items = [
+        {
+            "key": str(item.get("key") or ""),
+            "category": _clean_text(item.get("category"), limit=200),
+            "content": _clean_text(item.get("content"), limit=2000),
+        }
+        for item in items
+    ]
+    if comparable_items == default_items:
+        signature_row = int(rule["suggestions_row"]) + 1
+        return {
+            "item_rows": list(range(start_row, original_end_row + 1)),
+            "suggestions_row": int(rule["suggestions_row"]),
+            "signature_row": signature_row,
+            "sheet_range": critical_guard_sheet_range(sheet_name),
+            "last_column": get_column_letter(max_column),
+        }
+
+    source_row = start_row
+    height_source_row = start_row + 1 if sheet_name == "灾害专项" else start_row
+    source_styles = {
+        column: copy(ws.cell(row=source_row, column=column)._style)
+        for column in range(1, max_column + 1)
+    }
+    source_alignments = {
+        column: copy(ws.cell(row=source_row, column=column).alignment)
+        for column in range(1, max_column + 1)
+    }
+    source_borders = {
+        column: copy(ws.cell(row=source_row, column=column).border)
+        for column in range(1, max_column + 1)
+    }
+    content_border = copy(
+        ws.cell(row=source_row, column=int(rule["content_col"])).border
+    )
+    source_height = ws.row_dimensions[height_source_row].height
+
+    moved_merges: list[tuple[int, int, int, int]] = []
+    for merged in list(ws.merged_cells.ranges):
+        if int(merged.max_row) < start_row:
+            continue
+        moved_merges.append(
+            (
+                int(merged.min_col),
+                int(merged.min_row),
+                int(merged.max_col),
+                int(merged.max_row),
+            )
+        )
+        ws.unmerge_cells(str(merged))
+
+    if delta > 0:
+        ws.insert_rows(footer_start_row, amount=delta)
+    elif delta < 0:
+        ws.delete_rows(start_row + item_count, amount=-delta)
+
+    for min_col, min_row, max_col, max_row in moved_merges:
+        if min_row < footer_start_row:
+            # Category merges are intentionally replaced by repeated values so
+            # user-added rows remain independently editable and bordered.
+            continue
+        shifted_min_row = min_row + delta
+        shifted_max_row = max_row + delta
+        ws.merge_cells(
+            start_row=shifted_min_row,
+            start_column=min_col,
+            end_row=shifted_max_row,
+            end_column=max_col,
+        )
+
+    category_matrix: list[list[str]] = []
+    for index, item in enumerate(items):
+        row_number = start_row + index
+        category_text = _clean_text(item.get("category"), limit=200)
+        content_text = _clean_text(item.get("content"), limit=2000)
+        content_lines = max(
+            1,
+            math.ceil(len(content_text) / (38 if sheet_name == "灾害专项" else 54)),
+        )
+        category_lines = max(1, math.ceil(len(category_text) / 14))
+        base_height = float(source_height or 20.0)
+        ws.row_dimensions[row_number].height = max(
+            base_height,
+            min(90.0, float(max(content_lines, category_lines) * 15 + 4)),
+        )
+        for column in range(1, max_column + 1):
+            cell = ws.cell(row=row_number, column=column)
+            cell._style = copy(source_styles[column])
+            alignment = copy(source_alignments[column])
+            if column >= min(int(value) for value in rule["category_cols"]):
+                alignment.wrap_text = True
+                alignment.vertical = "center"
+            cell.alignment = alignment
+            cell.border = (
+                copy(content_border)
+                if column in set(int(value) for value in rule["category_cols"])
+                else copy(source_borders[column])
+            )
+            cell.value = None
+
+        category_column_count = len(rule["category_cols"])
+        category_parts = (
+            [category_text]
+            if category_column_count == 1
+            else [
+                part.strip()
+                for part in re.split(
+                    r"\s*/\s*",
+                    category_text,
+                    maxsplit=category_column_count - 1,
+                )
+            ]
+        )
+        category_parts = [part for part in category_parts if part]
+        normalized_category_parts = [
+            category_parts[category_index]
+            if category_index < len(category_parts)
+            else ""
+            for category_index in range(len(rule["category_cols"]))
+        ]
+        category_matrix.append(normalized_category_parts)
+        for category_index, column in enumerate(rule["category_cols"]):
+            _set_excel_text(
+                ws.cell(row=row_number, column=int(column)),
+                normalized_category_parts[category_index],
+                limit=200,
+            )
+        _set_excel_text(
+            ws.cell(row=row_number, column=int(rule["content_col"])),
+            content_text,
+            limit=2000,
+        )
+
+    for category_index, column in enumerate(rule["category_cols"]):
+        group_start = 0
+        while group_start < item_count:
+            prefix = tuple(category_matrix[group_start][: category_index + 1])
+            group_end = group_start + 1
+            while (
+                group_end < item_count
+                and tuple(category_matrix[group_end][: category_index + 1]) == prefix
+            ):
+                group_end += 1
+            if prefix[-1] and group_end - group_start > 1:
+                ws.merge_cells(
+                    start_row=start_row + group_start,
+                    start_column=int(column),
+                    end_row=start_row + group_end - 1,
+                    end_column=int(column),
+                )
+            group_start = group_end
+
+    suggestions_row = int(rule["suggestions_row"]) + delta
+    signature_row = suggestions_row + 1
+    return {
+        "item_rows": [start_row + index for index in range(item_count)],
+        "suggestions_row": suggestions_row,
+        "signature_row": signature_row,
+        "sheet_range": (
+            f"B2:{'F' if sheet_name == '灾害专项' else 'E'}{signature_row}"
+        ),
+        "last_column": get_column_letter(max_column),
+    }
 
 
 def _write_check_sheet(
@@ -661,51 +1027,66 @@ def _write_check_sheet(
     sheet_name: str,
     cells: dict[str, Any],
     signatures: list[dict[str, Any]] | None,
-) -> list[Any]:
+) -> tuple[list[Any], str]:
     from openpyxl.drawing.image import Image as ExcelImage
     from openpyxl.utils import get_column_letter
 
     rule = _CHECK_SHEET_RULES[sheet_name]
+    items = response_check_items(sheet_name, cells)
+    layout = _prepare_dynamic_check_rows(
+        ws,
+        sheet_name=sheet_name,
+        items=items,
+    )
     if sheet_name == "灾害专项":
         weather = cells.get("weather") if isinstance(cells.get("weather"), dict) else {}
-        ws["D3"] = _clean_text(weather.get("level1"), limit=500)
-        ws["D4"] = _clean_text(weather.get("level2"), limit=500)
-        ws["D5"] = _clean_text(weather.get("current"), limit=500)
-        ws["D6"] = _clean_text(cells.get("machine_room"), limit=80)
+        _set_excel_text(ws["D3"], weather.get("level1"), limit=500)
+        _set_excel_text(ws["D4"], weather.get("level2"), limit=500)
+        _set_excel_text(ws["D5"], weather.get("current"), limit=500)
+        _set_excel_text(ws["D6"], cells.get("machine_room"), limit=80)
         _write_value_right_of_label(
             ws,
             "检查日期",
             _normalize_date(cells.get("check_date")),
         )
-        signature_anchor = "D31"
-        signature_row = 31
+        signature_row = int(layout["signature_row"])
+        signature_anchor = f"D{signature_row}"
         signature_start_col = 4
         signature_end_col = 6
     else:
-        ws["C3"] = _clean_text(cells.get("machine_room"), limit=80)
+        _set_excel_text(ws["C3"], cells.get("machine_room"), limit=80)
         _write_value_right_of_label(
             ws,
             "检查日期",
             _normalize_date(cells.get("check_date")),
         )
-        signature_row = int(rule["suggestions_row"]) + 1
+        signature_row = int(layout["signature_row"])
         signature_anchor = f"C{signature_row}"
         signature_start_col = 3
         signature_end_col = 5
 
     checks = cells.get("checks") if isinstance(cells.get("checks"), dict) else {}
-    for item in sheet_definition(sheet_name).get("items") or []:
-        row_number = int(item["row"])
+    for item, row_number in zip(items, layout["item_rows"]):
         row = checks.get(str(item["key"])) if isinstance(checks.get(str(item["key"])), dict) else {}
         abnormal = str(row.get("status") or "").strip().lower() == "abnormal"
-        ws.cell(row=row_number, column=int(rule["result_col"])).value = "异常" if abnormal else "正常"
-        ws.cell(row=row_number, column=int(rule["note_col"])).value = _clean_text(
-            row.get("note"), limit=2000
+        _set_excel_text(
+            ws.cell(row=row_number, column=int(rule["result_col"])),
+            "异常" if abnormal else "正常",
+            limit=10,
         )
-    ws.cell(
-        row=int(rule["suggestions_row"]),
-        column=int(rule["content_col"]),
-    ).value = _clean_text(cells.get("suggestions"), limit=5000)
+        _set_excel_text(
+            ws.cell(row=row_number, column=int(rule["note_col"])),
+            row.get("note"),
+            limit=2000,
+        )
+    _set_excel_text(
+        ws.cell(
+            row=int(layout["suggestions_row"]),
+            column=int(rule["content_col"]),
+        ),
+        cells.get("suggestions"),
+        limit=5000,
+    )
 
     image_handles: list[Any] = []
     signature_png, original_width, original_height, _signature_rows = (
@@ -737,7 +1118,7 @@ def _write_check_sheet(
         excel_image.height = signature_height_px
         ws.add_image(excel_image, signature_anchor)
         image_handles.extend([buffer, excel_image])
-    return image_handles
+    return image_handles, str(layout["sheet_range"])
 
 
 def _write_materials_sheet(ws: Any, cells: dict[str, Any]) -> None:
@@ -812,10 +1193,11 @@ def build_critical_guard_workbook(
         keep_links=False,
     )
     image_handles: list[Any] = []
+    sheet_range = critical_guard_sheet_range(normalized_sheet)
     try:
         ws = workbook[normalized_sheet]
         if normalized_sheet in CRITICAL_GUARD_CHECK_SHEETS:
-            image_handles = _write_check_sheet(
+            image_handles, sheet_range = _write_check_sheet(
                 ws,
                 sheet_name=normalized_sheet,
                 cells=normalized_cells,
@@ -826,7 +1208,7 @@ def build_critical_guard_workbook(
         else:
             _write_contacts_sheet(ws, normalized_cells)
         ws.sheet_view.showGridLines = False
-        ws.print_area = critical_guard_sheet_range(normalized_sheet)
+        ws.print_area = sheet_range
         workbook.active = workbook.sheetnames.index(normalized_sheet)
         workbook.save(output_path)
     except Exception:
@@ -844,7 +1226,7 @@ def build_critical_guard_workbook(
         "path": str(output_path),
         "sha256": _file_sha256(output_path),
         "size": output_path.stat().st_size,
-        "sheet_range": critical_guard_sheet_range(normalized_sheet),
+        "sheet_range": sheet_range,
     }
 
 
@@ -1903,7 +2285,7 @@ def render_critical_guard_image(
     estimated_height = 260
     if definition["kind"] == "check":
         columns = [230, 830, 190, 470]
-        for item in definition.get("items") or []:
+        for item in response_check_items(sheet_name, cells):
             check = (cells.get("checks") or {}).get(str(item["key"]), {})
             estimated_height += row_height(
                 measure_draw,
@@ -1980,7 +2362,7 @@ def render_critical_guard_image(
             draw_cell(draw, (start, y, end, y + 54), label, fill=header_fill, use_font=head_font, color=blue, align="center")
         y += 54
         checks = cells.get("checks") if isinstance(cells.get("checks"), dict) else {}
-        items = list(definition.get("items") or [])
+        items = response_check_items(sheet_name, cells)
         heights: list[int] = []
         for item in items:
             check = checks.get(str(item["key"])) if isinstance(checks.get(str(item["key"])), dict) else {}

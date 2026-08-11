@@ -476,11 +476,14 @@ class ClipboardItemWidget(QWidget):
         self._delete_interaction_enabled = True
         self._delete_confirm_pending = False
         # 跟踪内容是否未上传（新建/更新后但未点上传按钮）
-        self.has_unuploaded_changes = True
+        self.has_unuploaded_changes = bool(
+            self.data.get("_has_unuploaded_changes", True)
+        )
         # 上传/更新处理中标记
-        self.upload_in_progress = False
+        self.upload_in_progress = bool(self.data.get("_upload_in_progress"))
         # 记录上传时的内容哈希，用于避免覆盖新内容
-        self.pending_upload_hash = None
+        self.pending_upload_hash = self.data.get("_pending_upload_hash")
+        self.last_upload_error = str(self.data.get("_last_upload_error") or "")
 
 
         # 状态管理
@@ -1189,9 +1192,14 @@ class ClipboardItemWidget(QWidget):
                 level=new_data_dict.get("level"),
             )
             self._restore_timer_widget_state()
-        # 内容被更新，标记为未上传
-        self.has_unuploaded_changes = True
-        self.pending_upload_hash = None
+        self.has_unuploaded_changes = bool(
+            new_data_dict.get("_has_unuploaded_changes", True)
+        )
+        self.upload_in_progress = bool(new_data_dict.get("_upload_in_progress"))
+        self.pending_upload_hash = new_data_dict.get("_pending_upload_hash")
+        self.last_upload_error = str(
+            new_data_dict.get("_last_upload_error") or ""
+        )
         if self._safe_action_btn():
             self._refresh_action_text()
         self._refresh_today_progress_button()
@@ -1385,6 +1393,23 @@ class ClipboardItemWidget(QWidget):
     def _refresh_action_text(self):
         btn = self._safe_action_btn()
         if not btn:
+            return
+        if getattr(self, "upload_in_progress", False):
+            btn.setProperty("uploaded", "false")
+            btn.setEnabled(False)
+            btn.setText("上传中")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            return
+        if (
+            str(getattr(self, "last_upload_error", "") or "").strip()
+            and getattr(self, "has_unuploaded_changes", True)
+        ):
+            btn.setProperty("uploaded", "false")
+            btn.setEnabled(True)
+            btn.setText("失败可重试")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
             return
         if not getattr(self, "has_unuploaded_changes", True):
             self.set_uploaded_visual(True)

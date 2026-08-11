@@ -167,6 +167,14 @@ class CriticalGuardTaskRequest(APIModel):
         extra = "forbid"
 
 
+class CriticalGuardWeatherPauseRequest(APIModel):
+    paused: bool
+    operation_id: str = Field(default="", max_length=128)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class CriticalGuardResponseRequest(APIModel):
     scope: str
     cells: dict[str, Any] = Field(default_factory=dict)
@@ -176,6 +184,20 @@ class CriticalGuardResponseRequest(APIModel):
     generate_image: bool = False
     expected_version: int | str | None = None
     operation_id: str = Field(default="", max_length=128)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class CriticalGuardScopeTemplateRequest(APIModel):
+    scope: str = Field(default="", max_length=16)
+    sheet_type: str = Field(default="", max_length=64)
+    items: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+    response_id: str = Field(default="", max_length=128)
+    cells: dict[str, Any] = Field(default_factory=dict)
+    expected_revision: int | str | None = None
+    expected_response_version: int | str | None = None
+    operation_id: str = Field(min_length=8, max_length=128)
 
     class Config(APIModel.Config):
         extra = "forbid"

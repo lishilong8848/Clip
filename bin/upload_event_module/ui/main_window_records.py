@@ -20,7 +20,7 @@ from ..utils import WHITESPACE_TRANSLATOR
 from ..core.parser import extract_event_info
 from ..time_parser import parse_time_range
 from ..building_normalizer import (
-    normalize_building_name,
+    extract_building_codes,
     normalize_buildings_value as normalize_buildings_list,
 )
 from .display_state import (
@@ -170,6 +170,7 @@ class MainWindowRecordsMixin:
 
     def _recover_stale_upload_states(self) -> dict[str, int]:
         recovered = 0
+        recovered_payloads: list[dict] = []
         now = time.monotonic()
         try:
             entries = list(self._active_notice_store().entries())
@@ -217,6 +218,7 @@ class MainWindowRecordsMixin:
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_last_upload_error", None)
                 data.pop("_upload_started_monotonic", None)
+                data.pop("_upload_operation_id", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 self._rebuild_active_item_widget(
                     list_widget,
@@ -227,6 +229,7 @@ class MainWindowRecordsMixin:
                     pending_upload_hash=None,
                     has_unuploaded_changes=True,
                 )
+                recovered_payloads.append(data)
                 recovered += 1
                 continue
             has_record_identity = any(
@@ -241,6 +244,7 @@ class MainWindowRecordsMixin:
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_last_upload_error", None)
                 data.pop("_upload_started_monotonic", None)
+                data.pop("_upload_operation_id", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 self._rebuild_active_item_widget(
                     list_widget,
@@ -251,6 +255,7 @@ class MainWindowRecordsMixin:
                     pending_upload_hash=None,
                     has_unuploaded_changes=True,
                 )
+                recovered_payloads.append(data)
                 recovered += 1
                 continue
             started_at = float(data.get("_upload_started_monotonic") or 0.0)
@@ -262,6 +267,7 @@ class MainWindowRecordsMixin:
             data["_has_unuploaded_changes"] = True
             data["_last_upload_error"] = "上传状态超时，已恢复按钮，可刷新核对后重试。"
             data.pop("_upload_started_monotonic", None)
+            data.pop("_upload_operation_id", None)
             item.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
                 list_widget,
@@ -272,9 +278,17 @@ class MainWindowRecordsMixin:
                 pending_upload_hash=None,
                 has_unuploaded_changes=True,
             )
+            recovered_payloads.append(data)
             recovered += 1
         if recovered:
             log_warning(f"上传状态自愈: 已恢复 {recovered} 条无队列上传中条目")
+            upsert = getattr(self, "_upsert_active_cache_record", None)
+            if callable(upsert):
+                for payload in recovered_payloads:
+                    try:
+                        upsert(payload)
+                    except Exception:
+                        continue
             try:
                 self.request_active_cache_save()
             except Exception:
@@ -1013,6 +1027,26 @@ class MainWindowRecordsMixin:
         text = cls._normalize_match_text(value)
         return text.strip(" ;；")
 
+    @classmethod
+    def _normalize_event_match_time(cls, value) -> str:
+        raw_time = cls._normalize_match_text(value)
+        if not raw_time:
+            return ""
+        try:
+            start_time, _ = parse_time_range(raw_time.replace("T", " "))
+        except Exception:
+            start_time = None
+        if start_time is not None:
+            return start_time.strftime("%Y%m%d%H%M")
+        digits = re.sub(r"\D", "", unicodedata.normalize("NFKC", raw_time))
+        if len(digits) >= 12:
+            return digits[:12]
+        return raw_time.replace(" ", "").upper()
+
+    @staticmethod
+    def _normalize_event_building_key(value) -> str:
+        return ",".join(extract_building_codes(value))
+
     def _event_match_title_from_data(self, data: dict | None) -> str:
         if not isinstance(data, dict):
             return ""
@@ -1022,6 +1056,84 @@ class MainWindowRecordsMixin:
                 return value
         info = extract_event_info(str(data.get("text") or "")) or {}
         return self._normalize_event_match_title(info.get("title") or "")
+
+    def _event_sparse_match_fields(
+        self,
+        data: dict | None = None,
+        *,
+        text: str = "",
+    ) -> dict[str, str]:
+        data = data if isinstance(data, dict) else {}
+        raw_text = str(text or data.get("text") or "")
+        info = extract_event_info(raw_text) or {}
+        summary = self._extract_section_text(raw_text, ("概述", "告警描述"))
+        title = self._normalize_event_match_title(
+            summary
+            or data.get("alarm_desc")
+            or data.get("告警描述")
+            or info.get("title")
+            or data.get("match_title")
+            or data.get("title")
+            or ""
+        )
+        raw_time = str(
+            info.get("time_str")
+            or data.get("time_str")
+            or data.get("occurrence_date")
+            or data.get("event_time")
+            or data.get("start_time")
+            or ""
+        ).strip()
+        time_key = self._normalize_event_match_time(raw_time)
+        buildings = self._normalize_buildings_value(
+            data.get("buildings")
+            or data.get("building_codes")
+            or data.get("building")
+        )
+        if not buildings:
+            buildings = self._infer_buildings_from_notice_text(raw_text)
+        building_key = self._normalize_event_building_key(buildings)
+        source = self._normalize_match_text(
+            info.get("source")
+            or data.get("event_source")
+            or data.get("source")
+            or self._extract_section_text(raw_text, ("来源", "事件发现来源"))
+        ).replace(" ", "").upper()
+        level = self._normalize_match_text(
+            info.get("level")
+            or data.get("level")
+            or self._extract_section_text(raw_text, ("等级", "事件等级"))
+        ).replace(" ", "").upper()
+        stored = data.get("event_match_fields")
+        stored = stored if isinstance(stored, dict) else {}
+        stored_time = self._normalize_event_match_time(
+            stored.get("time") or stored.get("event_time")
+        )
+        stored_building = self._normalize_event_building_key(
+            stored.get("building") or stored.get("buildings")
+        )
+        return {
+            "title": title or str(stored.get("title") or "").strip(),
+            "time": time_key or stored_time,
+            "building": building_key or stored_building,
+            "source": source or str(stored.get("source") or "").strip(),
+            "level": level or str(stored.get("level") or "").strip(),
+        }
+
+    def _event_sparse_identity_matches(
+        self,
+        incoming: dict,
+        candidate: dict,
+    ) -> bool:
+        incoming_fields = self._event_sparse_match_fields(incoming)
+        candidate_fields = self._event_sparse_match_fields(candidate)
+        for key in ("title", "time", "source"):
+            if not incoming_fields[key] or incoming_fields[key] != candidate_fields[key]:
+                return False
+        for key in ("building", "level"):
+            if incoming_fields[key] and incoming_fields[key] != candidate_fields[key]:
+                return False
+        return True
 
     @staticmethod
     def _remote_target_record_id_from_data(data: dict | None) -> str:
@@ -1063,22 +1175,21 @@ class MainWindowRecordsMixin:
             event_buildings = self._normalize_buildings_value(
                 self._infer_buildings_from_notice_text(text)
             )
-            event_building_key = ",".join(
-                self._normalize_match_text(item) for item in event_buildings if item
-            )
+            event_building_key = self._normalize_event_building_key(event_buildings)
+            event_time_key = self._normalize_event_match_time(resolved_time)
             event_source = self._normalize_match_text(
                 info.get("source")
                 or self._extract_section_text(text, ("来源", "事件发现来源"))
-            )
+            ).strip(" ;；,，。")
             event_level = self._normalize_match_text(
                 info.get("level")
                 or self._extract_section_text(text, ("等级", "事件等级"))
-            ).upper()
-            if not (resolved_time and event_building_key and event_source and event_level):
+            ).strip(" ;；,，。").upper()
+            if not (event_time_key and event_building_key and event_source and event_level):
                 return resolved_title, ""
             component_text = "|".join(
                 (
-                    f"时间:{resolved_time}",
+                    f"时间:{event_time_key}",
                     f"楼栋:{event_building_key}",
                     f"来源:{event_source}",
                     f"等级:{event_level}",
@@ -1223,15 +1334,19 @@ class MainWindowRecordsMixin:
             ensured["match_title"] = match_title
         else:
             ensured.pop("match_title", None)
+        is_event_notice = self._is_event_notice(
+            str(ensured.get("notice_type") or parsed_info.get("notice_type") or "")
+        )
         if match_key:
             ensured["match_key"] = match_key
-            if self._is_event_notice(
-                str(ensured.get("notice_type") or parsed_info.get("notice_type") or "")
-            ):
+            if is_event_notice and not str(
+                ensured.get("event_identity_key") or ""
+            ).strip():
                 ensured["event_identity_key"] = match_key
         else:
             ensured.pop("match_key", None)
-            ensured.pop("event_identity_key", None)
+            if not is_event_notice:
+                ensured.pop("event_identity_key", None)
         routing_state = self._normalize_routing_state(ensured.get("routing_state"))
         if routing_state == "conflicted":
             ensured["routing_state"] = "conflicted"
@@ -1294,6 +1409,18 @@ class MainWindowRecordsMixin:
         ):
             if key not in updated and key in existing_data:
                 updated[key] = existing_data.get(key)
+        if bool(existing_data.get("_upload_in_progress")):
+            for key in (
+                "_upload_in_progress",
+                "_upload_pending_dialog",
+                "_upload_started_monotonic",
+                "_last_upload_error",
+                "_pending_upload_hash",
+                "_upload_operation_id",
+                "_has_unuploaded_changes",
+            ):
+                if key in existing_data:
+                    updated[key] = existing_data.get(key)
         return updated
 
     @staticmethod
@@ -2635,6 +2762,7 @@ class MainWindowRecordsMixin:
         self,
         data_dict: dict,
         *,
+        persist_cache: bool = True,
         refresh_detail: bool = True,
         rebuild_widget: bool = True,
         force_status: str | None = None,
@@ -2660,7 +2788,7 @@ class MainWindowRecordsMixin:
 
         record_id = str(normalized.get("record_id") or "").strip()
         cache_saved = True
-        if getattr(self, "cache_store", None) and record_id:
+        if persist_cache and getattr(self, "cache_store", None) and record_id:
             try:
                 cache_saved = bool(self.cache_store.upsert_record(normalized))
                 if not cache_saved:
@@ -2672,9 +2800,13 @@ class MainWindowRecordsMixin:
                 log_warning(
                     f"活动缓存提交异常，保留内存态: record_id={record_id}, error={exc}"
                 )
+        cached = (
+            self._load_record_from_cache(record_id)
+            if persist_cache and cache_saved
+            else None
+        )
         committed = self._ensure_active_item_identity(
-            (self._load_record_from_cache(record_id) if cache_saved else None)
-            or normalized
+            self._inherit_active_runtime_fields(cached or normalized, normalized)
         )
 
         if list_widget is None or item is None:
@@ -2908,6 +3040,7 @@ class MainWindowRecordsMixin:
                 )
                 if not isinstance(cache_data, dict):
                     continue
+                cache_data = self._inherit_active_runtime_fields(cache_data, data)
                 item.setData(Qt.ItemDataRole.UserRole, cache_data)
                 self._upsert_active_notice_model_item(list_widget, item, cache_data)
                 self._apply_cache_to_item(list_widget, item, cache_data)
@@ -3102,6 +3235,31 @@ class MainWindowRecordsMixin:
                 return list_widget, item, next(iter(matched))
         return None, None, ""
 
+    def _is_current_upload_operation(self, record_id: str, operation_id: str) -> bool:
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            return True
+        _list_widget, item, _matched = self._find_active_item_by_upload_completion_id(
+            record_id
+        )
+        if item and self._is_valid_list_item(item):
+            data = item.data(Qt.ItemDataRole.UserRole) or {}
+            return str(data.get("_upload_operation_id") or "").strip() == operation_id
+        try:
+            entries = self._active_notice_store().entries()
+        except Exception:
+            entries = []
+        for _list_widget, candidate, data in entries:
+            if not self._is_valid_list_item(candidate) or not isinstance(data, dict):
+                continue
+            if str(data.get("_upload_operation_id") or "").strip() == operation_id:
+                return True
+        pending_ids = set(getattr(self, "pending_action_record_ids", set()) or set())
+        return any(
+            candidate_id in pending_ids
+            for candidate_id in self._upload_completion_record_id_candidates(record_id)
+        )
+
     def _update_active_item_data(self, record_id, data_dict, *, persist_cache=True):
         list_widget, item = self._find_active_item_by_record_id(record_id)
         if item:
@@ -3109,6 +3267,7 @@ class MainWindowRecordsMixin:
                 return
             committed = self._commit_active_record(
                 data_dict,
+                persist_cache=persist_cache,
                 refresh_detail=not self._should_defer_ui_refresh(),
                 rebuild_widget=False,
                 list_widget=list_widget,
@@ -3217,21 +3376,10 @@ class MainWindowRecordsMixin:
 
     @staticmethod
     def _infer_buildings_from_text(text: str) -> list[str]:
-        normalized_text = unicodedata.normalize("NFKC", text or "").upper()
-        if not normalized_text:
-            return []
-        matched = []
-        for char in re.findall(r"([A-EH])\s*[栋楼]", normalized_text):
-            building = normalize_building_name(f"{char}楼")
-            if building not in matched:
-                matched.append(building)
-        if "110" in normalized_text:
-            for token in ("110机房", "110"):
-                building = normalize_building_name(token)
-                if token in normalized_text and building and building not in matched:
-                    matched.append(building)
-                    break
-        return matched
+        return [
+            "110站" if code == "110" else f"{code}楼"
+            for code in extract_building_codes(text)
+        ]
 
     @staticmethod
     def _extract_section_text(text: str, labels: tuple[str, ...]) -> str:
@@ -3797,8 +3945,29 @@ class MainWindowRecordsMixin:
         if len(key_matches) > 1:
             return None, None
         if self._is_event_notice(resolved_notice_type):
-            # 事件通告不能只按标题路由。不同时间的事件可能标题完全相同，
-            # 只靠标题会把新事件绑定到旧 target_record_id，后续删除可能误删旧记录。
+            incoming_data = {
+                "notice_type": resolved_notice_type,
+                "text": content_clean,
+                "title": title,
+                "time_str": resolved_time,
+                "source": info.get("source"),
+                "level": info.get("level"),
+            }
+            sparse_matches = []
+            for list_widget, item, data in store.entries():
+                if not _notice_type_matches(data):
+                    continue
+                if self._event_sparse_identity_matches(incoming_data, data):
+                    sparse_matches.append((list_widget, item))
+            if len(sparse_matches) == 1:
+                return sparse_matches[0]
+            if len(sparse_matches) > 1:
+                log_warning(
+                    "事件剪贴板更新匹配到多条活动记录，已阻止自动绑定: "
+                    f"fields={self._event_sparse_match_fields(incoming_data)}"
+                )
+            # 事件通告不能只按标题路由。稀疏身份也不唯一时继续阻止，
+            # 避免把新事件绑定到旧 target_record_id。
             return None, None
         if len(title_matches) == 1:
             return title_matches[0][0], title_matches[0][1]
@@ -3992,6 +4161,7 @@ class MainWindowRecordsMixin:
                 data["_upload_in_progress"] = False
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_upload_started_monotonic", None)
+                data.pop("_upload_operation_id", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 if hasattr(self, "_upsert_active_notice_model_item"):
                     try:
@@ -4007,6 +4177,11 @@ class MainWindowRecordsMixin:
                     pending_upload_hash=None,
                     has_unuploaded_changes=has_unuploaded_changes,
                 )
+                if hasattr(self, "_upsert_active_cache_record"):
+                    try:
+                        self._upsert_active_cache_record(data)
+                    except Exception:
+                        pass
 
             screenshot_candidates = set(candidate_ids)
             if matched_record_id:
@@ -4052,6 +4227,7 @@ class MainWindowRecordsMixin:
             data["_has_unuploaded_changes"] = True
             data["_last_upload_error"] = error_text
             data.pop("_upload_started_monotonic", None)
+            data.pop("_upload_operation_id", None)
             item.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
                 list_widget,
@@ -4062,6 +4238,11 @@ class MainWindowRecordsMixin:
                 pending_upload_hash=None,
                 has_unuploaded_changes=True,
             )
+            if hasattr(self, "_upsert_active_cache_record"):
+                try:
+                    self._upsert_active_cache_record(data)
+                except Exception:
+                    pass
 
     def clear_upload_runtime_state_for_ids(self, *record_ids, mark_uploaded: bool = False):
         """Clear Qt-local upload markers for all aliases of the given IDs.
@@ -4126,6 +4307,8 @@ class MainWindowRecordsMixin:
                 data["_upload_in_progress"] = False
                 data["_pending_upload_hash"] = None
                 data.pop("_upload_started_monotonic", None)
+                data.pop("_upload_pending_dialog", None)
+                data.pop("_upload_operation_id", None)
                 if mark_uploaded:
                     data["_has_unuploaded_changes"] = False
                     data.pop("_last_upload_error", None)
@@ -4140,6 +4323,11 @@ class MainWindowRecordsMixin:
                     has_unuploaded_changes=data.get("_has_unuploaded_changes"),
                 )
                 changed = True
+                if hasattr(self, "_upsert_active_cache_record"):
+                    try:
+                        self._upsert_active_cache_record(data)
+                    except Exception:
+                        pass
         if changed:
             try:
                 self.request_active_cache_save()

@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -32,6 +33,7 @@ from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
 from upload_event_module.config import EVENT_NOTICE_FIELDS, config, get_field_config
+from upload_event_module.building_normalizer import extract_building_codes
 from upload_event_module.services.service_registry import (
     ensure_feishu_token,
     refresh_feishu_token,
@@ -65,8 +67,12 @@ from .critical_guard import (
     CRITICAL_GUARD_SOURCE_PREVIEW_RENDER_VERSION,
     CriticalGuardError,
     critical_guard_catalog,
+    critical_guard_template_path,
+    default_check_items,
     default_response_cells,
     memory_cells_for_new_task,
+    normalize_check_items,
+    reconcile_check_results,
     normalize_response_cells,
     normalize_scope as normalize_critical_guard_scope,
     normalize_sheet_name as normalize_critical_guard_sheet,
@@ -77,6 +83,13 @@ from .critical_guard import (
     safe_path_part as safe_critical_guard_path_part,
     validate_critical_guard_source_workbook,
     validate_response_for_generation,
+)
+from .critical_guard_weather import (
+    build_weather_guard_card,
+    normalize_weather_snapshot,
+    progress_summary as critical_guard_weather_progress,
+    warning_task_name,
+    weather_cells_patch,
 )
 
 
@@ -182,6 +195,24 @@ WATER_CONSUMPTION_SUPERVISOR_FALLBACKS = {
         "name": "周庆庆",
         "open_id": "ou_31b9b88b491da8ef0cfa18ee4599288c",
     },
+}
+CRITICAL_GUARD_WEATHER_URL = "https://www.sm.sjhl.online:3001/api/weather/warning"
+CRITICAL_GUARD_WEATHER_SCOPES = ("A", "B", "C", "D", "E")
+CRITICAL_GUARD_WEATHER_OBSERVER_SCOPE = "H"
+CRITICAL_GUARD_WEATHER_REMINDER_SECONDS = 20 * 60
+CRITICAL_GUARD_WEATHER_POLL_SECONDS = 10 * 60
+CRITICAL_GUARD_ARCHIVE_APP_TOKEN = "Tmn8bjGnpasbLTskafbcRijvnKe"
+CRITICAL_GUARD_ARCHIVE_TABLE_ID = "tblVFWuUbjo4GHOY"
+MEI_BINGBING_OPEN_ID = "ou_6e607320c167d816366acba893b339b1"
+CRITICAL_GUARD_COLOR_LABELS = {
+    "red": "红色",
+    "orange": "橙色",
+    "yellow": "黄色",
+    "blue": "蓝色",
+    "红": "红色",
+    "橙": "橙色",
+    "黄": "黄色",
+    "蓝": "蓝色",
 }
 REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES = frozenset(
     {
@@ -1181,6 +1212,17 @@ def send_text_to_open_ids(
     return send_impl(text, open_ids)
 
 
+def send_interactive_to_open_ids(
+    card: dict[str, Any],
+    open_ids: list[str],
+) -> tuple[bool, str, list[dict[str, Any]]]:
+    from upload_event_module.services.robot_webhook import (
+        send_interactive_to_open_ids as send_impl,
+    )
+
+    return send_impl(card, open_ids)
+
+
 def send_text_to_chat_id(text: str, chat_id: str) -> tuple[bool, str]:
     from upload_event_module.services.robot_webhook import (
         send_text_to_chat_id as send_impl,
@@ -1314,6 +1356,9 @@ class MaintenancePortalService:
         self._critical_guard_response_locks_guard = threading.RLock()
         self._critical_guard_response_locks: dict[str, threading.RLock] = {}
         self._critical_guard_render_semaphore = threading.BoundedSemaphore(1)
+        self._critical_guard_weather_http_client = FeishuHttpClient(retries=0)
+        self._critical_guard_weather_job_lock = threading.RLock()
+        self._critical_guard_weather_running_job_id = ""
         self._signature_crypto = SignatureCryptoManager()
         self._signature_crypto_migration_lock = threading.RLock()
         self._signature_crypto_migration_running = False
@@ -20855,29 +20900,19 @@ class MaintenancePortalService:
                 return str(value)
         return str(value or "").strip()
 
-    @staticmethod
-    def _building_code_from_value(value: Any) -> str:
-        text = str(value or "").strip().upper()
-        if "110" in text:
-            return "110"
-        match = re.search(r"[ABCDEH]", text)
-        return match.group(0) if match else ""
+    @classmethod
+    def _building_code_from_value(cls, value: Any) -> str:
+        codes = cls._building_codes_from_value(value)
+        return codes[0] if codes else ""
 
     @classmethod
     def _building_codes_from_value(cls, value: Any) -> list[str]:
         values = value if isinstance(value, (list, tuple, set)) else [value]
-        codes: list[str] = []
-        for raw in values:
-            raw_text = str(raw or "").strip()
-            mapped = REPAIR_BUILDING_OPTION_FALLBACK.get(raw_text)
-            text = str(mapped or raw_text).upper()
-            if not text:
-                continue
-            if "110" in text and "110" not in codes:
-                codes.append("110")
-            for code in re.findall(r"[ABCDEH]", text):
-                if code not in codes:
-                    codes.append(code)
+        normalized_values = [
+            REPAIR_BUILDING_OPTION_FALLBACK.get(str(raw or "").strip(), raw)
+            for raw in values
+        ]
+        codes = extract_building_codes(normalized_values)
         return [code for code in BUILDING_SCOPE_CODES if code in codes]
 
     @classmethod
@@ -21073,8 +21108,10 @@ class MaintenancePortalService:
             codes = self._building_codes_from_notice_text(
                 title,
                 location,
+                content,
                 request_payload.get("title"),
                 request_payload.get("location"),
+                request_payload.get("content"),
             )
         normalized_scope = self._normalize_scope(scope)
         if (
@@ -21299,23 +21336,7 @@ class MaintenancePortalService:
 
     @classmethod
     def _repair_building_codes_from_value(cls, value: Any) -> list[str]:
-        values = value if isinstance(value, (list, tuple, set)) else [value]
-        codes: list[str] = []
-        for raw in values:
-            text = str(raw or "").strip().upper()
-            if not text:
-                continue
-            if re.search(r"110\s*(?:站|楼|机房|数据中心)?", text) and "110" not in codes:
-                codes.append("110")
-            for code in ("A", "B", "C", "D", "E", "H"):
-                patterns = (
-                    rf"(?<![A-Z0-9]){code}\s*(?:楼|栋|座|区|机房|数据中心|DC)",
-                    rf"(?:楼栋|楼宇|数据中心)\s*{code}(?![A-Z0-9])",
-                    rf"^(?:南通)?{code}$",
-                )
-                if any(re.search(pattern, text) for pattern in patterns) and code not in codes:
-                    codes.append(code)
-        return [code for code in BUILDING_SCOPE_CODES if code in codes]
+        return cls._building_codes_from_value(value)
 
     @staticmethod
     def _clean_source_text(value: Any) -> str:
@@ -25414,7 +25435,6 @@ class MaintenancePortalService:
 
     @classmethod
     def _building_codes_from_notice_text(cls, *values: Any) -> list[str]:
-        codes: list[str] = []
         text = "\n".join(str(value or "") for value in values if str(value or "").strip())
         upper = text.upper()
         for label in ("标题", "名称"):
@@ -25422,17 +25442,8 @@ class MaintenancePortalService:
             section = str(match.group(1) if match else "").upper()
             if section and re.search(r"110\s*(?:站|楼|机房|数据中心|DC|KV)?", section):
                 return ["110"]
-        if re.search(r"110\s*(?:站|楼|机房|数据中心|DC|KV)?", upper):
-            codes.append("110")
-        for code in ("A", "B", "C", "D", "E", "H"):
-            patterns = (
-                rf"(?<![A-Z0-9]){code}\s*(?:楼|栋|座|区|机房|数据中心|DC)",
-                rf"(?:楼栋|楼宇|数据中心)\s*{code}(?![A-Z0-9])",
-                rf"(?<![A-Z0-9]){code}[-－]\d",
-            )
-            if any(re.search(pattern, upper) for pattern in patterns):
-                codes.append(code)
-        return [code for code in BUILDING_SCOPE_CODES if code in dict.fromkeys(codes)]
+        codes = extract_building_codes(upper)
+        return [code for code in BUILDING_SCOPE_CODES if code in codes]
 
     @classmethod
     def _strip_notice_title_suffix(cls, title: str, work_type: str) -> str:
@@ -28336,6 +28347,12 @@ class MaintenancePortalService:
                 "level",
                 fallback_names=("事件等级",),
             )
+            event_source = field_value(
+                "source",
+                fallback_names=("事件发现来源（统一）", "事件发现来源", "来源"),
+            )
+            form_fields["source"] = event_source
+            form_fields["event_source"] = event_source
             start_value = field_value(
                 "occurrence_time",
                 fallback_names=("事件发生时间",),
@@ -28369,6 +28386,8 @@ class MaintenancePortalService:
             )
         form_fields["start_time"] = self._target_form_datetime_value(start_value)
         form_fields["end_time"] = self._target_form_datetime_value(end_value)
+        if work_type == WORK_TYPE_EVENT:
+            form_fields["time_str"] = form_fields["start_time"]
 
         if work_type == WORK_TYPE_POWER:
             title = form_fields.get("title", "")
@@ -28525,13 +28544,40 @@ class MaintenancePortalService:
                 copy.deepcopy(current_payload or {})
             )
         )
-        payload.update(
-            self._target_record_form_fields(
-                work_type=work_type,
-                notice_type=notice_type,
-                target_record=target_record,
-            )
+        projected_fields = self._target_record_form_fields(
+            work_type=work_type,
+            notice_type=notice_type,
+            target_record=target_record,
         )
+        if work_type == WORK_TYPE_EVENT:
+            previous_sections = self._parse_notice_sections(
+                str(payload.get("text") or "")
+            )
+            alarm_desc = str(projected_fields.get("title") or "").strip()
+            previous_title = str(payload.get("title") or "").strip() or (
+                self._notice_section_value(previous_sections, ["标题", "名称"])
+            )
+            projected_fields["title"] = previous_title or alarm_desc
+            projected_fields["content"] = alarm_desc or str(
+                payload.get("content")
+                or self._notice_section_value(
+                    previous_sections,
+                    ["概述", "告警描述"],
+                )
+            ).strip()
+            for key, section_names in (
+                ("impact", ["影响"]),
+                ("progress", ["进展"]),
+            ):
+                if not projected_fields.get(key):
+                    projected_fields[key] = str(
+                        payload.get(key)
+                        or self._notice_section_value(
+                            previous_sections,
+                            section_names,
+                        )
+                    ).strip()
+        payload.update(projected_fields)
         projected_notice_type = str(payload.get("notice_type") or "").strip()
         if work_type != WORK_TYPE_POWER or projected_notice_type not in {
             NOTICE_TYPE_POWER_UP,
@@ -28549,18 +28595,21 @@ class MaintenancePortalService:
             or ""
         ).strip()
         remote_status = str(lifecycle.get("status") or "").strip()
-        action_status = (
-            "更新"
-            if "更新" in remote_status or current_status == "更新"
-            else "开始"
-        )
+        if work_type == WORK_TYPE_EVENT:
+            # A target snapshot exists only after the first event upload.  It is
+            # therefore an updateable active event, never a new local draft.
+            action_status = "更新"
+        else:
+            action_status = (
+                "更新"
+                if "更新" in remote_status or current_status == "更新"
+                else "开始"
+            )
         active_item_id = str(
             payload.get("active_item_id")
             or (identity or {}).get("active_item_id")
             or f"target-{work_type}-{target_record_id}"
         ).strip()
-        if is_local_record_id(active_item_id):
-            active_item_id = target_record_id
         payload.update(
             {
                 "active_item_id": active_item_id,
@@ -36111,6 +36160,38 @@ class MaintenancePortalService:
             },
         )
 
+    @staticmethod
+    def build_event_notice_text(
+        *,
+        status: str,
+        title: str,
+        source: str,
+        time_str: str,
+        summary: str,
+        impact: str,
+        progress: str,
+    ) -> str:
+        normalized_status = {
+            "开始": "新增",
+            "发起": "新增",
+            "新增": "新增",
+            "更新": "更新",
+            "结束": "结束",
+        }.get(str(status or "").strip(), str(status or "").strip() or "更新")
+        display_time = MaintenancePortalService._format_input_datetime(time_str)
+        values = (
+            ("标题", title),
+            ("来源", source),
+            ("时间", display_time or time_str),
+            ("概述", summary or title),
+            ("影响", impact),
+            ("进展", progress),
+        )
+        return "\n".join(
+            [f"【{NOTICE_TYPE_EVENT}】状态：{normalized_status}"]
+            + [f"【{label}】{str(value or '').strip()}" for label, value in values]
+        )
+
     def _base_job(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         now_ts = time.time()
@@ -37690,6 +37771,29 @@ class MaintenancePortalService:
                 fault_time=str(prepared.get("fault_time") or ""),
                 expected_time=str(prepared.get("expected_time") or ""),
             )
+        elif work_type == WORK_TYPE_EVENT:
+            expected = cls.build_event_notice_text(
+                status=status,
+                title=str(prepared.get("title") or ""),
+                source=str(
+                    prepared.get("event_source")
+                    or prepared.get("source")
+                    or ""
+                ),
+                time_str=str(
+                    prepared.get("time_str")
+                    or prepared.get("start_time")
+                    or ""
+                ),
+                summary=str(
+                    prepared.get("content")
+                    or prepared.get("alarm_desc")
+                    or prepared.get("title")
+                    or ""
+                ),
+                impact=str(prepared.get("impact") or ""),
+                progress=str(prepared.get("progress") or ""),
+            )
         elif work_type in {WORK_TYPE_POWER, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
             expected = cls.build_simple_notice_text(
                 work_type=work_type,
@@ -38406,15 +38510,9 @@ class MaintenancePortalService:
                 title = str(request_payload.get("title") or "").strip()
                 if not title:
                     raise PortalError("纯手填变更通告缺少名称。")
-                building_codes = [
-                    str(code or "").strip().upper()
-                    for code in (request_payload.get("building_codes") or [])
-                    if str(code or "").strip()
-                ]
-                if not building_codes:
-                    building_codes = self._building_codes_from_value(
-                        request_payload.get("building")
-                    )
+                building_codes = self._building_codes_from_request_payload(
+                    request_payload
+                )
                 building = (
                     str(request_payload.get("building") or "").strip()
                     or self._building_label_from_codes(building_codes)
@@ -38623,6 +38721,8 @@ class MaintenancePortalService:
             building=building,
             building_codes=building_codes,
             title=title,
+            location=request_payload.get("location"),
+            content=request_payload.get("content"),
             work_type_label="变更通告",
             allow_scope_fallback=manual,
         )
@@ -39920,6 +40020,31 @@ class MaintenancePortalService:
             else ""
         )
         sheet_type = str(result.get("sheet_type") or "").strip()
+        if sheet_type in CRITICAL_GUARD_CHECK_SHEETS:
+            try:
+                result["cells"] = normalize_response_cells(
+                    sheet_type,
+                    str(result.get("scope") or ""),
+                    result.get("cells") if isinstance(result.get("cells"), dict) else {},
+                )
+                result["check_date"] = str(
+                    result["cells"].get("check_date") or result.get("check_date") or ""
+                )
+                result["template_revision"] = int(
+                    result["cells"].get("template_revision") or 0
+                )
+                result["template_customized"] = bool(
+                    result["cells"].get(
+                        "template_customized",
+                        bool(result["template_revision"]),
+                    )
+                )
+            except CriticalGuardError:
+                logging.getLogger(__name__).warning(
+                    "重保检查行快照读取失败: response_id=%s",
+                    response_id,
+                    exc_info=True,
+                )
         if sheet_type in CRITICAL_GUARD_FILE_SHEETS:
             response_cells = result.get("cells") if isinstance(result.get("cells"), dict) else {}
             bound_file_id = str(response_cells.get("source_file_id") or "").strip()
@@ -40085,6 +40210,1208 @@ class MaintenancePortalService:
             "current_signer": {},
         }
 
+    def _patch_critical_guard_weather_state(
+        self, **changes: Any
+    ) -> dict[str, Any]:
+        state = self._state_store.get_critical_guard_weather_state()
+        state.update(changes)
+        return self._state_store.put_critical_guard_weather_state(state)
+
+    def _critical_guard_public_base_url(self) -> str:
+        base_url = self._signature_public_base_url(scope="A")
+        parsed = urlparse(base_url)
+        host = str(parsed.hostname or "").strip()
+        if host not in {"", "127.0.0.1", "localhost", "0.0.0.0", "::"}:
+            return base_url.rstrip("/")
+
+        lan_host = ""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.settimeout(0.5)
+                probe.connect(("8.8.8.8", 80))
+                lan_host = str(probe.getsockname()[0] or "").strip()
+        except OSError:
+            with suppress(OSError):
+                candidate = socket.gethostbyname(socket.gethostname())
+                if candidate and not candidate.startswith("127."):
+                    lan_host = candidate
+        if not lan_host:
+            return ""
+        scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "http"
+        port = parsed.port or int(
+            getattr(config, "lan_template_portal_port", 18766) or 18766
+        )
+        return f"{scheme}://{self._url_host_for_display(lan_host)}:{port}"
+
+    def _fetch_critical_guard_weather_snapshot(self) -> dict[str, Any]:
+        try:
+            payload = self._critical_guard_weather_http_client.request_json(
+                "GET",
+                CRITICAL_GUARD_WEATHER_URL,
+                retries=2,
+            )
+        except FeishuHTTPError as exc:
+            raise PortalError(f"天气预警接口请求失败：{exc}") from exc
+        if not isinstance(payload, dict):
+            raise PortalError("天气预警接口返回格式无效。")
+        try:
+            return normalize_weather_snapshot(payload)
+        except ValueError as exc:
+            raise PortalError(str(exc)) from exc
+
+    def critical_guard_weather_query_paused(self) -> bool:
+        state = self._state_store.get_critical_guard_weather_state()
+        return bool(state.get("paused"))
+
+    def set_critical_guard_weather_query_paused(
+        self,
+        *,
+        paused: bool,
+        operator_open_id: str = "",
+        operator_name: str = "",
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._critical_guard_weather_job_lock:
+            running_id = str(self._critical_guard_weather_running_job_id or "")
+            running_job = (
+                self._state_store.get_critical_guard_weather_job(running_id)
+                if running_id
+                else None
+            )
+            job_is_running = bool(
+                running_job
+                and running_job.get("status") in {"queued", "running"}
+            )
+            changes: dict[str, Any] = {
+                "paused": bool(paused),
+                "running": job_is_running,
+                "pause_updated_at": now,
+                "pause_updated_by_open_id": str(operator_open_id or "").strip(),
+                "pause_updated_by_name": str(operator_name or "").strip(),
+            }
+            if not job_is_running:
+                changes["active_job_id"] = ""
+            if paused:
+                changes["paused_at"] = now
+                if not job_is_running:
+                    changes["phase"] = "paused"
+            else:
+                changes["resumed_at"] = now
+                if not job_is_running:
+                    changes["phase"] = "idle"
+            self._patch_critical_guard_weather_state(**changes)
+        return self.critical_guard_weather_status()
+
+    def start_critical_guard_weather_job(
+        self,
+        *,
+        trigger_type: str = "manual",
+        operator_open_id: str = "",
+        operator_name: str = "",
+    ) -> dict[str, Any]:
+        trigger = "manual" if str(trigger_type or "").strip() == "manual" else "scheduled"
+        with self._critical_guard_weather_job_lock:
+            if self.critical_guard_weather_query_paused():
+                if trigger == "manual":
+                    raise PortalError("天气自动查询已暂停，请先恢复自动查询。")
+                return {
+                    "paused": True,
+                    "running": False,
+                    "status": "paused",
+                    "phase": "paused",
+                }
+            running_id = str(self._critical_guard_weather_running_job_id or "")
+            if running_id:
+                running = self._state_store.get_critical_guard_weather_job(running_id)
+                if running and running.get("status") in {"queued", "running"}:
+                    return {**running, "reused": True, "running": True}
+                self._critical_guard_weather_running_job_id = ""
+
+            job_id = f"guard_weather_{uuid.uuid4().hex}"
+            job = self._state_store.create_critical_guard_weather_job(
+                job_id=job_id,
+                trigger_type=trigger,
+                created_by_open_id=operator_open_id,
+                created_by_name=operator_name,
+            )
+            self._critical_guard_weather_running_job_id = job_id
+            self._patch_critical_guard_weather_state(
+                running=True,
+                active_job_id=job_id,
+                phase="queued",
+                last_error="",
+            )
+            threading.Thread(
+                target=self._run_critical_guard_weather_job,
+                kwargs={"job_id": job_id},
+                name="CriticalGuardWeather",
+                daemon=True,
+            ).start()
+            return {**job, "reused": False, "running": True}
+
+    def _set_critical_guard_weather_job_phase(
+        self,
+        job_id: str,
+        *,
+        phase: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        self._state_store.update_critical_guard_weather_job(
+            job_id,
+            phase=phase,
+            status="running",
+            result=result,
+            started=True,
+        )
+        self._patch_critical_guard_weather_state(
+            running=True,
+            active_job_id=job_id,
+            phase=phase,
+        )
+
+    @staticmethod
+    def _critical_guard_weather_source_payload(
+        snapshot: dict[str, Any], warning: dict[str, Any]
+    ) -> dict[str, Any]:
+        public_snapshot = {
+            key: copy.deepcopy(value)
+            for key, value in snapshot.items()
+            if key != "raw"
+        }
+        return {
+            "snapshot": public_snapshot,
+            "warning": copy.deepcopy(warning),
+            "actions": list(snapshot.get("actions") or []),
+            "snapshot_at": str(snapshot.get("snapshot_at") or ""),
+            "template_download_token": secrets.token_urlsafe(32),
+        }
+
+    def _ensure_critical_guard_weather_task(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        warning: dict[str, Any],
+        operator_open_id: str,
+        operator_name: str,
+    ) -> tuple[dict[str, Any], bool]:
+        weather_key = str(warning.get("weather_key") or "").strip()
+        existing = self._state_store.get_critical_guard_weather_task(
+            weather_key=weather_key
+        )
+        if existing:
+            source_payload = self._critical_guard_weather_source_payload(
+                snapshot, warning
+            )
+            existing_source = (
+                existing.get("source_payload")
+                if isinstance(existing.get("source_payload"), dict)
+                else {}
+            )
+            existing_token = str(
+                existing_source.get("template_download_token") or ""
+            ).strip()
+            if existing_token:
+                source_payload["template_download_token"] = existing_token
+            refreshed = self._state_store.put_critical_guard_weather_task(
+                weather_key=weather_key,
+                warning_id=str(warning.get("id") or ""),
+                warning_title=str(warning.get("title") or ""),
+                warning_type=str(warning.get("type") or ""),
+                warning_color=str(warning.get("color") or ""),
+                guard_level=str(warning.get("guard_level") or ""),
+                sheet_types=[
+                    str(item or "").strip()
+                    for item in warning.get("sheet_types") or []
+                    if str(item or "").strip()
+                ],
+                task_id=str(existing.get("task_id") or ""),
+                source_payload=source_payload,
+            )
+            return refreshed, False
+        sheet_types = [
+            str(item or "").strip()
+            for item in warning.get("sheet_types") or []
+            if str(item or "").strip()
+        ]
+        detail = self.create_critical_guard_task(
+            name=warning_task_name(warning),
+            sheet_types=sheet_types,
+            target_scopes=list(CRITICAL_GUARD_WEATHER_SCOPES),
+            operation_id=f"critical_guard_weather:{weather_key}",
+            operator_open_id=operator_open_id,
+            operator_name=operator_name or "天气预警自动任务",
+            initial_cells_by_sheet={"灾害专项": weather_cells_patch(warning)},
+        )
+        source_payload = self._critical_guard_weather_source_payload(snapshot, warning)
+        mapped = self._state_store.put_critical_guard_weather_task(
+            weather_key=weather_key,
+            warning_id=str(warning.get("id") or ""),
+            warning_title=str(warning.get("title") or ""),
+            warning_type=str(warning.get("type") or ""),
+            warning_color=str(warning.get("color") or ""),
+            guard_level=str(warning.get("guard_level") or ""),
+            sheet_types=sheet_types,
+            task_id=str(detail.get("task_id") or ""),
+            source_payload=source_payload,
+        )
+        return mapped, bool(detail.get("created", True))
+
+    def _send_critical_guard_weather_scope_card(
+        self,
+        *,
+        weather_task: dict[str, Any],
+        progress: dict[str, Any],
+        scope: str,
+        message_kind: str,
+        recipient_open_id: str | None = None,
+        include_actions: bool = True,
+    ) -> tuple[bool, str]:
+        open_id = str(
+            (
+                BUILDING_OPEN_ID_MAP.get(scope)
+                if recipient_open_id is None
+                else recipient_open_id
+            )
+            or ""
+        ).strip()
+        if not open_id:
+            return False, f"{scope}楼重保通知收件人未配置飞书 open_id"
+        public_base = self._critical_guard_public_base_url()
+        if not public_base:
+            return False, "未配置可供手机访问的局域网地址"
+        task_id = str(weather_task.get("task_id") or "").strip()
+        source_payload = (
+            weather_task.get("source_payload")
+            if isinstance(weather_task.get("source_payload"), dict)
+            else {}
+        )
+        download_token = str(
+            source_payload.get("template_download_token") or ""
+        ).strip()
+        template_url = f"{public_base}/api/critical-guard/template"
+        if download_token:
+            template_url += (
+                f"?task_id={quote(task_id, safe='')}"
+                f"&token={quote(download_token, safe='')}"
+            )
+        card = build_weather_guard_card(
+            weather_task=weather_task,
+            progress=progress,
+            registration_url=(
+                f"{public_base}/critical-guard?scope={quote(scope, safe='')}"
+                f"&task_id={quote(task_id, safe='')}"
+            ),
+            template_url=template_url,
+            message_kind=message_kind,
+            recipient_scope=scope,
+            include_actions=include_actions,
+        )
+        ok, message, _results = send_interactive_to_open_ids(card, [open_id])
+        return bool(ok), str(message or "")
+
+    def _reconcile_critical_guard_weather_task(
+        self,
+        weather_task: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, Any]:
+        weather_key = str(weather_task.get("weather_key") or "")
+        task = self._state_store.get_critical_guard_task(
+            str(weather_task.get("task_id") or ""),
+            include_all_responses=True,
+        )
+        if not task:
+            self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                status="deleted",
+            )
+            return {
+                "task_id": str(weather_task.get("task_id") or ""),
+                "deleted": True,
+                "notifications_sent": 0,
+                "notifications_failed": 0,
+            }
+        progress = critical_guard_weather_progress(
+            task,
+            CRITICAL_GUARD_WEATHER_SCOPES,
+        )
+        scope_state = (
+            copy.deepcopy(weather_task.get("scope_state"))
+            if isinstance(weather_task.get("scope_state"), dict)
+            else {}
+        )
+        sent = 0
+        failed = 0
+        for scope_row in progress.get("scopes") or []:
+            scope = str(scope_row.get("scope") or "").strip().upper()
+            if scope not in CRITICAL_GUARD_WEATHER_SCOPES:
+                continue
+            state = scope_state.get(scope)
+            if not isinstance(state, dict):
+                state = {}
+            kind = ""
+            if scope_row.get("complete") and not float(
+                state.get("completed_notified_at") or 0
+            ):
+                kind = "completed"
+            elif not float(state.get("initial_sent_at") or 0):
+                kind = "initial"
+            elif not scope_row.get("complete"):
+                last_notice = max(
+                    float(state.get("initial_sent_at") or 0),
+                    float(state.get("last_reminder_at") or 0),
+                )
+                if now - last_notice >= CRITICAL_GUARD_WEATHER_REMINDER_SECONDS:
+                    kind = "reminder"
+            if not kind:
+                scope_state[scope] = state
+                continue
+            state[f"last_{kind}_attempt_at"] = now
+            try:
+                ok, message = self._send_critical_guard_weather_scope_card(
+                    weather_task=weather_task,
+                    progress=progress,
+                    scope=scope,
+                    message_kind=kind,
+                )
+            except Exception as exc:
+                ok, message = False, str(exc) or "飞书通知发送异常"
+            if ok:
+                sent += 1
+                state["last_error"] = ""
+                if kind == "initial":
+                    state["initial_sent_at"] = now
+                elif kind == "completed":
+                    state["completed_notified_at"] = now
+                else:
+                    state["last_reminder_at"] = now
+            else:
+                failed += 1
+                state["last_error"] = message or "飞书通知发送失败"
+            scope_state[scope] = state
+            weather_task = self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                scope_state=scope_state,
+            )
+
+        observer_state_key = "_h_observer"
+        observer_state = scope_state.get(observer_state_key)
+        if not isinstance(observer_state, dict):
+            observer_state = {}
+        # If the immediately preceding implementation already sent one of the
+        # per-building H copies, adopt that delivery marker instead of
+        # sending another card after an update or restart.
+        if not float(observer_state.get("sent_at") or 0):
+            legacy_sent_at = max(
+                (
+                    float((scope_state.get(scope) or {}).get("h_cc_initial_sent_at") or 0)
+                    for scope in CRITICAL_GUARD_WEATHER_SCOPES
+                    if isinstance(scope_state.get(scope), dict)
+                ),
+                default=0,
+            )
+            if legacy_sent_at:
+                observer_state["sent_at"] = legacy_sent_at
+        if not float(observer_state.get("sent_at") or 0):
+            observer_state["last_attempt_at"] = now
+            observer_open_id = str(
+                BUILDING_OPEN_ID_MAP.get(CRITICAL_GUARD_WEATHER_OBSERVER_SCOPE) or ""
+            ).strip()
+            try:
+                ok, message = self._send_critical_guard_weather_scope_card(
+                    weather_task=weather_task,
+                    progress=progress,
+                    scope=CRITICAL_GUARD_WEATHER_OBSERVER_SCOPE,
+                    message_kind="initial",
+                    recipient_open_id=observer_open_id,
+                    include_actions=False,
+                )
+            except Exception as exc:
+                ok, message = False, str(exc) or "飞书通知发送异常"
+            if ok:
+                sent += 1
+                observer_state["sent_at"] = now
+                observer_state["last_error"] = ""
+            else:
+                failed += 1
+                observer_state["last_error"] = message or "H楼重保通知发送失败"
+        scope_state[observer_state_key] = observer_state
+        weather_task = self._state_store.update_critical_guard_weather_task(
+            weather_key,
+            scope_state=scope_state,
+        )
+        archive_result = {"status": str(weather_task.get("archive_status") or "pending")}
+        if progress.get("complete"):
+            archive_result = self._archive_critical_guard_weather_task(
+                weather_task,
+                task,
+            )
+        return {
+            "task_id": str(task.get("task_id") or ""),
+            "progress": progress,
+            "notifications_sent": sent,
+            "notifications_failed": failed,
+            "archive": archive_result,
+        }
+
+    @staticmethod
+    def _critical_guard_sheet_abnormal_notes(
+        responses: list[dict[str, Any]], sheet_type: str
+    ) -> list[str]:
+        notes: list[str] = []
+        for response in responses:
+            if str(response.get("sheet_type") or "") != sheet_type:
+                continue
+            cells = response.get("cells") if isinstance(response.get("cells"), dict) else {}
+            checks = cells.get("checks") if isinstance(cells.get("checks"), dict) else {}
+            scope = str(response.get("scope") or "")
+            for check in checks.values():
+                if not isinstance(check, dict) or str(check.get("status") or "") != "abnormal":
+                    continue
+                note = str(check.get("note") or "").strip() or "存在异常项"
+                notes.append(f"{scope}楼：{note}")
+            suggestions = str(cells.get("suggestions") or "").strip()
+            if suggestions:
+                notes.append(f"{scope}楼：{suggestions}")
+        return list(dict.fromkeys(notes))
+
+    def _find_critical_guard_archive_record(self, archive_tag: str) -> str:
+        page_token = ""
+        seen_tokens: set[str] = set()
+        for _page in range(20):
+            params: dict[str, Any] = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=CRITICAL_GUARD_ARCHIVE_APP_TOKEN,
+                table_id=CRITICAL_GUARD_ARCHIVE_TABLE_ID,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            for item in data.get("items") or []:
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                tag = self._repair_management_plain_text(fields.get("重保标签"))
+                if tag == archive_tag:
+                    return str(item.get("record_id") or "").strip()
+            next_token = str(data.get("page_token") or "").strip()
+            if not data.get("has_more") or not next_token or next_token in seen_tokens:
+                break
+            seen_tokens.add(next_token)
+            page_token = next_token
+        return ""
+
+    @staticmethod
+    def _critical_guard_archive_result_value(
+        meta: FieldMeta | None,
+        *,
+        normal: bool,
+    ) -> Any:
+        if meta and (meta.field_type == 7 or "checkbox" in meta.ui_type.lower()):
+            return bool(normal)
+        return "正常" if normal else "异常"
+
+    def _critical_guard_archive_fields(
+        self,
+        weather_task: dict[str, Any],
+        task: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, list[str]]]:
+        responses = [
+            item for item in task.get("responses") or [] if isinstance(item, dict)
+        ]
+        missing_artifacts = [
+            f"{str(item.get('scope') or '')}楼/{str(item.get('sheet_type') or '')}"
+            for item in responses
+            if not str(item.get("generated_image_path") or "").strip()
+            or not Path(str(item.get("generated_image_path") or "")).is_file()
+        ]
+        if missing_artifacts:
+            preview = "、".join(missing_artifacts[:8])
+            suffix = f"等 {len(missing_artifacts)} 项" if len(missing_artifacts) > 8 else ""
+            raise PortalError(
+                f"重保汇总缺少已生成图片：{preview}{suffix}，请重新生成后再归档。"
+            )
+        _metas, meta_by_name = self._load_table_fields(
+            app_token=CRITICAL_GUARD_ARCHIVE_APP_TOKEN,
+            table_id=CRITICAL_GUARD_ARCHIVE_TABLE_ID,
+        )
+        selected_sheets = set(weather_task.get("sheet_types") or [])
+        required_fields = {
+            "日期",
+            "检查人",
+            "重保标签",
+            "重保戒备等级",
+            "机房经理",
+        }
+        sheet_required_fields = {
+            "设备安全": {
+                "检查设备安全项",
+                "设备安全检查纸质图片",
+                "设备异常描述",
+            },
+            "环境安全": {
+                "检查环境安全项",
+                "环境安全检查纸质图片",
+                "环境异常描述",
+            },
+            "灾害专项": {
+                "检查灾害专项",
+                "灾害专项检查纸质图片",
+                "灾害异常描述",
+            },
+            "物资检查清单": {
+                "检查重保物资清单正常",
+                "重保物资异常描述",
+            },
+            "重保联络清单": {
+                "检查重保联络清单人员齐备",
+                "联络清单异常描述",
+            },
+        }
+        for sheet in selected_sheets:
+            required_fields.update(sheet_required_fields.get(str(sheet), set()))
+        missing_fields = sorted(required_fields.difference(meta_by_name))
+        if missing_fields:
+            raise PortalError(
+                "重保汇总目标表缺少字段：" + "、".join(missing_fields)
+            )
+        archive_tag = (
+            f"{str(weather_task.get('warning_type') or weather_task.get('warning_title') or '天气预警').strip()}"
+            f"{CRITICAL_GUARD_COLOR_LABELS.get(str(weather_task.get('warning_color') or '').lower(), '')}"
+            f" · {str(weather_task.get('weather_key') or '')[:12]}"
+        )
+        fields: dict[str, Any] = {
+            "日期": int(time.time() * 1000),
+            "检查人": [
+                {"id": BUILDING_OPEN_ID_MAP[scope]}
+                for scope in CRITICAL_GUARD_WEATHER_SCOPES
+                if BUILDING_OPEN_ID_MAP.get(scope)
+            ],
+            "重保标签": archive_tag,
+            "重保戒备等级": str(weather_task.get("guard_level") or ""),
+            "机房经理": [
+                {"id": MA_JINYU_OPEN_ID},
+                {"id": MEI_BINGBING_OPEN_ID},
+            ],
+        }
+        attachment_paths: dict[str, list[str]] = {}
+        rules = {
+            "设备安全": ("检查设备安全项", "设备安全检查纸质图片", "设备异常描述"),
+            "环境安全": ("检查环境安全项", "环境安全检查纸质图片", "环境异常描述"),
+            "灾害专项": ("检查灾害专项", "灾害专项检查纸质图片", "灾害异常描述"),
+        }
+        for sheet, (result_field, attachment_field, note_field) in rules.items():
+            if sheet not in selected_sheets:
+                continue
+            notes = self._critical_guard_sheet_abnormal_notes(responses, sheet)
+            if result_field in meta_by_name:
+                fields[result_field] = self._critical_guard_archive_result_value(
+                    meta_by_name.get(result_field),
+                    normal=not notes,
+                )
+            if note_field in meta_by_name:
+                fields[note_field] = "；".join(notes)
+            if attachment_field in meta_by_name:
+                attachment_paths[attachment_field] = [
+                    str(item.get("generated_image_path") or "")
+                    for item in responses
+                    if str(item.get("sheet_type") or "") == sheet
+                    and str(item.get("generated_image_path") or "")
+                    and Path(str(item.get("generated_image_path") or "")).is_file()
+                ]
+        if "物资检查清单" in selected_sheets:
+            name = "检查重保物资清单正常"
+            if name in meta_by_name:
+                fields[name] = self._critical_guard_archive_result_value(
+                    meta_by_name.get(name),
+                    normal=True,
+                )
+        if "重保联络清单" in selected_sheets:
+            name = "检查重保联络清单人员齐备"
+            if name in meta_by_name:
+                fields[name] = self._critical_guard_archive_result_value(
+                    meta_by_name.get(name),
+                    normal=True,
+                )
+        fields = {key: value for key, value in fields.items() if key in meta_by_name}
+        return fields, attachment_paths
+
+    def _archive_critical_guard_weather_task(
+        self,
+        weather_task: dict[str, Any],
+        task: dict[str, Any],
+        *,
+        force_retry: bool = False,
+    ) -> dict[str, Any]:
+        weather_key = str(weather_task.get("weather_key") or "").strip()
+        if not weather_key:
+            return {"status": "failed", "error": "天气重保任务缺少唯一标识。"}
+        lock = self._critical_guard_response_lock(f"weather-archive:{weather_key}")
+        with lock:
+            current = (
+                self._state_store.get_critical_guard_weather_task(
+                    weather_key=weather_key
+                )
+                or weather_task
+            )
+            return self._archive_critical_guard_weather_task_unlocked(
+                current,
+                task,
+                force_retry=force_retry,
+            )
+
+    def _archive_critical_guard_weather_task_unlocked(
+        self,
+        weather_task: dict[str, Any],
+        task: dict[str, Any],
+        *,
+        force_retry: bool = False,
+    ) -> dict[str, Any]:
+        weather_key = str(weather_task.get("weather_key") or "")
+        status = str(weather_task.get("archive_status") or "pending")
+        if status == "archived" and weather_task.get("archive_record_id"):
+            return {
+                "status": "archived",
+                "record_id": str(weather_task.get("archive_record_id") or ""),
+                "reused": True,
+            }
+        attempted_at = float(weather_task.get("archive_attempted_at") or 0)
+        creating_is_stale = (
+            status == "creating"
+            and attempted_at > 0
+            and time.time() - attempted_at >= 15 * 60
+        )
+        if status == "failed" and not force_retry:
+            return {
+                "status": status,
+                "record_id": str(weather_task.get("archive_record_id") or ""),
+                "error": str(weather_task.get("archive_error") or ""),
+            }
+        if status == "creating" and not force_retry and not creating_is_stale:
+            return {
+                "status": status,
+                "record_id": str(weather_task.get("archive_record_id") or ""),
+                "error": str(weather_task.get("archive_error") or ""),
+            }
+        attempted_at = time.time()
+        weather_task = self._state_store.update_critical_guard_weather_task(
+            weather_key,
+            archive_status="creating",
+            archive_error="",
+            archive_attempted_at=attempted_at,
+        )
+        try:
+            fields, attachment_paths = self._critical_guard_archive_fields(
+                weather_task,
+                task,
+            )
+            archive_tag = str(fields.get("重保标签") or "")
+            existing_record_id = self._find_critical_guard_archive_record(archive_tag)
+            if existing_record_id:
+                self._state_store.update_critical_guard_weather_task(
+                    weather_key,
+                    status="completed",
+                    archive_status="archived",
+                    archive_record_id=existing_record_id,
+                    archive_error="",
+                    archived_at=time.time(),
+                )
+                return {
+                    "status": "archived",
+                    "record_id": existing_record_id,
+                    "reused": True,
+                }
+            for field_name, paths in attachment_paths.items():
+                tokens = [
+                    self._upload_bitable_file(
+                        file_path=path,
+                        file_name=Path(path).name,
+                        app_token=CRITICAL_GUARD_ARCHIVE_APP_TOKEN,
+                    )
+                    for path in paths
+                ]
+                fields[field_name] = [{"file_token": token} for token in tokens if token]
+            payload = self._create_record_fields(
+                app_token=CRITICAL_GUARD_ARCHIVE_APP_TOKEN,
+                table_id=CRITICAL_GUARD_ARCHIVE_TABLE_ID,
+                fields=fields,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            record = data.get("record") if isinstance(data.get("record"), dict) else {}
+            record_id = str(record.get("record_id") or data.get("record_id") or "").strip()
+            if not record_id:
+                record_id = self._find_critical_guard_archive_record(archive_tag)
+            if not record_id:
+                raise PortalError("重保汇总多维已响应成功，但未返回记录 ID。")
+            self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                status="completed",
+                archive_status="archived",
+                archive_record_id=record_id,
+                archive_error="",
+                archived_at=time.time(),
+            )
+            return {"status": "archived", "record_id": record_id, "reused": False}
+        except Exception as exc:
+            self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                archive_status="failed",
+                archive_error=str(exc),
+                archive_attempted_at=attempted_at,
+            )
+            return {"status": "failed", "error": str(exc)}
+
+    def retry_critical_guard_weather_archive(self, task_id: str) -> dict[str, Any]:
+        weather_task = self._state_store.get_critical_guard_weather_task(
+            task_id=str(task_id or "").strip()
+        )
+        if not weather_task:
+            raise PortalError("该任务不是天气自动发布任务。")
+        task = self._state_store.get_critical_guard_task(
+            str(weather_task.get("task_id") or ""),
+            include_all_responses=True,
+        )
+        if not task:
+            raise PortalError("重保任务已不存在，无法重试归档。")
+        progress = critical_guard_weather_progress(
+            task,
+            CRITICAL_GUARD_WEATHER_SCOPES,
+        )
+        if not progress.get("complete"):
+            raise PortalError("A-E 五楼尚未全部完成，不能归档。")
+        return self._archive_critical_guard_weather_task(
+            weather_task,
+            task,
+            force_retry=True,
+        )
+
+    def _run_critical_guard_weather_job(self, *, job_id: str) -> None:
+        job = self._state_store.get_critical_guard_weather_job(job_id) or {}
+        result: dict[str, Any] = {
+            "new_tasks": 0,
+            "existing_tasks": 0,
+            "notifications_sent": 0,
+            "notifications_failed": 0,
+            "archived": 0,
+            "archive_failed": 0,
+            "task_failed": 0,
+            "task_errors": [],
+        }
+        try:
+            if self.critical_guard_weather_query_paused():
+                result.update(
+                    skipped=True,
+                    message="天气自动查询已暂停，本次未请求天气接口。",
+                )
+                self._state_store.update_critical_guard_weather_job(
+                    job_id,
+                    phase="paused",
+                    status="completed",
+                    result=result,
+                    finished=True,
+                )
+                self._patch_critical_guard_weather_state(
+                    running=False,
+                    active_job_id="",
+                    phase="paused",
+                )
+                return
+            self._set_critical_guard_weather_job_phase(job_id, phase="fetching")
+            query_at = time.time()
+            query_state = {"last_query_at": query_at, "last_error": ""}
+            if str(job.get("trigger_type") or "") == "scheduled":
+                query_state["last_scheduled_query_at"] = query_at
+            self._patch_critical_guard_weather_state(**query_state)
+            snapshot = self._fetch_critical_guard_weather_snapshot()
+            snapshot_state: dict[str, Any] = {
+                "last_success_at": time.time(),
+                "snapshot": snapshot,
+            }
+            if snapshot.get("authoritative_for_state"):
+                snapshot_state.update(
+                    current_warnings=list(snapshot.get("warnings") or []),
+                    current_guard_level=str(snapshot.get("guard_level") or ""),
+                )
+            self._patch_critical_guard_weather_state(**snapshot_state)
+            self._set_critical_guard_weather_job_phase(job_id, phase="evaluating")
+            if snapshot.get("fresh_for_publish"):
+                for warning in snapshot.get("warnings") or []:
+                    _mapped, created = self._ensure_critical_guard_weather_task(
+                        snapshot=snapshot,
+                        warning=warning,
+                        operator_open_id=str(job.get("created_by_open_id") or ""),
+                        operator_name=str(job.get("created_by_name") or ""),
+                    )
+                    result["new_tasks" if created else "existing_tasks"] += 1
+            self._set_critical_guard_weather_job_phase(
+                job_id,
+                phase="notifying",
+                result=result,
+            )
+            now = time.time()
+            task_results: list[dict[str, Any]] = []
+            for weather_task in self._state_store.list_critical_guard_weather_tasks(
+                status="active"
+            ):
+                try:
+                    item = self._reconcile_critical_guard_weather_task(
+                        weather_task,
+                        now=now,
+                    )
+                except Exception as exc:
+                    item = {
+                        "task_id": str(weather_task.get("task_id") or ""),
+                        "error": str(exc) or "天气重保任务处理失败",
+                        "notifications_sent": 0,
+                        "notifications_failed": 0,
+                    }
+                    result["task_failed"] += 1
+                    result["task_errors"].append(
+                        {
+                            "task_id": item["task_id"],
+                            "warning_title": str(
+                                weather_task.get("warning_title") or ""
+                            ),
+                            "error": item["error"],
+                        }
+                    )
+                    logging.getLogger(__name__).exception(
+                        "单个天气重保任务处理失败: task_id=%s",
+                        item["task_id"],
+                    )
+                task_results.append(item)
+                result["notifications_sent"] += int(item.get("notifications_sent") or 0)
+                result["notifications_failed"] += int(
+                    item.get("notifications_failed") or 0
+                )
+                archive = item.get("archive") if isinstance(item.get("archive"), dict) else {}
+                if archive.get("status") == "archived" and not archive.get("reused"):
+                    result["archived"] += 1
+                elif archive.get("status") == "failed":
+                    result["archive_failed"] += 1
+            result["tasks"] = task_results
+            result["processed_tasks"] = len(task_results)
+            result["message"] = (
+                f"新建任务 {result['new_tasks']} 个，已有任务 {result['existing_tasks']} 个，"
+                f"通知成功 {result['notifications_sent']} 次，归档 {result['archived']} 条，"
+                f"任务失败 {result['task_failed']} 个。"
+            )
+            self._state_store.update_critical_guard_weather_job(
+                job_id,
+                phase="completed",
+                status="completed",
+                result=result,
+                finished=True,
+            )
+            self._patch_critical_guard_weather_state(
+                running=False,
+                active_job_id="",
+                phase="completed",
+                last_result=result,
+                last_error="",
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("天气重保任务执行失败")
+            with suppress(Exception):
+                self._state_store.update_critical_guard_weather_job(
+                    job_id,
+                    phase="failed",
+                    status="failed",
+                    result=result,
+                    error=str(exc),
+                    finished=True,
+                )
+            with suppress(Exception):
+                self._patch_critical_guard_weather_state(
+                    running=False,
+                    active_job_id="",
+                    phase="failed",
+                    last_error=str(exc),
+                )
+        finally:
+            with suppress(Exception):
+                self._state_store.cleanup_critical_guard_weather_jobs(
+                    keep_count=200
+                )
+            with self._critical_guard_weather_job_lock:
+                if self._critical_guard_weather_running_job_id == job_id:
+                    self._critical_guard_weather_running_job_id = ""
+
+    def critical_guard_weather_status(self) -> dict[str, Any]:
+        state = self._state_store.get_critical_guard_weather_state()
+        latest_job = self._state_store.get_latest_critical_guard_weather_job() or {}
+        running_id = str(self._critical_guard_weather_running_job_id or "")
+        running = bool(
+            running_id
+            and latest_job.get("job_id") == running_id
+            and latest_job.get("status") in {"queued", "running"}
+        )
+        last_query_at = float(state.get("last_query_at") or 0)
+        last_scheduled_query_at = float(state.get("last_scheduled_query_at") or 0)
+        snapshot = state.get("snapshot") if isinstance(state.get("snapshot"), dict) else {}
+        try:
+            poll_interval_seconds = max(
+                CRITICAL_GUARD_WEATHER_POLL_SECONDS,
+                int(
+                    snapshot.get("poll_interval_seconds")
+                    or CRITICAL_GUARD_WEATHER_POLL_SECONDS
+                ),
+            )
+        except (TypeError, ValueError):
+            poll_interval_seconds = CRITICAL_GUARD_WEATHER_POLL_SECONDS
+        weather_tasks = self._state_store.list_critical_guard_weather_tasks(status="all")
+        recent_tasks = weather_tasks[:30]
+        failed_tasks = [
+            item for item in weather_tasks if item.get("archive_status") == "failed"
+        ]
+        visible_tasks = list(recent_tasks)
+        visible_keys = {str(item.get("weather_key") or "") for item in visible_tasks}
+        for item in failed_tasks:
+            key = str(item.get("weather_key") or "")
+            if key not in visible_keys:
+                visible_tasks.append(item)
+                visible_keys.add(key)
+        task_summaries = [
+            {
+                key: item.get(key)
+                for key in (
+                    "weather_key",
+                    "task_id",
+                    "warning_title",
+                    "guard_level",
+                    "status",
+                    "archive_status",
+                    "archive_record_id",
+                    "archive_error",
+                    "created_at",
+                )
+            }
+            for item in visible_tasks
+        ]
+        return {
+            "paused": bool(state.get("paused")),
+            "paused_at": float(state.get("paused_at") or 0),
+            "pause_updated_at": float(state.get("pause_updated_at") or 0),
+            "pause_updated_by_name": str(state.get("pause_updated_by_name") or ""),
+            "running": running,
+            "phase": str(latest_job.get("phase") or state.get("phase") or "idle"),
+            "job": latest_job,
+            "last_query_at": last_query_at,
+            "last_success_at": float(state.get("last_success_at") or 0),
+            "next_query_at": (
+                0
+                if state.get("paused")
+                else (
+                    last_scheduled_query_at + poll_interval_seconds
+                    if last_scheduled_query_at
+                    else time.time() + poll_interval_seconds
+                )
+            ),
+            "schema_version": str(snapshot.get("schema_version") or ""),
+            "source_state": str(snapshot.get("source_state") or ""),
+            "guard_decision_state": str(snapshot.get("guard_decision_state") or ""),
+            "poll_interval_seconds": poll_interval_seconds,
+            "current_warnings": list(state.get("current_warnings") or []),
+            "current_guard_level": str(state.get("current_guard_level") or ""),
+            "last_result": dict(state.get("last_result") or {}),
+            "last_error": str(state.get("last_error") or ""),
+            "tasks": task_summaries,
+        }
+
+    @staticmethod
+    def get_critical_guard_template_bytes() -> tuple[bytes, str]:
+        path = critical_guard_template_path()
+        if not path.is_file():
+            raise PortalError("重保检查模板不存在。")
+        return path.read_bytes(), path.name
+
+    def get_critical_guard_scope_template(
+        self,
+        *,
+        scope: str,
+        sheet_type: str,
+    ) -> dict[str, Any]:
+        try:
+            scope_code = normalize_critical_guard_scope(scope)
+            normalized_sheet = normalize_critical_guard_sheet(sheet_type)
+        except CriticalGuardError as exc:
+            raise PortalError(str(exc)) from exc
+        if normalized_sheet not in CRITICAL_GUARD_CHECK_SHEETS:
+            raise PortalError("只有检查类表格支持楼栋专属模板。")
+        stored = self._state_store.get_critical_guard_scope_template(
+            scope=scope_code,
+            sheet_type=normalized_sheet,
+        )
+        customized = bool(stored and stored.get("customized"))
+        try:
+            items = normalize_check_items(
+                normalized_sheet,
+                (stored or {}).get("items") if customized else None,
+                fallback_to_default=True,
+            )
+        except CriticalGuardError as exc:
+            raise PortalError(str(exc)) from exc
+        return {
+            "scope": scope_code,
+            "sheet_type": normalized_sheet,
+            "items": items,
+            "revision": int((stored or {}).get("revision") or 0),
+            "customized": customized,
+            "template_version": str(
+                (stored or {}).get("template_version")
+                or critical_guard_catalog().get("template_version")
+                or ""
+            ),
+            "updated_by_name": str((stored or {}).get("updated_by_name") or ""),
+            "updated_at": float((stored or {}).get("updated_at") or 0),
+        }
+
+    def update_critical_guard_scope_template(
+        self,
+        *,
+        scope: str,
+        sheet_type: str,
+        items: list[dict[str, Any]] | None,
+        reset_to_default: bool,
+        expected_revision: int | str | None,
+        response_id: str,
+        response_cells: dict[str, Any] | None,
+        expected_response_version: int | str | None,
+        operator_open_id: str,
+        operator_name: str,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        try:
+            scope_code = normalize_critical_guard_scope(scope)
+            normalized_sheet = normalize_critical_guard_sheet(sheet_type)
+        except CriticalGuardError as exc:
+            raise PortalError(str(exc)) from exc
+        if normalized_sheet not in CRITICAL_GUARD_CHECK_SHEETS:
+            raise PortalError("只有检查类表格支持楼栋专属模板。")
+        normalized_operation_id = str(operation_id or "").strip()
+        if len(normalized_operation_id) < 8:
+            raise PortalError("模板操作标识无效，请重新操作。")
+        try:
+            normalized_items = (
+                default_check_items(normalized_sheet)
+                if reset_to_default
+                else normalize_check_items(
+                    normalized_sheet,
+                    items,
+                    fallback_to_default=False,
+                )
+            )
+        except CriticalGuardError as exc:
+            raise PortalError(str(exc)) from exc
+
+        normalized_response_id = str(response_id or "").strip()
+        normalized_cells: dict[str, Any] | None = None
+        if normalized_response_id:
+            current_response = self._state_store.get_critical_guard_response(
+                normalized_response_id
+            )
+            if not current_response:
+                raise PortalError("重保填报记录不存在。")
+            if (
+                str(current_response.get("scope") or "").strip().upper()
+                != scope_code
+                or str(current_response.get("sheet_type") or "").strip()
+                != normalized_sheet
+            ):
+                raise PortalError("当前填报与楼栋检查模板不匹配。")
+            source_cells = (
+                response_cells if isinstance(response_cells, dict) else {}
+            )
+            try:
+                normalized_cells = normalize_response_cells(
+                    normalized_sheet,
+                    scope_code,
+                    {
+                        **source_cells,
+                        "template_items": normalized_items,
+                        "template_revision": 0,
+                        "template_customized": not reset_to_default,
+                    },
+                    fallback=(
+                        current_response.get("cells")
+                        if isinstance(current_response.get("cells"), dict)
+                        else None
+                    ),
+                )
+                normalized_cells = reconcile_check_results(
+                    normalized_sheet,
+                    current_response.get("cells"),
+                    normalized_cells,
+                )
+            except CriticalGuardError as exc:
+                raise PortalError(str(exc)) from exc
+
+        try:
+            updated = self._state_store.update_critical_guard_scope_template(
+                scope=scope_code,
+                sheet_type=normalized_sheet,
+                template_version=str(
+                    critical_guard_catalog().get("template_version") or ""
+                ),
+                items=None if reset_to_default else normalized_items,
+                expected_revision=expected_revision,
+                actor_open_id=operator_open_id,
+                actor_name=operator_name,
+                response_id=normalized_response_id,
+                response_cells=normalized_cells,
+                expected_response_version=expected_response_version,
+                operation_id=normalized_operation_id,
+            )
+        except ValueError as exc:
+            raise PortalConflictError(str(exc)) from exc
+        except KeyError as exc:
+            raise PortalError("重保填报记录不存在。") from exc
+
+        for stale_path in updated.pop("_stale_artifact_paths", []) or []:
+            with suppress(OSError):
+                Path(str(stale_path)).unlink()
+        public_template = self.get_critical_guard_scope_template(
+            scope=scope_code,
+            sheet_type=normalized_sheet,
+        )
+        public_response = (
+            self._critical_guard_public_response(
+                updated.get("response") or {},
+                operator_open_id=operator_open_id,
+            )
+            if updated.get("response")
+            else None
+        )
+        return {
+            "template": public_template,
+            "response": public_response,
+            "reset": bool(reset_to_default),
+            "idempotent_replay": bool(updated.get("idempotent_replay")),
+        }
+
+    def can_download_critical_guard_template(
+        self,
+        *,
+        task_id: str,
+        token: str,
+    ) -> bool:
+        normalized_task_id = str(task_id or "").strip()
+        normalized_token = str(token or "").strip()
+        if not normalized_task_id or not normalized_token:
+            return False
+        weather_task = self._state_store.get_critical_guard_weather_task(
+            task_id=normalized_task_id
+        )
+        if not weather_task or str(weather_task.get("status") or "") == "deleted":
+            return False
+        source_payload = (
+            weather_task.get("source_payload")
+            if isinstance(weather_task.get("source_payload"), dict)
+            else {}
+        )
+        expected = str(source_payload.get("template_download_token") or "").strip()
+        return bool(expected) and secrets.compare_digest(expected, normalized_token)
+
     def create_critical_guard_task(
         self,
         *,
@@ -40094,6 +41421,7 @@ class MaintenancePortalService:
         operation_id: str,
         operator_open_id: str,
         operator_name: str,
+        initial_cells_by_sheet: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         task_name = re.sub(r"\s+", " ", str(name or "").strip())[:160]
         if not task_name:
@@ -40129,6 +41457,25 @@ class MaintenancePortalService:
         responses: list[dict[str, Any]] = []
         for scope in normalized_scopes:
             for sheet in normalized_sheets:
+                scope_template = (
+                    self._state_store.get_critical_guard_scope_template(
+                        scope=scope,
+                        sheet_type=sheet,
+                    )
+                    if sheet in CRITICAL_GUARD_CHECK_SHEETS
+                    else None
+                )
+                scope_template_items = (
+                    list(scope_template.get("items") or [])
+                    if scope_template and scope_template.get("customized")
+                    else None
+                )
+                scope_template_revision = int(
+                    (scope_template or {}).get("revision") or 0
+                )
+                scope_template_customized = bool(
+                    scope_template and scope_template.get("customized")
+                )
                 memory = self._state_store.get_critical_guard_memory(
                     memory_key=memory_key,
                     scope=scope,
@@ -40136,9 +41483,22 @@ class MaintenancePortalService:
                     template_version=template_version,
                 )
                 cells = (
-                    memory_cells_for_new_task(sheet, scope, memory.get("cells"))
+                    memory_cells_for_new_task(
+                        sheet,
+                        scope,
+                        memory.get("cells"),
+                        template_items=scope_template_items,
+                        template_revision=scope_template_revision,
+                        template_customized=scope_template_customized,
+                    )
                     if memory
-                    else default_response_cells(sheet, scope)
+                    else default_response_cells(
+                        sheet,
+                        scope,
+                        template_items=scope_template_items,
+                        template_revision=scope_template_revision,
+                        template_customized=scope_template_customized,
+                    )
                 )
                 if sheet in CRITICAL_GUARD_FILE_SHEETS:
                     latest_file = self._state_store.get_latest_critical_guard_scope_file(
@@ -40156,6 +41516,18 @@ class MaintenancePortalService:
                                 "source_file_sha256": str(latest_file.get("sha256") or ""),
                             }
                         )
+                initial_cells = (
+                    (initial_cells_by_sheet or {}).get(sheet)
+                    if isinstance(initial_cells_by_sheet, dict)
+                    else None
+                )
+                if isinstance(initial_cells, dict):
+                    cells = copy.deepcopy(cells)
+                    for key, value in initial_cells.items():
+                        if isinstance(value, dict) and isinstance(cells.get(key), dict):
+                            cells[key] = {**cells[key], **copy.deepcopy(value)}
+                        else:
+                            cells[key] = copy.deepcopy(value)
                 responses.append(
                     {
                         "response_id": f"guard_response_{uuid.uuid4().hex}",
@@ -40180,6 +41552,7 @@ class MaintenancePortalService:
             str(task.get("task_id") or task_id),
             include_all_responses=True,
         ) or task
+        detail["created"] = bool(task.get("created"))
         detail["responses"] = [
             self._critical_guard_public_response(item)
             for item in detail.get("responses") or []
@@ -40266,6 +41639,14 @@ class MaintenancePortalService:
                 "重保任务已删除，但生成文件清理不完整: task_id=%s errors=%s",
                 normalized_task_id,
                 "; ".join(cleanup_errors[:5]),
+            )
+        weather_task = self._state_store.get_critical_guard_weather_task(
+            task_id=normalized_task_id
+        )
+        if weather_task:
+            self._state_store.update_critical_guard_weather_task(
+                str(weather_task.get("weather_key") or ""),
+                status="deleted",
             )
         return {
             "deleted": True,

@@ -31,6 +31,7 @@ from lan_bitable_template_portal.critical_guard import (
     critical_guard_template_path,
     default_response_cells,
     memory_cells_for_new_task,
+    normalize_response_cells,
     render_critical_guard_image,
     render_critical_guard_source_file_artifacts,
     render_critical_guard_source_file_preview,
@@ -102,6 +103,181 @@ class CriticalGuardHelperTests(unittest.TestCase):
         self.assertEqual(reused["machine_room"], "南通机房B楼")
         self.assertNotEqual(reused["check_date"], "2025-01-01")
         self.assertEqual(reused["checks"][first_key]["note"], "保留上次异常说明")
+
+    def test_memory_does_not_reuse_result_after_template_row_text_changes(self) -> None:
+        memory = default_response_cells("客户重保", "A", today="2025-01-01")
+        first_item = dict(memory["template_items"][0])
+        second_item = dict(memory["template_items"][1])
+        memory["checks"][first_item["key"]] = {
+            "status": "abnormal",
+            "note": "旧检查内容的异常说明",
+        }
+        memory["checks"][second_item["key"]] = {
+            "status": "abnormal",
+            "note": "未修改检查内容应继续复用",
+        }
+        first_item["content"] = "已经修改的新检查内容"
+
+        reused = memory_cells_for_new_task(
+            "客户重保",
+            "A",
+            memory,
+            template_items=[first_item, second_item],
+            template_revision=7,
+            template_customized=True,
+        )
+
+        self.assertEqual(
+            reused["checks"][first_item["key"]],
+            {"status": "normal", "note": ""},
+        )
+        self.assertEqual(
+            reused["checks"][second_item["key"]]["note"],
+            "未修改检查内容应继续复用",
+        )
+        self.assertTrue(reused["template_customized"])
+
+    def test_custom_check_rows_are_normalized_and_rendered_in_source_style(self) -> None:
+        from openpyxl import load_workbook
+
+        cells = default_response_cells("设备安全", "A", today="2026-08-03")
+        items = [dict(item) for item in cells["template_items"][:2]]
+        items[0]["category"] = "消防/电气"
+        items[0]["content"] = "=1+1 楼栋自定义检查内容"
+        items.append(
+            {
+                "key": "custom-added-row",
+                "category": "新增检查项",
+                "content": "新增行检查内容",
+            }
+        )
+        cells["template_items"] = items
+        cells["checks"] = {
+            item["key"]: {"status": "normal", "note": ""} for item in items
+        }
+        normalized = normalize_response_cells("设备安全", "A", cells)
+        self.assertEqual(len(normalized["template_items"]), 3)
+        self.assertEqual(set(normalized["checks"]), {item["key"] for item in items})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "custom-check.xlsx"
+            metadata = build_critical_guard_workbook(
+                sheet_name="设备安全",
+                scope="A",
+                cells=normalized,
+                signatures=None,
+                output_path=output_path,
+            )
+            workbook = load_workbook(output_path, data_only=False, keep_links=False)
+            worksheet = workbook["设备安全"]
+            self.assertEqual(metadata["sheet_range"], "B2:E9")
+            self.assertEqual(worksheet["B5"].value, "消防/电气")
+            self.assertEqual(worksheet["C5"].value, "=1+1 楼栋自定义检查内容")
+            self.assertEqual(worksheet["B5"].data_type, "s")
+            self.assertEqual(worksheet["C5"].data_type, "s")
+            self.assertEqual(worksheet["B7"].value, "新增检查项")
+            self.assertEqual(worksheet["C7"].value, "新增行检查内容")
+            self.assertEqual(worksheet["D7"].value, "正常")
+            self.assertEqual(worksheet["B8"].value, "检查意见及建议：")
+            self.assertEqual(worksheet["B9"].value, "检查人签字：")
+            self.assertEqual(worksheet["C5"].font.name, worksheet["C7"].font.name)
+
+    def test_disaster_custom_rows_keep_two_level_categories_and_footer(self) -> None:
+        from openpyxl import load_workbook
+
+        cells = default_response_cells("灾害专项", "A", today="2026-08-03")
+        items = [
+            {
+                "key": "disaster-one",
+                "category": "暴雨 / 排水/防涝",
+                "content": "检查排水设施",
+            },
+            {
+                "key": "disaster-two",
+                "category": "暴雨 / 排水/防涝",
+                "content": "检查防汛物资",
+            },
+        ]
+        cells["template_items"] = items
+        cells["template_customized"] = True
+        cells["checks"] = {
+            item["key"]: {"status": "normal", "note": ""} for item in items
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "custom-disaster.xlsx"
+            metadata = build_critical_guard_workbook(
+                sheet_name="灾害专项",
+                scope="A",
+                cells=cells,
+                signatures=None,
+                output_path=output_path,
+            )
+            workbook = load_workbook(output_path, data_only=False, keep_links=False)
+            worksheet = workbook["灾害专项"]
+            self.assertEqual(metadata["sheet_range"], "B2:F12")
+            self.assertEqual(worksheet["B8"].value, "暴雨")
+            self.assertEqual(worksheet["C8"].value, "排水/防涝")
+            self.assertIn("B8:B9", {str(item) for item in worksheet.merged_cells.ranges})
+            self.assertIn("C8:C9", {str(item) for item in worksheet.merged_cells.ranges})
+            self.assertEqual(
+                worksheet["B10"].value,
+                "其他检查项（可自行增加内容）：",
+            )
+            self.assertEqual(worksheet["B11"].value, "检查意见及建议：")
+            self.assertEqual(worksheet["B12"].value, "检查人签字：")
+
+    def test_custom_check_rows_can_extend_beyond_original_template_range(self) -> None:
+        from openpyxl import load_workbook
+
+        cells = default_response_cells("设备安全", "A", today="2026-08-03")
+        items = [dict(item) for item in cells["template_items"]]
+        items.append(
+            {
+                "key": "custom-after-original-last-row",
+                "category": "楼栋新增项",
+                "content": "原模板末行之后新增的检查内容",
+            }
+        )
+        cells["template_items"] = items
+        cells["template_customized"] = True
+        cells["checks"] = {
+            item["key"]: {"status": "normal", "note": ""} for item in items
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "extended-check.xlsx"
+            metadata = build_critical_guard_workbook(
+                sheet_name="设备安全",
+                scope="A",
+                cells=cells,
+                signatures=None,
+                output_path=output_path,
+            )
+            workbook = load_workbook(output_path, data_only=False, keep_links=False)
+            worksheet = workbook["设备安全"]
+            added_row = 5 + len(items) - 1
+            suggestions_row = added_row + 1
+            signature_row = suggestions_row + 1
+            self.assertEqual(metadata["sheet_range"], f"B2:E{signature_row}")
+            self.assertEqual(worksheet.cell(added_row, 2).value, "楼栋新增项")
+            self.assertEqual(
+                worksheet.cell(added_row, 3).value,
+                "原模板末行之后新增的检查内容",
+            )
+            self.assertEqual(
+                worksheet.cell(suggestions_row, 2).value,
+                "检查意见及建议：",
+            )
+            self.assertEqual(
+                worksheet.cell(signature_row, 2).value,
+                "检查人签字：",
+            )
+            self.assertEqual(
+                worksheet.cell(added_row, 3).font.name,
+                worksheet.cell(5, 3).font.name,
+            )
+            self.assertEqual(worksheet["C5"].font.sz, worksheet["C7"].font.sz)
+            self.assertEqual(worksheet["C5"].border.left.style, worksheet["C7"].border.left.style)
+            workbook.close()
 
     def test_pending_response_date_tracks_the_day_it_is_opened(self) -> None:
         service = MaintenancePortalService.__new__(MaintenancePortalService)
@@ -987,6 +1163,123 @@ class CriticalGuardStateStoreTests(unittest.TestCase):
                 expected_version=2,
                 actor_open_id="operator-open-id",
                 actor_name="填写人",
+            )
+
+    def test_scope_template_is_isolated_reused_and_can_restore_default(self) -> None:
+        service = MaintenancePortalService.__new__(MaintenancePortalService)
+        service._state_store = self.store
+        response = self.store.get_critical_guard_response(self.response_id)
+        self.assertIsNotNone(response)
+        custom_items = [
+            dict(item) for item in response["cells"]["template_items"][:2]
+        ]
+        custom_items.append(
+            {
+                "key": "custom-building-row",
+                "category": "楼栋专属",
+                "content": "仅 A 楼使用",
+            }
+        )
+        saved = service.update_critical_guard_scope_template(
+            scope="A",
+            sheet_type="设备安全",
+            items=custom_items,
+            reset_to_default=False,
+            expected_revision=0,
+            response_id=self.response_id,
+            response_cells=response["cells"],
+            expected_response_version=response["version"],
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+            operation_id="scope-template-save-operation",
+        )
+        self.assertTrue(saved["template"]["customized"])
+        self.assertEqual(saved["template"]["revision"], 1)
+        self.assertEqual(len(saved["response"]["cells"]["template_items"]), 3)
+
+        replayed = service.update_critical_guard_scope_template(
+            scope="A",
+            sheet_type="设备安全",
+            items=custom_items,
+            reset_to_default=False,
+            expected_revision=0,
+            response_id=self.response_id,
+            response_cells=response["cells"],
+            expected_response_version=response["version"],
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+            operation_id="scope-template-save-operation",
+        )
+        self.assertTrue(replayed["idempotent_replay"])
+        self.assertEqual(
+            replayed["response"]["version"], saved["response"]["version"]
+        )
+
+        next_task = service.create_critical_guard_task(
+            name="楼栋模板复用任务",
+            sheet_types=["设备安全"],
+            target_scopes=["A", "B"],
+            operation_id="scope-template-reuse-operation",
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        by_scope = {item["scope"]: item for item in next_task["responses"]}
+        self.assertEqual(len(by_scope["A"]["cells"]["template_items"]), 3)
+        self.assertEqual(by_scope["A"]["cells"]["template_revision"], 1)
+        self.assertGreater(len(by_scope["B"]["cells"]["template_items"]), 3)
+        self.assertEqual(by_scope["B"]["cells"]["template_revision"], 0)
+
+        restored = service.update_critical_guard_scope_template(
+            scope="A",
+            sheet_type="设备安全",
+            items=[],
+            reset_to_default=True,
+            expected_revision=1,
+            response_id=self.response_id,
+            response_cells=saved["response"]["cells"],
+            expected_response_version=saved["response"]["version"],
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+            operation_id="scope-template-reset-operation",
+        )
+        self.assertFalse(restored["template"]["customized"])
+        self.assertEqual(restored["template"]["revision"], 2)
+        self.assertEqual(restored["response"]["cells"]["template_revision"], 2)
+        self.assertFalse(restored["response"]["cells"]["template_customized"])
+        self.assertEqual(
+            len(restored["response"]["cells"]["template_items"]),
+            len(critical_guard_catalog()["sheets"][0]["items"]),
+        )
+
+        after_reset_task = service.create_critical_guard_task(
+            name="恢复默认后的模板复用任务",
+            sheet_types=["设备安全"],
+            target_scopes=["A"],
+            operation_id="scope-template-after-reset-operation",
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        after_reset_response = after_reset_task["responses"][0]
+        self.assertEqual(after_reset_response["cells"]["template_revision"], 2)
+        self.assertFalse(after_reset_response["cells"]["template_customized"])
+        self.assertEqual(
+            len(after_reset_response["cells"]["template_items"]),
+            len(critical_guard_catalog()["sheets"][0]["items"]),
+        )
+
+        with self.assertRaisesRegex(PortalConflictError, "其他用户修改"):
+            service.update_critical_guard_scope_template(
+                scope="A",
+                sheet_type="设备安全",
+                items=custom_items,
+                reset_to_default=False,
+                expected_revision=0,
+                response_id=self.response_id,
+                response_cells=restored["response"]["cells"],
+                expected_response_version=restored["response"]["version"],
+                operator_open_id="operator-open-id",
+                operator_name="管理员",
+                operation_id="stale-template-save-operation",
             )
 
     def test_multiple_signature_references_are_persisted(self) -> None:

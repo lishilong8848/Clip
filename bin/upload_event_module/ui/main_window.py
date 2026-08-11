@@ -37,7 +37,7 @@ class ClipboardTool(
     QWidget,
 ):
     # 缃戠粶璇锋眰瀹屾垚淇″彿锛?action_name, success, message, record_id)
-    request_finished = pyqtSignal(str, bool, str, str)
+    request_finished = pyqtSignal(str, bool, str, str, str)
     patch_update_finished = pyqtSignal(bool, str)
     clipboard_entry_received = pyqtSignal(dict)
     remote_update_checked = pyqtSignal(str, object, object)
@@ -170,6 +170,7 @@ class ClipboardTool(
             self._drain_ui_signal_queue,
         )
         self._ui_signal_timer.start(100)
+        self._ui_priority_mutation_queue = queue.Queue(maxsize=100)
         self._ui_mutation_queue = queue.Queue(maxsize=500)
         self._ui_mutation_max_per_tick = 1
         self._ui_mutation_budget_ms = 40.0

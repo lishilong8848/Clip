@@ -5,6 +5,7 @@ import os
 import re
 import json
 import gc
+import ast
 import importlib.util
 import subprocess
 import sys
@@ -1107,27 +1108,35 @@ def check_qt_upload_path_has_no_local_queue_dispatch() -> tuple[bool, list[str]]
         for pattern in forbidden_state:
             if pattern in ui_file_text:
                 offenders.append(f"{rel}: {pattern}")
-    marker = "    def _has_pending_upload(self, record_id):"
-    start = text.find(marker)
-    if start < 0:
+    try:
+        workflow_tree = ast.parse(text)
+    except SyntaxError as exc:
+        offenders.append(f"bin/upload_event_module/ui/main_window_workflow.py: Python 语法无效: {exc}")
+        workflow_tree = None
+
+    def _method_source(method_name: str) -> str:
+        if workflow_tree is None:
+            return ""
+        for node in ast.walk(workflow_tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name:
+                return ast.get_source_segment(text, node) or ""
+        return ""
+
+    pending_body = _method_source("_has_pending_upload")
+    if not pending_body:
         offenders.append("bin/upload_event_module/ui/main_window_workflow.py: 缺少 _has_pending_upload")
-    else:
-        next_def = text.find("\n    def ", start + len(marker))
-        body = text[start:] if next_def < 0 else text[start:next_def]
-        if "_upload_queues" in body or "_upload_workers" in body:
-            offenders.append(
-                "bin/upload_event_module/ui/main_window_workflow.py: _has_pending_upload 仍依赖 Qt 本地上传队列"
-            )
-    dispatch_marker = "    def _dispatch_backend_notice_upload(self, record_id: str, task) -> None:"
-    dispatch_start = text.find(dispatch_marker)
-    if dispatch_start < 0:
+    elif "_upload_queues" in pending_body or "_upload_workers" in pending_body:
+        offenders.append(
+            "bin/upload_event_module/ui/main_window_workflow.py: _has_pending_upload 仍依赖 Qt 本地上传队列"
+        )
+
+    dispatch_body = _method_source("_dispatch_backend_notice_upload")
+    if not dispatch_body:
         offenders.append("bin/upload_event_module/ui/main_window_workflow.py: 缺少 _dispatch_backend_notice_upload")
     else:
-        next_def = text.find("\n    def ", dispatch_start + len(dispatch_marker))
-        body = text[dispatch_start:] if next_def < 0 else text[dispatch_start:next_def]
-        if "threading.Thread(" in body:
+        if "threading.Thread(" in dispatch_body:
             offenders.append("_dispatch_backend_notice_upload 仍直接创建线程")
-        if "_qt_backend_command_executor" not in body or ".submit(" not in body:
+        if "_qt_backend_command_executor" not in dispatch_body or ".submit(" not in dispatch_body:
             offenders.append("_dispatch_backend_notice_upload 未使用受控 Qt 后端命令线程池")
     if "ThreadPoolExecutor" not in main_text or "_qt_backend_command_executor" not in main_text:
         offenders.append("main_window.py 缺少 Qt 后端命令线程池")

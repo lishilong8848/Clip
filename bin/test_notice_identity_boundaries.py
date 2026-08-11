@@ -22,6 +22,7 @@ from upload_event_module.config import (  # noqa: E402
     EVENT_NOTICE_FIELDS,
     MAINTENANCE_NOTICE_FIELDS,
 )
+from upload_event_module.building_normalizer import extract_building_codes  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.event_notice import EventNoticeHandler  # noqa: E402
@@ -918,6 +919,45 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 work_type_label="检修通告",
             )
 
+    def test_compact_campus_building_text_extracts_all_explicit_buildings(self) -> None:
+        cases = {
+            "EA118园区ABCDE楼": ["A", "B", "C", "D", "E"],
+            "A-E楼": ["A", "B", "C", "D", "E"],
+            "A、B、C楼": ["A", "B", "C"],
+            "A楼、B楼、C楼": ["A", "B", "C"],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(extract_building_codes(text), expected)
+                self.assertEqual(
+                    MaintenancePortalService._building_codes_from_notice_text(text),
+                    expected,
+                )
+
+    def test_change_location_can_resolve_compact_campus_buildings(self) -> None:
+        building, codes = self.service._resolve_notice_submit_building(
+            scope="CAMPUS",
+            request_payload={"location": "EA118园区ABCDE楼"},
+            title="EA118园区蓄电池测试变更",
+            location="EA118园区ABCDE楼",
+            work_type_label="变更通告",
+        )
+
+        self.assertEqual(codes, ["A", "B", "C", "D", "E"])
+        self.assertEqual(building, "A楼、B楼、C楼、D楼、E楼")
+
+    def test_change_content_is_last_resort_for_building_resolution(self) -> None:
+        building, codes = self.service._resolve_notice_submit_building(
+            scope="CAMPUS",
+            request_payload={"content": "本次操作覆盖EA118园区ABCDE楼"},
+            title="园区蓄电池测试变更",
+            content="本次操作覆盖EA118园区ABCDE楼",
+            work_type_label="变更通告",
+        )
+
+        self.assertEqual(codes, ["A", "B", "C", "D", "E"])
+        self.assertEqual(building, "A楼、B楼、C楼、D楼、E楼")
+
     def test_event_identity_requires_event_time(self) -> None:
         base_text = (
             "【事件通告】状态：新增\n"
@@ -963,6 +1003,39 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         self.assertNotEqual(
             PortalRuntime._event_notice_identity_key(first),
             PortalRuntime._event_notice_identity_key(second),
+        )
+
+    def test_event_identity_reuses_target_snapshot_with_area_text_and_punctuation(self) -> None:
+        text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房B楼I3级事件通报；\n"
+            "【来源】巡检发现；\n"
+            "【时间】2026年8月11日09:37分；\n"
+            "【概述】巡检发现B-127冷冻站A区变频补水环网管道有渗水现象\n"
+            "【影响】对IT业务暂无影响；\n"
+            "【进展】人员已经到达现场，正在排查"
+        )
+        incoming = {"notice_type": "事件通告", "text": text}
+        target_snapshot = {
+            "notice_type": "事件通告",
+            "title": "巡检发现B-127冷冻站A区变频补水环网管道有渗水现象",
+            "start_time": "2026-08-11T09:37",
+            "building": "B楼",
+            "building_codes": ["B"],
+            "source": "巡检发现",
+            "event_source": "巡检发现",
+            "level": "I3",
+        }
+
+        parsed = extract_event_info(text) or {}
+
+        self.assertEqual(parsed.get("source"), "巡检发现")
+        self.assertEqual(parsed.get("time_str"), "2026年8月11日09:37分")
+        self.assertEqual(parsed.get("level"), "I3")
+        self.assertEqual(PortalRuntime._event_notice_building_key(incoming), "B")
+        self.assertEqual(
+            PortalRuntime._event_notice_identity_key(incoming),
+            PortalRuntime._event_notice_identity_key(target_snapshot),
         )
 
     def test_event_title_only_does_not_build_remote_reuse_identity(self) -> None:

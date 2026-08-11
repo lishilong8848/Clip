@@ -39,6 +39,13 @@ PATTERN_LEVEL = re.compile(r"【等级】(.*?)(?:【|$)", re.DOTALL)  # 变更�
 PATTERN_REASON = re.compile(r"【(?:原因|故障原因|故障维修原因)】(.*?)(?:【|$)", re.DOTALL)
 
 
+def _clean_section_value(value: str, *, single_line: bool = False) -> str:
+    text = str(value or "").strip()
+    if single_line:
+        text = re.sub(r"\s+", " ", text)
+    return re.sub(r"[;；]+$", "", text).strip()
+
+
 def _extract_event_building_key(text: str, title: str) -> str:
     def _codes_from_text(value: str) -> list[str]:
         normalized = str(value or "").upper().replace("栋", "楼")
@@ -124,11 +131,11 @@ def extract_notice_info(content):
         title_match = PATTERN_EVENT_TITLE.search(raw_content)
     if not title_match:
         return None
-    title = title_match.group(1).replace("\n", " ").strip()
+    title = _clean_section_value(title_match.group(1), single_line=True)
 
     # 提取时间构建唯一键
     time_match = PATTERN_TIME.search(raw_content)
-    time_str = time_match.group(1).strip() if time_match else ""
+    time_str = _clean_section_value(time_match.group(1)) if time_match else ""
 
     reason = ""
     reason_match = PATTERN_REASON.search(raw_content)
@@ -141,7 +148,7 @@ def extract_notice_info(content):
         pattern_source = re.compile(r"【(?:来源|事件发现来源)】(.*?)(?:【|$)", re.DOTALL)
         source_match = pattern_source.search(raw_content)
         if source_match:
-            source = source_match.group(1).strip()
+            source = _clean_section_value(source_match.group(1), single_line=True)
 
     # 提取等级。事件也需要等级参与身份匹配，避免同标题同时间的事件串绑。
     level = None
@@ -151,9 +158,16 @@ def extract_notice_info(content):
             if notice_type == NOTICE_TYPE_SHIJIAN
             else PATTERN_LEVEL.search(raw_content)
         )
-        raw_level = level_match.group(1).strip() if level_match else ""
+        raw_level = _clean_section_value(level_match.group(1), single_line=True) if level_match else ""
+        if notice_type == NOTICE_TYPE_SHIJIAN and not raw_level:
+            raw_level = title
+        level_pattern = (
+            r"(I3\s*[→>\-]\s*I2|I3\s*[→>\-]\s*I1|I3|I2|I1|E4|E3|E2|E1|E0)"
+            if notice_type == NOTICE_TYPE_SHIJIAN
+            else r"(E4|E3|E2|E1|E0|超低|极低|低|中|高)"
+        )
         valid_level_match = re.search(
-            r"(I3\s*[→>\-]\s*I2|I3\s*[→>\-]\s*I1|I3|I2|I1|E4|E3|E2|E1|E0|超低|极低|低|中|高)",
+            level_pattern,
             raw_level.upper() if notice_type == NOTICE_TYPE_SHIJIAN else raw_level,
         )
         if valid_level_match:

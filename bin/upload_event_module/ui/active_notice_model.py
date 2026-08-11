@@ -305,6 +305,34 @@ class ActiveNoticeModel(QAbstractListModel):
         self._rebuild_index()
         return True
 
+    def replace_record(self, identity: str, record: dict[str, Any] | None) -> bool:
+        """Replace one existing row even when its stable identity is repaired."""
+
+        identity = str(identity or "").strip()
+        if not identity or not isinstance(record, dict):
+            return False
+        row = self._identity_to_row.get(identity)
+        new_identity = self.identity_for_record(record)
+        if row is None or row < 0 or row >= len(self._records) or not new_identity:
+            return False
+        duplicate_row = self._identity_to_row.get(new_identity)
+        if duplicate_row is not None and duplicate_row != row:
+            self.beginRemoveRows(QModelIndex(), row, row)
+            self._records.pop(row)
+            self.endRemoveRows()
+            if row < duplicate_row:
+                duplicate_row -= 1
+            self._records[duplicate_row] = dict(record)
+            self._rebuild_index()
+            model_index = self.index(duplicate_row, 0)
+            self.dataChanged.emit(model_index, model_index, [])
+            return True
+        self._records[row] = dict(record)
+        self._rebuild_index()
+        model_index = self.index(row, 0)
+        self.dataChanged.emit(model_index, model_index, [])
+        return True
+
     def remove_record(self, record: dict[str, Any] | None) -> bool:
         identity = self.identity_for_record(record)
         if not identity:
@@ -430,7 +458,11 @@ class ActiveNoticeModelItem:
         row = self.row()
         if model is None or row < 0:
             return False
-        updated = model.upsert_record(dict(value), row=row)
+        new_identity = model.identity_for_record(value)
+        if new_identity and new_identity != self._identity:
+            updated = model.replace_record(self._identity, dict(value))
+        else:
+            updated = model.upsert_record(dict(value), row=row)
         if updated:
             self._identity = model.identity_for_record(value) or self._identity
         return bool(updated)

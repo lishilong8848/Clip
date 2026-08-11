@@ -15,6 +15,7 @@ from ..config import (
     OPTION_SLASH,
 )
 from ..core.parser import extract_event_info
+from lan_bitable_template_portal.identity_utils import canonical_target_record_id
 
 
 _TITLE_PATTERNS = (
@@ -23,6 +24,14 @@ _TITLE_PATTERNS = (
 )
 _SECTION_PATTERN_TEMPLATE = r"【{label}】(.*?)(?=【|$)"
 _LEVEL_LOCK_NOTICE_TYPES = {"变更通告", "事件通告"}
+_TRANSIENT_UPLOAD_FIELDS = {
+    "_upload_in_progress",
+    "_upload_pending_dialog",
+    "_upload_started_monotonic",
+    "_last_upload_error",
+    "_pending_upload_hash",
+    "_upload_operation_id",
+}
 
 
 def _clean_text(value) -> str:
@@ -78,6 +87,43 @@ def _build_preview_text(text: str, limit: int = 40) -> str:
     return preview[:limit] + "..."
 
 
+def _event_text_from_structured_data(data: dict) -> str:
+    if str(data.get("notice_type") or "").strip() != "事件通告":
+        return ""
+    title = _clean_text(
+        data.get("title")
+        or data.get("content")
+        or data.get("alarm_desc")
+    )
+    if not title:
+        return ""
+    status = _clean_text(data.get("status"))
+    if canonical_target_record_id(data) and not data.get("_is_placeholder_record"):
+        status = "更新"
+    elif status in {"", "开始", "发起"}:
+        status = "新增"
+    time_str = _clean_text(data.get("time_str") or data.get("start_time"))
+    if "T" in time_str:
+        time_str = time_str.replace("T", " ", 1)
+    source = _clean_text(data.get("event_source") or data.get("source"))
+    summary = _clean_text(
+        data.get("content")
+        or data.get("alarm_desc")
+        or title
+    )
+    return "\n".join(
+        (
+            f"【事件通告】状态：{status}",
+            f"【标题】{title}",
+            f"【来源】{source}",
+            f"【时间】{time_str}",
+            f"【概述】{summary}",
+            f"【影响】{_clean_text(data.get('impact'))}",
+            f"【进展】{_clean_text(data.get('progress'))}",
+        )
+    )
+
+
 def notice_supports_level_lock(notice_type: str) -> bool:
     return str(notice_type or "").strip() in _LEVEL_LOCK_NOTICE_TYPES
 
@@ -121,6 +167,8 @@ def normalize_active_item_data(data_dict: dict | None) -> dict:
     normalized = dict(data_dict)
     normalized.pop("need_upload_first", None)
     raw_text = _recover_notice_text_from_log_preview(normalized.get("text"))
+    if not raw_text:
+        raw_text = _event_text_from_structured_data(normalized)
     normalized["text"] = raw_text
     normalized.pop("title", None)
 
@@ -176,6 +224,19 @@ def normalize_active_item_data(data_dict: dict | None) -> dict:
         normalized["record_binding_state"] = "placeholder"
         normalized.pop("record_binding_error", None)
 
+    return normalized
+
+
+def persistent_active_item_data(data_dict: dict | None) -> dict:
+    """Return an active-item snapshot that is safe to persist.
+
+    Upload progress, transient errors and operation correlation IDs only describe
+    the current Qt process. Persisting them can revive an old "上传中" or
+    "失败可重试" state after a cache refresh or restart.
+    """
+    normalized = normalize_active_item_data(data_dict)
+    for field in _TRANSIENT_UPLOAD_FIELDS:
+        normalized.pop(field, None)
     return normalized
 
 

@@ -430,6 +430,25 @@ class _FakeRepairEventRouteService:
         return {"record_id": record_id, "transfer_to_overhaul": True}
 
 
+class _FakeCriticalGuardTemplateRouteService:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def update_critical_guard_scope_template(self, **kwargs) -> dict:
+        self.calls.append(dict(kwargs))
+        return {
+            "template": {
+                "scope": kwargs.get("scope"),
+                "sheet_type": kwargs.get("sheet_type"),
+                "revision": 1,
+                "customized": True,
+            },
+            "response": None,
+            "reset": bool(kwargs.get("reset_to_default")),
+            "idempotent_replay": False,
+        }
+
+
 class BackendApiModelTests(unittest.TestCase):
     def test_repair_scope_request_rejects_unknown_fields(self):
         parsed = parse_api_model(RepairScopeRequest, {"scope": "E"})
@@ -461,6 +480,53 @@ class BackendApiModelTests(unittest.TestCase):
             parse_api_model(RepairFollowupRecordRequest, {"scope": "E"})
         with self.assertRaises(ValueError):
             parse_api_model(RepairFollowupBindRequest, {"scope": "E"})
+
+    def test_critical_guard_scope_template_route_forwards_operation_id(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        service = _FakeCriticalGuardTemplateRouteService()
+        session_id = "critical-guard-template-route-session"
+        PortalRuntime.service = service
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试管理员", "open_id": ""},
+                "role": "admin",
+                "allowed_scopes": ["A"],
+                "expires_at": 9999999999,
+            }
+        client = TestClient(controller._build_app())
+        headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+        try:
+            response = client.put(
+                "/api/critical-guard/scope-template",
+                headers=headers,
+                json={
+                    "scope": "A",
+                    "sheet_type": "设备安全",
+                    "items": [
+                        {
+                            "key": "row-1",
+                            "category": "供配电",
+                            "content": "检查设备运行状态",
+                        }
+                    ],
+                    "expected_revision": 0,
+                    "operation_id": "scope-template-route-operation",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json().get("ok"), response.text)
+            self.assertEqual(len(service.calls), 1)
+            self.assertEqual(
+                service.calls[0]["operation_id"],
+                "scope-template-route-operation",
+            )
+        finally:
+            PortalRuntime.service = original_service
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_repair_management_and_event_transfer_routes_are_native_and_authorized(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
