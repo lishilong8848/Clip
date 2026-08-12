@@ -937,7 +937,10 @@ async function removePermissionUser(user: Dict): Promise<void> {
   try {
     const data = await api("/api/auth/permissions/remove", {
       method: "POST",
-      body: JSON.stringify({ open_id: String(user.open_id || "").trim() }),
+      body: JSON.stringify({
+        open_id: String(user.open_id || "").trim(),
+        operation_id: `permission-delete:${String(user.open_id || "").trim()}:${Date.now()}`,
+      }),
     });
     message.value = data.removed ? "用户权限已删除" : "该用户已不在权限列表中";
     await Promise.all([loadPermissions(), loadPermissionDirectory(false)]);

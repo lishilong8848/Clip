@@ -1927,17 +1927,24 @@ class MainWindowWorkflowMixin:
         self._show_screenshot_dialog(data_dict, "end")
 
     def _submit_delete_active_item_to_backend(self, data_dict) -> tuple[bool, str, dict]:
-        data_dict = dict(data_dict or {})
-        data_dict["operation_id"] = str(
-            data_dict.get("operation_id") or f"qt-delete:{uuid.uuid4().hex}"
-        )
+        source_data = data_dict if isinstance(data_dict, dict) else {}
+        delete_operation_id = str(source_data.get("_delete_operation_id") or "").strip()
+        if not delete_operation_id:
+            existing_operation_id = str(source_data.get("operation_id") or "").strip()
+            if existing_operation_id.startswith("qt-delete:"):
+                delete_operation_id = existing_operation_id
+            else:
+                delete_operation_id = f"qt-delete:{uuid.uuid4().hex}"
+            source_data["_delete_operation_id"] = delete_operation_id
+        command_data = dict(source_data)
+        command_data["operation_id"] = delete_operation_id
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，Qt 不再直接执行多维删除。", {}
         try:
             result = self._submit_qt_command(
                 "delete_active_item",
-                {"data_dict": dict(data_dict)},
+                {"data_dict": command_data},
                 timeout=30.0,
             )
         except Exception as exc:
@@ -2152,9 +2159,15 @@ class MainWindowWorkflowMixin:
         record_id = str((data_dict or {}).get("record_id") or "").strip()
         list_widget, item = self._find_active_item_by_record_id(record_id)
         widget = self._safe_item_widget(list_widget, item)
-        data_dict["operation_id"] = str(
-            data_dict.get("operation_id") or f"qt-delete:{uuid.uuid4().hex}"
-        )
+        delete_operation_id = str(data_dict.get("_delete_operation_id") or "").strip()
+        if not delete_operation_id:
+            existing_operation_id = str(data_dict.get("operation_id") or "").strip()
+            delete_operation_id = (
+                existing_operation_id
+                if existing_operation_id.startswith("qt-delete:")
+                else f"qt-delete:{uuid.uuid4().hex}"
+            )
+            data_dict["_delete_operation_id"] = delete_operation_id
         if item and self._is_valid_list_item(item):
             item.setData(Qt.ItemDataRole.UserRole, dict(data_dict))
 

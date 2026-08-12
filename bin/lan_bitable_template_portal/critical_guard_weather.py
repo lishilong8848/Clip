@@ -314,10 +314,14 @@ def build_weather_guard_card(
     weather = snapshot.get("weather") if isinstance(snapshot.get("weather"), dict) else {}
     warning_title = _text(weather_task.get("warning_title"))
     guard_level = _text(weather_task.get("guard_level"))
-    kind_prefix = "完成" if message_kind == "completed" else "提醒" if message_kind == "reminder" else "发布"
+    scope_completed = message_kind == "completed"
+    all_completed = scope_completed and bool(progress.get("complete"))
+    kind_prefix = "提醒" if message_kind == "reminder" else "发布"
     title = f"南通天气重保 · {guard_level}"
-    if message_kind == "completed" and recipient_scope:
-        title = f"{recipient_scope}楼重保检查已完成"
+    if all_completed:
+        title = "南通天气重保 · 全部楼栋已完成"
+    elif scope_completed and recipient_scope:
+        title = f"{recipient_scope}楼重保检查 · 本楼已完成"
     progress_line = (
         f"已登记 {progress.get('registered_scopes', 0)}/{progress.get('scope_count', 0)} · "
         f"完成 {progress.get('submitted', 0)}/{progress.get('total', 0)} · "
@@ -342,15 +346,44 @@ def build_weather_guard_card(
     if wind:
         weather_lines.append(f"风力 {wind}")
     actions = [_text(item) for item in source.get("actions") or [] if _text(item)]
-    body_lines = [
-        f"**{warning_title}**",
-        f"{kind_prefix} {_format_clock(source.get('snapshot_at')) or '刚刚'} · 数据已刷新",
-        "",
-        "　".join(weather_lines),
-        "",
-        f"**楼栋进度**　{progress_line}",
-        *scope_lines,
-    ]
+    if scope_completed:
+        scope_row = next(
+            (
+                item
+                for item in progress.get("scopes") or []
+                if _text(item.get("scope")).upper() == _text(recipient_scope).upper()
+            ),
+            {},
+        )
+        if all_completed:
+            completion_summary = (
+                f"全部 {progress.get('scope_count', 0)} 个楼栋已完成本次重保检查。"
+            )
+            completion_heading = "**整体完成情况**"
+        else:
+            completion_summary = (
+                f"{recipient_scope}楼已完成本次 "
+                f"{scope_row.get('submitted', 0)}/{scope_row.get('total', 0)} 项检查并提交结果。"
+            )
+            completion_heading = "**其他楼栋进度**"
+        body_lines = [
+            f"**{warning_title}**",
+            completion_summary,
+            "",
+            f"**完成汇总**　{progress_line}",
+            completion_heading,
+            *scope_lines,
+        ]
+    else:
+        body_lines = [
+            f"**{warning_title}**",
+            f"{kind_prefix} {_format_clock(source.get('snapshot_at')) or '刚刚'} · 数据已刷新",
+            "",
+            "　".join(weather_lines),
+            "",
+            f"**楼栋进度**　{progress_line}",
+            *scope_lines,
+        ]
     if actions:
         body_lines.extend(["", f"**戒备要求 · {len(actions)}项**"])
         body_lines.extend(f"{index}. {item}" for index, item in enumerate(actions, 1))
@@ -363,7 +396,7 @@ def build_weather_guard_card(
             },
         }
     ]
-    if include_actions:
+    if include_actions and not scope_completed:
         elements.append(
             {
                 "tag": "action",
@@ -386,7 +419,7 @@ def build_weather_guard_card(
     return {
         "config": {"wide_screen_mode": True, "enable_forward": True},
         "header": {
-            "template": "blue" if message_kind != "completed" else "green",
+            "template": "turquoise" if all_completed else "green" if scope_completed else "blue",
             "title": {"tag": "plain_text", "content": title},
         },
         "elements": elements,

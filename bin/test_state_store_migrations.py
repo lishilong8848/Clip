@@ -601,6 +601,125 @@ class StateStoreMigrationTests(unittest.TestCase):
                 ["audit_recent"],
             )
 
+    def test_deletion_audit_outbox_is_idempotent_and_retryable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.sqlite3"
+            store = LanPortalStateStore(db_path)
+            first = store.enqueue_deletion_audit(
+                audit_id="del_test_1",
+                operation_id="delete-operation-1",
+                source="网页",
+                deletion_type="删除通告",
+                business_type="维保通告",
+                scope="A",
+                record_name="测试维保通告",
+                actor_name="测试用户",
+                actor_open_id="ou_test",
+                target_record_id="rec_target",
+                remote_deleted=True,
+                detail={"reason": "用户确认删除"},
+            )
+            duplicate = store.enqueue_deletion_audit(
+                audit_id="del_test_1",
+                operation_id="delete-operation-1",
+                source="网页",
+                deletion_type="删除通告",
+                business_type="维保通告",
+                scope="A",
+                record_name="更新后的日志名称",
+                actor_name="测试用户",
+                actor_open_id="ou_test",
+                target_record_id="rec_target",
+                remote_deleted=True,
+            )
+
+            self.assertEqual(first["status"], "pending")
+            self.assertEqual(duplicate["status"], "pending")
+            self.assertEqual(duplicate["record_name"], "测试维保通告")
+            self.assertEqual(len(store.list_pending_deletion_audits()), 1)
+
+            failed = store.mark_deletion_audit_failed(
+                "del_test_1",
+                error="temporary timeout",
+            )
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["attempts"], 1)
+            self.assertEqual(store.list_pending_deletion_audits(), [])
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "UPDATE deletion_audit_outbox SET next_attempt_at = 0 "
+                    "WHERE audit_id = ?",
+                    ("del_test_1",),
+                )
+                conn.commit()
+                row_count = conn.execute(
+                    "SELECT COUNT(*) FROM deletion_audit_outbox"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(row_count, 1)
+            self.assertEqual(len(store.list_pending_deletion_audits()), 1)
+
+            uploaded = store.mark_deletion_audit_uploaded(
+                "del_test_1",
+                remote_record_id="rec_audit",
+            )
+            self.assertEqual(uploaded["status"], "uploaded")
+            self.assertEqual(uploaded["remote_record_id"], "rec_audit")
+            self.assertEqual(store.list_pending_deletion_audits(), [])
+
+            replay = store.enqueue_deletion_audit(
+                audit_id="del_test_1",
+                operation_id="delete-operation-1",
+                source="网页",
+                deletion_type="删除通告",
+                business_type="维保通告",
+                scope="A",
+                record_name="重复回调",
+                target_record_id="rec_target",
+                remote_deleted=True,
+            )
+            self.assertEqual(replay["status"], "uploaded")
+            self.assertEqual(replay["remote_record_id"], "rec_audit")
+            self.assertEqual(replay["record_name"], "测试维保通告")
+            self.assertEqual(store.list_pending_deletion_audits(), [])
+
+            pending = store.enqueue_deletion_audit(
+                audit_id="del_pending_kept",
+                source="Qt",
+                deletion_type="移除未上传通告",
+                local_only=True,
+            )
+            self.assertEqual(pending["status"], "pending")
+            old_time = time.time() - 60 * 24 * 3600
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "UPDATE deletion_audit_outbox SET uploaded_at = ?, "
+                    "updated_at = ? WHERE audit_id = ?",
+                    (old_time, old_time, "del_test_1"),
+                )
+                conn.execute(
+                    "UPDATE deletion_audit_outbox SET created_at = ?, "
+                    "updated_at = ? WHERE audit_id = ?",
+                    (old_time, old_time, "del_pending_kept"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            removed = store.cleanup_uploaded_deletion_audits(
+                retention_seconds=30 * 24 * 3600,
+                max_delete=10,
+            )
+            self.assertEqual(removed, 1)
+            self.assertEqual(
+                [item["audit_id"] for item in store.list_pending_deletion_audits()],
+                ["del_pending_kept"],
+            )
+
     def test_repair_snapshot_failure_preserves_last_good_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")

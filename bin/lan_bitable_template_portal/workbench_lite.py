@@ -3782,6 +3782,10 @@ def render_workbench_lite(
         source_record_id: sourceRecordId,
         target_record_id: targetRecordId,
         record_id: recordId,
+        title: String(patch.title || patch.name || '').trim(),
+        name: String(patch.name || patch.title || '').trim(),
+        text: String(patch.text || '').trim(),
+        building: String(patch.building || '').trim(),
         operation_id: String(operationId || '').trim(),
         record_version: String(patch.record_version || '').trim(),
         expected_record_version: String(
@@ -3817,19 +3821,15 @@ def render_workbench_lite(
         }}, 4200);
         return;
       }}
-      const operationId = isLocalRemove
-        ? ''
-        : String(
+      const operationId = String(
             button.getAttribute('data-delete-operation-id')
-            || `delete:${{Date.now()}}:${{
+            || `${{isLocalRemove ? 'remove' : 'delete'}}:${{Date.now()}}:${{
               (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function')
                 ? globalThis.crypto.randomUUID()
                 : Math.random().toString(36).slice(2)
             }}`
           );
-      if (!isLocalRemove) {{
-        button.setAttribute('data-delete-operation-id', operationId);
-      }}
+      button.setAttribute('data-delete-operation-id', operationId);
       const payload = ongoingDeletePayload(form, operationId);
       const endpoint = isLocalRemove ? '/api/ongoing-items/remove-local' : '/api/ongoing-items/delete';
       clearLiteHtmlCache();

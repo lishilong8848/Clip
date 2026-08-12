@@ -18403,6 +18403,96 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
+    def test_fastapi_ongoing_delete_keeps_success_when_local_cleanup_fails(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        service = _NativeFastAPIRouteService()
+        PortalRuntime.service = service
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalRuntime.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        client = TestClient(controller._build_app())
+        session = {
+            "user": {"name": "测试用户", "open_id": "ou_cleanup_failure"},
+            "role": "admin",
+            "allowed_scopes": ["ALL"],
+            "expires_at": time.time() + 3600,
+        }
+        call_order: list[str] = []
+
+        def execute_delete(_payload):
+            call_order.append("delete")
+            return {
+                "ok": True,
+                "remote_deleted": True,
+                "record_id": "target-web-cleanup-failure",
+                "active_item_id": "active-web-cleanup-failure",
+                "source_record_id": "source-web-cleanup-failure",
+                "work_type": "maintenance",
+            }
+
+        def record_audit(**_payload):
+            call_order.append("audit")
+
+        def hide_item(*_args, **_kwargs):
+            call_order.append("hide")
+            raise RuntimeError("hide failed")
+
+        def discard_state(*_args, **_kwargs):
+            call_order.append("discard")
+            return {"discarded": True, "source_plan_reset": True}
+
+        try:
+            with patch.object(
+                controller,
+                "_current_session",
+                return_value=session,
+            ), patch.object(
+                PortalRuntime,
+                "execute_local_delete_active_item",
+                side_effect=execute_delete,
+            ), patch.object(
+                controller,
+                "_record_deletion_audit",
+                side_effect=record_audit,
+            ), patch.object(
+                service,
+                "hide_ongoing_item",
+                side_effect=hide_item,
+            ), patch.object(
+                service,
+                "discard_deleted_ongoing_state",
+                side_effect=discard_state,
+            ):
+                response = client.post(
+                    "/api/ongoing-items/delete",
+                    json={
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "active_item_id": "active-web-cleanup-failure",
+                        "source_record_id": "source-web-cleanup-failure",
+                        "target_record_id": "target-web-cleanup-failure",
+                        "title": "A楼删除清理异常测试",
+                        "building": "A楼",
+                        "operation_id": "web-delete-cleanup-failure",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            data = response.json()["data"]
+            self.assertTrue(data["deleted"])
+            self.assertTrue(data["remote_deleted"])
+            self.assertTrue(data["source_plan_reset"])
+            self.assertIn("隐藏本地通告失败", data["cleanup_warning"])
+            self.assertEqual(call_order[:4], ["delete", "audit", "hide", "discard"])
+        finally:
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            temp_dir.cleanup()
+
     def test_fastapi_qt_command_delete_clears_active_item_and_read_cache(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_service = PortalRuntime.service
@@ -18529,6 +18619,82 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 leased[0]["payload"]["payload"]["source_record_id"],
                 "source-delete-recovered",
             )
+        finally:
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            temp_dir.cleanup()
+
+    def test_fastapi_qt_delete_continues_state_cleanup_after_hide_failure(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        service = _NativeFastAPIRouteService()
+        PortalRuntime.service = service
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalRuntime.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        client = TestClient(controller._build_app())
+        call_order: list[str] = []
+
+        def hide_item(*_args, **_kwargs):
+            call_order.append("hide")
+            raise RuntimeError("hide failed")
+
+        def discard_state(*_args, **_kwargs):
+            call_order.append("discard")
+            return {"discarded": True, "source_plan_reset": True}
+
+        try:
+            with patch.object(
+                PortalRuntime,
+                "execute_local_delete_active_item",
+                return_value={
+                    "ok": True,
+                    "remote_deleted": True,
+                    "record_id": "target-qt-cleanup-failure",
+                    "active_item_id": "active-qt-cleanup-failure",
+                    "source_record_id": "source-qt-cleanup-failure",
+                    "work_type": "maintenance",
+                },
+            ), patch.object(
+                controller,
+                "_record_deletion_audit",
+            ) as record_audit, patch.object(
+                service,
+                "hide_ongoing_item",
+                side_effect=hide_item,
+            ), patch.object(
+                service,
+                "discard_deleted_ongoing_state",
+                side_effect=discard_state,
+            ):
+                response = client.post(
+                    "/api/qt/commands",
+                    json={
+                        "command": "delete_active_item",
+                        "payload": {
+                            "data_dict": {
+                                "scope": "A",
+                                "notice_type": "维保通告",
+                                "work_type": "maintenance",
+                                "active_item_id": "active-qt-cleanup-failure",
+                                "source_record_id": "source-qt-cleanup-failure",
+                                "target_record_id": "target-qt-cleanup-failure",
+                                "operation_id": "qt-delete-cleanup-failure",
+                            }
+                        },
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            data = response.json()["data"]
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["remote_deleted"])
+            self.assertTrue(data["source_plan_reset"])
+            self.assertIn("隐藏本地通告失败", data["cleanup_warning"])
+            self.assertEqual(call_order, ["hide", "discard"])
+            record_audit.assert_called_once()
         finally:
             PortalRuntime.service = original_service
             PortalRuntime.state_store = original_state_store

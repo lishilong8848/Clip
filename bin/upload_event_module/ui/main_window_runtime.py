@@ -1328,9 +1328,10 @@ class MainWindowRuntimeMixin:
             return {"ok": False, "error": "该条目正在上传，请等待完成后再删除。"}
         remote_deleted = False
         remote_message = ""
-        data["operation_id"] = str(
-            data.get("operation_id") or f"qt-delete:{uuid.uuid4().hex}"
+        delete_operation_id = str(
+            data.get("_delete_operation_id") or f"qt-delete:{uuid.uuid4().hex}"
         )
+        data["_delete_operation_id"] = delete_operation_id
         item.setData(Qt.ItemDataRole.UserRole, dict(data))
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
@@ -1338,7 +1339,12 @@ class MainWindowRuntimeMixin:
         try:
             result = self._submit_qt_command(
                 "delete_active_item",
-                {"data_dict": dict(data)},
+                {
+                    "data_dict": {
+                        **dict(data),
+                        "operation_id": delete_operation_id,
+                    }
+                },
                 timeout=30.0,
             )
         except Exception as exc:

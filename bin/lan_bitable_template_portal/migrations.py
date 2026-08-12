@@ -46,6 +46,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (37, "critical_guard_weather_automation"),
     (38, "critical_guard_scope_templates"),
     (39, "critical_guard_scope_template_revision_ledger"),
+    (40, "deletion_audit_outbox"),
 )
 
 

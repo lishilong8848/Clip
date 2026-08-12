@@ -569,6 +569,66 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         )
         self.assertNotIn("H", CRITICAL_GUARD_WEATHER_SCOPES)
 
+    def test_scope_and_all_completion_cards_use_distinct_messages(self) -> None:
+        weather_task = {
+            "warning_title": "暴雨蓝色预警",
+            "guard_level": "三级戒备",
+            "source_payload": {},
+        }
+        partial_progress = {
+            "registered_scopes": 1,
+            "completed_scopes": 1,
+            "scope_count": 5,
+            "submitted": 2,
+            "total": 10,
+            "abnormal": 0,
+            "complete": False,
+            "scopes": [
+                {"scope": "A", "submitted": 2, "total": 2, "complete": True},
+                {"scope": "B", "submitted": 0, "total": 2, "complete": False},
+            ],
+        }
+        scope_card = build_weather_guard_card(
+            weather_task=weather_task,
+            progress=partial_progress,
+            registration_url="http://example.test/register",
+            template_url="http://example.test/template",
+            message_kind="completed",
+            recipient_scope="A",
+        )
+        self.assertEqual(
+            scope_card["header"]["title"]["content"],
+            "A楼重保检查 · 本楼已完成",
+        )
+        scope_content = scope_card["elements"][0]["text"]["content"]
+        self.assertIn("A楼已完成本次 2/2 项检查", scope_content)
+        self.assertFalse(
+            any(item.get("tag") == "action" for item in scope_card["elements"])
+        )
+
+        all_progress = {
+            **partial_progress,
+            "registered_scopes": 5,
+            "completed_scopes": 5,
+            "submitted": 10,
+            "complete": True,
+        }
+        all_card = build_weather_guard_card(
+            weather_task=weather_task,
+            progress=all_progress,
+            registration_url="http://example.test/register",
+            template_url="http://example.test/template",
+            message_kind="completed",
+            recipient_scope="E",
+        )
+        self.assertEqual(
+            all_card["header"]["title"]["content"],
+            "南通天气重保 · 全部楼栋已完成",
+        )
+        all_content = all_card["elements"][0]["text"]["content"]
+        self.assertIn("全部 5 个楼栋已完成本次重保检查", all_content)
+        self.assertNotEqual(scope_content, all_content)
+
     def test_h_observer_receives_one_persisted_message_per_weather_task(self) -> None:
         service = self._weather_service()
         task = service.create_critical_guard_task(
@@ -823,10 +883,47 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
                 {"id": "ou_6e607320c167d816366acba893b339b1"},
             ],
         )
+        self.assertEqual(fields["重保标签"], "暴雨蓝色")
         self.assertNotIn("机房经理确认", fields)
         self.assertEqual(
             attachments["设备安全检查纸质图片"],
             [str(image_path)],
+        )
+
+    def test_archive_record_lookup_requires_matching_tag_and_date(self) -> None:
+        service = self._weather_service()
+        service._request_json = lambda *_args, **_kwargs: {
+            "data": {
+                "items": [
+                    {
+                        "record_id": "old-record",
+                        "fields": {"重保标签": "暴雨蓝色", "日期": 1_700_000_000_000},
+                    },
+                    {
+                        "record_id": "current-record",
+                        "fields": {"重保标签": "暴雨蓝色", "日期": 1_800_000_010_000},
+                    },
+                    {
+                        "record_id": "wrong-tag",
+                        "fields": {"重保标签": "高温橙色", "日期": 1_800_000_000_000},
+                    },
+                ],
+                "has_more": False,
+            }
+        }
+        self.assertEqual(
+            service._find_critical_guard_archive_record(
+                "暴雨蓝色",
+                expected_date_ms=1_800_000_000_000,
+            ),
+            "current-record",
+        )
+        self.assertEqual(
+            service._find_critical_guard_archive_record(
+                "暴雨蓝色",
+                expected_date_ms=1_900_000_000_000,
+            ),
+            "",
         )
 
     def test_one_bad_task_does_not_abort_other_weather_tasks(self) -> None:

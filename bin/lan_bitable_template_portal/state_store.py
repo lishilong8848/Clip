@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 39
+    SCHEMA_VERSION = 40
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     _live_portal_restore_last: dict[str, float] = {}
@@ -138,6 +138,7 @@ class LanPortalStateStore:
         "repair_project_status_index",
         "repair_management_change_log",
         "business_operation_audits",
+        "deletion_audit_outbox",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -203,6 +204,7 @@ class LanPortalStateStore:
         "idx_business_operation_audits_domain_status",
         "idx_business_operation_audits_operation",
         "idx_business_operation_audits_target",
+        "idx_deletion_audit_outbox_pending",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -1488,6 +1490,41 @@ class LanPortalStateStore:
             ON business_operation_audits(
                 target_record_id, summary_record_id, updated_at DESC
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deletion_audit_outbox (
+                audit_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                deletion_type TEXT NOT NULL DEFAULT '',
+                business_type TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL DEFAULT '',
+                record_name TEXT NOT NULL DEFAULT '',
+                actor_name TEXT NOT NULL DEFAULT '',
+                actor_open_id TEXT NOT NULL DEFAULT '',
+                source_record_id TEXT NOT NULL DEFAULT '',
+                target_record_id TEXT NOT NULL DEFAULT '',
+                local_record_id TEXT NOT NULL DEFAULT '',
+                remote_deleted INTEGER NOT NULL DEFAULT 0,
+                local_only INTEGER NOT NULL DEFAULT 0,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                remote_record_id TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                next_attempt_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                uploaded_at REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_deletion_audit_outbox_pending
+            ON deletion_audit_outbox(status, next_attempt_at, updated_at)
             """
         )
         conn.execute(
@@ -13174,6 +13211,248 @@ class LanPortalStateStore:
                 )
                 conn.commit()
                 return max(0, int(cursor.rowcount or 0))
+
+    @classmethod
+    def _deletion_audit_payload(
+        cls,
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        detail = cls._loads(str(row["detail_json"] or ""), {})
+        return {
+            "audit_id": str(row["audit_id"] or ""),
+            "operation_id": str(row["operation_id"] or ""),
+            "source": str(row["source"] or ""),
+            "deletion_type": str(row["deletion_type"] or ""),
+            "business_type": str(row["business_type"] or ""),
+            "scope": str(row["scope"] or ""),
+            "record_name": str(row["record_name"] or ""),
+            "actor_name": str(row["actor_name"] or ""),
+            "actor_open_id": str(row["actor_open_id"] or ""),
+            "source_record_id": str(row["source_record_id"] or ""),
+            "target_record_id": str(row["target_record_id"] or ""),
+            "local_record_id": str(row["local_record_id"] or ""),
+            "remote_deleted": bool(row["remote_deleted"]),
+            "local_only": bool(row["local_only"]),
+            "detail": detail if isinstance(detail, dict) else {},
+            "status": str(row["status"] or ""),
+            "attempts": int(row["attempts"] or 0),
+            "remote_record_id": str(row["remote_record_id"] or ""),
+            "last_error": str(row["last_error"] or ""),
+            "next_attempt_at": float(row["next_attempt_at"] or 0),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+            "uploaded_at": float(row["uploaded_at"] or 0),
+        }
+
+    def enqueue_deletion_audit(
+        self,
+        *,
+        audit_id: str,
+        operation_id: str = "",
+        source: str = "",
+        deletion_type: str = "",
+        business_type: str = "",
+        scope: str = "",
+        record_name: str = "",
+        actor_name: str = "",
+        actor_open_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+        local_record_id: str = "",
+        remote_deleted: bool = False,
+        local_only: bool = False,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_audit_id = self._text(audit_id)
+        if not normalized_audit_id:
+            raise ValueError("删除审计 audit_id 不能为空。")
+        now = time.time()
+        try:
+            detail_json = json.dumps(
+                dict(detail or {}),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+        except Exception as exc:
+            detail_json = self._json({"serialization_error": str(exc)[:500]})
+        values = (
+            normalized_audit_id,
+            self._text(operation_id),
+            self._text(source),
+            self._text(deletion_type),
+            self._text(business_type),
+            self._text(scope).upper(),
+            self._text(record_name),
+            self._text(actor_name),
+            self._text(actor_open_id),
+            self._text(source_record_id),
+            self._text(target_record_id),
+            self._text(local_record_id),
+            int(bool(remote_deleted)),
+            int(bool(local_only)),
+            detail_json,
+            now,
+            now,
+        )
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO deletion_audit_outbox(
+                        audit_id, operation_id, source, deletion_type,
+                        business_type, scope, record_name, actor_name,
+                        actor_open_id, source_record_id, target_record_id,
+                        local_record_id, remote_deleted, local_only,
+                        detail_json, status, attempts, remote_record_id,
+                        last_error, next_attempt_at, created_at, updated_at,
+                        uploaded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              'pending', 0, '', '', 0, ?, ?, 0)
+                    ON CONFLICT(audit_id) DO NOTHING
+                    """,
+                    values,
+                )
+                row = conn.execute(
+                    "SELECT * FROM deletion_audit_outbox WHERE audit_id = ?",
+                    (normalized_audit_id,),
+                ).fetchone()
+                conn.commit()
+        return self._deletion_audit_payload(row) or {}
+
+    def cleanup_uploaded_deletion_audits(
+        self,
+        *,
+        retention_seconds: float = 30 * 24 * 3600,
+        max_delete: int = 1000,
+    ) -> int:
+        """Remove only local queue rows already persisted to the audit table."""
+
+        if not self.db_path.exists():
+            return 0
+        uploaded_before = time.time() - max(
+            24 * 3600.0,
+            float(retention_seconds or 0),
+        )
+        delete_limit = max(1, min(int(max_delete or 1000), 10000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM deletion_audit_outbox
+                    WHERE audit_id IN (
+                        SELECT audit_id
+                        FROM deletion_audit_outbox
+                        WHERE status = 'uploaded'
+                          AND uploaded_at > 0
+                          AND uploaded_at < ?
+                        ORDER BY uploaded_at ASC, audit_id ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (uploaded_before, delete_limit),
+                )
+                conn.commit()
+                return max(0, int(cursor.rowcount or 0))
+
+    def list_pending_deletion_audits(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        max_limit = max(1, min(int(limit or 50), 500))
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT * FROM deletion_audit_outbox
+                    WHERE status IN ('pending', 'failed')
+                      AND next_attempt_at <= ?
+                    ORDER BY created_at ASC, audit_id ASC
+                    LIMIT ?
+                    """,
+                    (now, max_limit),
+                ).fetchall()
+        return [
+            payload
+            for row in rows
+            if (payload := self._deletion_audit_payload(row)) is not None
+        ]
+
+    def mark_deletion_audit_uploaded(
+        self,
+        audit_id: str,
+        *,
+        remote_record_id: str = "",
+    ) -> dict[str, Any]:
+        normalized_audit_id = self._text(audit_id)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE deletion_audit_outbox
+                    SET status = 'uploaded', remote_record_id = ?,
+                        last_error = '', next_attempt_at = 0,
+                        uploaded_at = ?, updated_at = ?
+                    WHERE audit_id = ?
+                    """,
+                    (self._text(remote_record_id), now, now, normalized_audit_id),
+                )
+                row = conn.execute(
+                    "SELECT * FROM deletion_audit_outbox WHERE audit_id = ?",
+                    (normalized_audit_id,),
+                ).fetchone()
+                conn.commit()
+        return self._deletion_audit_payload(row) or {}
+
+    def mark_deletion_audit_failed(
+        self,
+        audit_id: str,
+        *,
+        error: str,
+    ) -> dict[str, Any]:
+        normalized_audit_id = self._text(audit_id)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                current = conn.execute(
+                    "SELECT attempts FROM deletion_audit_outbox WHERE audit_id = ?",
+                    (normalized_audit_id,),
+                ).fetchone()
+                attempts = int(current["attempts"] or 0) + 1 if current else 1
+                retry_delay = min(3600.0, 15.0 * (2 ** min(attempts - 1, 8)))
+                conn.execute(
+                    """
+                    UPDATE deletion_audit_outbox
+                    SET status = 'failed', attempts = ?, last_error = ?,
+                        next_attempt_at = ?, updated_at = ?
+                    WHERE audit_id = ? AND status != 'uploaded'
+                    """,
+                    (
+                        attempts,
+                        self._text(error)[:2000],
+                        now + retry_delay,
+                        now,
+                        normalized_audit_id,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM deletion_audit_outbox WHERE audit_id = ?",
+                    (normalized_audit_id,),
+                ).fetchone()
+                conn.commit()
+        return self._deletion_audit_payload(row) or {}
 
     def append_repair_management_change(
         self,

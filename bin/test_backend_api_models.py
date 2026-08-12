@@ -448,8 +448,73 @@ class _FakeCriticalGuardTemplateRouteService:
             "idempotent_replay": False,
         }
 
+    @staticmethod
+    def get_critical_guard_image_bytes(
+        response_id: str,
+        *,
+        allow_all_scopes: bool = False,
+    ) -> tuple[bytes, str]:
+        return b"test-image", f"{response_id}.png"
+
+    @staticmethod
+    def get_critical_guard_workbook_bytes(
+        response_id: str,
+        *,
+        allow_all_scopes: bool = False,
+    ) -> tuple[bytes, str]:
+        return b"test-workbook", f"{response_id}.xlsx"
+
+
+class _FakeSignatureUsageRouteService:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def build_signature_usage_confirmation_messages(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        notice_title: str,
+        signatures: list[dict],
+        mop_attachment_name: str = "",
+        context_type: str = "mop",
+        request_base_url: str = "",
+        operator_open_id: str = "",
+        operator_name: str = "",
+    ) -> dict:
+        self.calls.append(
+            {
+                "scope": scope,
+                "notice_key": notice_key,
+                "notice_title": notice_title,
+                "signatures": signatures,
+                "mop_attachment_name": mop_attachment_name,
+                "context_type": context_type,
+                "request_base_url": request_base_url,
+                "operator_open_id": operator_open_id,
+                "operator_name": operator_name,
+            }
+        )
+        return {"messages": [], "skipped": []}
+
 
 class BackendApiModelTests(unittest.TestCase):
+    def test_deletion_audit_failure_never_changes_business_result(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        with patch.object(
+            PortalRuntime.service,
+            "record_deletion_log",
+            side_effect=RuntimeError("删除日志表暂时不可用"),
+        ):
+            controller._record_deletion_audit(
+                source="网页",
+                deletion_type="删除通告",
+                business_type="维保通告",
+                record_name="A楼删除日志隔离测试",
+                target_record_id="rec-delete-audit-isolation",
+                remote_deleted=True,
+            )
+
     def test_repair_scope_request_rejects_unknown_fields(self):
         parsed = parse_api_model(RepairScopeRequest, {"scope": "E"})
         self.assertEqual(parsed.scope, "E")
@@ -496,6 +561,13 @@ class BackendApiModelTests(unittest.TestCase):
                 "allowed_scopes": ["A"],
                 "expires_at": 9999999999,
             }
+            PortalRuntime.auth_manager._sessions["critical-guard-user-session"] = {
+                "session_id": "critical-guard-user-session",
+                "user": {"name": "普通用户", "open_id": ""},
+                "role": "user",
+                "allowed_scopes": ["A"],
+                "expires_at": 9999999999,
+            }
         client = TestClient(controller._build_app())
         headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
         try:
@@ -523,6 +595,80 @@ class BackendApiModelTests(unittest.TestCase):
                 service.calls[0]["operation_id"],
                 "scope-template-route-operation",
             )
+            with patch.object(
+                PortalRuntime.state_store,
+                "get_critical_guard_response",
+                return_value={"response_id": "guard-response", "scope": "E"},
+            ):
+                image = client.get(
+                    "/api/critical-guard/images/guard-response",
+                    headers=headers,
+                )
+                workbook = client.get(
+                    "/api/critical-guard/workbooks/guard-response",
+                    headers=headers,
+                )
+                denied = client.get(
+                    "/api/critical-guard/images/guard-response",
+                    headers={
+                        "Cookie": (
+                            f"{AUTH_COOKIE_NAME}=critical-guard-user-session"
+                        )
+                    },
+                )
+            self.assertEqual(image.status_code, 200, image.text)
+            self.assertEqual(image.content, b"test-image")
+            self.assertEqual(workbook.status_code, 200, workbook.text)
+            self.assertEqual(workbook.content, b"test-workbook")
+            self.assertEqual(denied.status_code, 404, denied.text)
+        finally:
+            PortalRuntime.service = original_service
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+
+    def test_signature_usage_confirmation_route_matches_service_contract(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        service = _FakeSignatureUsageRouteService()
+        session_id = "signature-usage-route-session"
+        PortalRuntime.service = service
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试人员", "open_id": ""},
+                "role": "user",
+                "allowed_scopes": ["A"],
+                "expires_at": 9999999999,
+            }
+        client = TestClient(controller._build_app())
+        headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+        try:
+            response = client.post(
+                "/api/signatures/usage-confirmations/send",
+                headers=headers,
+                json={
+                    "scope": "A",
+                    "notice_key": "critical-guard:task:A",
+                    "notice_title": "暴雨蓝色预警",
+                    "mop_attachment_name": "设备安全",
+                    "context_type": "critical_guard",
+                    "signatures": [
+                        {
+                            "source": "staff",
+                            "record_id": "staff-record",
+                            "role": "inspector",
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json().get("ok"), response.text)
+            self.assertEqual(response.json()["data"]["sent_count"], 0)
+            self.assertEqual(len(service.calls), 1)
+            self.assertEqual(service.calls[0]["context_type"], "critical_guard")
+            self.assertEqual(service.calls[0]["operator_name"], "测试人员")
+            self.assertEqual(service.calls[0]["signatures"][0]["role"], "inspector")
         finally:
             PortalRuntime.service = original_service
             with PortalRuntime.auth_manager._lock:
@@ -545,6 +691,7 @@ class BackendApiModelTests(unittest.TestCase):
             }
         client = TestClient(controller._build_app())
         headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+        deletion_audits: list[dict] = []
         try:
             with (
                 patch.object(
@@ -556,6 +703,11 @@ class BackendApiModelTests(unittest.TestCase):
                     PortalRuntime.state_store,
                     "latest_repair_management_change_id",
                     return_value=7,
+                ),
+                patch.object(
+                    controller,
+                    "_record_deletion_audit",
+                    side_effect=lambda **payload: deletion_audits.append(payload),
                 ),
             ):
                 unauth = client.get("/api/repair-management/records?scope=E")
@@ -615,7 +767,8 @@ class BackendApiModelTests(unittest.TestCase):
                     },
                 )
                 deleted = client.delete(
-                    "/api/repair-management/records/rec-1?scope=E",
+                    "/api/repair-management/records/rec-1"
+                    "?scope=E&operation_id=project-delete-op",
                     headers=headers,
                 )
                 repair_events = client.get(
@@ -832,6 +985,14 @@ class BackendApiModelTests(unittest.TestCase):
                 ],
             )
             self.assertTrue(transferred.json()["data"]["transfer_to_overhaul"])
+            self.assertEqual(
+                [item["deletion_type"] for item in deletion_audits],
+                ["删除维修项目", "删除维修跟进记录"],
+            )
+            self.assertEqual(
+                [item["operation_id"] for item in deletion_audits],
+                ["project-delete-op", "followup-delete-op"],
+            )
         finally:
             PortalRuntime.service = original_service
             with PortalRuntime.auth_manager._lock:

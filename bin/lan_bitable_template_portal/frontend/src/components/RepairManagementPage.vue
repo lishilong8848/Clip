@@ -3408,7 +3408,10 @@ async function deleteRecordNow(): Promise<void> {
   saving.value = true;
   try {
     const deletedRecordId = editingRecordId.value;
-    const params = new URLSearchParams({ scope: props.scope || "ALL" });
+    const params = new URLSearchParams({
+      scope: props.scope || "ALL",
+      operation_id: `repair-project-delete:${deletedRecordId}`,
+    });
     const result = await requestJson(`/api/repair-management/records/${encodeURIComponent(deletedRecordId)}?${params.toString()}`, {
       method: "DELETE",
     });

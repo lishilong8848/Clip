@@ -393,6 +393,79 @@ class FastAPIPortalController:
             return False
 
     @staticmethod
+    def _deletion_record_name(payload: dict[str, Any] | None) -> str:
+        payload = payload if isinstance(payload, dict) else {}
+        for key in ("record_name", "title", "name", "match_title"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value[:500]
+        text = str(payload.get("text") or "").strip()
+        match = re.search(r"【(?:名称|标题)】\s*([^\r\n]+)", text)
+        if match:
+            return str(match.group(1) or "").strip(" ；;")[:500]
+        return text.splitlines()[0].strip()[:500] if text else ""
+
+    @staticmethod
+    def _deletion_business_type(payload: dict[str, Any] | None) -> str:
+        payload = payload if isinstance(payload, dict) else {}
+        notice_type = str(payload.get("notice_type") or "").strip()
+        if notice_type:
+            return notice_type
+        work_type = str(payload.get("work_type") or "").strip().lower()
+        return {
+            "maintenance": "维保通告",
+            "change": "变更通告",
+            "repair": "设备检修",
+            "power": "上/下电通告",
+            "polling": "设备轮巡",
+            "adjust": "设备调整",
+            "event": "事件通告",
+        }.get(work_type, work_type or "通告")
+
+    def _record_deletion_audit(
+        self,
+        *,
+        source: str,
+        deletion_type: str,
+        business_type: str = "",
+        scope: str = "",
+        record_name: str = "",
+        actor_name: str = "",
+        actor_open_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+        local_record_id: str = "",
+        remote_deleted: bool = False,
+        local_only: bool = False,
+        operation_id: str = "",
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Queue deletion telemetry without changing the business result."""
+
+        try:
+            PortalRuntime.service.record_deletion_log(
+                source=source,
+                deletion_type=deletion_type,
+                business_type=business_type,
+                scope=scope,
+                record_name=record_name,
+                actor_name=actor_name,
+                actor_open_id=actor_open_id,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+                local_record_id=local_record_id,
+                remote_deleted=remote_deleted,
+                local_only=local_only,
+                operation_id=operation_id,
+                detail=detail,
+            )
+        except Exception as exc:
+            log_warning(
+                f"删除操作已完成，但删除审计入队失败: "
+                f"{deletion_type}: {record_name or target_record_id or local_record_id}: {exc}"
+            )
+
+    @staticmethod
     def _permission_scope_text(permission_request: dict) -> str:
         labels = permission_request.get("requested_scope_labels")
         if isinstance(labels, list) and labels:
@@ -2598,7 +2671,6 @@ class FastAPIPortalController:
                     or self._request_base_url(request),
                     operator_open_id=str(user.get("open_id") or ""),
                     operator_name=str(user.get("name") or user.get("en_name") or ""),
-                    operation_id=str(payload.get("operation_id") or ""),
                 )
                 messages = list(data.get("messages") or [])
                 results: list[dict[str, Any]] = []
@@ -3594,6 +3666,35 @@ class FastAPIPortalController:
                     audit_metadata={"task_id": str(task_id or "")},
                     audit_remote_written_on_success=False,
                 )
+                if bool((data or {}).get("deleted")):
+                    operation_id = str(
+                        request.query_params.get("operation_id") or ""
+                    ).strip()
+                    self._record_deletion_audit(
+                        source="网页",
+                        deletion_type="删除重保任务",
+                        business_type="重保任务",
+                        scope="、".join(
+                            str(item or "").strip()
+                            for item in ((data or {}).get("target_scopes") or [])
+                            if str(item or "").strip()
+                        ),
+                        record_name=str((data or {}).get("name") or ""),
+                        actor_name=str(
+                            user.get("name") or user.get("en_name") or ""
+                        ),
+                        actor_open_id=str(user.get("open_id") or ""),
+                        local_record_id=str(task_id or ""),
+                        operation_id=operation_id,
+                        detail={
+                            "response_count": int(
+                                (data or {}).get("response_count") or 0
+                            ),
+                            "removed_artifact_count": int(
+                                (data or {}).get("removed_artifact_count") or 0
+                            ),
+                        },
+                    )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -3767,7 +3868,10 @@ class FastAPIPortalController:
                 response = PortalRuntime.state_store.get_critical_guard_response(response_id)
                 if not response:
                     raise PortalError("重保检查图片不存在。")
-                self._authorized_scope_or_error(session, str(response.get("scope") or ""))
+                if not PortalRuntime.auth_manager.is_admin(session):
+                    self._authorized_scope_or_error(
+                        session, str(response.get("scope") or "")
+                    )
                 content, file_name = await asyncio.to_thread(
                     PortalRuntime.service.get_critical_guard_image_bytes,
                     response_id,
@@ -3796,7 +3900,10 @@ class FastAPIPortalController:
                 response = PortalRuntime.state_store.get_critical_guard_response(response_id)
                 if not response:
                     raise PortalError("重保检查原表不存在。")
-                self._authorized_scope_or_error(session, str(response.get("scope") or ""))
+                if not PortalRuntime.auth_manager.is_admin(session):
+                    self._authorized_scope_or_error(
+                        session, str(response.get("scope") or "")
+                    )
                 content, file_name = await asyncio.to_thread(
                     PortalRuntime.service.get_critical_guard_workbook_bytes,
                     response_id,
@@ -4344,6 +4451,28 @@ class FastAPIPortalController:
                     ),
                     scope=scope,
                 )
+                if bool((data or {}).get("deleted")):
+                    self._record_deletion_audit(
+                        source="网页",
+                        deletion_type="删除维修跟进记录",
+                        business_type="维修跟进",
+                        scope=scope,
+                        record_name=str((data or {}).get("record_name") or ""),
+                        actor_name=str(
+                            user.get("name") or user.get("en_name") or ""
+                        ),
+                        actor_open_id=str(user.get("open_id") or ""),
+                        target_record_id=str(record_id or ""),
+                        local_record_id=str(summary_record_id or ""),
+                        remote_deleted=True,
+                        operation_id=operation_id,
+                        detail={
+                            "summary_record_id": summary_record_id,
+                            "summary_sync_pending": bool(
+                                (data or {}).get("summary_sync_pending")
+                            ),
+                        },
+                    )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -4832,12 +4961,16 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                operation_id = str(
+                    request.query_params.get("operation_id") or ""
+                ).strip()
                 data = await audited_thread_call(
                     PortalRuntime.state_store,
                     PortalRuntime.service.delete_repair_management_record,
                     record_id,
                     audit_domain="repair",
                     audit_action="delete_project",
+                    audit_operation_id=operation_id,
                     audit_scope=scope,
                     audit_actor_open_id=str(user.get("open_id") or ""),
                     audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
@@ -4845,6 +4978,29 @@ class FastAPIPortalController:
                     audit_remote_written_on_success=True,
                     scope=request.query_params.get("scope") or "ALL",
                 )
+                if bool((data or {}).get("deleted")):
+                    self._record_deletion_audit(
+                        source="网页",
+                        deletion_type="删除维修项目",
+                        business_type="维修单",
+                        scope=scope,
+                        record_name=str((data or {}).get("record_name") or ""),
+                        actor_name=str(
+                            user.get("name") or user.get("en_name") or ""
+                        ),
+                        actor_open_id=str(user.get("open_id") or ""),
+                        target_record_id=str(record_id or ""),
+                        remote_deleted=True,
+                        operation_id=operation_id,
+                        detail={
+                            "deleted_followup_count": int(
+                                (data or {}).get("deleted_followup_count") or 0
+                            ),
+                            "deleted_followup_ids": list(
+                                (data or {}).get("deleted_followup_ids") or []
+                            ),
+                        },
+                    )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -5409,49 +5565,108 @@ class FastAPIPortalController:
                     ).strip()
                     if resolved_value:
                         cleanup_payload[identity_field] = resolved_value
-                data = PortalRuntime.service.hide_ongoing_item(
-                    cleanup_payload,
+                self._record_deletion_audit(
+                    source="网页",
+                    deletion_type="删除通告",
+                    business_type=self._deletion_business_type(cleanup_payload),
                     scope=scope,
-                    deleted_by=payload["_auth_open_id"],
+                    record_name=self._deletion_record_name(cleanup_payload),
+                    actor_name=payload["_auth_user_name"],
+                    actor_open_id=payload["_auth_open_id"],
+                    source_record_id=str(
+                        cleanup_payload.get("source_record_id") or ""
+                    ),
+                    target_record_id=str(
+                        (delete_result or {}).get("record_id")
+                        or cleanup_payload.get("target_record_id")
+                        or ""
+                    ),
+                    local_record_id=str(
+                        cleanup_payload.get("active_item_id") or ""
+                    ),
+                    remote_deleted=remote_deleted,
+                    operation_id=str(payload.get("operation_id") or ""),
+                    detail={"delete_ok": delete_ok},
                 )
-                data.update(
-                    PortalRuntime.service.discard_deleted_ongoing_state(
-                        cleanup_payload,
-                        scope=scope,
-                        reset_source_plan=bool(
-                            (delete_result or {}).get("remote_deleted")
-                        ),
+                cleanup_warnings: list[str] = []
+                data: dict[str, Any] = {
+                    "deleted": True,
+                    "scope": scope,
+                    "active_item_id": str(
+                        cleanup_payload.get("active_item_id") or ""
+                    ),
+                }
+                try:
+                    data.update(
+                        PortalRuntime.service.hide_ongoing_item(
+                            cleanup_payload,
+                            scope=scope,
+                            deleted_by=payload["_auth_open_id"],
+                        )
                     )
-                )
-                PortalRuntime.clear_payload_cache()
-                self._clear_read_cache()
-                self._notify_qt_active_streams()
-                event_id = PortalRuntime.state_store.enqueue_outbox_event(
-                    "qt_action",
-                    {
-                        "kind": "active_delete",
-                        "payload": {
-                            "active_item_id": str(payload.get("active_item_id") or ""),
-                            "record_id": str(
-                                (delete_result or {}).get("record_id")
-                                or payload.get("target_record_id")
-                                or ""
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
+                try:
+                    data.update(
+                        PortalRuntime.service.discard_deleted_ongoing_state(
+                            cleanup_payload,
+                            scope=scope,
+                            reset_source_plan=bool(
+                                (delete_result or {}).get("remote_deleted")
                             ),
-                            "source_record_id": str(
-                                cleanup_payload.get("source_record_id") or ""
-                            ),
-                            "work_type": str(cleanup_payload.get("work_type") or ""),
-                            "notice_type": str(payload.get("notice_type") or ""),
+                        )
+                    )
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
+                try:
+                    PortalRuntime.clear_payload_cache()
+                    self._clear_read_cache()
+                    self._notify_qt_active_streams()
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"刷新本地缓存失败：{cleanup_exc}")
+                event_id = ""
+                try:
+                    event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": str(
+                                    payload.get("active_item_id") or ""
+                                ),
+                                "record_id": str(
+                                    (delete_result or {}).get("record_id")
+                                    or payload.get("target_record_id")
+                                    or ""
+                                ),
+                                "source_record_id": str(
+                                    cleanup_payload.get("source_record_id") or ""
+                                ),
+                                "work_type": str(
+                                    cleanup_payload.get("work_type") or ""
+                                ),
+                                "notice_type": str(
+                                    payload.get("notice_type") or ""
+                                ),
+                            },
                         },
-                    },
-                )
+                    )
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
                 data["qt_deleted"] = bool(delete_result.get("active_item_id") or delete_result.get("record_id"))
                 data["qt_event_id"] = event_id
                 data["remote_deleted"] = remote_deleted
                 if not delete_ok:
-                    data["cleanup_warning"] = str(
-                        (delete_result or {}).get("message")
-                        or "目标多维已删除，本地状态已通过补偿链路清理。"
+                    cleanup_warnings.insert(
+                        0,
+                        str(
+                            (delete_result or {}).get("message")
+                            or "目标多维已删除，本地状态已通过补偿链路清理。"
+                        ),
+                    )
+                if cleanup_warnings:
+                    data["cleanup_warning"] = "；".join(
+                        dict.fromkeys(cleanup_warnings)
                     )
                     data["cleanup_recovered"] = True
                 return self._json_ok(request, session, data)
@@ -5490,42 +5705,97 @@ class FastAPIPortalController:
                         },
                         status_code=409,
                     )
-                data = PortalRuntime.service.hide_ongoing_item(
-                    payload,
+                self._record_deletion_audit(
+                    source="网页",
+                    deletion_type="移除显示",
+                    business_type=self._deletion_business_type(payload),
                     scope=scope,
-                    deleted_by=payload["_auth_open_id"],
-                )
-                data.update(
-                    PortalRuntime.service.discard_deleted_ongoing_state(
-                        payload, scope=scope
-                    )
-                )
-                PortalRuntime.clear_payload_cache()
-                self._clear_read_cache()
-                self._notify_qt_active_streams()
-                event_id = PortalRuntime.state_store.enqueue_outbox_event(
-                    "qt_action",
-                    {
-                        "kind": "active_delete",
-                        "payload": {
-                            "active_item_id": str(payload.get("active_item_id") or ""),
-                            "record_id": str(
-                                (remove_result or {}).get("record_id")
-                                or payload.get("target_record_id")
-                                or ""
-                            ),
-                            "source_record_id": str(payload.get("source_record_id") or ""),
-                            "work_type": str(payload.get("work_type") or ""),
-                            "notice_type": str(payload.get("notice_type") or ""),
-                        },
+                    record_name=self._deletion_record_name(payload),
+                    actor_name=payload["_auth_user_name"],
+                    actor_open_id=payload["_auth_open_id"],
+                    source_record_id=str(payload.get("source_record_id") or ""),
+                    target_record_id=str(
+                        (remove_result or {}).get("record_id")
+                        or payload.get("target_record_id")
+                        or ""
+                    ),
+                    local_record_id=str(payload.get("active_item_id") or ""),
+                    local_only=True,
+                    operation_id=str(payload.get("operation_id") or ""),
+                    detail={
+                        "qt_removed": bool(
+                            (remove_result or {}).get("qt_removed")
+                            or (remove_result or {}).get("already_absent")
+                        )
                     },
                 )
+                cleanup_warnings: list[str] = []
+                data: dict[str, Any] = {
+                    "deleted": True,
+                    "scope": scope,
+                    "active_item_id": str(payload.get("active_item_id") or ""),
+                }
+                try:
+                    data.update(
+                        PortalRuntime.service.hide_ongoing_item(
+                            payload,
+                            scope=scope,
+                            deleted_by=payload["_auth_open_id"],
+                        )
+                    )
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
+                try:
+                    data.update(
+                        PortalRuntime.service.discard_deleted_ongoing_state(
+                            payload, scope=scope
+                        )
+                    )
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
+                try:
+                    PortalRuntime.clear_payload_cache()
+                    self._clear_read_cache()
+                    self._notify_qt_active_streams()
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"刷新本地缓存失败：{cleanup_exc}")
+                event_id = ""
+                try:
+                    event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": str(
+                                    payload.get("active_item_id") or ""
+                                ),
+                                "record_id": str(
+                                    (remove_result or {}).get("record_id")
+                                    or payload.get("target_record_id")
+                                    or ""
+                                ),
+                                "source_record_id": str(
+                                    payload.get("source_record_id") or ""
+                                ),
+                                "work_type": str(payload.get("work_type") or ""),
+                                "notice_type": str(
+                                    payload.get("notice_type") or ""
+                                ),
+                            },
+                        },
+                    )
+                except Exception as cleanup_exc:
+                    cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
                 data["qt_deleted"] = bool(
                     remove_result.get("qt_removed")
                     or remove_result.get("already_absent")
                 )
                 data["qt_event_id"] = event_id
                 data["remote_deleted"] = False
+                if cleanup_warnings:
+                    data["cleanup_warning"] = "；".join(
+                        dict.fromkeys(cleanup_warnings)
+                    )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -6118,11 +6388,52 @@ class FastAPIPortalController:
                 actor_open_id = str(actor.get("open_id") or "").strip()
                 if open_id and open_id == actor_open_id:
                     raise PortalError("不能删除当前登录管理员自己的权限。")
+                current_permissions = (
+                    PortalRuntime.auth_manager.get_permissions_payload()
+                )
+                deleted_user = next(
+                    (
+                        item
+                        for item in (current_permissions.get("users") or [])
+                        if str(item.get("open_id") or "").strip() == open_id
+                    ),
+                    {},
+                )
                 permissions, removed = PortalRuntime.auth_manager.remove_permission_user(
                     open_id,
                     updated_by=actor_open_id,
                 )
-                self._clear_read_cache(("auth_status",))
+                if removed:
+                    self._record_deletion_audit(
+                        source="网页",
+                        deletion_type="删除权限用户",
+                        business_type="门户权限",
+                        scope="、".join(
+                            str(item or "").strip()
+                            for item in (deleted_user.get("scopes") or [])
+                            if str(item or "").strip()
+                        ),
+                        record_name=str(
+                            deleted_user.get("name") or open_id
+                        ).strip(),
+                        actor_name=str(
+                            actor.get("name") or actor.get("en_name") or ""
+                        ),
+                        actor_open_id=actor_open_id,
+                        local_record_id=open_id,
+                        operation_id=str(payload.get("operation_id") or ""),
+                        detail={
+                            "role": str(deleted_user.get("role") or ""),
+                            "enabled": deleted_user.get("enabled") is not False,
+                        },
+                    )
+                try:
+                    self._clear_read_cache(("auth_status",))
+                except Exception as cleanup_exc:
+                    log_warning(
+                        "权限用户已删除，但登录状态缓存清理失败: "
+                        f"open_id={open_id}: {cleanup_exc}"
+                    )
                 return self._json_ok(
                     request,
                     session,
@@ -6493,7 +6804,51 @@ class FastAPIPortalController:
                         if resolved_value:
                             delete_payload[identity_field] = resolved_value
                     scope = str(delete_payload.get("scope") or "ALL").strip() or "ALL"
-                    cleanup_succeeded = True
+                    self._record_deletion_audit(
+                        source="Qt",
+                        deletion_type=(
+                            "移除未上传通告"
+                            if local_only_candidate
+                            else "删除通告"
+                        ),
+                        business_type=self._deletion_business_type(
+                            delete_payload
+                        ),
+                        scope=scope,
+                        record_name=self._deletion_record_name(delete_payload),
+                        actor_name=str(
+                            delete_payload.get("_auth_user_name")
+                            or delete_payload.get("operator_name")
+                            or "Qt客户端"
+                        ),
+                        actor_open_id=str(
+                            delete_payload.get("_auth_open_id")
+                            or delete_payload.get("operator_open_id")
+                            or ""
+                        ),
+                        source_record_id=str(
+                            delete_payload.get("source_record_id") or ""
+                        ),
+                        target_record_id=str(
+                            data.get("record_id")
+                            or delete_payload.get("target_record_id")
+                            or ""
+                        ),
+                        local_record_id=str(
+                            data.get("active_item_id")
+                            or delete_payload.get("active_item_id")
+                            or ""
+                        ),
+                        remote_deleted=remote_deleted,
+                        local_only=local_only_candidate,
+                        operation_id=str(
+                            delete_payload.get("operation_id")
+                            or command_payload.get("operation_id")
+                            or ""
+                        ),
+                        detail={"delete_ok": delete_ok},
+                    )
+                    cleanup_warnings: list[str] = []
                     try:
                         data.update(
                             PortalRuntime.service.hide_ongoing_item(
@@ -6502,6 +6857,9 @@ class FastAPIPortalController:
                                 deleted_by=str(delete_payload.get("_auth_open_id") or "qt"),
                             )
                         )
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
+                    try:
                         data.update(
                             PortalRuntime.service.discard_deleted_ongoing_state(
                                 delete_payload,
@@ -6512,47 +6870,58 @@ class FastAPIPortalController:
                             )
                         )
                     except Exception as cleanup_exc:
-                        cleanup_succeeded = False
-                        data["cleanup_warning"] = str(cleanup_exc)
-                    if (
-                        remote_deleted
-                        and not delete_ok
-                        and cleanup_succeeded
-                        and not data.get("cleanup_warning")
-                    ):
-                        data["cleanup_warning"] = str(
-                            data.get("message")
-                            or "目标多维已删除，本地状态已通过补偿链路清理。"
+                        cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
+                    if remote_deleted and not delete_ok:
+                        cleanup_warnings.insert(
+                            0,
+                            str(
+                                data.get("message")
+                                or "目标多维已删除，本地状态已通过补偿链路清理。"
+                            ),
                         )
-                    if remote_deleted and not delete_ok and cleanup_succeeded:
+                    if remote_deleted and not delete_ok:
                         data["ok"] = True
                         data["cleanup_recovered"] = True
-                    PortalRuntime.clear_payload_cache()
-                    self._clear_read_cache()
-                    self._notify_qt_active_streams()
-                    PortalRuntime.state_store.enqueue_outbox_event(
-                        "qt_action",
-                        {
-                            "kind": "active_delete",
-                            "payload": {
-                                "active_item_id": str(
-                                    data.get("active_item_id")
-                                    or delete_payload.get("active_item_id")
-                                    or ""
-                                ),
-                                "record_id": str(
-                                    data.get("record_id")
-                                    or delete_payload.get("target_record_id")
-                                    or ""
-                                ),
-                                "source_record_id": str(
-                                    delete_payload.get("source_record_id") or ""
-                                ),
-                                "work_type": str(delete_payload.get("work_type") or ""),
-                                "notice_type": str(delete_payload.get("notice_type") or ""),
+                    try:
+                        PortalRuntime.clear_payload_cache()
+                        self._clear_read_cache()
+                        self._notify_qt_active_streams()
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"刷新本地缓存失败：{cleanup_exc}")
+                    try:
+                        PortalRuntime.state_store.enqueue_outbox_event(
+                            "qt_action",
+                            {
+                                "kind": "active_delete",
+                                "payload": {
+                                    "active_item_id": str(
+                                        data.get("active_item_id")
+                                        or delete_payload.get("active_item_id")
+                                        or ""
+                                    ),
+                                    "record_id": str(
+                                        data.get("record_id")
+                                        or delete_payload.get("target_record_id")
+                                        or ""
+                                    ),
+                                    "source_record_id": str(
+                                        delete_payload.get("source_record_id") or ""
+                                    ),
+                                    "work_type": str(
+                                        delete_payload.get("work_type") or ""
+                                    ),
+                                    "notice_type": str(
+                                        delete_payload.get("notice_type") or ""
+                                    ),
+                                },
                             },
-                        },
-                    )
+                        )
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
+                    if cleanup_warnings:
+                        data["cleanup_warning"] = "；".join(
+                            dict.fromkeys(cleanup_warnings)
+                        )
                     return {"ok": True, "data": data}
                 if command == "apply_notice_undo":
                     command_payload = dict(payload.get("payload") or {})
@@ -9794,6 +10163,20 @@ class FastAPIPortalController:
         except Exception as exc:
             business_audits_removed = 0
             log_warning(f"业务操作审计清理失败: {exc}")
+        try:
+            cleanup_deletion_audits = getattr(
+                PortalRuntime.state_store,
+                "cleanup_uploaded_deletion_audits",
+                None,
+            )
+            deletion_audits_removed = (
+                int(cleanup_deletion_audits() or 0)
+                if callable(cleanup_deletion_audits)
+                else 0
+            )
+        except Exception as exc:
+            deletion_audits_removed = 0
+            log_warning(f"删除审计本地队列清理失败: {exc}")
         return {
             **cleanup,
             "runtime_queue_removed": queue_removed,
@@ -9806,6 +10189,7 @@ class FastAPIPortalController:
             "mop_temp_signature_removed": mop_temp_signature_removed,
             "mop_local_files": mop_local_files,
             "business_audits_removed": business_audits_removed,
+            "deletion_audits_removed": deletion_audits_removed,
             "cleaned_at": time.time(),
         }
 
@@ -9869,6 +10253,19 @@ class FastAPIPortalController:
             )
         except Exception as exc:
             log_warning(f"天气重保后台检查触发失败: {exc}")
+
+    def _run_scheduled_deletion_audit_flush(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            result = PortalRuntime.service.flush_deletion_audit_logs(limit=50)
+            if int((result or {}).get("failed") or 0):
+                log_warning(
+                    "删除审计日志仍有上传失败记录，已保留本地等待重试: "
+                    f"failed={result.get('failed')}"
+                )
+        except Exception as exc:
+            log_warning(f"删除审计日志重试失败: {exc}")
 
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
@@ -10099,6 +10496,15 @@ class FastAPIPortalController:
             coalesce=True,
         )
         scheduler.add_job(
+            self._run_scheduled_deletion_audit_flush,
+            "interval",
+            minutes=2,
+            id="deletion_audit_flush",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
@@ -10128,6 +10534,14 @@ class FastAPIPortalController:
                 "date",
                 run_date=dt.datetime.now() + dt.timedelta(seconds=35),
                 id="critical_guard_weather_startup",
+                replace_existing=True,
+                max_instances=1,
+            )
+            scheduler.add_job(
+                self._run_scheduled_deletion_audit_flush,
+                "date",
+                run_date=dt.datetime.now() + dt.timedelta(seconds=15),
+                id="deletion_audit_flush_startup",
                 replace_existing=True,
                 max_instances=1,
             )

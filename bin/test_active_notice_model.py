@@ -232,6 +232,86 @@ class _RuntimeOngoingHarness(MainWindowRuntimeMixin):
         return ""
 
 
+class _QtDeleteOperationHarness(MainWindowRuntimeMixin):
+    def __init__(self):
+        self.item = QListWidgetItem()
+        self.item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "active-delete-operation",
+                "record_id": "rec-delete-operation",
+                "target_record_id": "rec-delete-operation",
+                "operation_id": "upload-operation-must-not-be-reused",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "buildings": ["A"],
+                "text": "【维保通告】状态：开始\n【名称】A楼删除幂等测试",
+            },
+        )
+        self.lan_template_portal_controller = _TodayProgressController()
+        self.command_results = [
+            {"ok": False, "message": "temporary failure"},
+            {"ok": True, "message": "deleted"},
+        ]
+        self.submitted_payloads = []
+        self.removed = False
+        self.cache_save_requests = 0
+        self._today_in_progress_pending_record_ids = set()
+        self._today_in_progress_synced_record_ids = set()
+        self.pending_new_by_record_id = {}
+        self.pending_replace_by_record_id = {}
+        self.pending_update_after_upload = {}
+        self.pending_action_record_ids = set()
+        self.pending_action_types = {}
+
+    @staticmethod
+    def _is_screenshot_dialog_active():
+        return False
+
+    @staticmethod
+    def _recover_stale_upload_states():
+        return {}
+
+    def _find_lan_ongoing_item_for_payload(self, _payload):
+        return None, self.item
+
+    @staticmethod
+    def _is_valid_list_item(item):
+        return item is not None
+
+    @staticmethod
+    def _normalize_buildings_value(value):
+        return list(value or [])
+
+    @staticmethod
+    def _infer_buildings_from_notice_text(_text):
+        return []
+
+    @staticmethod
+    def _lan_scope_matches(_scope, _buildings):
+        return True
+
+    @staticmethod
+    def _has_pending_upload(_record_id):
+        return False
+
+    def _submit_qt_command(self, command, payload, *, timeout=120.0):
+        self.submitted_payloads.append(
+            {"command": command, "payload": dict(payload), "timeout": timeout}
+        )
+        return self.command_results.pop(0)
+
+    @staticmethod
+    def _clear_upload_queue(_record_id):
+        return None
+
+    def _remove_active_item_widget_only(self, _list_widget, _item):
+        self.removed = True
+
+    def request_active_cache_save(self, *_args, **_kwargs):
+        self.cache_save_requests += 1
+
+
 class _ActiveCacheScheduleHarness(ActiveCacheMixin):
     def __init__(self):
         self._is_restoring_cache = False
@@ -1210,6 +1290,31 @@ class ActiveNoticeModelTests(unittest.TestCase):
             harness.lan_template_portal_controller.calls[0][1]["record_id"],
             "target-1",
         )
+
+    def test_qt_delete_retry_uses_stable_id_separate_from_upload_operation(self):
+        harness = _QtDeleteOperationHarness()
+
+        first = harness._execute_lan_ongoing_delete(
+            {"scope": "A", "active_item_id": "active-delete-operation"}
+        )
+        second = harness._execute_lan_ongoing_delete(
+            {"scope": "A", "active_item_id": "active-delete-operation"}
+        )
+
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["ok"])
+        operation_ids = [
+            item["payload"]["data_dict"]["operation_id"]
+            for item in harness.submitted_payloads
+        ]
+        self.assertEqual(len(set(operation_ids)), 1)
+        self.assertTrue(operation_ids[0].startswith("qt-delete:"))
+        self.assertNotEqual(operation_ids[0], "upload-operation-must-not-be-reused")
+        item_data = harness.item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(item_data["operation_id"], "upload-operation-must-not-be-reused")
+        self.assertEqual(item_data["_delete_operation_id"], operation_ids[0])
+        self.assertTrue(harness.removed)
+        self.assertEqual(harness.cache_save_requests, 1)
 
 
 if __name__ == "__main__":

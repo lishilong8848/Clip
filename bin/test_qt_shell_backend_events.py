@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -167,6 +168,18 @@ class _ImmediateDeleteHarness(MainWindowWorkflowMixin):
 
     def show_message(self, message):
         self.messages.append(str(message))
+
+
+class _DeleteCommandIdHarness(MainWindowWorkflowMixin):
+    def __init__(self):
+        self.lan_template_portal_controller = type(
+            "Controller", (), {"submit_qt_command": lambda *args, **kwargs: None}
+        )()
+        self.submissions = []
+
+    def _submit_qt_command(self, command, payload, *, timeout):
+        self.submissions.append((command, payload, timeout))
+        return {"ok": True, "remote_deleted": True}
 
 
 class _RecordsHarness(MainWindowRecordsMixin):
@@ -419,6 +432,28 @@ class QtShellBackendEventTests(unittest.TestCase):
         harness.backend_release.set()
         self.assertTrue(harness.backend_finished.wait(1.0))
         self.assertEqual(harness.cache_delete_count, 1)
+
+    def test_qt_swipe_delete_keeps_upload_operation_id_and_reuses_delete_id(self):
+        harness = _DeleteCommandIdHarness()
+        payload = {
+            "active_item_id": "active-delete-id",
+            "record_id": "rec-delete-id",
+            "target_record_id": "rec-delete-id",
+            "operation_id": "upload-operation-id",
+        }
+
+        first = harness._submit_delete_active_item_to_backend(payload)
+        second = harness._submit_delete_active_item_to_backend(payload)
+
+        self.assertTrue(first[0])
+        self.assertTrue(second[0])
+        submitted_ids = [
+            item[1]["data_dict"]["operation_id"] for item in harness.submissions
+        ]
+        self.assertEqual(len(set(submitted_ids)), 1)
+        self.assertTrue(submitted_ids[0].startswith("qt-delete:"))
+        self.assertEqual(payload["operation_id"], "upload-operation-id")
+        self.assertEqual(payload["_delete_operation_id"], submitted_ids[0])
 
     def test_runtime_active_upsert_keeps_cross_month_ongoing_item(self):
         harness = _ActiveUpsertVisibilityHarness()
@@ -1211,19 +1246,23 @@ class QtShellBackendEventTests(unittest.TestCase):
                     origin="clipboard",
                 )
 
-                PortalRuntime._remember_local_upload_target(
-                    {
-                        "active_item_id": "event-active-1",
-                        "record_id": "local_event_active_1",
-                        "notice_type": "事件通告",
-                        "work_type": "event",
-                        "title": "D楼直流屏系统总故障",
-                        "text": first_text,
-                        "_is_placeholder_record": True,
-                    },
-                    notice_type="事件通告",
-                    target_record_id="rec-event-target",
-                )
+                with patch(
+                    "lan_bitable_template_portal.server.query_record_by_id",
+                    return_value=(True, {"record_version": "version-1"}),
+                ):
+                    PortalRuntime._remember_local_upload_target(
+                        {
+                            "active_item_id": "event-active-1",
+                            "record_id": "local_event_active_1",
+                            "notice_type": "事件通告",
+                            "work_type": "event",
+                            "title": "D楼直流屏系统总故障",
+                            "text": first_text,
+                            "_is_placeholder_record": True,
+                        },
+                        notice_type="事件通告",
+                        target_record_id="rec-event-target",
+                    )
 
                 items = store.list_qt_active_items()
                 self.assertEqual(len(items), 1)

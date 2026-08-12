@@ -162,6 +162,25 @@ WATER_CONSUMPTION_LARGE_CHANGE_THRESHOLD = 0.5
 WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD = "异常备注"
 WATER_CONSUMPTION_ALERT_CHAT_ID = "oc_3bc648b9b761f24a65366a9b04b32eb2"
 WATER_CONSUMPTION_ALERT_CHAT_NAME = "全景异常项同步"
+DELETION_AUDIT_APP_TOKEN = "HScCwZt9QiqPCUkSrHjcbBL1ngb"
+DELETION_AUDIT_TABLE_ID = "tblN2nwmjGhngcOE"
+DELETION_AUDIT_TEXT_FIELDS = (
+    "删除时间",
+    "操作入口",
+    "删除方式",
+    "业务类型",
+    "楼栋",
+    "记录名称",
+    "操作人",
+    "操作人OpenID",
+    "源表记录ID",
+    "目标表记录ID",
+    "本地记录ID",
+    "远端记录已删除",
+    "仅移除显示",
+    "审计唯一ID",
+    "删除详情",
+)
 WATER_CONSUMPTION_SUPERVISOR_POSITIONS = {
     "A": "设施运维主管",
     "B": "设施运维主管",
@@ -1359,6 +1378,11 @@ class MaintenancePortalService:
         self._critical_guard_weather_http_client = FeishuHttpClient(retries=0)
         self._critical_guard_weather_job_lock = threading.RLock()
         self._critical_guard_weather_running_job_id = ""
+        self._deletion_audit_schema_lock = threading.RLock()
+        self._deletion_audit_schema_ready = False
+        self._deletion_audit_flush_lock = threading.Lock()
+        self._deletion_audit_worker_lock = threading.RLock()
+        self._deletion_audit_worker_running = False
         self._signature_crypto = SignatureCryptoManager()
         self._signature_crypto_migration_lock = threading.RLock()
         self._signature_crypto_migration_running = False
@@ -2696,6 +2720,346 @@ class MaintenancePortalService:
     def _touch_state_cache_version(self) -> None:
         with self._state_version_lock:
             self._state_version += 1
+
+    def ensure_deletion_audit_schema(self) -> dict[str, Any]:
+        """Create the append-only deletion log fields when they are missing."""
+
+        with self._deletion_audit_schema_lock:
+            if self._deletion_audit_schema_ready:
+                return {
+                    "ok": True,
+                    "created_fields": [],
+                    "field_count": len(DELETION_AUDIT_TEXT_FIELDS) + 1,
+                    "cached": True,
+                }
+            raw_fields = self._load_raw_table_fields(
+                app_token=DELETION_AUDIT_APP_TOKEN,
+                table_id=DELETION_AUDIT_TABLE_ID,
+                http_client=self._write_http_client,
+            )
+            by_name = {
+                str(item.get("field_name") or "").strip(): item
+                for item in raw_fields
+                if isinstance(item, dict)
+            }
+            primary = by_name.get("文本")
+            if primary is None or int(primary.get("type") or 0) != 1:
+                raise PortalError("删除日志表必须保留文本类型主字段“文本”。")
+            created: list[str] = []
+            fields_url = (
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                f"{DELETION_AUDIT_APP_TOKEN}/tables/"
+                f"{DELETION_AUDIT_TABLE_ID}/fields"
+            )
+            for field_name in DELETION_AUDIT_TEXT_FIELDS:
+                existing = by_name.get(field_name)
+                if existing is not None:
+                    if int(existing.get("type") or 0) != 1:
+                        raise PortalError(
+                            f"删除日志字段“{field_name}”必须是文本字段。"
+                        )
+                    continue
+
+                def do_create(name: str = field_name) -> dict[str, Any]:
+                    return self._request_payload(
+                        "POST",
+                        fields_url,
+                        context=f"删除日志字段创建({name})",
+                        headers={
+                            **self._auth_headers(),
+                            "Content-Type": "application/json",
+                        },
+                        json_payload={"field_name": name, "type": 1},
+                        http_client=self._write_http_client,
+                    )
+
+                payload = do_create()
+                if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+                    refresh_feishu_token()
+                    payload = do_create()
+                code = int(payload.get("code") or 0)
+                if code not in {0, 1254014}:
+                    raise PortalError(
+                        f"创建删除日志字段“{field_name}”失败: "
+                        f"code={code}, msg={payload.get('msg') or 'unknown'}"
+                    )
+                if code == 0:
+                    created.append(field_name)
+
+            if created:
+                raw_fields = self._load_raw_table_fields(
+                    app_token=DELETION_AUDIT_APP_TOKEN,
+                    table_id=DELETION_AUDIT_TABLE_ID,
+                    http_client=self._write_http_client,
+                )
+                by_name = {
+                    str(item.get("field_name") or "").strip(): item
+                    for item in raw_fields
+                    if isinstance(item, dict)
+                }
+            missing = [
+                name for name in DELETION_AUDIT_TEXT_FIELDS if name not in by_name
+            ]
+            if missing:
+                raise PortalError(
+                    f"删除日志表字段创建后仍缺少：{'、'.join(missing)}"
+                )
+            self._deletion_audit_schema_ready = True
+            return {
+                "ok": True,
+                "created_fields": created,
+                "field_count": len(by_name),
+            }
+
+    def _find_deletion_audit_record_id(self, audit_id: str) -> str:
+        normalized_audit_id = str(audit_id or "").strip()
+        if not normalized_audit_id:
+            return ""
+        url = (
+            "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{DELETION_AUDIT_APP_TOKEN}/tables/"
+            f"{DELETION_AUDIT_TABLE_ID}/records/search"
+        )
+        body = {
+            "automatic_fields": False,
+            "field_names": ["审计唯一ID"],
+            "filter": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": "审计唯一ID",
+                        "operator": "is",
+                        "value": [normalized_audit_id],
+                    }
+                ],
+            },
+        }
+
+        def do_search() -> dict[str, Any]:
+            return self._request_payload(
+                "POST",
+                url,
+                context="删除日志幂等查询",
+                headers={
+                    **self._auth_headers(),
+                    "Content-Type": "application/json",
+                },
+                params={"page_size": 2, "user_id_type": "open_id"},
+                json_payload=body,
+                http_client=self._write_http_client,
+            )
+
+        payload = do_search()
+        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            refresh_feishu_token()
+            payload = do_search()
+        code = int(payload.get("code") or 0)
+        if code != 0:
+            raise PortalError(
+                "删除日志幂等查询失败: "
+                f"code={code}, msg={payload.get('msg') or 'unknown'}"
+            )
+        items = (payload.get("data") or {}).get("items") or []
+        record_ids = [
+            str(item.get("record_id") or "").strip()
+            for item in items
+            if isinstance(item, dict) and str(item.get("record_id") or "").strip()
+        ]
+        if len(record_ids) > 1:
+            raise PortalError(
+                f"删除日志审计唯一ID重复：{normalized_audit_id}"
+            )
+        return record_ids[0] if record_ids else ""
+
+    @staticmethod
+    def _deletion_audit_text(value: Any, *, limit: int = 1000) -> str:
+        text = str(value or "").strip()
+        return text[: max(1, int(limit or 1000))]
+
+    def _upload_deletion_audit(self, audit: dict[str, Any]) -> str:
+        try:
+            self.ensure_deletion_audit_schema()
+            audit_id = self._deletion_audit_text(audit.get("audit_id"), limit=128)
+            existing_record_id = self._find_deletion_audit_record_id(audit_id)
+            if existing_record_id:
+                return existing_record_id
+            created_at = float(audit.get("created_at") or time.time())
+            deleted_at_text = dt.datetime.fromtimestamp(created_at).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            detail = (
+                audit.get("detail")
+                if isinstance(audit.get("detail"), dict)
+                else {}
+            )
+            summary_parts = [
+                deleted_at_text,
+                self._deletion_audit_text(audit.get("source"), limit=40),
+                self._deletion_audit_text(audit.get("deletion_type"), limit=60),
+                self._deletion_audit_text(audit.get("business_type"), limit=60),
+                self._deletion_audit_text(audit.get("record_name"), limit=300),
+            ]
+            summary = " | ".join(part for part in summary_parts if part)
+            detail_text = json.dumps(
+                detail,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            fields = {
+                "文本": summary[:1000] or f"删除日志 {audit_id}",
+                "删除时间": deleted_at_text,
+                "操作入口": self._deletion_audit_text(audit.get("source"), limit=80),
+                "删除方式": self._deletion_audit_text(
+                    audit.get("deletion_type"), limit=100
+                ),
+                "业务类型": self._deletion_audit_text(
+                    audit.get("business_type"), limit=100
+                ),
+                "楼栋": self._deletion_audit_text(audit.get("scope"), limit=100),
+                "记录名称": self._deletion_audit_text(
+                    audit.get("record_name"), limit=1000
+                ),
+                "操作人": self._deletion_audit_text(audit.get("actor_name"), limit=200),
+                "操作人OpenID": self._deletion_audit_text(
+                    audit.get("actor_open_id"), limit=200
+                ),
+                "源表记录ID": self._deletion_audit_text(
+                    audit.get("source_record_id"), limit=200
+                ),
+                "目标表记录ID": self._deletion_audit_text(
+                    audit.get("target_record_id"), limit=200
+                ),
+                "本地记录ID": self._deletion_audit_text(
+                    audit.get("local_record_id"), limit=200
+                ),
+                "远端记录已删除": "是" if audit.get("remote_deleted") else "否",
+                "仅移除显示": "是" if audit.get("local_only") else "否",
+                "审计唯一ID": audit_id,
+                "删除详情": detail_text[:5000],
+            }
+            payload = self._create_record_fields(
+                app_token=DELETION_AUDIT_APP_TOKEN,
+                table_id=DELETION_AUDIT_TABLE_ID,
+                fields=fields,
+            )
+            return self._created_record_id(payload)
+        except Exception:
+            with self._deletion_audit_schema_lock:
+                self._deletion_audit_schema_ready = False
+            raise
+
+    def flush_deletion_audit_logs(self, *, limit: int = 50) -> dict[str, Any]:
+        if not self._deletion_audit_flush_lock.acquire(blocking=False):
+            return {"ok": True, "reused": True, "uploaded": 0, "failed": 0}
+        uploaded = 0
+        failed = 0
+        errors: list[str] = []
+        try:
+            pending = self._state_store.list_pending_deletion_audits(limit=limit)
+            for audit in pending:
+                audit_id = str(audit.get("audit_id") or "").strip()
+                try:
+                    remote_record_id = self._upload_deletion_audit(audit)
+                    if not remote_record_id:
+                        raise PortalError("删除日志写入成功但未返回记录 ID。")
+                    self._state_store.mark_deletion_audit_uploaded(
+                        audit_id,
+                        remote_record_id=remote_record_id,
+                    )
+                    uploaded += 1
+                except Exception as exc:
+                    failed += 1
+                    error = str(exc)
+                    errors.append(f"{audit_id}: {error}")
+                    self._state_store.mark_deletion_audit_failed(
+                        audit_id,
+                        error=error,
+                    )
+            return {
+                "ok": failed == 0,
+                "reused": False,
+                "pending": len(pending),
+                "uploaded": uploaded,
+                "failed": failed,
+                "errors": errors[:10],
+            }
+        finally:
+            self._deletion_audit_flush_lock.release()
+
+    def start_deletion_audit_flush_async(self, *, delay_seconds: float = 0) -> bool:
+        with self._deletion_audit_worker_lock:
+            if self._deletion_audit_worker_running:
+                return False
+            self._deletion_audit_worker_running = True
+
+        def run() -> None:
+            try:
+                delay = max(0.0, float(delay_seconds or 0))
+                if delay:
+                    time.sleep(delay)
+                self.flush_deletion_audit_logs()
+            except Exception:
+                logging.exception("删除审计日志后台上传失败")
+            finally:
+                with self._deletion_audit_worker_lock:
+                    self._deletion_audit_worker_running = False
+
+        threading.Thread(
+            target=run,
+            name="DeletionAuditFlush",
+            daemon=True,
+        ).start()
+        return True
+
+    def record_deletion_log(
+        self,
+        *,
+        source: str,
+        deletion_type: str,
+        business_type: str = "",
+        scope: str = "",
+        record_name: str = "",
+        actor_name: str = "",
+        actor_open_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+        local_record_id: str = "",
+        remote_deleted: bool = False,
+        local_only: bool = False,
+        operation_id: str = "",
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_operation_id = str(operation_id or "").strip()
+        if normalized_operation_id:
+            digest_input = (
+                f"deletion:{source}:{deletion_type}:{normalized_operation_id}"
+            )
+            audit_id = "del_" + hashlib.sha256(
+                digest_input.encode("utf-8")
+            ).hexdigest()[:32]
+        else:
+            audit_id = "del_" + uuid.uuid4().hex
+        audit = self._state_store.enqueue_deletion_audit(
+            audit_id=audit_id,
+            operation_id=normalized_operation_id,
+            source=source,
+            deletion_type=deletion_type,
+            business_type=business_type,
+            scope=scope,
+            record_name=record_name,
+            actor_name=actor_name,
+            actor_open_id=actor_open_id,
+            source_record_id=source_record_id,
+            target_record_id=target_record_id,
+            local_record_id=local_record_id,
+            remote_deleted=remote_deleted,
+            local_only=local_only,
+            detail=detail,
+        )
+        if not external_mock_enabled():
+            self.start_deletion_audit_flush_async()
+        return audit
 
     def _auth_headers(self) -> dict[str, str]:
         token = str(ensure_feishu_token() or config.user_token or "").strip()
@@ -9321,6 +9685,7 @@ class MaintenancePortalService:
             self._assert_repair_record_version(records[0], expected_version)
         if summary_id not in self._repair_followup_parent_ids(records[0]):
             raise PortalError("该维修跟进记录不属于当前检修单。")
+        record_name = self._repair_management_title(records[0])
         self._ensure_repair_management_record_in_scope(summary_id, scope)
         self._delete_record_fields(
             app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -9349,6 +9714,7 @@ class MaintenancePortalService:
         return {
             "record_id": normalized_record_id,
             "summary_record_id": summary_id,
+            "record_name": record_name,
             "deleted": True,
             "warnings": warnings,
             "summary_sync_pending": summary_sync_pending,
@@ -16175,11 +16541,12 @@ class MaintenancePortalService:
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
-        self._ensure_repair_management_record_in_scope(
+        project_record = self._ensure_repair_management_record_in_scope(
             record_id,
             scope,
             meta_by_name=meta_by_name,
         )
+        record_name = self._repair_management_title(project_record)
         summary_id = str(record_id or "").strip()
         _followup_metas, _followup_meta_by_name, linked_followups = (
             self._load_repair_followups_for_summary(summary_id, limit=500)
@@ -16260,6 +16627,7 @@ class MaintenancePortalService:
         operation_result = {
             **existing_result,
             "task_payload": task_payload,
+            "record_name": record_name,
             "started_at": time.time(),
             "available_at": 0,
         }
@@ -16315,6 +16683,7 @@ class MaintenancePortalService:
         response = {
             **latest_result,
             "record_id": summary_id,
+            "record_name": record_name,
             "deleted": True,
             "available_at": 0,
             "finished_at": time.time(),
@@ -40675,7 +41044,61 @@ class MaintenancePortalService:
                 notes.append(f"{scope}楼：{suggestions}")
         return list(dict.fromkeys(notes))
 
-    def _find_critical_guard_archive_record(self, archive_tag: str) -> str:
+    @staticmethod
+    def _critical_guard_archive_tag(weather_task: dict[str, Any]) -> str:
+        warning_title = str(weather_task.get("warning_title") or "").strip()
+        warning_type = str(weather_task.get("warning_type") or "").strip()
+        warning_color = str(weather_task.get("warning_color") or "").strip().lower()
+        color_label = CRITICAL_GUARD_COLOR_LABELS.get(warning_color, "")
+        if not color_label:
+            color_match = re.search(r"(红色|橙色|黄色|蓝色)预警", warning_title)
+            if color_match:
+                color_label = color_match.group(1)
+        if not warning_type:
+            type_match = re.search(
+                r"(?:发布)?([^，。；;\s]+?)(?:红色|橙色|黄色|蓝色)预警",
+                warning_title,
+            )
+            if type_match:
+                warning_type = type_match.group(1).strip()
+                warning_type = re.sub(r"^.*?(?:气象台|应急局)发布", "", warning_type)
+        warning_type = re.sub(r"(?:红色|橙色|黄色|蓝色)?预警$", "", warning_type).strip()
+        if not warning_type or not color_label:
+            raise PortalError("天气预警缺少类型或颜色，无法填写重保标签。")
+        if warning_type.endswith(color_label):
+            return warning_type
+        return f"{warning_type}{color_label}"
+
+    @staticmethod
+    def _critical_guard_archive_date_ms(value: Any) -> int:
+        if isinstance(value, dict):
+            value = (
+                value.get("timestamp")
+                or value.get("value")
+                or value.get("date")
+                or 0
+            )
+        if isinstance(value, list) and value:
+            return MaintenancePortalService._critical_guard_archive_date_ms(value[0])
+        try:
+            parsed = int(float(value or 0))
+        except (TypeError, ValueError):
+            return 0
+        return parsed * 1000 if 0 < parsed < 10_000_000_000 else parsed
+
+    def _find_critical_guard_archive_record(
+        self,
+        archive_tag: str,
+        *,
+        expected_date_ms: int,
+        tolerance_ms: int = 5 * 60 * 1000,
+    ) -> str:
+        normalized_tag = str(archive_tag or "").strip()
+        normalized_expected_date = self._critical_guard_archive_date_ms(expected_date_ms)
+        if not normalized_tag or not normalized_expected_date:
+            return ""
+        closest_record_id = ""
+        closest_delta: int | None = None
         page_token = ""
         seen_tokens: set[str] = set()
         for _page in range(20):
@@ -40692,14 +41115,24 @@ class MaintenancePortalService:
             for item in data.get("items") or []:
                 fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
                 tag = self._repair_management_plain_text(fields.get("重保标签"))
-                if tag == archive_tag:
-                    return str(item.get("record_id") or "").strip()
+                if tag != normalized_tag:
+                    continue
+                record_date_ms = self._critical_guard_archive_date_ms(fields.get("日期"))
+                if not record_date_ms:
+                    continue
+                delta = abs(record_date_ms - normalized_expected_date)
+                if delta > max(0, int(tolerance_ms)):
+                    continue
+                record_id = str(item.get("record_id") or "").strip()
+                if record_id and (closest_delta is None or delta < closest_delta):
+                    closest_record_id = record_id
+                    closest_delta = delta
             next_token = str(data.get("page_token") or "").strip()
             if not data.get("has_more") or not next_token or next_token in seen_tokens:
                 break
             seen_tokens.add(next_token)
             page_token = next_token
-        return ""
+        return closest_record_id
 
     @staticmethod
     def _critical_guard_archive_result_value(
@@ -40775,11 +41208,7 @@ class MaintenancePortalService:
             raise PortalError(
                 "重保汇总目标表缺少字段：" + "、".join(missing_fields)
             )
-        archive_tag = (
-            f"{str(weather_task.get('warning_type') or weather_task.get('warning_title') or '天气预警').strip()}"
-            f"{CRITICAL_GUARD_COLOR_LABELS.get(str(weather_task.get('warning_color') or '').lower(), '')}"
-            f" · {str(weather_task.get('weather_key') or '')[:12]}"
-        )
+        archive_tag = self._critical_guard_archive_tag(weather_task)
         fields: dict[str, Any] = {
             "日期": int(time.time() * 1000),
             "检查人": [
@@ -40876,6 +41305,7 @@ class MaintenancePortalService:
                 "reused": True,
             }
         attempted_at = float(weather_task.get("archive_attempted_at") or 0)
+        previous_attempted_at = attempted_at
         creating_is_stale = (
             status == "creating"
             and attempted_at > 0
@@ -40906,7 +41336,13 @@ class MaintenancePortalService:
                 task,
             )
             archive_tag = str(fields.get("重保标签") or "")
-            existing_record_id = self._find_critical_guard_archive_record(archive_tag)
+            archive_date_ms = self._critical_guard_archive_date_ms(fields.get("日期"))
+            existing_record_id = ""
+            if previous_attempted_at > 0 and status in {"creating", "failed"}:
+                existing_record_id = self._find_critical_guard_archive_record(
+                    archive_tag,
+                    expected_date_ms=int(previous_attempted_at * 1000),
+                )
             if existing_record_id:
                 self._state_store.update_critical_guard_weather_task(
                     weather_key,
@@ -40940,7 +41376,10 @@ class MaintenancePortalService:
             record = data.get("record") if isinstance(data.get("record"), dict) else {}
             record_id = str(record.get("record_id") or data.get("record_id") or "").strip()
             if not record_id:
-                record_id = self._find_critical_guard_archive_record(archive_tag)
+                record_id = self._find_critical_guard_archive_record(
+                    archive_tag,
+                    expected_date_ms=archive_date_ms,
+                )
             if not record_id:
                 raise PortalError("重保汇总多维已响应成功，但未返回记录 ID。")
             self._state_store.update_critical_guard_weather_task(
@@ -41640,19 +42079,28 @@ class MaintenancePortalService:
                 normalized_task_id,
                 "; ".join(cleanup_errors[:5]),
             )
-        weather_task = self._state_store.get_critical_guard_weather_task(
-            task_id=normalized_task_id
-        )
-        if weather_task:
-            self._state_store.update_critical_guard_weather_task(
-                str(weather_task.get("weather_key") or ""),
-                status="deleted",
+        try:
+            weather_task = self._state_store.get_critical_guard_weather_task(
+                task_id=normalized_task_id
+            )
+            if weather_task:
+                self._state_store.update_critical_guard_weather_task(
+                    str(weather_task.get("weather_key") or ""),
+                    status="deleted",
+                )
+        except Exception as exc:
+            cleanup_errors.append(f"天气任务状态清理失败：{exc}")
+            logging.getLogger(__name__).warning(
+                "重保任务已删除，但天气任务状态清理失败: task_id=%s error=%s",
+                normalized_task_id,
+                exc,
             )
         return {
             "deleted": True,
             "already_deleted": False,
             "task_id": normalized_task_id,
             "name": str(deleted.get("name") or ""),
+            "target_scopes": list(deleted.get("target_scopes") or []),
             "response_count": int(deleted.get("response_count") or 0),
             "removed_artifact_count": removed_artifacts,
             "cleanup_warning": (

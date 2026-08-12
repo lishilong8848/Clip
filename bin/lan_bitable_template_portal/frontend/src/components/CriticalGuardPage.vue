@@ -240,14 +240,25 @@
                     <span :class="statusClass(response.status)">{{ statusText(response.status) }}</span>
                   </header>
                   <button
-                    v-if="response.image_url"
+                    v-if="response.image_url && !adminImageFailed(response)"
                     type="button"
                     class="result-thumbnail"
                     @click="openImage(response.image_url, `${response.scope}楼 · ${response.sheet_type}`)"
                   >
-                    <img :src="response.image_url" :alt="`${response.scope}楼${response.sheet_type}`" loading="lazy" />
+                    <img
+                      :key="adminImageSrc(response)"
+                      :src="adminImageSrc(response)"
+                      :alt="`${response.scope}楼${response.sheet_type}`"
+                      loading="lazy"
+                      @error="markAdminImageFailed(response)"
+                    />
                     <ZoomIn :size="20" />
                   </button>
+                  <div v-else-if="response.image_url" class="result-empty image-error">
+                    <RefreshCw :size="23" />
+                    <span>图片加载失败</span>
+                    <button type="button" @click="retryAdminImage(response)">重新加载</button>
+                  </div>
                   <div v-else class="result-empty"><FileSpreadsheet :size="25" /> 尚未生成</div>
                   <footer>{{ response.signature_names || response.signature_name || "未签名" }} · {{ formatDateTime(response.updated_at) }}</footer>
                   <a v-if="response.workbook_url" class="workbook-link compact" :href="response.workbook_url" download>
@@ -726,6 +737,8 @@ const sourceFileDragging = ref(false);
 const sourceFileUploading = ref(false);
 const sourceFilePreviewFailed = ref(false);
 const sourceFilePreviewRevision = ref(0);
+const adminImageFailures = ref<Record<string, boolean>>({});
+const adminImageRetryTokens = ref<Record<string, number>>({});
 const selectedSigners = ref<Dict[]>([]);
 const pendingSwitch = ref<null | (() => void)>(null);
 let editRevision = 0;
@@ -740,6 +753,11 @@ let bootstrapController: AbortController | null = null;
 let listController: AbortController | null = null;
 let detailController: AbortController | null = null;
 let weatherPollTimer: ReturnType<typeof setTimeout> | null = null;
+let adminDetailPollTimer: ReturnType<typeof setTimeout> | null = null;
+let adminDetailPollController: AbortController | null = null;
+let adminDetailPollInFlight = false;
+let adminDetailPollFailureReported = false;
+let componentUnmounted = false;
 let weatherStatusLoading = false;
 let weatherTaskRefreshJobId = "";
 const publishForm = ref({
@@ -948,12 +966,98 @@ async function loadBootstrap(): Promise<void> {
     if (generation !== bootstrapGeneration) return;
     bootstrap.value = data;
     await loadTasks();
-    if (viewMode.value === "admin") void loadWeatherStatus(true);
+    if (viewMode.value === "admin") {
+      void loadWeatherStatus(true);
+      scheduleAdminDetailRefresh(5_000);
+    }
   } catch (loadError: any) {
     if (controller.signal.aborted || generation !== bootstrapGeneration) return;
     error.value = loadError?.message || "重保管理读取失败。";
   } finally {
     if (generation === bootstrapGeneration) loading.value = false;
+  }
+}
+
+function syncAdminTaskSummary(detail: Dict): void {
+  const taskId = String(detail?.task_id || "");
+  const index = tasks.value.findIndex((item) => String(item.task_id || "") === taskId);
+  if (index < 0) return;
+  const responses = Array.isArray(detail?.responses) ? detail.responses : [];
+  const submittedCount = responses.filter((item: Dict) => item.status === "submitted").length;
+  const draftCount = responses.filter((item: Dict) => item.status === "draft").length;
+  const pendingCount = responses.filter((item: Dict) => item.status === "pending").length;
+  tasks.value[index] = {
+    ...tasks.value[index],
+    response_count: responses.length,
+    submitted_count: submittedCount,
+    draft_count: draftCount,
+    pending_count: pendingCount,
+    complete: Boolean(responses.length) && submittedCount === responses.length,
+  };
+}
+
+function scheduleAdminDetailRefresh(delay = 5_000): void {
+  if (adminDetailPollTimer) window.clearTimeout(adminDetailPollTimer);
+  adminDetailPollTimer = null;
+  if (componentUnmounted || viewMode.value !== "admin") return;
+  adminDetailPollTimer = window.setTimeout(
+    () => void refreshSelectedAdminTask(),
+    delay,
+  );
+}
+
+async function refreshSelectedAdminTask(): Promise<void> {
+  if (viewMode.value !== "admin" || adminDetailPollInFlight) return;
+  if (document.visibilityState === "hidden") {
+    scheduleAdminDetailRefresh(15_000);
+    return;
+  }
+  const taskId = String(selectedTask.value?.task_id || "");
+  if (!taskId) {
+    scheduleAdminDetailRefresh();
+    return;
+  }
+  adminDetailPollInFlight = true;
+  adminDetailPollController?.abort();
+  const controller = new AbortController();
+  adminDetailPollController = controller;
+  let nextDelay = 5_000;
+  try {
+    const detail = await requestJson(
+      `/api/critical-guard/tasks/${encodeURIComponent(taskId)}?admin=1`,
+      { cache: "no-store", signal: controller.signal, timeoutMs: 15_000 },
+    );
+    if (
+      controller.signal.aborted
+      || viewMode.value !== "admin"
+      || String(selectedTask.value?.task_id || "") !== taskId
+    ) return;
+    const currentSheet = adminActiveSheet.value;
+    selectedTask.value = detail;
+    adminActiveSheet.value = (detail.sheet_types || []).includes(currentSheet)
+      ? currentSheet
+      : String(detail.sheet_types?.[0] || "");
+    syncAdminTaskSummary(detail);
+    adminDetailPollFailureReported = false;
+  } catch (refreshError: any) {
+    nextDelay = 15_000;
+    if (!controller.signal.aborted && !adminDetailPollFailureReported) {
+      adminDetailPollFailureReported = true;
+      setMessage(
+        `管理员汇总暂未同步：${refreshError?.message || "请稍后重试"}`,
+        "warning",
+      );
+    }
+  } finally {
+    if (adminDetailPollController === controller) adminDetailPollController = null;
+    adminDetailPollInFlight = false;
+    scheduleAdminDetailRefresh(nextDelay);
+  }
+}
+
+function handlePageVisibilityChange(): void {
+  if (document.visibilityState === "visible" && viewMode.value === "admin") {
+    scheduleAdminDetailRefresh(100);
   }
 }
 
@@ -991,7 +1095,7 @@ async function loadTasks(): Promise<void> {
 function scheduleWeatherStatus(delay = 30_000): void {
   if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
   weatherPollTimer = null;
-  if (viewMode.value !== "admin") return;
+  if (componentUnmounted || viewMode.value !== "admin") return;
   weatherPollTimer = window.setTimeout(() => void loadWeatherStatus(true), delay);
 }
 
@@ -1092,6 +1196,8 @@ function clearTaskSelection(): void {
   adminActiveSheet.value = "";
   cells.value = {};
   selectedSigners.value = [];
+  adminImageFailures.value = {};
+  adminImageRetryTokens.value = {};
   dirty.value = false;
 }
 
@@ -1108,6 +1214,8 @@ async function selectTask(taskId: string, admin = false): Promise<void> {
     const detail = await requestJson(path, { cache: "no-store", signal: controller.signal });
     if (generation !== detailGeneration) return;
     selectedTask.value = detail;
+    adminImageFailures.value = {};
+    adminImageRetryTokens.value = {};
     adminActiveSheet.value = selectedTask.value?.sheet_types?.[0] || "";
     if (!admin) {
       const first = orderedResponses.value[0] || null;
@@ -1787,6 +1895,33 @@ function openImage(url: string, title: string): void {
   imageViewerTitle.value = title;
 }
 
+function adminImageSrc(response: Dict): string {
+  const responseId = String(response?.response_id || "");
+  const source = String(response?.image_url || "");
+  const retryToken = Number(adminImageRetryTokens.value[responseId] || 0);
+  if (!source || !retryToken) return source;
+  return `${source}${source.includes("?") ? "&" : "?"}retry=${retryToken}`;
+}
+
+function adminImageFailed(response: Dict): boolean {
+  return Boolean(adminImageFailures.value[adminImageSrc(response)]);
+}
+
+function markAdminImageFailed(response: Dict): void {
+  const source = adminImageSrc(response);
+  if (!source) return;
+  adminImageFailures.value = { ...adminImageFailures.value, [source]: true };
+}
+
+function retryAdminImage(response: Dict): void {
+  const responseId = String(response?.response_id || "");
+  if (!responseId) return;
+  adminImageRetryTokens.value = {
+    ...adminImageRetryTokens.value,
+    [responseId]: Date.now(),
+  };
+}
+
 function closeImage(): void {
   imageViewerUrl.value = "";
   imageViewerTitle.value = "";
@@ -1876,20 +2011,35 @@ watch(() => [props.scope, props.adminMode], () => {
   weatherTaskRefreshJobId = "";
   if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
   weatherPollTimer = null;
+  if (adminDetailPollTimer) window.clearTimeout(adminDetailPollTimer);
+  adminDetailPollTimer = null;
+  adminDetailPollController?.abort();
+  adminDetailPollController = null;
+  adminDetailPollInFlight = false;
+  adminDetailPollFailureReported = false;
   void loadBootstrap();
 });
 
-onMounted(loadBootstrap);
+onMounted(() => {
+  componentUnmounted = false;
+  document.addEventListener("visibilitychange", handlePageVisibilityChange);
+  void loadBootstrap();
+});
 
 onBeforeUnmount(() => {
+  componentUnmounted = true;
   bootstrapGeneration += 1;
   listGeneration += 1;
   detailGeneration += 1;
   bootstrapController?.abort();
   listController?.abort();
   detailController?.abort();
+  adminDetailPollController?.abort();
   if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
   weatherPollTimer = null;
+  if (adminDetailPollTimer) window.clearTimeout(adminDetailPollTimer);
+  adminDetailPollTimer = null;
+  document.removeEventListener("visibilitychange", handlePageVisibilityChange);
 });
 </script>
 
@@ -2168,6 +2318,9 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .result-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
 .result-thumbnail svg { position: absolute; right: 8px; bottom: 8px; border-radius: 8px; padding: 6px; box-sizing: content-box; background: rgba(18, 74, 153, .82); color: #fff; }
 .result-empty { height: 160px; display: grid; place-items: center; align-content: center; gap: 7px; color: #8999ac; font-size: 12px; }
+.result-empty.image-error { color: #9a5b13; background: #fffaf2; }
+.result-empty.image-error button { min-height: 30px; border: 1px solid #e6c48f; border-radius: 8px; padding: 0 10px; background: #fff; color: #8b5312; font: inherit; font-size: 11px; font-weight: 850; cursor: pointer; }
+.result-empty.image-error button:hover { border-color: #ce9c50; background: #fff5e5; }
 
 .status-chip { display: inline-flex; border-radius: 999px; padding: 5px 8px; background: #fff7ed; color: #b45309 !important; font-size: 11px !important; font-weight: 900 !important; }
 .status-chip.submitted { background: #ecfdf5; color: #087f5b !important; }
