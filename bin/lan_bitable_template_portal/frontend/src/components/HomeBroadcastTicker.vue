@@ -7,15 +7,29 @@
     </div>
     <div class="broadcast-viewport">
       <div class="broadcast-track" :class="{ 'is-static': items.length === 0 }" :style="trackStyle">
-        <span
-          v-for="(item, index) in repeatedItems"
-          :key="`${item.key}-${index}`"
-          class="broadcast-item"
-          :class="item.tone"
-        >
-          <b>{{ item.label }}</b>
-          <span>{{ item.text }}</span>
-        </span>
+        <template v-for="item in renderItems" :key="item.instanceKey">
+          <button
+            v-if="item.action"
+            type="button"
+            class="broadcast-item interactive"
+            :class="item.tone"
+            :aria-hidden="item.duplicate ? 'true' : undefined"
+            :tabindex="item.duplicate ? -1 : 0"
+            @click="activate(item)"
+          >
+            <b>{{ item.label }}</b>
+            <span>{{ item.text }}</span>
+          </button>
+          <span
+            v-else
+            class="broadcast-item"
+            :class="item.tone"
+            :aria-hidden="item.duplicate ? 'true' : undefined"
+          >
+            <b>{{ item.label }}</b>
+            <span>{{ item.text }}</span>
+          </span>
+        </template>
       </div>
     </div>
   </section>
@@ -23,84 +37,101 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-
-type HomeBroadcastTone = "ongoing" | "pending" | "event" | "quiet";
-type HomeBroadcastItem = {
-  key: string;
-  label: string;
-  text: string;
-  tone: HomeBroadcastTone;
-};
+import type { ScopeHomeBroadcastItem } from "../scopeHomeUtils";
 
 const props = defineProps<{
-  items: HomeBroadcastItem[];
+  items: ScopeHomeBroadcastItem[];
   summary: string;
 }>();
 
-const repeatedItems = computed(() => {
+const emit = defineEmits<{
+  activate: [item: ScopeHomeBroadcastItem];
+}>();
+
+type RenderBroadcastItem = ScopeHomeBroadcastItem & {
+  instanceKey: string;
+  duplicate: boolean;
+};
+
+const renderItems = computed<RenderBroadcastItem[]>(() => {
   const list = props.items.length
     ? props.items
     : [{ key: "empty", label: "就绪", text: "当前账号暂无待处理任务", tone: "quiet" as const }];
-  return list.length > 1 ? [...list, ...list] : list;
+  const primary = list.map((item) => ({
+    ...item,
+    instanceKey: `${item.key}-primary`,
+    duplicate: false,
+  }));
+  if (list.length <= 1) return primary;
+  return [
+    ...primary,
+    ...list.map((item) => ({
+      ...item,
+      instanceKey: `${item.key}-duplicate`,
+      duplicate: true,
+    })),
+  ];
 });
 
 const trackStyle = computed(() => {
   const duration = Math.min(90, Math.max(26, props.items.length * 7));
   return { "--broadcast-duration": `${duration}s` };
 });
+
+function activate(item: RenderBroadcastItem): void {
+  if (item.duplicate || !item.action) return;
+  emit("activate", item);
+}
 </script>
 
 <style scoped>
 .home-broadcast-card {
-  min-height: 54px;
+  min-height: 44px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   overflow: hidden;
-  padding: 8px 12px 8px 14px;
+  padding: 5px 9px 5px 11px;
   border: 1px solid #d8e5f7;
-  border-radius: 18px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(241, 247, 255, 0.92)),
-    #fff;
-  box-shadow: 0 18px 42px rgba(15, 73, 153, 0.11);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(15, 73, 153, 0.07);
 }
 
 .broadcast-fixed {
-  display: grid;
-  grid-template-columns: 11px auto;
-  grid-template-areas:
-    "dot title"
-    "dot summary";
+  display: flex;
   align-items: center;
-  column-gap: 8px;
-  min-width: 154px;
-  padding-right: 12px;
+  gap: 7px;
+  min-width: 252px;
+  padding-right: 10px;
   border-right: 1px solid rgba(195, 211, 234, 0.78);
 }
 
 .broadcast-dot {
-  grid-area: dot;
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
   border-radius: 999px;
-  background: linear-gradient(135deg, #1f6dff, #00b7d8);
-  box-shadow: 0 0 0 6px rgba(31, 109, 255, 0.1);
+  background: #1f6dff;
+  box-shadow: 0 0 0 4px rgba(31, 109, 255, 0.1);
 }
 
 .broadcast-fixed strong {
-  grid-area: title;
   color: #071a39;
-  font-size: 14px;
-  font-weight: 950;
+  font-size: 13px;
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 .broadcast-fixed small {
-  grid-area: summary;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: #5e728f;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .broadcast-viewport {
@@ -134,30 +165,51 @@ const trackStyle = computed(() => {
 .broadcast-item {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  min-height: 30px;
-  padding: 5px 10px;
-  border: 1px solid rgba(216, 229, 247, 0.95);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.86);
+  gap: 6px;
+  min-height: 27px;
+  padding: 3px 8px;
+  border: 1px solid #dce6f2;
+  border-radius: 6px;
+  background: #ffffff;
   color: #24415f;
-  box-shadow: 0 8px 18px rgba(25, 91, 176, 0.08);
   white-space: nowrap;
+}
+
+button.broadcast-item {
+  font: inherit;
+}
+
+.broadcast-item.interactive {
+  cursor: pointer;
+}
+
+.broadcast-item.interactive:hover {
+  border-color: #9fc1eb;
+  background: #f4f9ff;
+}
+
+.broadcast-item.interactive:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.16);
+}
+
+.broadcast-item[aria-hidden="true"] {
+  pointer-events: none;
 }
 
 .broadcast-item b {
   display: inline-flex;
   align-items: center;
   min-height: 20px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 950;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 900;
 }
 
 .broadcast-item span {
-  font-size: 12px;
-  font-weight: 850;
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .broadcast-item.ongoing b {
@@ -201,18 +253,22 @@ const trackStyle = computed(() => {
     will-change: auto;
     padding-left: 0;
   }
+
+  .broadcast-item[aria-hidden="true"] {
+    display: none;
+  }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 759px) {
   .home-broadcast-card {
     grid-template-columns: 1fr;
-    gap: 8px;
+    gap: 5px;
   }
 
   .broadcast-fixed {
     min-width: 0;
     padding-right: 0;
-    padding-bottom: 8px;
+    padding-bottom: 5px;
     border-right: 0;
     border-bottom: 1px solid rgba(195, 211, 234, 0.78);
   }

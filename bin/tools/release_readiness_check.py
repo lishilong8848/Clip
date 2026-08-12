@@ -550,6 +550,7 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     admin_tools = src_dir / "components" / "AdminTools.vue"
     admin_permission_users = src_dir / "components" / "AdminPermissionUsers.vue"
     scope_home = src_dir / "components" / "ScopeHome.vue"
+    home_dashboard = src_dir / "components" / "HomeDashboard.vue"
     scope_home_utils = src_dir / "scopeHomeUtils.ts"
     history_memory = src_dir / "components" / "HistoryMemoryPage.vue"
     workbench_lite = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
@@ -565,6 +566,7 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         ("AdminPermissionUsers.vue", admin_permission_users),
         ("AuthPanels.vue", auth_panels),
         ("ScopeHome.vue", scope_home),
+        ("HomeDashboard.vue", home_dashboard),
         ("scopeHomeUtils.ts", scope_home_utils),
         ("HistoryMemoryPage.vue", history_memory),
         ("workbench_lite.py", workbench_lite),
@@ -641,9 +643,18 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
             errors.append(f"AuthPanels.vue 权限申请楼栋选择未统一蓝白胶囊样式: {marker}")
 
     scope_text = files["ScopeHome.vue"]
-    for marker in ("HomeBroadcastTicker", "module-card", "module-icon"):
+    for marker in ("HomeDashboard", "activateBroadcastItem", "dashboard-mode"):
         if marker not in scope_text:
-            errors.append(f"ScopeHome.vue 功能选择页缺少生产入口样式/文案: {marker}")
+            errors.append(f"ScopeHome.vue 功能选择页缺少主页协调逻辑: {marker}")
+    dashboard_text = files["HomeDashboard.vue"]
+    for marker in (
+        "HomeBroadcastTicker",
+        "grid-template-columns: repeat(4, minmax(0, 1fr))",
+        "lucide-vue-next",
+        "request-permission",
+    ):
+        if marker not in dashboard_text:
+            errors.append(f"HomeDashboard.vue 4×2 业务驾驶舱缺少结构/入口: {marker}")
     scope_home_utils_text = files["scopeHomeUtils.ts"]
     for marker in ("交接班审核页", "维护单管理", "进入事件管理", "进入变更管理"):
         if marker not in scope_home_utils_text:

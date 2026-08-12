@@ -8,11 +8,19 @@ export type ScopeHomeModuleCard = {
   icon: string;
   badge: string;
   title: string;
-  description: string;
   tags: string[];
-  size?: "main" | "compact";
   disabled?: boolean;
-  actions: ScopeHomeModuleAction[];
+  primaryAction: ScopeHomeModuleAction;
+  secondaryActions?: ScopeHomeModuleAction[];
+};
+export type ScopeHomeBroadcastItem = {
+  key: string;
+  label: string;
+  text: string;
+  tone: "ongoing" | "pending" | "event" | "quiet";
+  scope?: string;
+  workType?: string;
+  action?: "workbench" | "event";
 };
 export type ScopeHomeEntryConfig = {
   kicker: string;
@@ -39,10 +47,8 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "event",
     badge: "全流程",
     title: "事件管理",
-    description: "覆盖事件发现、分级响应、处置升级与复盘归档",
-    tags: ["事件上报", "处置跟踪", "复盘归档"],
-    size: "main",
-    actions: [{ key: "event", label: "进入事件管理", primary: true }],
+    tags: ["事件处置", "复盘归档"],
+    primaryAction: { key: "event", label: "进入事件管理", primary: true },
   },
   {
     key: "maintenance",
@@ -50,11 +56,9 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "wrench",
     badge: "核心模块",
     title: "维护管理",
-    description: "统一管理维保计划、MOP 执行、签名与维护单归档",
-    tags: ["维保计划", "MOP 执行", "工单归档"],
-    size: "main",
-    actions: [
-      { key: "maintenance", label: "进入维护管理", primary: true },
+    tags: ["维保计划", "MOP 执行"],
+    primaryAction: { key: "maintenance", label: "进入维护管理", primary: true },
+    secondaryActions: [
       { key: "maintenance_mop", label: "维护单管理" },
     ],
   },
@@ -64,10 +68,8 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "switch",
     badge: "流程审批",
     title: "变更管理",
-    description: "进入变更通告，处理风险评估、实施更新与回退确认",
-    tags: ["变更申请", "风险评估", "回退确认"],
-    size: "main",
-    actions: [{ key: "change", label: "进入变更管理", primary: true }],
+    tags: ["风险评估", "回退确认"],
+    primaryAction: { key: "change", label: "进入变更管理", primary: true },
   },
   {
     key: "repair_management",
@@ -75,11 +77,40 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "repair",
     badge: "检修单",
     title: "检修管理",
-    description: "统一处理检修单记录与检修通告",
-    tags: ["检修单", "检修通告", "转检修"],
-    actions: [
-      { key: "repair_management", label: "进入检修单管理", primary: true },
+    tags: ["检修单", "检修通告"],
+    primaryAction: { key: "repair_management", label: "进入检修单管理", primary: true },
+    secondaryActions: [
       { key: "repair", label: "检修通告管理" },
+    ],
+  },
+  {
+    key: "risk",
+    tone: "rose",
+    icon: "risk",
+    badge: "闭环管理",
+    title: "风险管理",
+    tags: ["重保任务", "结果汇总"],
+    primaryAction: { key: "critical_guard", label: "进入重保管理", primary: true },
+  },
+  {
+    key: "capacity",
+    tone: "emerald",
+    icon: "capacity",
+    badge: "数据洞察",
+    title: "容量管理",
+    tags: ["水耗台账", "趋势统计"],
+    primaryAction: { key: "water", label: "进入水耗管理", primary: true },
+  },
+  {
+    key: "tools",
+    tone: "slate",
+    icon: "more",
+    badge: "辅助入口",
+    title: "其他工具",
+    tags: ["每日任务", "辅助通告"],
+    primaryAction: { key: "tools", label: "进入其他工具", primary: true },
+    secondaryActions: [
+      { key: "daily", label: "每日任务" },
     ],
   },
   {
@@ -88,46 +119,9 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "drill",
     badge: "计划管理",
     title: "演练管理",
-    description: "沉淀演练计划、场景脚本和评估改进",
-    tags: ["演练计划", "场景脚本", "评估改进"],
+    tags: ["演练计划", "评估改进"],
     disabled: true,
-    actions: [{ key: "", label: "建设中", disabled: true }],
-  },
-  {
-    key: "capacity",
-    tone: "emerald",
-    icon: "capacity",
-    badge: "数据洞察",
-    title: "容量管理",
-    description: "统一查看并维护各楼水耗记录",
-    tags: ["水耗台账", "趋势统计", "水表照片"],
-    actions: [{ key: "water", label: "水耗管理", primary: true }],
-  },
-  {
-    key: "risk",
-    tone: "rose",
-    icon: "risk",
-    badge: "闭环管理",
-    title: "风险管理",
-    description: "统一发布重保检查任务并汇总各楼填报结果",
-    tags: ["重保任务", "检查填报", "结果汇总"],
-    actions: [{ key: "critical_guard", label: "重保管理", primary: true }],
-  },
-  {
-    key: "tools",
-    tone: "slate",
-    icon: "more",
-    badge: "辅助入口",
-    title: "其他工具",
-    description: "汇总每日任务、上/下电、轮巡、调整和交接班入口",
-    tags: ["每日任务", "上/下电", "轮巡", "交接班"],
-    actions: [
-      { key: "daily", label: "每日任务清单", primary: true },
-      { key: "power", label: "上/下电" },
-      { key: "polling", label: "轮巡" },
-      { key: "adjust", label: "调整" },
-      { key: "handover", label: "交接班" },
-    ],
+    primaryAction: { key: "", label: "建设中", disabled: true },
   },
 ];
 

@@ -1,63 +1,16 @@
 <template>
-  <section class="home-shell">
-    <HomeBroadcastTicker
+  <section class="home-shell" :class="{ 'dashboard-mode': !activeMode }">
+    <HomeDashboard
       v-if="!activeMode"
-      :items="homeBroadcastItems"
-      :summary="homeBroadcastSummary"
+      :modules="moduleCards"
+      :enabled-module-count="enabledModuleCount"
+      :can-request-more-scopes="Boolean(canRequestMoreScopes)"
+      :broadcast-items="homeBroadcastItems"
+      :broadcast-summary="homeBroadcastSummary"
+      @select-action="selectModuleAction"
+      @activate-broadcast="activateBroadcastItem"
+      @request-permission="$emit('request-permission')"
     />
-
-    <div v-if="canRequestMoreScopes" class="permission-more-card">
-      <div>
-        <span class="section-kicker">权限申请</span>
-        <strong>需要访问其他楼栋？</strong>
-      </div>
-      <button type="button" class="secondary" @click="$emit('request-permission')">申请其他楼权限</button>
-    </div>
-
-    <template v-if="!activeMode">
-      <div class="module-heading">
-        <div>
-          <h2>业务工作台</h2>
-        </div>
-        <span>已开放 {{ enabledModuleCount }} / 共 {{ moduleCards.length }} 个模块</span>
-      </div>
-
-      <div class="module-grid">
-        <article
-          v-for="module in moduleCards"
-          :key="module.key"
-          class="module-card"
-          :class="[module.tone, module.size || 'compact', { disabled: module.disabled }]"
-          :aria-disabled="module.disabled ? 'true' : 'false'"
-          :title="module.disabled ? '暂未开放' : ''"
-        >
-          <div class="module-card__head">
-            <span class="module-icon" :class="module.icon" aria-hidden="true"></span>
-            <span class="module-badge">{{ module.badge }}</span>
-          </div>
-          <div class="module-card__body">
-            <strong>{{ module.title }}</strong>
-            <span v-if="module.disabled" class="module-disabled-note">暂未开放</span>
-            <div class="module-tags">
-              <span v-for="tag in module.tags" :key="tag">{{ tag }}</span>
-            </div>
-          </div>
-          <div class="module-actions">
-            <button type="button"
-              v-for="action in module.actions"
-              :key="action.key"
-              :class="action.primary ? 'primary' : 'secondary'"
-              :disabled="module.disabled || action.disabled"
-              :title="module.disabled || action.disabled ? '暂未开放' : ''"
-              @click.stop="selectModuleAction(action, module.disabled)"
-            >
-              {{ action.label }}
-              <span v-if="!module.disabled && !action.disabled" aria-hidden="true">›</span>
-            </button>
-          </div>
-        </article>
-      </div>
-    </template>
 
     <section v-else class="feature-section" :class="{ 'scope-selection': activeMode !== 'tools' }">
       <div class="page-back-row">
@@ -296,19 +249,13 @@ import {
   scopeSortIndex,
   typedScopeCounts as resolveTypedScopeCounts,
   type ScopeHomeEntryKey as EntryKey,
+  type ScopeHomeBroadcastItem,
   type ScopeHomeModuleAction as ModuleAction,
 } from "../scopeHomeUtils";
-import HomeBroadcastTicker from "./HomeBroadcastTicker.vue";
+import HomeDashboard from "./HomeDashboard.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 
 type Dict = Record<string, any>;
-type HomeBroadcastItem = {
-  key: string;
-  label: string;
-  text: string;
-  tone: "ongoing" | "pending" | "event" | "quiet";
-};
-
 const props = defineProps<{
   scopeOptions: Array<{ value: string; label: string }>;
   overview: Record<string, Dict>;
@@ -442,13 +389,13 @@ const homeBroadcastStats = computed(() => {
   let ongoing = 0;
   let pending = 0;
   let events = 0;
-  const ongoingItems: HomeBroadcastItem[] = [];
-  const fallbackItems: HomeBroadcastItem[] = [];
+  const ongoingItems: ScopeHomeBroadcastItem[] = [];
+  const fallbackItems: ScopeHomeBroadcastItem[] = [];
 
   for (const scope of broadcastScopes.value) {
     let scopeOngoing = 0;
     let scopePending = 0;
-    const scopeOngoingItems: HomeBroadcastItem[] = [];
+    const scopeOngoingItems: ScopeHomeBroadcastItem[] = [];
     const scopePendingParts: string[] = [];
     const overviewItem = props.overview[scope.value] || {};
     const titleItems = Array.isArray(overviewItem.ongoing_titles) ? overviewItem.ongoing_titles : [];
@@ -462,6 +409,9 @@ const homeBroadcastStats = computed(() => {
           label: "进行中",
           text: `${scope.label} · ${workType.label} ${counts.ongoing} 条`,
           tone: "ongoing",
+          scope: scope.value,
+          workType: workType.key,
+          action: "workbench",
         });
       }
       if (counts.pending > 0) {
@@ -470,17 +420,25 @@ const homeBroadcastStats = computed(() => {
       }
     }
     if (titleItems.length) {
-      scopeOngoingItems.splice(0, scopeOngoingItems.length);
-      for (const item of titleItems) {
+      const titledOngoingItems: ScopeHomeBroadcastItem[] = [];
+      for (const [titleIndex, item] of titleItems.entries()) {
         const workType = String(item?.work_type || "");
         const title = String(item?.title || "").trim();
         if (!title) continue;
-        scopeOngoingItems.push({
-          key: `ongoing-title-${scope.value}-${String(item?.key || title)}`,
+        const canOpenWorkbench = Boolean(broadcastWorkTypeLabelByKey[workType]);
+        titledOngoingItems.push({
+          key: `ongoing-title-${scope.value}-${String(item?.key || title)}-${titleIndex}`,
           label: "进行中",
           text: `${scope.label} · ${broadcastWorkTypeLabelByKey[workType] || "通告"} · ${title}`,
           tone: "ongoing",
+          scope: scope.value,
+          workType: canOpenWorkbench ? workType : undefined,
+          action: canOpenWorkbench ? "workbench" : undefined,
         });
+      }
+      if (titledOngoingItems.length) {
+        scopeOngoingItems.splice(0, scopeOngoingItems.length, ...titledOngoingItems);
+        scopeOngoing = Math.max(scopeOngoing, titledOngoingItems.length);
       }
     }
 
@@ -507,6 +465,8 @@ const homeBroadcastStats = computed(() => {
         label: "事件",
         text: `${scope.label} · 本月 ${eventTotal} 条，处理中 ${eventProcessing} 条`,
         tone: "event",
+        scope: scope.value,
+        action: "event",
       });
     }
   }
@@ -519,7 +479,7 @@ const homeBroadcastStats = computed(() => {
   };
 });
 
-const homeBroadcastItems = computed<HomeBroadcastItem[]>(() => {
+const homeBroadcastItems = computed<ScopeHomeBroadcastItem[]>(() => {
   const items = homeBroadcastStats.value.items;
   if (items.length > BROADCAST_ITEM_LIMIT) {
     return [
@@ -544,11 +504,22 @@ const homeBroadcastItems = computed<HomeBroadcastItem[]>(() => {
 const homeBroadcastSummary = computed(() => {
   const stats = homeBroadcastStats.value;
   const scopeCount = broadcastScopes.value.length || displayScopeOptions.value.length;
-  if (stats.ongoing > 0) return `有权限楼栋 ${scopeCount} 个 · 进行中 ${stats.ongoing} 条`;
-  if (stats.pending > 0) return `有权限楼栋 ${scopeCount} 个 · 待发起 ${stats.pending} 条`;
-  if (stats.events > 0) return `有权限楼栋 ${scopeCount} 个 · 事件 ${stats.events} 条`;
-  return `有权限楼栋 ${scopeCount} 个 · 数据就绪`;
+  return `有权限楼栋 ${scopeCount} 个 · 进行中 ${stats.ongoing} 条`;
 });
+
+function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
+  const scope = normalizeScopeValue(String(item.scope || ""), "");
+  if (!scope) return;
+  if (item.action === "event") {
+    emit("event", scope);
+    return;
+  }
+  const workType = String(item.workType || "").trim();
+  if (item.action === "workbench" && workType) {
+    emit("prefetch", scope, workType);
+    emit("enter", scope, workType);
+  }
+}
 
 function selectEntry(key: EntryKey): void {
   if (!key) return;
@@ -749,15 +720,16 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   gap: 10px;
 }
 
-.module-grid,
+.home-shell.dashboard-mode {
+  padding: 0;
+}
+
 .scope-grid,
 .tool-grid {
   display: grid;
   gap: 12px;
 }
 
-.permission-more-card,
-.module-card,
 .feature-section,
 .scope-card,
 .tool-card {
@@ -766,7 +738,6 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   box-shadow: 0 18px 42px rgba(15, 73, 153, 0.12);
 }
 
-.module-card::after,
 .scope-card::after {
   content: "";
   position: absolute;
@@ -782,25 +753,20 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   transform: rotate(-14deg);
 }
 
-.module-card strong,
 .scope-card strong,
 .tool-card strong {
   color: #071a39;
   font-weight: 900;
 }
 
-.module-card p,
 .feature-section__head p,
 .scope-card span,
-.tool-card small,
-.permission-more-card p,
-.module-heading p {
+.tool-card small {
   margin: 0;
   color: #5e728f;
   line-height: 1.7;
 }
 
-.module-icon,
 .tool-icon {
   display: inline-grid;
   place-items: center;
@@ -809,19 +775,12 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   box-shadow: 0 14px 24px rgba(21, 92, 214, 0.22);
 }
 
-.module-icon::before,
 .tool-icon::before {
   content: "";
   width: 24px;
   height: 24px;
   border: 3px solid currentColor;
   border-radius: 7px;
-}
-
-.module-icon.wrench::before {
-  width: 25px;
-  height: 16px;
-  border-radius: 5px;
 }
 
 .tool-icon.link::before {
@@ -842,231 +801,14 @@ onBeforeUnmount(clearWaterBuildingsPoll);
       4px 13px / 9px 8px repeat-x;
 }
 
-.permission-more-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 13px 16px;
-  border-radius: 16px;
-}
-
-.permission-more-card strong {
-  display: block;
-  margin-top: 3px;
-  color: #071a39;
-  font-size: 16px;
-  font-weight: 900;
-}
-
-.module-heading {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: 16px;
-  margin-top: 2px;
-}
-
-.module-heading h2 {
-  margin: 0;
-  color: #071a39;
-  font-size: 18px;
-  font-weight: 950;
-}
-
-.module-heading span {
-  align-self: center;
-  padding: 6px 12px;
-  border: 1px solid #d8e5f7;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.7);
-  color: #1b5bbd;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.module-grid {
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  align-items: stretch;
-}
-
-.module-card {
-  position: relative;
-  overflow: hidden;
-  grid-column: span 3;
-  min-height: 128px;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding: 13px 15px;
-  border-radius: 18px;
-  cursor: default;
-  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
-}
-
-.module-card.main {
-  grid-column: span 4;
-  min-height: 156px;
-  padding: 15px 18px;
-  gap: 8px;
-}
-
-.module-card.disabled {
-  cursor: default;
-  border-color: rgba(216, 229, 247, 0.7);
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(241, 245, 249, 0.82)),
-    #f8fafc;
-  box-shadow: 0 8px 22px rgba(71, 85, 105, 0.06);
-  opacity: 0.88;
-}
-
-.module-card.disabled .module-icon {
-  filter: grayscale(0.45);
-  opacity: 0.72;
-}
-
-.module-card.disabled .module-badge,
-.module-card.disabled .module-tags span {
-  color: #64748b;
-  background: rgba(241, 245, 249, 0.88);
-}
-
-.module-card.disabled .module-card__body strong,
-.module-card.disabled .module-card__body p {
-  color: #64748b;
-}
-
-.module-card.disabled::before {
-  background: #cbd5e1;
-}
-
-.module-card.disabled .module-actions {
-  display: none;
-}
-
-.module-card.disabled .module-tags {
-  opacity: 0.72;
-}
-
-.module-disabled-note {
-  width: fit-content;
-  padding: 5px 9px;
-  border: 1px solid rgba(203, 213, 225, 0.86);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.78);
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.module-card:focus-visible {
-  outline: 3px solid rgba(22, 120, 255, 0.28);
-  outline-offset: 3px;
-}
-
-.module-card::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 4px;
-  background: #1e63ff;
-}
-
-.module-card.violet::before {
-  background: #7657e6;
-}
-
-.module-card.orange::before {
-  background: #ff8a3d;
-}
-
-.module-card.cyan::before {
-  background: #11b7ca;
-}
-
-.module-card.emerald::before {
-  background: #22b981;
-}
-
-.module-card.rose::before {
-  background: #ef5260;
-}
-
-.module-card.slate::before {
-  background: #4b86d9;
-}
-
-.module-card__head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: center;
-}
-
-.module-icon,
 .tool-icon {
   width: 46px;
   height: 46px;
   background: linear-gradient(135deg, #2a77ff, #004fc4);
 }
-
-.module-card.main .module-icon {
-  width: 54px;
-  height: 54px;
-}
-
-.module-card.orange .module-icon {
-  background: linear-gradient(135deg, #ff984d, #f36a32);
-}
-
-.module-card.violet .module-icon {
-  background: linear-gradient(135deg, #8b68ff, #6044d6);
-}
-
-.module-card.cyan .module-icon {
-  background: linear-gradient(135deg, #27d1df, #0a8fb8);
-}
-
-.module-card.emerald .module-icon {
-  background: linear-gradient(135deg, #29cd8d, #07945f);
-}
-
-.module-card.rose .module-icon {
-  background: linear-gradient(135deg, #ff6871, #dd3447);
-}
-
-.module-card.slate .module-icon {
-  background: linear-gradient(135deg, #4b9bff, #2260b9);
-}
-
-.module-icon.switch::before {
-  border-radius: 50%;
-  background:
-    linear-gradient(currentColor, currentColor) 50% 50% / 26px 3px no-repeat;
-}
-
-.module-icon.repair::before,
-.module-icon.drill::before,
-.module-icon.capacity::before,
-.module-icon.risk::before,
 .tool-icon.adjust::before {
   border-radius: 50%;
 }
-
-.module-icon.event::before {
-  width: 30px;
-  height: 14px;
-  border: 0;
-  border-radius: 999px;
-  background:
-    linear-gradient(currentColor, currentColor) 0 50% / 100% 3px no-repeat,
-    linear-gradient(115deg, transparent 0 40%, currentColor 41% 52%, transparent 53%);
-}
-
-.module-icon.more::before,
 .tool-icon.polling::before,
 .tool-icon.power::before {
   width: 28px;
@@ -1077,89 +819,6 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   background: currentColor;
 }
 
-.module-badge {
-  padding: 6px 11px;
-  border: 1px solid #dce8f8;
-  border-radius: 999px;
-  background: #f6faff;
-  color: #1763d7;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.module-card__body {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  gap: 6px;
-  flex: 1;
-}
-
-.module-card__body strong {
-  font-size: 18px;
-  line-height: 1.15;
-}
-
-.module-card.main .module-card__body strong {
-  font-size: 21px;
-}
-
-.module-card__body p {
-  min-height: 24px;
-  font-size: 13px;
-  line-height: 1.35;
-}
-
-.module-card.compact .module-card__body p {
-  min-height: 28px;
-  font-size: 12px;
-}
-
-.module-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 1px;
-}
-
-.module-tags span {
-  padding: 3px 7px;
-  border: 1px solid #e0e9f6;
-  border-radius: 999px;
-  background: #f7fbff;
-  color: #4e6381;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.module-actions {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding-top: 6px;
-  border-top: 1px solid #e8eef7;
-}
-
-.module-actions button {
-  cursor: pointer;
-}
-
-.module-actions button:disabled {
-  cursor: not-allowed;
-}
-
-.module-actions .primary {
-  min-width: 124px;
-}
-
-.module-actions .secondary {
-  min-height: 38px;
-  padding: 0 12px;
-  border-radius: 999px;
-  box-shadow: none;
-}
 
 .feature-section {
   padding: 20px;
@@ -1585,18 +1244,6 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   box-shadow: 0 22px 54px rgba(15, 73, 153, 0.16);
 }
 
-.module-card:not(.disabled):focus-within,
-.module-card:not(.disabled):hover {
-  border-color: #b7d0f5;
-  box-shadow: 0 22px 54px rgba(15, 73, 153, 0.14);
-}
-
-.module-card.disabled:hover {
-  border-color: rgba(216, 229, 247, 0.7);
-  box-shadow: 0 8px 22px rgba(71, 85, 105, 0.06);
-  transform: none;
-}
-
 .tool-card small {
   display: block;
   margin-top: 6px;
@@ -1694,15 +1341,6 @@ a.secondary {
 }
 
 @media (max-width: 1280px) {
-  .module-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .module-card,
-  .module-card.main {
-    grid-column: auto;
-  }
-
   .scope-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1725,7 +1363,6 @@ a.secondary {
     padding: 22px 18px 30px;
   }
 
-  .module-grid,
   .scope-grid,
   .tool-grid {
     grid-template-columns: 1fr;
@@ -1740,9 +1377,7 @@ a.secondary {
     justify-self: start;
   }
 
-  .feature-section__head,
-  .permission-more-card,
-  .module-heading {
+  .feature-section__head {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -1765,10 +1400,5 @@ a.secondary {
     border-top: 0;
   }
 
-  .module-card {
-    min-height: auto;
-    padding: 24px;
-    grid-column: auto;
-  }
 }
 </style>

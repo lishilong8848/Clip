@@ -34,6 +34,17 @@
   --cf-z-signature-pad: 920;
 }
 
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 320px;
+}
+
 .app-shell :is(.btn, a.btn, .primary, .secondary) {
   box-sizing: border-box;
   max-width: 100%;

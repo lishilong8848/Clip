@@ -1329,7 +1329,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               if (!topbarBackground.includes('gradient')) result.push(`topbar is not gradient: ${{topbarBackground}}`);
               if (!card) result.push('main white card missing');
               const numericRadius = Number.parseFloat(cardRadius || '0');
-              if (card && (!Number.isFinite(numericRadius) || numericRadius < 12 || numericRadius > 28)) {{
+              const minimumRadius = card?.matches('.module-card') ? 8 : 12;
+              if (card && (!Number.isFinite(numericRadius) || numericRadius < minimumRadius || numericRadius > 28)) {{
                 result.push(`card radius not VNET-like: ${{cardRadius}}`);
               }}
               if (card && !/(255, 255, 255|#fff|white)/i.test(cardBackground)) {{
@@ -1427,7 +1428,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertVnetSkin(noScopePage, 'no-scope');
           await noScopeContext.close();
 
-          const context = await browser.newContext();
+          const context = await browser.newContext({{ viewport: {{ width: 1366, height: 768 }} }});
           await context.addInitScript(() => {{
             const NativeEventSource = window.EventSource;
             if (!NativeEventSource || window.__clipflowEventSourcePatched) return;
@@ -1495,8 +1496,51 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           for (const marker of forbidden) {{
             if (bodyText.includes(marker)) throw new Error(`legacy marker visible: ${{marker}}`);
           }}
+          const expectedModuleOrder = ['事件管理', '维护管理', '变更管理', '检修管理', '风险管理', '容量管理', '其他工具', '演练管理'];
+          const moduleOrder = await page.locator('.module-card .module-card__main strong').allTextContents();
+          if (JSON.stringify(moduleOrder) !== JSON.stringify(expectedModuleOrder)) {{
+            throw new Error(`home module order mismatch: ${{JSON.stringify(moduleOrder)}}`);
+          }}
+          const inspectDashboard = () => page.evaluate(() => {{
+            const cards = Array.from(document.querySelectorAll('.module-card'));
+            const grid = document.querySelector('.module-grid');
+            const buttons = Array.from(document.querySelectorAll('.module-actions button'));
+            return {{
+              columns: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : 0,
+              heights: Array.from(new Set(cards.map(card => Math.round(card.getBoundingClientRect().height)))),
+              lastBottom: cards.length ? Math.round(cards[cards.length - 1].getBoundingClientRect().bottom) : 0,
+              minActionHeight: buttons.length ? Math.min(...buttons.map(button => Math.round(button.getBoundingClientRect().height))) : 0,
+              overflowX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+              bodyMargin: getComputedStyle(document.body).margin,
+              disabledFocusable: document.querySelectorAll('.module-card.disabled button:not([disabled])').length,
+            }};
+          }});
+          const desktopDashboard = await inspectDashboard();
+          if (desktopDashboard.columns !== 4 || desktopDashboard.heights.length !== 1 || desktopDashboard.lastBottom > 768 || desktopDashboard.overflowX || desktopDashboard.bodyMargin !== '0px' || desktopDashboard.disabledFocusable) {{
+            throw new Error(`desktop home dashboard mismatch: ${{JSON.stringify(desktopDashboard)}}`);
+          }}
+          await page.emulateMedia({{ reducedMotion: 'reduce' }});
+          const visibleBroadcastDuplicates = await page.locator('.broadcast-item[aria-hidden="true"]').evaluateAll(nodes =>
+            nodes.filter(node => getComputedStyle(node).display !== 'none').length,
+          );
+          if (visibleBroadcastDuplicates !== 0) {{
+            throw new Error(`reduced-motion broadcast still shows duplicate items: ${{visibleBroadcastDuplicates}}`);
+          }}
+          await page.emulateMedia({{ reducedMotion: 'no-preference' }});
+          await page.setViewportSize({{ width: 1024, height: 768 }});
+          const tabletDashboard = await inspectDashboard();
+          if (tabletDashboard.columns !== 2 || tabletDashboard.heights.length !== 1 || tabletDashboard.overflowX) {{
+            throw new Error(`tablet home dashboard mismatch: ${{JSON.stringify(tabletDashboard)}}`);
+          }}
+          await page.setViewportSize({{ width: 390, height: 844 }});
+          const mobileDashboard = await inspectDashboard();
+          if (mobileDashboard.columns !== 1 || mobileDashboard.minActionHeight < 44 || mobileDashboard.overflowX) {{
+            throw new Error(`mobile home dashboard mismatch: ${{JSON.stringify(mobileDashboard)}}`);
+          }}
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           await assertLayout(page, 'home');
-          await page.locator('.module-card.slate').getByRole('button', {{ name: '交接班', exact: true }}).click();
+          await page.locator('.module-card.slate .module-card__main').click();
+          await page.getByRole('button', {{ name: '选择交接班审核页', exact: true }}).click();
           try {{
             await page.waitForFunction(() => document.body.innerText.includes('选择楼栋打开交接班审核页'), null, {{ timeout: 10000 }});
           }} catch (err) {{
@@ -1512,13 +1556,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertLayout(page, 'handover-feature');
           await page.getByRole('button', {{ name: /^返回$/ }}).first().click();
           try {{
-            await page.waitForSelector('text=业务工作台', {{ timeout: 2500 }});
+            await page.waitForSelector('text=业务模块', {{ timeout: 2500 }});
           }} catch (err) {{
             await page.getByRole('button', {{ name: /^返回$/ }}).first().click();
-            await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+            await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
           }}
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
-          await page.getByRole('button', {{ name: '进入检修单管理', exact: true }}).click();
+          await page.locator('.module-repair_management .module-card__main').click();
           await page.waitForSelector('text=选择楼栋进入检修单管理', {{ timeout: 10000 }});
           const repairScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await repairScopeCard.getByRole('button', {{ name: '进入检修单管理' }}).click();
@@ -1768,7 +1812,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             waitUntil: 'domcontentloaded',
             timeout: 20000,
           }});
-          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+          await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-repair-management');
           await page.getByRole('button', {{ name: '检修通告管理', exact: true }}).click();
           await page.waitForSelector('text=选择楼栋进入检修通告管理', {{ timeout: 10000 }});
@@ -1779,8 +1823,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`repair notice entry work_type mismatch: ${{page.url()}}`);
           }}
           await page.goto(cfg.url, {{ waitUntil: 'domcontentloaded', timeout: 20000 }});
-          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
-          await page.getByRole('button', {{ name: '进入维护管理', exact: true }}).click();
+          await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
+          await page.locator('.module-maintenance .module-card__main').click();
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await scopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
@@ -2082,7 +2126,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
             }}
             await page.getByRole('link', {{ name: /^返回$/ }}).click();
-            await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+            await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
             await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-home-after-return');
             if (errors.length || failedResponses.length) {{
               throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
@@ -2148,10 +2192,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertLayout(page, 'workbench');
           await assertVnetSkin(page, 'workbench');
           await page.getByRole('button', {{ name: /^返回$/ }}).click();
-          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+          await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-return-from-workbench');
           await assertVnetSkin(page, 'home-after-return-from-workbench');
-          await page.getByRole('button', {{ name: '进入维护管理', exact: true }}).click();
+          await page.locator('.module-maintenance .module-card__main').click();
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const returnScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await returnScopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
