@@ -86,25 +86,24 @@ function activate(item: RenderBroadcastItem): void {
 
 <style scoped>
 .home-broadcast-card {
-  min-height: 44px;
+  min-height: 42px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   overflow: hidden;
-  padding: 5px 9px 5px 11px;
-  border: 1px solid #d8e5f7;
+  padding: 5px 10px 5px 12px;
+  border: 1px solid #d6e2f1;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 6px 18px rgba(15, 73, 153, 0.07);
+  background: rgba(248, 251, 255, 0.96);
 }
 
 .broadcast-fixed {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-width: 252px;
-  padding-right: 10px;
+  min-width: 322px;
+  padding-right: 12px;
   border-right: 1px solid rgba(195, 211, 234, 0.78);
 }
 
@@ -120,7 +119,7 @@ function activate(item: RenderBroadcastItem): void {
 .broadcast-fixed strong {
   color: #071a39;
   font-size: 13px;
-  font-weight: 900;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -130,7 +129,7 @@ function activate(item: RenderBroadcastItem): void {
   text-overflow: ellipsis;
   color: #5e728f;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -145,7 +144,7 @@ function activate(item: RenderBroadcastItem): void {
   width: max-content;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 22px;
   padding-left: 100%;
   animation: broadcast-scroll var(--broadcast-duration, 32s) linear infinite;
   will-change: transform;
@@ -163,16 +162,28 @@ function activate(item: RenderBroadcastItem): void {
 }
 
 .broadcast-item {
+  --broadcast-tone: #64748b;
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 27px;
-  padding: 3px 8px;
-  border: 1px solid #dce6f2;
-  border-radius: 6px;
-  background: #ffffff;
+  min-height: 28px;
+  padding: 3px 1px 3px 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
   color: #24415f;
   white-space: nowrap;
+}
+
+.broadcast-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--broadcast-tone);
 }
 
 button.broadcast-item {
@@ -184,8 +195,7 @@ button.broadcast-item {
 }
 
 .broadcast-item.interactive:hover {
-  border-color: #9fc1eb;
-  background: #f4f9ff;
+  background: rgba(226, 238, 253, 0.72);
 }
 
 .broadcast-item.interactive:focus-visible {
@@ -200,35 +210,44 @@ button.broadcast-item {
 .broadcast-item b {
   display: inline-flex;
   align-items: center;
-  min-height: 20px;
-  padding: 2px 6px;
-  border-radius: 5px;
   font-size: 11px;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .broadcast-item span {
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 600;
+}
+
+.broadcast-item.ongoing {
+  --broadcast-tone: #1f6dff;
 }
 
 .broadcast-item.ongoing b {
-  background: rgba(31, 109, 255, 0.11);
   color: #0b5bd3;
 }
 
+.broadcast-item.pending {
+  --broadcast-tone: #d98908;
+}
+
 .broadcast-item.pending b {
-  background: rgba(245, 158, 11, 0.12);
   color: #b45309;
 }
 
+.broadcast-item.event {
+  --broadcast-tone: #df4058;
+}
+
 .broadcast-item.event b {
-  background: rgba(239, 82, 96, 0.12);
   color: #c92f47;
 }
 
+.broadcast-item.quiet {
+  --broadcast-tone: #64748b;
+}
+
 .broadcast-item.quiet b {
-  background: rgba(100, 116, 139, 0.12);
   color: #475569;
 }
 
@@ -261,16 +280,18 @@ button.broadcast-item {
 
 @media (max-width: 759px) {
   .home-broadcast-card {
-    grid-template-columns: 1fr;
-    gap: 5px;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+    padding-left: 10px;
   }
 
   .broadcast-fixed {
-    min-width: 0;
-    padding-right: 0;
-    padding-bottom: 5px;
-    border-right: 0;
-    border-bottom: 1px solid rgba(195, 211, 234, 0.78);
+    min-width: auto;
+    padding-right: 9px;
+  }
+
+  .broadcast-fixed small {
+    display: none;
   }
 }
 </style>

@@ -1,5 +1,5 @@
 <template>
-  <header class="app-topbar">
+  <header class="app-topbar" :class="{ 'home-mode': homeMode }">
     <div class="brand">
       <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
       <div>
@@ -9,6 +9,7 @@
     </div>
     <div class="topbar-actions">
       <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
+        <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
         {{ auth.user?.name || "已登录" }}
       </span>
       <label v-if="auth.loggedIn && isEventPage && visibleScopeOptions.length > 1" class="scope-switch">
@@ -36,14 +37,19 @@
         title="打开管理员诊断和权限管理"
         @click="emit('open-admin')"
       >
-        <span class="settings-icon" aria-hidden="true"></span>
+        <Settings v-if="homeMode" :size="18" aria-hidden="true" />
+        <span v-else class="settings-icon" aria-hidden="true"></span>
       </button>
-      <button type="button" v-if="auth.loggedIn" class="btn danger-text" title="退出当前飞书登录" @click="emit('logout')">退出</button>
+      <button type="button" v-if="auth.loggedIn" class="btn danger-text" title="退出当前飞书登录" @click="emit('logout')">
+        <LogOut v-if="homeMode" :size="16" aria-hidden="true" />
+        <span>退出</span>
+      </button>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
+import { LogOut, Settings, UserRound } from "lucide-vue-next";
 import RefreshDataMenu from "./RefreshDataMenu.vue";
 import type { LooseDict, ScopeOption } from "../types";
 
@@ -64,6 +70,7 @@ const props = defineProps<{
   refreshCooldown: Record<string, boolean>;
   eventRefreshTitle: string;
   isAdmin: boolean;
+  homeMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -397,6 +404,79 @@ header.app-topbar .settings-entry {
     width: 100%;
     min-width: 0;
     justify-content: flex-start;
+  }
+
+  header.app-topbar.home-mode .brand,
+  header.app-topbar.home-mode .topbar-actions {
+    flex: 0 0 auto;
+  }
+
+  header.app-topbar.home-mode .brand {
+    width: 100%;
+  }
+}
+
+@media (min-width: 921px) {
+  header.app-topbar.home-mode {
+    min-height: 88px;
+    align-items: center;
+    flex-flow: row nowrap;
+    gap: 16px;
+    padding: 14px 30px;
+  }
+
+  header.app-topbar.home-mode .brand {
+    flex: 1 1 auto;
+    gap: 18px;
+  }
+
+  header.app-topbar.home-mode .brand-logo {
+    width: 112px;
+    height: 44px;
+    padding-right: 18px;
+  }
+
+  header.app-topbar.home-mode .brand h1 {
+    max-width: min(610px, 50vw);
+    font-size: 25px;
+    font-weight: 700;
+  }
+
+  header.app-topbar.home-mode .brand p {
+    margin-top: 4px;
+    font-weight: 600;
+  }
+
+  header.app-topbar.home-mode .topbar-actions {
+    flex: 0 0 auto;
+    max-width: min(480px, 42vw);
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  header.app-topbar.home-mode :is(.btn, button, .user-chip) {
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font-weight: 650;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+
+  header.app-topbar.home-mode .user-chip {
+    max-width: 156px;
+  }
+
+  header.app-topbar.home-mode .settings-entry {
+    width: 36px;
+    min-width: 36px;
+    flex-basis: 36px;
+    padding: 0;
+    border-radius: 8px;
+  }
+
+  header.app-topbar.home-mode .danger-text {
+    box-shadow: 0 6px 16px rgba(4, 46, 145, 0.1);
   }
 }
 </style>

@@ -15,6 +15,7 @@
       :refresh-cooldown="refreshCooldown"
       :event-refresh-title="refreshButtonTitle('event')"
       :is-admin="isAdmin"
+      :home-mode="isScopeHomeDashboard"
       @switch-scope="switchScope"
       @update:refresh-menu-open="refreshMenuOpen = $event"
       @refresh-event="refreshEvent"
@@ -140,6 +141,7 @@
       @critical-guard="enterCriticalGuard()"
       @daily="enterDailyTasks"
       @request-permission="openAdditionalPermissionRequest"
+      @dashboard-visible="scopeHomeDashboardVisible = $event"
     />
 
   </main>
@@ -206,6 +208,7 @@ const eventRefreshing = ref(false);
 const eventRefreshNonce = ref(0);
 const workbenchOpening = ref(false);
 const workbenchOpeningText = ref("正在进入维护管理");
+const scopeHomeDashboardVisible = ref(true);
 const syncText = ref("准备中");
 const scopeOverview = ref<Record<string, Dict>>({});
 const handoverLinks = ref<Record<string, string>>({});
@@ -250,6 +253,14 @@ const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCriticalGuardPage = computed(() => routePath.value === "/critical-guard");
+const isScopeHomeDashboard = computed(() => (
+  routePath.value === "/"
+  && !routeParams.value.get("mode")
+  && auth.loggedIn
+  && !authChecking.value
+  && auth.scopeOptions.length > 0
+  && scopeHomeDashboardVisible.value
+));
 const criticalGuardScope = computed(() => {
   const raw = String(routeParams.value.get("scope") || "").trim();
   return raw ? normalizeScopeValue(raw, "") : "";

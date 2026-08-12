@@ -1510,13 +1510,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               heights: Array.from(new Set(cards.map(card => Math.round(card.getBoundingClientRect().height)))),
               lastBottom: cards.length ? Math.round(cards[cards.length - 1].getBoundingClientRect().bottom) : 0,
               minActionHeight: buttons.length ? Math.min(...buttons.map(button => Math.round(button.getBoundingClientRect().height))) : 0,
+              headerHeight: Math.round(document.querySelector('.app-topbar')?.getBoundingClientRect().height || 0),
+              bodyHeight: Math.round(document.body.scrollHeight),
               overflowX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
               bodyMargin: getComputedStyle(document.body).margin,
               disabledFocusable: document.querySelectorAll('.module-card.disabled button:not([disabled])').length,
+              duplicatePrimaryActions: document.querySelectorAll('.module-actions .module-primary-action').length,
             }};
           }});
           const desktopDashboard = await inspectDashboard();
-          if (desktopDashboard.columns !== 4 || desktopDashboard.heights.length !== 1 || desktopDashboard.lastBottom > 768 || desktopDashboard.overflowX || desktopDashboard.bodyMargin !== '0px' || desktopDashboard.disabledFocusable) {{
+          if (desktopDashboard.columns !== 4 || desktopDashboard.heights.length !== 1 || desktopDashboard.lastBottom > 768 || desktopDashboard.headerHeight > 100 || desktopDashboard.overflowX || desktopDashboard.bodyMargin !== '0px' || desktopDashboard.disabledFocusable || desktopDashboard.duplicatePrimaryActions) {{
             throw new Error(`desktop home dashboard mismatch: ${{JSON.stringify(desktopDashboard)}}`);
           }}
           await page.emulateMedia({{ reducedMotion: 'reduce' }});
@@ -1527,6 +1530,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`reduced-motion broadcast still shows duplicate items: ${{visibleBroadcastDuplicates}}`);
           }}
           await page.emulateMedia({{ reducedMotion: 'no-preference' }});
+          await page.setViewportSize({{ width: 1280, height: 800 }});
+          const compactDesktopDashboard = await inspectDashboard();
+          if (compactDesktopDashboard.columns !== 4 || compactDesktopDashboard.headerHeight > 100 || compactDesktopDashboard.overflowX) {{
+            throw new Error(`compact desktop home dashboard mismatch: ${{JSON.stringify(compactDesktopDashboard)}}`);
+          }}
           await page.setViewportSize({{ width: 1024, height: 768 }});
           const tabletDashboard = await inspectDashboard();
           if (tabletDashboard.columns !== 2 || tabletDashboard.heights.length !== 1 || tabletDashboard.overflowX) {{
@@ -1534,12 +1542,30 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await page.setViewportSize({{ width: 390, height: 844 }});
           const mobileDashboard = await inspectDashboard();
-          if (mobileDashboard.columns !== 1 || mobileDashboard.minActionHeight < 44 || mobileDashboard.overflowX) {{
+          if (mobileDashboard.columns !== 1 || mobileDashboard.minActionHeight < 44 || mobileDashboard.headerHeight > 200 || mobileDashboard.bodyHeight > 1500 || mobileDashboard.overflowX) {{
             throw new Error(`mobile home dashboard mismatch: ${{JSON.stringify(mobileDashboard)}}`);
           }}
           await page.setViewportSize({{ width: 1366, height: 768 }});
           await assertLayout(page, 'home');
           await page.locator('.module-card.slate .module-card__main').click();
+          const toolLandingState = await page.evaluate(() => ({{
+            scopeCardCount: document.querySelectorAll('article.scope-card').length,
+            toolLabels: Array.from(document.querySelectorAll('.tool-card')).map((node) => {{
+              const title = node.querySelector('strong')?.textContent?.trim() || '';
+              const badge = node.querySelector('b')?.textContent?.trim() || '';
+              return `${{title}}/${{badge}}`;
+            }}),
+          }}));
+          const expectedToolLabels = [
+            '每日任务清单/今日',
+            '上/下电通告/通告',
+            '设备轮巡/通告',
+            '设备调整/通告',
+            '交接班审核页/链接',
+          ];
+          if (toolLandingState.scopeCardCount !== 0 || JSON.stringify(toolLandingState.toolLabels) !== JSON.stringify(expectedToolLabels)) {{
+            throw new Error(`other tools landing mismatch: ${{JSON.stringify(toolLandingState)}}`);
+          }}
           await page.getByRole('button', {{ name: '选择交接班审核页', exact: true }}).click();
           try {{
             await page.waitForFunction(() => document.body.innerText.includes('选择楼栋打开交接班审核页'), null, {{ timeout: 10000 }});

@@ -640,6 +640,17 @@
       @resolve="resolveTemplateClose"
     />
 
+    <ConfirmDialog
+      :open="weatherNoTaskDialogOpen"
+      tone="primary"
+      kicker="天气检查完成"
+      title="暂无需要发布的重保任务"
+      :message="weatherNoTaskDialogMessage"
+      confirm-label="知道了"
+      :hide-cancel="true"
+      @resolve="weatherNoTaskDialogOpen = false"
+    />
+
     <CriticalGuardSignatureDrawer
       :open="signatureDrawerOpen"
       :scope="activeScope"
@@ -714,6 +725,8 @@ const messageTone = ref("info");
 const publishOpen = ref(false);
 const weatherStatus = ref<Dict | null>(null);
 const weatherActionBusy = ref(false);
+const weatherNoTaskDialogOpen = ref(false);
+const weatherNoTaskDialogMessage = ref("");
 const imageViewerUrl = ref("");
 const imageViewerTitle = ref("");
 const confirmOpen = ref(false);
@@ -760,6 +773,7 @@ let adminDetailPollFailureReported = false;
 let componentUnmounted = false;
 let weatherStatusLoading = false;
 let weatherTaskRefreshJobId = "";
+let manualWeatherJobId = "";
 const publishForm = ref({
   name: "",
   sheetTypes: ["设备安全", "环境安全"],
@@ -1114,6 +1128,20 @@ async function loadWeatherStatus(silent = false): Promise<void> {
       weatherTaskRefreshJobId = jobId;
       await loadTasks();
     }
+    if (jobId && jobFinished && jobId === manualWeatherJobId) {
+      manualWeatherJobId = "";
+      const jobStatus = String(nextStatus?.job?.status || "");
+      const result = nextStatus?.job?.result && typeof nextStatus.job.result === "object"
+        ? nextStatus.job.result
+        : {};
+      if (jobStatus === "completed" && Number(result.new_tasks || 0) === 0) {
+        const existingTasks = Number(result.existing_tasks || 0);
+        weatherNoTaskDialogMessage.value = existingTasks > 0
+          ? `本次未发布新任务。检测到的相关预警已有 ${existingTasks} 个重保任务，系统未重复创建。`
+          : "本次天气数据中没有达到重保任务发布条件的预警，系统未创建任务。";
+        weatherNoTaskDialogOpen.value = true;
+      }
+    }
   } catch (loadError: any) {
     if (!silent) setMessage(loadError?.message || "天气任务状态读取失败。", "error");
   } finally {
@@ -1132,10 +1160,12 @@ async function refreshWeatherNow(): Promise<void> {
       body: JSON.stringify({ operation_id: operationId() }),
       timeoutMs: 15_000,
     });
+    manualWeatherJobId = String(job.job_id || "");
     weatherStatus.value = {
       ...(weatherStatus.value || {}),
       running: true,
       phase: String(job.phase || "queued"),
+      job,
     };
     scheduleWeatherStatus(300);
   } catch (refreshError: any) {
@@ -2009,6 +2039,8 @@ watch(() => [props.scope, props.adminMode], () => {
   dirty.value = false;
   weatherStatus.value = null;
   weatherTaskRefreshJobId = "";
+  manualWeatherJobId = "";
+  weatherNoTaskDialogOpen.value = false;
   if (weatherPollTimer) window.clearTimeout(weatherPollTimer);
   weatherPollTimer = null;
   if (adminDetailPollTimer) window.clearTimeout(adminDetailPollTimer);

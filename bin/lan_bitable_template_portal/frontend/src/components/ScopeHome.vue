@@ -7,6 +7,7 @@
       :can-request-more-scopes="Boolean(canRequestMoreScopes)"
       :broadcast-items="homeBroadcastItems"
       :broadcast-summary="homeBroadcastSummary"
+      :module-metrics="homeModuleMetrics"
       @select-action="selectModuleAction"
       @activate-broadcast="activateBroadcastItem"
       @request-permission="$emit('request-permission')"
@@ -138,7 +139,7 @@
         正在读取水耗楼栋数据
       </div>
 
-      <div v-else class="scope-grid scope-overview-grid">
+      <div v-else-if="activeMode !== 'tools'" class="scope-grid scope-overview-grid">
         <article
           v-for="scope in displayScopeOptions"
           :key="scope.value"
@@ -236,7 +237,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { requestJson } from "../api/client";
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
@@ -251,6 +252,7 @@ import {
   type ScopeHomeEntryKey as EntryKey,
   type ScopeHomeBroadcastItem,
   type ScopeHomeModuleAction as ModuleAction,
+  type ScopeHomeModuleMetric,
 } from "../scopeHomeUtils";
 import HomeDashboard from "./HomeDashboard.vue";
 import VnetBackButton from "./VnetBackButton.vue";
@@ -273,6 +275,7 @@ const emit = defineEmits<{
   "critical-guard": [];
   daily: [scope: string];
   "request-permission": [];
+  "dashboard-visible": [visible: boolean];
 }>();
 
 const activeMode = ref<EntryKey>("");
@@ -389,6 +392,7 @@ const homeBroadcastStats = computed(() => {
   let ongoing = 0;
   let pending = 0;
   let events = 0;
+  let processingEvents = 0;
   const ongoingItems: ScopeHomeBroadcastItem[] = [];
   const fallbackItems: ScopeHomeBroadcastItem[] = [];
 
@@ -450,6 +454,7 @@ const homeBroadcastStats = computed(() => {
     const eventTotal = eventCounts.total;
     const eventProcessing = eventCounts.processing;
     events += eventTotal;
+    processingEvents += eventProcessing;
 
     if (scopePending > 0) {
       fallbackItems.push({
@@ -475,7 +480,41 @@ const homeBroadcastStats = computed(() => {
     ongoing,
     pending,
     events,
+    processingEvents,
     items: ongoing > 0 ? ongoingItems : fallbackItems,
+  };
+});
+
+const homeModuleMetrics = computed<Record<string, ScopeHomeModuleMetric>>(() => {
+  const maintenance = aggregateWorkTypeCounts("maintenance");
+  const change = aggregateWorkTypeCounts("change");
+  const repair = aggregateWorkTypeCounts("repair");
+  const stats = homeBroadcastStats.value;
+  return {
+    event: {
+      primaryLabel: "本月事件",
+      primaryValue: stats.events,
+      secondaryLabel: "处理中",
+      secondaryValue: stats.processingEvents,
+    },
+    maintenance: {
+      primaryLabel: "待发起",
+      primaryValue: maintenance.pending,
+      secondaryLabel: "进行中",
+      secondaryValue: maintenance.ongoing,
+    },
+    change: {
+      primaryLabel: "待发起",
+      primaryValue: change.pending,
+      secondaryLabel: "进行中",
+      secondaryValue: change.ongoing,
+    },
+    repair_management: {
+      primaryLabel: "待发起",
+      primaryValue: repair.pending,
+      secondaryLabel: "进行中",
+      secondaryValue: repair.ongoing,
+    },
   };
 });
 
@@ -504,8 +543,20 @@ const homeBroadcastItems = computed<ScopeHomeBroadcastItem[]>(() => {
 const homeBroadcastSummary = computed(() => {
   const stats = homeBroadcastStats.value;
   const scopeCount = broadcastScopes.value.length || displayScopeOptions.value.length;
-  return `有权限楼栋 ${scopeCount} 个 · 进行中 ${stats.ongoing} 条`;
+  return `楼栋 ${scopeCount} · 进行中 ${stats.ongoing} · 待发起 ${stats.pending} · 事件 ${stats.events}`;
 });
+
+function aggregateWorkTypeCounts(workType: string): { pending: number; ongoing: number } {
+  return broadcastScopes.value.reduce(
+    (total, scope) => {
+      const counts = typedScopeCounts(scope.value, workType);
+      total.pending += counts.pending;
+      total.ongoing += counts.ongoing;
+      return total;
+    },
+    { pending: 0, ongoing: 0 },
+  );
+}
 
 function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
   const scope = normalizeScopeValue(String(item.scope || ""), "");
@@ -533,6 +584,7 @@ function selectEntry(key: EntryKey): void {
     return;
   }
   activeMode.value = key;
+  emit("dashboard-visible", false);
   if (key === "repair_management") void loadRepairOverview();
   if (key === "water") void loadWaterBuildings();
 }
@@ -616,6 +668,7 @@ function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
 function returnFromFeature(): void {
   if (activeMode.value === "water") clearWaterBuildingsPoll();
   activeMode.value = isToolScopeMode.value ? "tools" : "";
+  emit("dashboard-visible", !activeMode.value);
 }
 
 function enterNoticeWorkbench(scope: string): void {
@@ -709,6 +762,7 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   return "进行中";
 }
 
+onMounted(() => emit("dashboard-visible", !activeMode.value));
 onBeforeUnmount(clearWaterBuildingsPoll);
 
 </script>

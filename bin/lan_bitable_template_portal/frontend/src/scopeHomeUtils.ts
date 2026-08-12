@@ -2,6 +2,12 @@ import type { Dict } from "./api/client";
 
 export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
+export type ScopeHomeModuleMetric = {
+  primaryLabel: string;
+  primaryValue: number;
+  secondaryLabel: string;
+  secondaryValue: number;
+};
 export type ScopeHomeModuleCard = {
   key: string;
   tone: string;

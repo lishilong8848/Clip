@@ -9,7 +9,7 @@
     <header class="dashboard-toolbar">
       <div class="dashboard-title">
         <h2 id="home-module-heading">业务模块</h2>
-        <span>已开放 {{ enabledModuleCount }} / {{ modules.length }}</span>
+        <span>{{ enabledModuleCount }} 个可用</span>
       </div>
       <button
         v-if="canRequestMoreScopes"
@@ -18,16 +18,20 @@
         @click="emit('request-permission')"
       >
         <KeyRound :size="16" aria-hidden="true" />
-        申请其他楼权限
+        申请楼栋权限
       </button>
     </header>
 
     <div class="module-grid">
       <article
-        v-for="module in modules"
+        v-for="(module, index) in modules"
         :key="module.key"
         class="module-card"
-        :class="[module.tone, `module-${module.key}`, { disabled: module.disabled }]"
+        :class="[
+          module.tone,
+          `module-${module.key}`,
+          { core: index < 4, disabled: module.disabled, 'has-secondary': module.secondaryActions?.length },
+        ]"
         :aria-disabled="module.disabled ? 'true' : undefined"
       >
         <button
@@ -39,37 +43,44 @@
         >
           <span class="module-card__head">
             <span class="module-icon" aria-hidden="true">
-              <component :is="moduleIcon(module.icon)" :size="22" :stroke-width="2.2" />
+              <component :is="moduleIcon(module.icon)" :size="21" :stroke-width="2.1" />
             </span>
-            <span class="module-badge">{{ module.disabled ? "建设中" : module.badge }}</span>
+            <span v-if="module.disabled" class="module-state">建设中</span>
           </span>
+
           <strong>{{ module.title }}</strong>
-          <span class="module-tags" aria-hidden="true">
-            <span v-for="tag in module.tags.slice(0, 2)" :key="tag">{{ tag }}</span>
+
+          <span v-if="moduleMetrics[module.key]" class="module-metrics" aria-hidden="true">
+            <span>
+              <b>{{ moduleMetrics[module.key].primaryValue }}</b>
+              <small>{{ moduleMetrics[module.key].primaryLabel }}</small>
+            </span>
+            <span>
+              <b>{{ moduleMetrics[module.key].secondaryValue }}</b>
+              <small>{{ moduleMetrics[module.key].secondaryLabel }}</small>
+            </span>
+          </span>
+          <span v-else class="module-summary">{{ module.tags.slice(0, 2).join(" · ") }}</span>
+
+          <span class="module-entry-cue" aria-hidden="true">
+            <span>{{ module.disabled ? "暂未开放" : module.primaryAction.label }}</span>
+            <ChevronRight v-if="!module.disabled" :size="16" />
           </span>
         </button>
 
-        <div v-if="!module.disabled" class="module-actions">
+        <div v-if="!module.disabled && module.secondaryActions?.length" class="module-actions">
           <button
-            type="button"
-            class="module-primary-action"
-            @click.stop="selectAction(module.primaryAction)"
-          >
-            <span>{{ module.primaryAction.label }}</span>
-            <ChevronRight :size="16" aria-hidden="true" />
-          </button>
-          <button
-            v-for="action in module.secondaryActions || []"
+            v-for="action in module.secondaryActions"
             :key="action.key"
             type="button"
             class="module-secondary-action"
             :disabled="action.disabled"
             @click.stop="selectAction(action)"
           >
-            {{ action.label }}
+            <span>{{ action.label }}</span>
+            <ChevronRight :size="15" aria-hidden="true" />
           </button>
         </div>
-        <div v-else class="module-disabled-action" aria-hidden="true">暂未开放</div>
       </article>
     </div>
   </section>
@@ -93,6 +104,7 @@ import type {
   ScopeHomeBroadcastItem,
   ScopeHomeModuleAction,
   ScopeHomeModuleCard,
+  ScopeHomeModuleMetric,
 } from "../scopeHomeUtils";
 import HomeBroadcastTicker from "./HomeBroadcastTicker.vue";
 
@@ -102,6 +114,7 @@ defineProps<{
   canRequestMoreScopes: boolean;
   broadcastItems: ScopeHomeBroadcastItem[];
   broadcastSummary: string;
+  moduleMetrics: Record<string, ScopeHomeModuleMetric>;
 }>();
 
 const emit = defineEmits<{
@@ -135,9 +148,9 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 .home-dashboard {
   width: min(100%, 1680px);
   margin: 0 auto;
-  padding: 14px 22px 22px;
+  padding: 12px 22px 24px;
   display: grid;
-  gap: 10px;
+  gap: 11px;
 }
 
 .dashboard-toolbar {
@@ -157,16 +170,16 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 
 .dashboard-title h2 {
   margin: 0;
-  color: #0b1f3a;
+  color: #10213a;
   font-size: 18px;
   line-height: 1.2;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .dashboard-title span {
-  color: #60738d;
+  color: #6a7d96;
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 600;
 }
 
 .permission-action {
@@ -176,20 +189,20 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
   justify-content: center;
   gap: 7px;
   padding: 0 13px;
-  border: 1px solid #cbdcf3;
+  border: 1px solid #c9d9ed;
   border-radius: 8px;
   background: #ffffff;
-  color: #1559bb;
+  color: #175ab7;
   font: inherit;
   font-size: 12px;
-  font-weight: 850;
+  font-weight: 650;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(20, 76, 150, 0.06);
+  box-shadow: 0 3px 10px rgba(20, 76, 150, 0.05);
 }
 
 .permission-action:hover {
-  border-color: #91b9ec;
-  background: #f7fbff;
+  border-color: #8fb7e9;
+  background: #f6faff;
 }
 
 .permission-action:focus-visible,
@@ -202,38 +215,41 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 .module-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 11px;
 }
 
 .module-card {
   --module-accent: #1e63ff;
   --module-soft: #edf4ff;
-  position: relative;
+  height: 186px;
   min-width: 0;
-  min-height: 182px;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   overflow: hidden;
-  border: 1px solid #d7e3f3;
-  border-top: 3px solid var(--module-accent);
+  border: 1px solid #d8e3f1;
   border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 8px 22px rgba(16, 66, 132, 0.07);
-  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  background: #fbfdff;
+  box-shadow: 0 5px 16px rgba(16, 66, 132, 0.055);
+  transition: border-color 170ms ease, box-shadow 170ms ease, background 170ms ease;
 }
 
-.module-card.orange { --module-accent: #e66f24; --module-soft: #fff3e9; }
-.module-card.violet { --module-accent: #7657d8; --module-soft: #f2efff; }
-.module-card.rose { --module-accent: #dc4960; --module-soft: #fff0f3; }
-.module-card.emerald { --module-accent: #15966c; --module-soft: #eaf9f3; }
-.module-card.slate { --module-accent: #3e73b8; --module-soft: #edf4fb; }
-.module-card.cyan { --module-accent: #1598aa; --module-soft: #eaf9fb; }
+.module-card.core {
+  background: #ffffff;
+  box-shadow: 0 7px 20px rgba(16, 66, 132, 0.075);
+}
+
+.module-card.orange { --module-accent: #d95e22; --module-soft: #fff2e9; }
+.module-card.violet { --module-accent: #6652c8; --module-soft: #f1efff; }
+.module-card.rose { --module-accent: #d64158; --module-soft: #fff0f3; }
+.module-card.emerald { --module-accent: #128765; --module-soft: #eaf8f2; }
+.module-card.slate { --module-accent: #356cae; --module-soft: #edf4fb; }
+.module-card.cyan { --module-accent: #168899; --module-soft: #eaf8fa; }
 
 .module-card:not(.disabled):hover,
 .module-card:not(.disabled):focus-within {
-  border-color: #a9c5e9;
-  box-shadow: 0 12px 28px rgba(16, 66, 132, 0.11);
-  transform: translateY(-1px);
+  border-color: #8fb7e9;
+  background: #ffffff;
+  box-shadow: 0 10px 25px rgba(16, 66, 132, 0.1);
 }
 
 .module-card__main {
@@ -242,10 +258,10 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
+  gap: 7px;
   padding: 13px 14px 10px;
   border: 0;
-  border-radius: 5px 5px 0 0;
+  border-radius: 7px;
   background: transparent;
   color: inherit;
   text-align: left;
@@ -258,6 +274,7 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 }
 
 .module-card__head {
+  min-height: 38px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -265,9 +282,9 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 }
 
 .module-icon {
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
   display: grid;
   place-items: center;
   border-radius: 8px;
@@ -275,131 +292,131 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
   color: var(--module-accent);
 }
 
-.module-badge {
-  min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid #dce6f2;
+.module-state {
+  padding: 3px 7px;
+  border: 1px solid #dbe3ed;
   border-radius: 999px;
-  background: var(--module-soft);
-  color: var(--module-accent);
+  background: #eef2f6;
+  color: #64748b;
   font-size: 11px;
-  line-height: 1.15;
-  font-weight: 850;
+  line-height: 1.2;
+  font-weight: 650;
   white-space: nowrap;
 }
 
-.module-card__main strong {
+.module-card__main > strong {
   min-width: 0;
   color: #10213a;
   font-size: 17px;
   line-height: 1.2;
-  font-weight: 900;
+  font-weight: 700;
 }
 
-.module-tags {
+.module-metrics {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
-  overflow: hidden;
+  gap: 20px;
 }
 
-.module-tags span {
+.module-metrics > span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.module-metrics b {
+  color: #155bc4;
+  font-size: 20px;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.module-metrics small,
+.module-summary {
+  color: #6a7d96;
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.module-summary {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+}
+
+.module-entry-cue {
+  min-width: 0;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #1b5fbf;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 650;
+}
+
+.module-entry-cue > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 3px 7px;
-  border: 1px solid #e1e9f4;
-  border-radius: 999px;
-  background: #f8fafc;
-  color: #566a84;
-  font-size: 11px;
-  line-height: 1.2;
-  font-weight: 750;
   white-space: nowrap;
 }
 
 .module-actions {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 10px 10px;
-  border-top: 1px solid #e8eef6;
+  padding: 6px 9px 8px;
+  border-top: 1px solid #e7eef7;
+  background: #f8fbff;
 }
 
 .module-actions button {
+  width: 100%;
   min-width: 0;
-  min-height: 38px;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border: 1px solid #ccdaec;
   border-radius: 7px;
+  background: #ffffff;
+  color: #31567f;
   font: inherit;
   font-size: 11px;
   line-height: 1.15;
-  font-weight: 850;
+  font-weight: 650;
   cursor: pointer;
 }
 
-.module-primary-action {
-  flex: 1 1 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 0 10px;
-  border: 1px solid var(--module-accent);
-  background: var(--module-accent);
-  color: #ffffff;
-}
-
-.module-primary-action span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.module-secondary-action {
-  flex: 0 1 auto;
-  padding: 0 9px;
-  border: 1px solid #cfdced;
-  background: #ffffff;
-  color: #31567f;
-  white-space: nowrap;
-}
-
-.module-secondary-action:hover {
-  border-color: var(--module-accent);
-  color: var(--module-accent);
-  background: var(--module-soft);
+.module-actions button:hover {
+  border-color: #8fb7e9;
+  color: #155bc4;
+  background: #f4f9ff;
 }
 
 .module-card.disabled {
-  border-top-color: #aab8ca;
-  background: #f6f8fb;
+  border-color: #dfe5ed;
+  background: #f4f6f9;
   box-shadow: none;
 }
 
-.module-card.disabled .module-card__main,
-.module-card.disabled .module-disabled-action {
+.module-card.disabled .module-card__main {
   opacity: 0.68;
 }
 
-.module-card.disabled .module-icon,
-.module-card.disabled .module-badge {
-  background: #e9edf3;
+.module-card.disabled .module-icon {
+  background: #e7ebf0;
   color: #64748b;
-  border-color: #d8e0ea;
 }
 
-.module-disabled-action {
-  min-height: 54px;
-  display: flex;
-  align-items: center;
-  padding: 9px 14px;
-  border-top: 1px solid #e1e7ef;
+.module-card.disabled .module-entry-cue {
   color: #64748b;
-  font-size: 12px;
-  font-weight: 850;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -416,30 +433,89 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 
 @media (max-width: 759px) {
   .home-dashboard {
-    padding: 12px 14px 20px;
+    padding: 10px 12px 18px;
   }
 
   .dashboard-toolbar {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
+    min-height: 36px;
   }
 
-  .permission-action,
-  .module-actions button {
+  .dashboard-title h2 {
+    font-size: 17px;
+  }
+
+  .permission-action {
     min-height: 44px;
+    padding: 0 11px;
   }
 
   .module-grid {
     grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
   }
 
   .module-card {
-    min-height: 174px;
+    height: auto;
+    min-height: 100px;
   }
 
-  .module-tags span:nth-child(n + 2) {
+  .module-card__main {
+    min-height: 100px;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-content: center;
+    gap: 5px 10px;
+    padding: 10px 12px;
+  }
+
+  .module-card__head {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    min-height: 34px;
+    align-self: start;
+  }
+
+  .module-icon {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+  }
+
+  .module-state {
     display: none;
+  }
+
+  .module-card__main > strong {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+  }
+
+  .module-metrics,
+  .module-summary {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+  }
+
+  .module-entry-cue {
+    grid-column: 3;
+    grid-row: 1 / 3;
+    align-self: center;
+    margin-top: 0;
+  }
+
+  .module-entry-cue > span {
+    display: none;
+  }
+
+  .module-card.disabled .module-entry-cue > span {
+    display: inline;
+  }
+
+  .module-actions button {
+    min-height: 44px;
   }
 }
 </style>

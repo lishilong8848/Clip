@@ -21,7 +21,7 @@
           <li v-for="item in details" :key="item">{{ item }}</li>
         </ul>
         <footer>
-          <button type="button" class="btn ghost" @click="emit('resolve', false)">
+          <button v-if="!hideCancel" type="button" class="btn ghost" @click="emit('resolve', false)">
             {{ cancelLabel || "取消" }}
           </button>
           <button type="button" class="btn" :class="confirmClass || defaultConfirmClass" @click="emit('resolve', true)">
@@ -46,6 +46,7 @@ const props = withDefaults(defineProps<{
   confirmLabel?: string;
   cancelLabel?: string;
   confirmClass?: string;
+  hideCancel?: boolean;
 }>(), {
   tone: "primary",
   kicker: "操作确认",
@@ -53,6 +54,7 @@ const props = withDefaults(defineProps<{
   confirmLabel: "确认",
   cancelLabel: "取消",
   confirmClass: "",
+  hideCancel: false,
 });
 
 const emit = defineEmits<{
