@@ -81,13 +81,6 @@
           >
             清空
           </button>
-          <img
-            v-if="signaturePreviewUrl && !hasInk"
-            class="signature-preview-img"
-            :src="signaturePreviewUrl"
-            alt="已有手写签名"
-            @error="markSelectedSignatureUnavailable"
-          />
           <canvas
             ref="canvasRef"
             aria-label="手写签名区域"
@@ -97,8 +90,8 @@
             @pointercancel="endDraw"
             @pointerleave="endDraw"
           ></canvas>
-          <div v-if="!hasInk && !signaturePreviewUrl" class="canvas-placeholder">
-            请在此处手写签名
+          <div v-if="!hasInk" class="canvas-placeholder">
+            {{ personHasUsableSignature(selectedPerson) ? "已有签名，可重新手写覆盖" : "请在此处手写签名" }}
           </div>
           <div v-if="message" class="signature-toast" :class="messageType">
             {{ message }}
@@ -109,8 +102,8 @@
           <button type="button" class="btn blue" :disabled="Boolean(saveDisabledReason)" :title="saveDisabledReason" @click="saveSignature">
             {{ saving ? "保存中" : (temporaryMode ? "保存临时签名" : "保存到签名表") }}
           </button>
-          <span v-if="saveDisabledReason && !signaturePreviewUrl" class="signature-action-hint">{{ saveDisabledReason }}</span>
-          <span v-if="signaturePreviewUrl && !hasInk" class="saved-inline">
+          <span v-if="saveDisabledReason && !personHasUsableSignature(selectedPerson)" class="signature-action-hint">{{ saveDisabledReason }}</span>
+          <span v-if="personHasUsableSignature(selectedPerson) && !hasInk" class="saved-inline">
             {{ linkMode ? "已保存" : temporaryMode ? "已保存" : "已有签名" }}
           </span>
         </div>
@@ -149,9 +142,6 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let peopleRequestSeq = 0;
 
 const selectedPerson = computed(() => people.value.find((item) => personKey(item) === selectedRecordId.value) || null);
-const signaturePreviewUrl = computed(() => (
-  personHasUsableSignature(selectedPerson.value) ? String(selectedPerson.value?.signature_preview_url || "") : ""
-));
 const peopleCountText = computed(() => {
   if (loading.value) return "读取中";
   if (!totalCount.value) return "0 人";
@@ -189,16 +179,7 @@ function personKey(person: Dict | null | undefined): string {
 }
 
 function personHasUsableSignature(person: Dict | null | undefined): boolean {
-  return Boolean(person?.has_signature && String(person?.signature_preview_url || "").trim());
-}
-
-function markSelectedSignatureUnavailable(): void {
-  if (!selectedPerson.value) return;
-  selectedPerson.value.has_signature = false;
-  selectedPerson.value.signature_count = 0;
-  selectedPerson.value.signature_preview_url = "";
-  selectedPerson.value.signature_version = "";
-  setMessage("该人员签名附件不可用，请重新手写保存。", "failed");
+  return Boolean(person?.has_signature);
 }
 
 function selectPerson(person: Dict): void {
@@ -411,7 +392,6 @@ async function saveSignature(): Promise<void> {
     setMessage(temporaryMode.value ? "签名已保存。" : `${data.name || selectedPerson.value.name || "签名"} 已保存。`, "success");
     selectedPerson.value.has_signature = true;
     selectedPerson.value.signature_count = 1;
-    selectedPerson.value.signature_preview_url = data.signature_preview_url || selectedPerson.value.signature_preview_url || "";
     selectedPerson.value.signature_version = data.signature_version || selectedPerson.value.signature_version || "";
     selectedPerson.value.status = data.status || "signed";
     selectedPerson.value.record_id = data.record_id || selectedPerson.value.record_id || "";

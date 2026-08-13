@@ -51,15 +51,13 @@
               class="sheet-cell-signatures"
               :style="signatureCellStyle(rowIndex)"
             >
-              <img
+              <span
                 v-for="person in cell.signatures.slice(0, 3)"
                 :key="`${rowIndex}:${cell.colIndex}:${person.record_id}`"
-                :src="person.signature_preview_url"
-                :alt="person.name || '签名'"
-                :style="signatureImageStyle(rowIndex)"
-                loading="lazy"
-                decoding="async"
-              />
+                class="sheet-cell-signature-token"
+              >
+                {{ person.name || person.display_name || "已确认签名" }}
+              </span>
               <em
                 v-if="cell.signatures.length > 3"
                 class="signature-more-count"
@@ -143,7 +141,6 @@ const props = defineProps<{
   signatureRoleAtCell: (rowIndex: number, colIndex: number) => string;
   cellSignatures: (rowIndex: number, colIndex: number) => Dict[];
   signatureCellStyle: (rowIndex: number) => Record<string, string>;
-  signatureImageStyle: (rowIndex: number) => Record<string, string>;
   signatureMoreStyle: (rowIndex: number) => Record<string, string>;
   checkboxStateLabel: (cell: Dict) => string;
   cellOverrideValue: (rowIndex: number, colIndex: number) => string;
@@ -414,16 +411,22 @@ td.selected-cell.active-cell {
   overflow: visible;
 }
 
-.sheet-cell-signatures img {
-  display: block;
-  flex: 0 1 auto;
-  object-fit: contain;
-}
-
 .sheet-cell-signatures span {
   color: #c2410c;
   font-size: 12px;
   font-weight: 850;
+}
+
+.sheet-cell-signatures .sheet-cell-signature-token {
+  max-width: 112px;
+  overflow: hidden;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .signature-more-count {

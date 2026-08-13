@@ -5703,6 +5703,94 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
+    def test_web_ongoing_uses_same_canonical_row_as_qt_for_stale_target_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            target_record_id = "rec-shared-maintenance-target"
+            current = {
+                "active_item_id": "active-current-c-maintenance",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "status": "更新",
+                "title": "EA118机房C楼柴油发电机组带载测试维护",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "start_time": "2026-08-10 09:00",
+                "end_time": "2026-08-14 23:00",
+                "location": "EA118园区A~E楼",
+                "content": "对预作用和水喷雾阀组进行全面排查",
+                "reason": "提升消防设施运行可靠性",
+                "impact": "对IT设备无影响",
+                "progress": "准备工作已完成",
+            }
+            stale = {
+                **current,
+                "active_item_id": "active-stale-a-maintenance",
+                "title": "EA118机房A楼柴油发电机组带载测试维护",
+                "building": "A楼",
+                "building_codes": ["A"],
+            }
+            try:
+                store.upsert_qt_active_item(
+                    current,
+                    section="other",
+                    origin="target_snapshot_refresh",
+                )
+                conn = store._connect()
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO qt_active_items(
+                            active_item_id, record_id, notice_type, section, sort_order,
+                            origin, payload_json, updated_at, deleted_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                        """,
+                        (
+                            stale["active_item_id"],
+                            target_record_id,
+                            "维保通告",
+                            "other",
+                            0,
+                            "target_snapshot_refresh",
+                            json.dumps(stale, ensure_ascii=False),
+                            time.time() - 60,
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                qt_visible = store.list_visible_qt_active_items()
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    web_all = FastAPIPortalController._get_ongoing("ALL")
+                    web_c = FastAPIPortalController._get_ongoing("C")
+                    web_a = FastAPIPortalController._get_ongoing("A")
+
+                self.assertEqual(len(store.list_qt_active_items()), 2)
+                self.assertEqual(len(qt_visible), 1)
+                self.assertEqual(len(web_all), 1)
+                self.assertEqual(len(web_c), 1)
+                self.assertEqual(web_a, [])
+                self.assertEqual(
+                    web_all[0]["active_item_id"],
+                    qt_visible[0]["active_item_id"],
+                )
+                self.assertEqual(
+                    web_all[0]["title"],
+                    "EA118机房C楼柴油发电机组带载测试维护",
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+
     def test_active_cache_store_does_not_merge_stale_file_items_when_sqlite_has_fewer(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "active_cache.json"
@@ -27290,7 +27378,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("事件发现来源（统一）", warning_text)
         self.assertNotIn("缺少“告警描述”", warning_text)
 
-    def test_repair_management_building_uses_repair_fallback_and_rejects_conflict(self):
+    def test_repair_management_building_accepts_containment_and_rejects_conflict(self):
         service = _TestMaintenancePortalService()
         metas = [
             FieldMeta(
@@ -27356,8 +27444,46 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "南通A楼",
         )
 
+        event_building["value"] = "南通B楼"
+        repair_building["value"] = "南通A楼、南通B楼"
+        payload = service._build_repair_management_prefill(
+            scope="ALL",
+            event_record_id="rec_event_building",
+            repair_record_ids=["rec_repair_building"],
+            followup_record_ids=[],
+            month="2026-07",
+            meta_by_name=meta_by_name,
+        )
+        self.assertEqual(
+            payload["fields"]["所属数据中心/楼栋-使用"],
+            "南通B楼",
+        )
+
+        event_building["value"] = "南通A楼、南通B楼"
+        repair_building["value"] = "南通B楼"
+        service._build_repair_management_prefill(
+            scope="ALL",
+            event_record_id="rec_event_building",
+            repair_record_ids=["rec_repair_building"],
+            followup_record_ids=[],
+            month="2026-07",
+            meta_by_name=meta_by_name,
+        )
+
         event_building["value"] = "A楼"
         repair_building["value"] = "B楼"
+        with self.assertRaisesRegex(PortalError, "关联事件机楼.*检修通告楼栋.*不一致"):
+            service._build_repair_management_prefill(
+                scope="ALL",
+                event_record_id="rec_event_building",
+                repair_record_ids=["rec_repair_building"],
+                followup_record_ids=[],
+                month="2026-07",
+                meta_by_name=meta_by_name,
+            )
+
+        event_building["value"] = "A楼、B楼"
+        repair_building["value"] = "B楼、C楼"
         with self.assertRaisesRegex(PortalError, "关联事件机楼.*检修通告楼栋.*不一致"):
             service._build_repair_management_prefill(
                 scope="ALL",

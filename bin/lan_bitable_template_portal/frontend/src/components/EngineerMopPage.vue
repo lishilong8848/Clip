@@ -154,7 +154,6 @@
                 :confirm-sending="signatureUsageConfirmSending"
                 :confirmable-count="signatureUsageConfirmationCount(signatureRole)"
                 @activate="activateSelectedSignaturePerson"
-                @image-error="handleSelectedSignatureImageError"
                 @web-sign="openSignaturePadForPerson"
                 @send-link="sendSignatureLinkForPerson"
                 @send-unsigned-links="sendUnsignedSignatureLinksForRole(signatureRole)"
@@ -188,7 +187,6 @@
               :draft-status-text="otherSignatureDraftStatusText"
               :draft-disabled-reason="temporarySignatureRowDisabledReason"
               @add-other="addOtherSignatureDraft"
-              @image-error="handleSelectedSignatureImageError"
               @web-sign-person="openSignaturePadForPerson"
               @send-temp-person="sendTemporarySignatureLinkForPerson"
               @remove-person="removeSignaturePerson(signatureRole, $event)"
@@ -236,13 +234,12 @@
               >
                 清空
               </button>
-              <img
+              <div
                 v-if="personHasUsableSignature(activeSignaturePerson) && !signatureHasInk"
-                class="mop-sign-preview-img"
-                :src="activeSignaturePerson?.signature_preview_url"
-                alt="已有手写签名"
-                @error="handleSignatureImageError(activeSignaturePerson?.record_id)"
-              />
+                class="sign-placeholder protected-signature-status"
+              >
+                已有签名已加密保护，重新手写后可更新
+              </div>
               <canvas
                 ref="signatureCanvasRef"
                 aria-label="MOP手写签名区域"
@@ -295,7 +292,6 @@
             :signature-role-at-cell="signatureRoleAtCell"
             :cell-signatures="cellSignatures"
             :signature-cell-style="signatureCellStyle"
-            :signature-image-style="signatureImageStyle"
             :signature-more-style="signatureMoreStyle"
             :checkbox-state-label="checkboxStateLabel"
             :cell-override-value="cellOverrideValue"
@@ -524,8 +520,6 @@ const {
   signatureSelectedRecords,
   rememberSignaturePeople,
   updateRememberedSignaturePerson,
-  markSignatureUnavailable,
-  markOtherSignatureUnavailable,
   selectSignaturePerson: selectSignaturePersonByRole,
   removeSignaturePerson: removeSignaturePersonByRole,
   unhideSignatureKey,
@@ -1897,6 +1891,7 @@ function buildMopRequestPayload(extra: Dict = {}): Dict {
     mop_title: preview.value?.mop_title || selectedMop.value?.title || "",
     mop_file_name: preview.value?.mop_file_name || selectedAttachment.value?.name || preview.value?.local_file?.file_name || "",
     notice_key: selectedNotice.value?.notice_key || selectedNoticeKey.value || "",
+    signature_context_key: signatureUsageNoticeKey.value,
     sheet_name: activeSheet.value?.name || "",
     fields: buildMopFieldPayload(),
     checkboxes: buildMopCheckboxPayload(),
@@ -1940,23 +1935,6 @@ function selectedFormalSignaturePendingConfirmationCount(role: MopSignatureRole)
 
 function selectedFormalSignatureRejectedCount(role: MopSignatureRole): number {
   return selectedFormalSignaturePeople(role).filter((person) => Boolean(person?.usage_rejected)).length;
-}
-
-function handleSignatureImageError(recordId: unknown): void {
-  markSignatureUnavailable(recordId);
-  signatureMessage.value = "该人员签名附件不可用，请重新手写保存。";
-  signatureMessageType.value = "failed";
-}
-
-function handleSelectedSignatureImageError(person: Dict): void {
-  const source = String(person?.source || "");
-  if (source === "temporary" || source === "external" || person?.temp_id) {
-    markOtherSignatureUnavailable(person);
-  } else {
-    markSignatureUnavailable(person?.record_id);
-  }
-  signatureMessage.value = "该签名附件不可用，请重新签名保存。";
-  signatureMessageType.value = "failed";
 }
 
 function resizeSignatureCanvas(): void {
@@ -2154,13 +2132,6 @@ function signatureCellStyle(rowIndex: number): Record<string, string> {
   };
 }
 
-function signatureImageStyle(rowIndex: number): Record<string, string> {
-  return {
-    maxHeight: `${signatureMaxHeightPx(rowIndex)}px`,
-    maxWidth: "150px",
-  };
-}
-
 function signatureMoreStyle(rowIndex: number): Record<string, string> {
   const height = Math.max(18, Math.min(28, signatureMaxHeightPx(rowIndex)));
   return {
@@ -2300,6 +2271,9 @@ async function saveMopSignature(): Promise<void> {
         String(target.record_id || ""),
         String(target.name || target.display_name || ""),
         signatureImage,
+        scope.value,
+        signatureUsageNoticeKey.value,
+        signatureRole.value,
       );
       const merged = { ...target, ...data, source: "external", role: target.role || signatureRole.value };
       mergeTemporarySignatures([merged]);
@@ -2318,7 +2292,7 @@ async function saveMopSignature(): Promise<void> {
       updateRememberedSignaturePerson(target.record_id, {
         has_signature: true,
         signature_count: 1,
-        signature_preview_url: data.signature_preview_url || target.signature_preview_url || "",
+        signature_preview_url: "",
         signature_version: data.signature_version || target.signature_version || "",
       });
       updateFormalSignaturePolling();
@@ -3885,16 +3859,6 @@ watch(() => props.scopeOptions, (items) => {
   cursor: not-allowed;
 }
 
-.mop-sign-preview-img {
-  position: absolute;
-  z-index: 1;
-  inset: 12%;
-  width: 76%;
-  height: 76%;
-  object-fit: contain;
-  pointer-events: none;
-}
-
 .sign-placeholder {
   position: absolute;
   z-index: 3;
@@ -3904,6 +3868,12 @@ watch(() => props.scopeOptions, (items) => {
   pointer-events: none;
   color: #94a3b8;
   font-weight: 850;
+}
+
+.protected-signature-status {
+  padding: 0 54px;
+  color: #475569;
+  text-align: center;
 }
 
 .signature-pad-canvas,

@@ -51,14 +51,7 @@
         }"
       >
         <button type="button" class="signature-preview" @click="emit('activate', person)">
-          <img
-            v-if="personHasStoredSignature(person) && showSignaturePreview !== false"
-            :src="person.signature_preview_url"
-            alt="人员签名预览"
-            loading="lazy"
-            @error="emit('image-error', person)"
-          />
-          <span v-else>{{ personHasStoredSignature(person) ? "已签名" : "未签名" }}</span>
+          <span>{{ personHasStoredSignature(person) ? "已签名" : "未签名" }}</span>
         </button>
         <button type="button" class="person-summary" @click="emit('activate', person)">
           <strong>{{ displayName(person) }}</strong>
@@ -115,12 +108,10 @@ const props = defineProps<{
   confirmSending: boolean;
   confirmableCount: number;
   readyTargetLabel?: string;
-  showSignaturePreview?: boolean;
 }>();
 
 const emit = defineEmits<{
   activate: [person: Dict];
-  "image-error": [person: Dict];
   "web-sign": [person: Dict];
   "send-link": [person: Dict, forceResign: boolean];
   "send-unsigned-links": [];
@@ -168,9 +159,7 @@ watch(() => props.role, () => {
 });
 
 function personHasStoredSignature(person: Dict | null | undefined): boolean {
-  if (!person?.has_signature) return false;
-  return props.showSignaturePreview === false
-    || Boolean(String(person?.signature_preview_url || "").trim());
+  return Boolean(person?.has_signature);
 }
 
 function personStatus(person: Dict): string {

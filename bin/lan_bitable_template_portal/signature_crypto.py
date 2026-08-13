@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -264,8 +265,8 @@ class SignatureCryptoManager:
             if value.get("version") == SIGNATURE_CRYPTO_VERSION:
                 return dict(value)
             for key in ("text", "value"):
-                nested = str(value.get(key) or "").strip()
-                if nested:
+                nested = value.get(key)
+                if nested not in (None, ""):
                     parsed = SignatureCryptoManager.metadata_from_field(nested)
                     if parsed:
                         return parsed
@@ -305,10 +306,22 @@ class SignatureCryptoManager:
     def is_portable_metadata(metadata: Any) -> bool:
         if not isinstance(metadata, dict):
             return False
+        try:
+            version = int(metadata.get("version") or 0)
+            dek = _unb64(str(metadata.get("portable_dek") or ""))
+            file_nonce = _unb64(str(metadata.get("file_nonce") or ""))
+        except (ValueError, TypeError, UnicodeError, binascii.Error):
+            return False
+        signature_sha = str(metadata.get("signature_sha256") or "").strip()
+        encrypted_sha = str(metadata.get("encrypted_sha256") or "").strip()
         return (
-            metadata.get("version") == SIGNATURE_CRYPTO_VERSION
-            and bool(metadata.get("portable_dek"))
-            and bool(metadata.get("file_nonce"))
+            version == SIGNATURE_CRYPTO_VERSION
+            and str(metadata.get("alg") or "") == "AES-256-GCM"
+            and len(dek) == 32
+            and len(file_nonce) == 12
+            and isinstance(metadata.get("aad"), dict)
+            and bool(re.fullmatch(r"[0-9a-fA-F]{64}", signature_sha))
+            and bool(re.fullmatch(r"[0-9a-fA-F]{64}", encrypted_sha))
         )
 
     @staticmethod
@@ -332,20 +345,73 @@ class SignatureCryptoManager:
         return self.cache_root / safe_record[:2] / f"{safe_record}_{safe_hash}.png"
 
     def read_cache(self, record_id: str, signature_sha256: str) -> bytes | None:
-        path = self.cache_path(record_id, signature_sha256)
-        try:
-            if path.exists():
-                return path.read_bytes()
-        except OSError:
+        expected_sha = str(signature_sha256 or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
             return None
+        path = self.cache_path(record_id, expected_sha)
+        checksum_path = path.with_suffix(path.suffix + ".sha256")
+        with self._lock:
+            try:
+                if not path.exists():
+                    checksum_path.unlink(missing_ok=True)
+                    return None
+                if not checksum_path.exists():
+                    path.unlink(missing_ok=True)
+                    return None
+                cached = path.read_bytes()
+                cached_sha = checksum_path.read_text(encoding="ascii").strip().lower()
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", cached_sha)
+                    and hashlib.sha256(cached).hexdigest() == cached_sha
+                ):
+                    return cached
+                path.unlink(missing_ok=True)
+                checksum_path.unlink(missing_ok=True)
+            except OSError:
+                return None
         return None
 
     def write_cache(self, record_id: str, signature_sha256: str, png_bytes: bytes) -> None:
-        path = self.cache_path(record_id, signature_sha256)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_bytes(png_bytes)
-            os.replace(tmp, path)
-        except OSError:
+        expected_sha = str(signature_sha256 or "").strip().lower()
+        if (
+            not png_bytes
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha)
+        ):
             return
+        path = self.cache_path(record_id, expected_sha)
+        checksum_path = path.with_suffix(path.suffix + ".sha256")
+        tmp_names: list[str] = []
+        with self._lock:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, data_tmp = tempfile.mkstemp(
+                    prefix=f"{path.stem}_",
+                    suffix=".tmp",
+                    dir=str(path.parent),
+                )
+                tmp_names.append(data_tmp)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(png_bytes)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                checksum_fd, checksum_tmp = tempfile.mkstemp(
+                    prefix=f"{path.stem}_checksum_",
+                    suffix=".tmp",
+                    dir=str(path.parent),
+                )
+                tmp_names.append(checksum_tmp)
+                with os.fdopen(checksum_fd, "w", encoding="ascii") as fh:
+                    fh.write(hashlib.sha256(png_bytes).hexdigest())
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(data_tmp, path)
+                os.replace(checksum_tmp, checksum_path)
+            except OSError:
+                return
+            finally:
+                for tmp_name in tmp_names:
+                    try:
+                        if os.path.exists(tmp_name):
+                            os.remove(tmp_name)
+                    except OSError:
+                        pass

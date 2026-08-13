@@ -52,26 +52,6 @@ export function useMopSignatureSelection(
     emitChanged();
   }
 
-  function markSignatureUnavailable(recordId: unknown): void {
-    const id = String(recordId || "").trim();
-    if (!id) return;
-    updateRememberedSignaturePerson(id, {
-      has_signature: false,
-      signature_count: 0,
-      signature_preview_url: "",
-      signature_version: "",
-    });
-  }
-
-  function markOtherSignatureUnavailable(person: LooseDict): void {
-    const personKey = signaturePersonKey(person);
-    temporarySignatures.value = temporarySignatures.value.map((item) => (
-      signaturePersonKey(item) === personKey
-        ? { ...item, has_signature: false, signature_preview_url: "", status: "pending" }
-        : item
-    ));
-  }
-
   function selectSignaturePerson(role: MopSignatureRole, recordId: string): void {
     const recordText = String(recordId || "");
     if (!recordText) return;
@@ -200,8 +180,6 @@ export function useMopSignatureSelection(
     signatureSelectedRecords,
     rememberSignaturePeople,
     updateRememberedSignaturePerson,
-    markSignatureUnavailable,
-    markOtherSignatureUnavailable,
     selectSignaturePerson,
     removeSignaturePerson,
     unhideSignatureKey,

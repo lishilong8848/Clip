@@ -7,7 +7,7 @@ function roleLabel(role: MopSignatureRole): string {
 }
 
 export function mopPersonHasUsableSignature(person: LooseDict | null | undefined): boolean {
-  return Boolean(person?.has_signature && String(person?.signature_preview_url || "").trim());
+  return Boolean(person?.has_signature);
 }
 
 export function temporarySignatureDisplayNumber(name: string): number {

@@ -498,7 +498,74 @@ class _FakeSignatureUsageRouteService:
         return {"messages": [], "skipped": []}
 
 
+class _FakeMopSignatureRouteService:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def fill_engineer_mop_file(self, **kwargs) -> dict:
+        self.calls.append(dict(kwargs))
+        return {"file_name": "filled.xlsx", "inserted": 2}
+
+
 class BackendApiModelTests(unittest.TestCase):
+    def test_signature_images_are_never_exposed_to_browser(self):
+        client = TestClient(
+            FastAPIPortalController(host="127.0.0.1", port=18766)._build_app()
+        )
+
+        for path in (
+            "/api/signatures/image?record_id=person-1&token=secret",
+            "/api/signatures/temporary/image?temporary_id=temp-1&token=secret",
+        ):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 404, response.text)
+            self.assertIn("仅供后端生成文件", response.json()["error"])
+
+    def test_mop_fill_route_forwards_operator_and_signature_context(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        service = _FakeMopSignatureRouteService()
+        session_id = "mop-signature-route-session"
+        PortalRuntime.service = service
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "MOP操作人", "open_id": "ou_mop_operator"},
+                "role": "admin",
+                "allowed_scopes": ["A"],
+                "expires_at": 9999999999,
+            }
+        client = TestClient(controller._build_app())
+        headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+        try:
+            with patch.object(controller, "_authorized_scope_or_error", return_value="A"):
+                response = client.post(
+                    "/api/engineer/mop/fill",
+                    headers=headers,
+                    json={
+                        "scope": "A",
+                        "notice_key": "notice-1",
+                        "signature_context_key": "notice-1|mop:mop-1|attachment:file-1",
+                        "local_file_path": "local.xlsx",
+                        "signatures": [
+                            {"source": "staff", "role": "implementer", "record_id": "person-1"}
+                        ],
+                    },
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(len(service.calls), 1)
+            self.assertEqual(service.calls[0]["operator_open_id"], "ou_mop_operator")
+            self.assertEqual(service.calls[0]["notice_key"], "notice-1")
+            self.assertEqual(
+                service.calls[0]["signature_context_key"],
+                "notice-1|mop:mop-1|attachment:file-1",
+            )
+        finally:
+            PortalRuntime.service = original_service
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+
     def test_deletion_audit_failure_never_changes_business_result(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         with patch.object(

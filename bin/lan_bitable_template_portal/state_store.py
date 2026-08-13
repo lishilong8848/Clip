@@ -10253,15 +10253,68 @@ class LanPortalStateStore:
                 self._ensure_schema_locked(conn)
                 row = conn.execute(
                     """
-                    SELECT record_id, expires_at
+                    SELECT 1
                     FROM signature_link_tokens
-                    WHERE token_hash = ?
+                    WHERE record_id = ?
+                      AND token_hash = ?
+                      AND expires_at >= ?
+                      AND used_at IS NULL
                     """,
-                    (token_hash,),
+                    (record_id, token_hash, now),
                 ).fetchone()
-        if not row:
+        return row is not None
+
+    def consume_signature_link_token(self, record_id: str, token: str) -> bool:
+        record_id = self._text(record_id)
+        token = str(token or "").strip()
+        if not record_id or not token:
             return False
-        return self._text(row["record_id"]) == record_id and float(row["expires_at"] or 0) >= now
+        token_hash = self._signature_link_token_hash(token)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    """
+                    UPDATE signature_link_tokens
+                    SET used_at = ?
+                    WHERE record_id = ?
+                      AND token_hash = ?
+                      AND expires_at >= ?
+                      AND used_at IS NULL
+                    """,
+                    (now, record_id, token_hash, now),
+                )
+                consumed = cursor.rowcount == 1
+                conn.commit()
+        return consumed
+
+    def release_signature_link_token(self, record_id: str, token: str) -> bool:
+        record_id = self._text(record_id)
+        token = str(token or "").strip()
+        if not record_id or not token:
+            return False
+        token_hash = self._signature_link_token_hash(token)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    """
+                    UPDATE signature_link_tokens
+                    SET used_at = NULL
+                    WHERE record_id = ?
+                      AND token_hash = ?
+                      AND expires_at >= ?
+                      AND used_at IS NOT NULL
+                    """,
+                    (record_id, token_hash, now),
+                )
+                released = cursor.rowcount == 1
+                conn.commit()
+        return released
 
     def mark_signature_link_token_used(self, *, record_id: str, token: str) -> None:
         record_id = self._text(record_id)

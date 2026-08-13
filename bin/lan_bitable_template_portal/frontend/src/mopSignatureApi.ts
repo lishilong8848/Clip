@@ -40,13 +40,23 @@ export function saveTemporarySignature(temporaryId: string, signaturePng: string
   });
 }
 
-export function saveExternalSignature(recordId: string, signerName: string, signaturePng: string): Promise<Dict> {
+export function saveExternalSignature(
+  recordId: string,
+  signerName: string,
+  signaturePng: string,
+  scope: string,
+  noticeKey: string,
+  role: string,
+): Promise<Dict> {
   return requestJson("/api/signatures/external/save", {
     method: "POST",
     body: JSON.stringify({
       record_id: recordId,
       signer_name: signerName,
       signature_png: signaturePng,
+      scope,
+      notice_key: noticeKey,
+      role,
     }),
   });
 }

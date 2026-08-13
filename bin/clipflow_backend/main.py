@@ -2187,6 +2187,8 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                fill_kwargs = engineer_mop_fill_kwargs_from_payload(payload, scope=scope)
+                fill_kwargs["operator_open_id"] = str(user.get("open_id") or "")
                 data = await audited_thread_call(
                     PortalRuntime.state_store,
                     PortalRuntime.service.fill_engineer_mop_file,
@@ -2198,7 +2200,7 @@ class FastAPIPortalController:
                     audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
                     audit_source_record_id=str(payload.get("source_record_id") or ""),
                     audit_metadata={"file_name": payload.get("mop_file_name")},
-                    **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
+                    **fill_kwargs,
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -2294,7 +2296,6 @@ class FastAPIPortalController:
                     scope=str(request.query_params.get("scope") or ""),
                     query=str(request.query_params.get("q") or ""),
                     record_id=record_id,
-                    link_token=link_token if session is None else "",
                     notice_key=str(request.query_params.get("notice_key") or ""),
                     operator_open_id=str((session.get("user") or {}).get("open_id") or "") if isinstance(session, dict) and isinstance(session.get("user"), dict) else "",
                     limit=int(str(request.query_params.get("limit") or "80") or 80),
@@ -2306,30 +2307,10 @@ class FastAPIPortalController:
 
         @app.get("/api/signatures/image")
         async def signatures_image(request: Request):
-            try:
-                session = self._current_session(request)
-                record_id = str(request.query_params.get("record_id") or "")
-                if session is None and not PortalRuntime.service.validate_signature_link_token(
-                    record_id=record_id,
-                    token=str(request.query_params.get("token") or ""),
-                ):
-                    return JSONResponse(
-                        {"ok": False, "error": "签名链接无效或已过期。"},
-                        status_code=404,
-                    )
-                content, content_type = await asyncio.to_thread(
-                    PortalRuntime.service.signature_image_bytes,
-                    record_id=record_id,
-                )
-                return Response(
-                    content=content,
-                    media_type=content_type,
-                    headers={
-                        "Cache-Control": "private, max-age=300",
-                    },
-                )
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=404)
+            return JSONResponse(
+                {"ok": False, "error": "签名图片仅供后端生成文件使用。"},
+                status_code=404,
+            )
 
         @app.get("/api/signatures/usage-confirm")
         async def signatures_usage_confirm(request: Request):
@@ -2381,56 +2362,10 @@ class FastAPIPortalController:
 
         @app.get("/api/signatures/temporary/image")
         async def temporary_signature_image(request: Request):
-            try:
-                session = self._current_session(request)
-                temp_id = str(request.query_params.get("temporary_id") or "")
-                record_id = str(request.query_params.get("record_id") or "")
-                token = str(request.query_params.get("token") or "")
-                if record_id:
-                    if session is None:
-                        return self._auth_required_response()
-                    requested_scope = str(request.query_params.get("scope") or "").strip()
-                    if requested_scope:
-                        self._authorized_scope_or_error(session, requested_scope)
-                    content, content_type = await asyncio.to_thread(
-                        PortalRuntime.service.external_signature_image_bytes,
-                        record_id=record_id,
-                    )
-                elif session is None:
-                    await asyncio.to_thread(
-                        PortalRuntime.service.temporary_signature_session,
-                        temp_id=temp_id,
-                        token=token,
-                    )
-                    content, content_type = await asyncio.to_thread(
-                        PortalRuntime.service.temporary_signature_image_bytes,
-                        temp_id=temp_id,
-                    )
-                else:
-                    temp_session = await asyncio.to_thread(
-                        PortalRuntime.state_store.get_mop_temporary_signature_session,
-                        temp_id=temp_id,
-                    )
-                    if not temp_session:
-                        return JSONResponse(
-                            {"ok": False, "error": "临时签名记录不存在。"},
-                            status_code=404,
-                        )
-                    self._authorized_scope_or_error(
-                        session,
-                        str(temp_session.get("scope") or "ALL"),
-                    )
-                    content, content_type = await asyncio.to_thread(
-                        PortalRuntime.service.temporary_signature_image_bytes,
-                        temp_id=temp_id,
-                    )
-                return Response(
-                    content=content,
-                    media_type=content_type,
-                    headers={"Cache-Control": "private, max-age=300"},
-                )
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=404)
+            return JSONResponse(
+                {"ok": False, "error": "签名图片仅供后端生成文件使用。"},
+                status_code=404,
+            )
 
         @app.post("/api/signatures/save")
         async def signatures_save(request: Request):
@@ -2445,35 +2380,40 @@ class FastAPIPortalController:
                 ).to_payload()
                 record_id = str(payload.get("record_id") or "")
                 link_token = str(payload.get("token") or "")
+                token_consumed = False
                 if session is None:
-                    if not PortalRuntime.service.validate_signature_link_token(
+                    token_consumed = await asyncio.to_thread(
+                        PortalRuntime.service.consume_signature_link_token,
                         record_id=record_id,
                         token=link_token,
-                    ):
+                    )
+                    if not token_consumed:
                         return JSONResponse(
                             {"ok": False, "error": "签名链接无效或已过期。"},
                             status_code=403,
                         )
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.save_signature_for_person,
-                    record_id=record_id,
-                    signature_png=str(payload.get("signature_png") or ""),
-                    signer_name=str(payload.get("signer_name") or ""),
-                    link_token=link_token if session is None else "",
-                    operator_open_id=str(((session or {}).get("user") or {}).get("open_id") or ""),
-                    operator_name=str(
-                        ((session or {}).get("user") or {}).get("name")
-                        or ((session or {}).get("user") or {}).get("en_name")
-                        or ""
-                    ),
-                    require_operator_match=bool(session is not None),
-                )
-                if session is None:
-                    await asyncio.to_thread(
-                        PortalRuntime.service.mark_signature_link_token_used,
+                try:
+                    data = await asyncio.to_thread(
+                        PortalRuntime.service.save_signature_for_person,
                         record_id=record_id,
-                        token=link_token,
+                        signature_png=str(payload.get("signature_png") or ""),
+                        signer_name=str(payload.get("signer_name") or ""),
+                        operator_open_id=str(((session or {}).get("user") or {}).get("open_id") or ""),
+                        operator_name=str(
+                            ((session or {}).get("user") or {}).get("name")
+                            or ((session or {}).get("user") or {}).get("en_name")
+                            or ""
+                        ),
+                        require_operator_match=bool(session is not None),
                     )
+                except Exception:
+                    if token_consumed:
+                        await asyncio.to_thread(
+                            PortalRuntime.service.release_signature_link_token,
+                            record_id=record_id,
+                            token=link_token,
+                        )
+                    raise
                 return {"ok": True, "data": data}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -2491,11 +2431,19 @@ class FastAPIPortalController:
                         max_bytes=4 * 1024 * 1024,
                     )
                 ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "ALL")
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 data = await asyncio.to_thread(
                     PortalRuntime.service.save_external_signature_for_person,
                     record_id=str(payload.get("record_id") or ""),
                     signature_png=str(payload.get("signature_png") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
+                    scope=scope,
+                    notice_key=str(payload.get("notice_key") or ""),
+                    role=str(payload.get("role") or "implementer"),
+                    operator_open_id=str(user.get("open_id") or ""),
                 )
                 return {"ok": True, "data": data}
             except Exception as exc:
@@ -2561,6 +2509,11 @@ class FastAPIPortalController:
                         session,
                         str(temp_session.get("scope") or "ALL"),
                     )
+                    user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                    if str(temp_session.get("created_by") or "").strip() != str(
+                        user.get("open_id") or ""
+                    ).strip():
+                        raise PortalError("当前账号无权修改该临时签名。")
                 data = await asyncio.to_thread(
                     PortalRuntime.service.save_temporary_signature,
                     temp_id=temp_id,

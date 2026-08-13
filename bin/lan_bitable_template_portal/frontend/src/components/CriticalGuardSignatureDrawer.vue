@@ -58,9 +58,7 @@
               :bulk-link-sending="bulkLinkSending"
               :confirm-sending="confirmationSending"
               :confirmable-count="companyConfirmableCount"
-              :show-signature-preview="false"
               @activate="activatePerson"
-              @image-error="markImageUnavailable"
               @web-sign="openWebSignature"
               @send-link="sendCompanyLink"
               @send-unsigned-links="sendAllUnsignedCompanyLinks"
@@ -88,9 +86,7 @@
             :person-web-sign-disabled-reason="otherWebSignDisabledReason"
             :draft-status-text="draftStatusText"
             :draft-disabled-reason="draftDisabledReason"
-            :show-signature-preview="false"
             @add-other="addTemporaryDraft"
-            @image-error="markImageUnavailable"
             @web-sign-person="openWebSignature"
             @send-temp-person="sendExistingTemporaryLink"
             @remove-person="removeOtherPerson"
@@ -215,6 +211,10 @@ let companySearchTimer: ReturnType<typeof setTimeout> | null = null;
 let externalSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let loadGeneration = 0;
+let companyLoadSequence = 0;
+let temporaryLoadSequence = 0;
+let externalLoadSequence = 0;
+let pendingStatusRefreshInFlight = false;
 
 const currentOpenId = computed(() => String(props.currentUserOpenId || "").trim());
 
@@ -389,18 +389,34 @@ function initializeSelection(): void {
   activePersonKey.value = "";
 }
 
+function loadContextIsCurrent(generation: number, scope: string, contextKey: string): boolean {
+  return generation === loadGeneration
+    && props.open
+    && props.scope === scope
+    && props.contextKey === contextKey;
+}
+
 async function loadCompanyPeople(refresh = false, silent = false): Promise<void> {
+  if (!props.open) return;
+  const sequence = ++companyLoadSequence;
   const generation = loadGeneration;
+  const requestScope = props.scope;
+  const requestContextKey = props.contextKey;
+  const requestQuery = companySearch.value;
   companyLoading.value = true;
   try {
     const data = await fetchSignaturePeople({
-      scope: props.scope,
-      q: companySearch.value,
-      noticeKey: props.contextKey,
+      scope: requestScope,
+      q: requestQuery,
+      noticeKey: requestContextKey,
       refresh,
       limit: 100,
     });
-    if (generation !== loadGeneration || !props.open) return;
+    if (
+      sequence !== companyLoadSequence
+      || !loadContextIsCurrent(generation, requestScope, requestContextKey)
+      || companySearch.value !== requestQuery
+    ) return;
     const items = Array.isArray(data.people) ? data.people.map(protectedSigner) : [];
     companyPeople.value = items;
     companyTotal.value = Number(data.count || items.length);
@@ -414,17 +430,29 @@ async function loadCompanyPeople(refresh = false, silent = false): Promise<void>
     if (reconcileDuplicateSelections()) emitStatusRefresh();
     if (silent) emitStatusRefresh();
   } catch (error: any) {
-    if (!silent) setStatus(error?.message || "公司人员读取失败。", "error");
+    if (
+      sequence === companyLoadSequence
+      && loadContextIsCurrent(generation, requestScope, requestContextKey)
+      && companySearch.value === requestQuery
+      && !silent
+    ) setStatus(error?.message || "公司人员读取失败。", "error");
   } finally {
-    if (generation === loadGeneration) companyLoading.value = false;
+    if (sequence === companyLoadSequence && generation === loadGeneration) companyLoading.value = false;
   }
 }
 
 async function loadTemporaryStatuses(silent = false): Promise<void> {
+  if (!props.open) return;
+  const sequence = ++temporaryLoadSequence;
   const generation = loadGeneration;
+  const requestScope = props.scope;
+  const requestContextKey = props.contextKey;
   try {
-    const data = await fetchTemporarySignatures(props.scope, props.contextKey);
-    if (generation !== loadGeneration || !props.open) return;
+    const data = await fetchTemporarySignatures(requestScope, requestContextKey);
+    if (
+      sequence !== temporaryLoadSequence
+      || !loadContextIsCurrent(generation, requestScope, requestContextKey)
+    ) return;
     const items = Array.isArray(data.items) ? data.items.map(protectedSigner) : [];
     temporaryPeople.value = items;
     const byId = new Map(items.map((item: Dict) => [String(item.temp_id || ""), item]));
@@ -440,38 +468,60 @@ async function loadTemporaryStatuses(silent = false): Promise<void> {
     if (reconcileDuplicateSelections()) emitStatusRefresh();
     if (silent) emitStatusRefresh();
   } catch (error: any) {
-    if (!silent) setStatus(error?.message || "临时签名状态读取失败。", "error");
+    if (
+      sequence === temporaryLoadSequence
+      && loadContextIsCurrent(generation, requestScope, requestContextKey)
+      && !silent
+    ) setStatus(error?.message || "临时签名状态读取失败。", "error");
   }
 }
 
 async function loadExternalPeople(refresh = false): Promise<void> {
+  if (!props.open) return;
+  const sequence = ++externalLoadSequence;
   externalLoading.value = true;
   const generation = loadGeneration;
+  const requestScope = props.scope;
+  const requestContextKey = props.contextKey;
+  const requestQuery = externalSearch.value;
   try {
     const data = await fetchExternalSignaturePeople({
-      scope: props.scope,
-      q: externalSearch.value,
-      noticeKey: props.contextKey,
+      scope: requestScope,
+      q: requestQuery,
+      noticeKey: requestContextKey,
       refresh,
       limit: 100,
     });
-    if (generation !== loadGeneration || !props.open) return;
+    if (
+      sequence !== externalLoadSequence
+      || !loadContextIsCurrent(generation, requestScope, requestContextKey)
+      || externalSearch.value !== requestQuery
+    ) return;
     externalPeople.value = Array.isArray(data.people) ? data.people.map(protectedSigner) : [];
     externalTotal.value = Number(data.count || externalPeople.value.length);
     if (reconcileDuplicateSelections()) emitStatusRefresh();
   } catch (error: any) {
-    setStatus(error?.message || "外部签名读取失败。", "error");
+    if (
+      sequence === externalLoadSequence
+      && loadContextIsCurrent(generation, requestScope, requestContextKey)
+      && externalSearch.value === requestQuery
+    ) setStatus(error?.message || "外部签名读取失败。", "error");
   } finally {
-    if (generation === loadGeneration) externalLoading.value = false;
+    if (sequence === externalLoadSequence && generation === loadGeneration) externalLoading.value = false;
   }
 }
 
 async function refreshPendingStatuses(): Promise<void> {
-  if (!props.open || document.hidden || !pendingCount.value) return;
-  await Promise.all([
-    loadCompanyPeople(false, true),
-    loadTemporaryStatuses(true),
-  ]);
+  if (!props.open || document.hidden || !pendingCount.value || pendingStatusRefreshInFlight) return;
+  pendingStatusRefreshInFlight = true;
+  try {
+    await Promise.all([
+      loadCompanyPeople(false, true),
+      loadTemporaryStatuses(true),
+    ]);
+  } finally {
+    pendingStatusRefreshInFlight = false;
+  }
 }
 
 function startPolling(): void {
@@ -939,7 +989,14 @@ async function saveWebSignature(): Promise<void> {
       saved = await saveTemporarySignature(String(person.temp_id || ""), png);
       replaceOrAddOther({ ...person, ...saved, source: "temporary", role: "inspector", ready: true });
     } else if (source === "external") {
-      saved = await saveExternalSignature(String(person.record_id || ""), personName(person), png);
+      saved = await saveExternalSignature(
+        String(person.record_id || ""),
+        personName(person),
+        png,
+        props.scope,
+        props.contextKey,
+        "inspector",
+      );
       replaceOrAddOther({ ...person, ...saved, source: "external", role: "inspector", usage_confirmed: true, ready: true });
     } else {
       saved = await saveStaffSignature(String(person.record_id || ""), personName(person), png);
@@ -961,13 +1018,6 @@ async function saveWebSignature(): Promise<void> {
   }
 }
 
-function markImageUnavailable(person: Dict): void {
-  person.has_signature = false;
-  person.signature_preview_url = "";
-  person.ready = false;
-  emitStatusRefresh();
-}
-
 function requestClose(): void {
   if (padSaving.value) return;
   if (drafts.value.length) {
@@ -982,10 +1032,12 @@ function handleKeydown(event: KeyboardEvent): void {
   if (props.open && event.key === "Escape" && !activePadPerson.value) requestClose();
 }
 
-watch(() => [props.open, props.contextKey] as const, ([open]) => {
+watch(() => [props.open, props.scope, props.contextKey] as const, ([open]) => {
   loadGeneration += 1;
   if (!open) {
     stopPolling();
+    companyLoading.value = false;
+    externalLoading.value = false;
     return;
   }
   initializeSelection();
@@ -999,12 +1051,16 @@ watch(() => [props.open, props.contextKey] as const, ([open]) => {
 
 watch(companySearch, () => {
   if (companySearchTimer) clearTimeout(companySearchTimer);
-  companySearchTimer = setTimeout(() => void loadCompanyPeople(), 300);
+  companySearchTimer = setTimeout(() => {
+    if (props.open) void loadCompanyPeople();
+  }, 300);
 });
 
 watch(externalSearch, () => {
   if (externalSearchTimer) clearTimeout(externalSearchTimer);
-  externalSearchTimer = setTimeout(() => void loadExternalPeople(), 300);
+  externalSearchTimer = setTimeout(() => {
+    if (props.open) void loadExternalPeople();
+  }, 300);
 });
 
 watch(() => props.open, (open) => {

@@ -15,7 +15,9 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.signature_crypto import (
     LEGACY_SIGNATURE_ENCRYPTED_MAGIC,
     SIGNATURE_ENCRYPTED_MAGIC,
+    SignatureCryptoError,
     SignatureCryptoManager,
+    SignatureNotEncrypted,
 )
 import lan_bitable_template_portal.signature_crypto as signature_crypto
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -85,6 +87,109 @@ class SignatureCryptoTests(unittest.TestCase):
             SignatureCryptoManager.metadata_from_field([{"text": text}])["file_nonce"],
             "ghi",
         )
+        self.assertEqual(
+            SignatureCryptoManager.metadata_from_field(
+                {"value": [{"text": text}]}
+            )["portable_dek"],
+            "abc",
+        )
+
+    def test_v2_metadata_validation_rejects_incomplete_or_corrupted_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = SignatureCryptoManager(
+                master_key_path=Path(tmp) / "secure" / "signature_master.key",
+                cache_root=Path(tmp) / "signature_cache",
+            )
+            encrypted, metadata = manager.encrypt_signature(
+                b"portable-signature",
+                manager.build_aad(
+                    app_token="app",
+                    table_id="table",
+                    record_id="rec_v2",
+                    source="staff",
+                ),
+            )
+            self.assertTrue(manager.is_portable_metadata(metadata))
+
+            for field, value in (
+                ("portable_dek", "invalid"),
+                ("file_nonce", "invalid"),
+                ("signature_sha256", "short"),
+                ("encrypted_sha256", "short"),
+                ("aad", "not-an-object"),
+            ):
+                with self.subTest(field=field):
+                    broken = dict(metadata)
+                    broken[field] = value
+                    self.assertFalse(manager.is_portable_metadata(broken))
+                    with self.assertRaises(SignatureCryptoError):
+                        manager.decrypt_signature(encrypted, broken)
+
+            tampered = encrypted[:-1] + bytes([encrypted[-1] ^ 1])
+            with self.assertRaisesRegex(SignatureCryptoError, "附件与密钥元数据不匹配"):
+                manager.decrypt_signature(tampered, metadata)
+            with self.assertRaises(SignatureNotEncrypted):
+                manager.decrypt_signature(b"", metadata)
+
+    def test_v2_is_portable_for_staff_temporary_and_external_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for source, table_id in (
+                ("staff", "tbl_staff"),
+                ("temporary", "tbl_temporary"),
+                ("external", "tbl_external"),
+            ):
+                with self.subTest(source=source):
+                    manager = SignatureCryptoManager(
+                        master_key_path=Path(tmp) / source / "signature_master.key",
+                        cache_root=Path(tmp) / "signature_cache",
+                    )
+                    plain = f"{source}-signature".encode("utf-8")
+                    encrypted, metadata = manager.encrypt_signature(
+                        plain,
+                        manager.build_aad(
+                            app_token="app",
+                            table_id=table_id,
+                            record_id=f"rec_{source}",
+                            source=source,
+                            open_id=f"ou_{source}",
+                            display_name=source,
+                        ),
+                    )
+                    restarted = SignatureCryptoManager(
+                        master_key_path=Path(tmp) / "different-machine" / source / "signature_master.key",
+                        cache_root=Path(tmp) / "signature_cache",
+                    )
+                    self.assertEqual(
+                        restarted.decrypt_signature(
+                            encrypted,
+                            SignatureCryptoManager.metadata_to_text(metadata),
+                        ),
+                        plain,
+                    )
+                    self.assertFalse(restarted.master_key_path.exists())
+
+    def test_cache_supports_normalized_png_and_evicts_corruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = SignatureCryptoManager(
+                master_key_path=Path(tmp) / "secure" / "signature_master.key",
+                cache_root=Path(tmp) / "signature_cache",
+            )
+            encrypted_plain = b"original-signature"
+            normalized_png = b"normalized-transparent-signature"
+            signature_sha = hashlib.sha256(encrypted_plain).hexdigest()
+            manager.write_cache("rec_cache", signature_sha, normalized_png)
+            cache_path = manager.cache_path("rec_cache", signature_sha)
+            checksum_path = cache_path.with_suffix(cache_path.suffix + ".sha256")
+            self.assertEqual(manager.read_cache("rec_cache", signature_sha), normalized_png)
+
+            cache_path.write_bytes(b"corrupted-cache")
+            self.assertIsNone(manager.read_cache("rec_cache", signature_sha))
+            self.assertFalse(cache_path.exists())
+            self.assertFalse(checksum_path.exists())
+
+            manager.write_cache("rec_cache", "not-a-sha256", normalized_png)
+            self.assertFalse(cache_path.exists())
+            self.assertIsNone(manager.read_cache("rec_cache", "not-a-sha256"))
 
     def test_aesgcm_can_be_reloaded_after_initial_missing_state(self):
         with tempfile.TemporaryDirectory() as tmp:

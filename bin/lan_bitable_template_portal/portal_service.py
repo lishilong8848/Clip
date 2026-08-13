@@ -1110,6 +1110,7 @@ def engineer_mop_fill_kwargs_from_payload(
         "mop_title": str(payload.get("mop_title") or ""),
         "mop_file_name": str(payload.get("mop_file_name") or ""),
         "notice_key": str(payload.get("notice_key") or ""),
+        "signature_context_key": str(payload.get("signature_context_key") or ""),
         "sheet_name": str(payload.get("sheet_name") or ""),
         "fields": _payload_list(payload, "fields"),
         "checkboxes": _payload_list(payload, "checkboxes"),
@@ -12098,10 +12099,15 @@ class MaintenancePortalService:
         repair_building_codes = [
             code for code in BUILDING_SCOPE_CODES if code in repair_building_codes
         ]
+        event_building_set = set(event_building_codes)
+        repair_building_set = set(repair_building_codes)
         if (
-            event_building_codes
-            and repair_building_codes
-            and set(event_building_codes) != set(repair_building_codes)
+            event_building_set
+            and repair_building_set
+            and not (
+                event_building_set.issubset(repair_building_set)
+                or repair_building_set.issubset(event_building_set)
+            )
         ):
             raise PortalError(
                 "关联事件机楼"
@@ -32076,18 +32082,6 @@ class MaintenancePortalService:
         )
         return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
-    @staticmethod
-    def _signature_preview_url(*, record_id: str, signature_version: str, link_token: str = "") -> str:
-        record_id = str(record_id or "").strip()
-        signature_version = str(signature_version or "").strip()
-        if not record_id or not signature_version:
-            return ""
-        url = f"/api/signatures/image?record_id={quote(record_id, safe='')}&v={quote(signature_version, safe='')}"
-        link_token = str(link_token or "").strip()
-        if link_token:
-            url += f"&token={quote(link_token, safe='')}"
-        return url
-
     @classmethod
     def _transparent_signature_png(cls, signature_bytes: bytes) -> bytes:
         """Normalize a canvas/image signature to black ink on transparent background."""
@@ -32696,7 +32690,7 @@ class MaintenancePortalService:
                     signature_crypto_metadata
                 )
                 building = self._mop_field_text(fields, ["楼栋", "机楼/专业"])
-                has_signature = bool(signature_version)
+                has_signature = bool(signature_version and portable_signature)
                 person = {
                     "record_id": record_id,
                     "name": name,
@@ -32713,15 +32707,10 @@ class MaintenancePortalService:
                     "signature_version": signature_version,
                     "signature_crypto_version": signature_crypto_version,
                     "portable_signature": portable_signature,
-                    "latest_publish_time": latest_publish_time,
-                    "signature_preview_url": (
-                        self._signature_preview_url(
-                            record_id=record_id,
-                            signature_version=signature_version,
-                        )
-                        if record_id and has_signature
-                        else ""
+                    "signature_requires_resign": bool(
+                        signature_version and not portable_signature
                     ),
+                    "latest_publish_time": latest_publish_time,
                     "raw_fields": fields,
                 }
                 people.append(person)
@@ -32755,7 +32744,6 @@ class MaintenancePortalService:
         scope: str = "",
         query: str = "",
         record_id: str = "",
-        link_token: str = "",
         notice_key: str = "",
         operator_open_id: str = "",
         limit: int = 80,
@@ -32804,19 +32792,7 @@ class MaintenancePortalService:
             if matches_query(person)
         ]
         limited = filtered[: max(1, min(500, int(limit or 80)))]
-        link_token = str(link_token or "").strip()
-        if link_token and record_id:
-            for person in limited:
-                if str(person.get("record_id") or "") != record_id:
-                    continue
-                signature_version = str(person.get("signature_version") or "")
-                if signature_version:
-                    person["signature_preview_url"] = self._signature_preview_url(
-                        record_id=record_id,
-                        signature_version=signature_version,
-                        link_token=link_token,
-                    )
-        if notice_key and operator_open_id:
+        if operator_open_id:
             for person in limited:
                 signer_record_id = str(person.get("record_id") or "").strip()
                 signer_open_id = str(person.get("open_id") or "").strip()
@@ -32825,7 +32801,7 @@ class MaintenancePortalService:
                     and signer_open_id == operator_open_id
                 )
                 usage_status = "confirmed" if confirmed else ""
-                if not confirmed and signer_record_id and signer_open_id:
+                if notice_key and not confirmed and signer_record_id and signer_open_id:
                     usage_status = self._state_store.mop_signature_usage_status(
                         scope=scope,
                         notice_key=notice_key,
@@ -32850,7 +32826,6 @@ class MaintenancePortalService:
                 if person.get("has_signature") and not person.get("portable_signature"):
                     person["has_signature"] = False
                     person["signature_requires_resign"] = True
-                person.pop("signature_preview_url", None)
                 person.pop("signature_file_token", None)
         return {
             "people": limited,
@@ -32859,17 +32834,6 @@ class MaintenancePortalService:
             "scope": scope,
             "loaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-
-    @staticmethod
-    def _external_signature_preview_url(*, record_id: str, signature_version: str) -> str:
-        record_id = str(record_id or "").strip()
-        signature_version = str(signature_version or "").strip()
-        if not record_id or not signature_version:
-            return ""
-        return (
-            f"/api/signatures/temporary/image?record_id={quote(record_id, safe='')}"
-            f"&v={quote(signature_version, safe='')}"
-        )
 
     def _load_external_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
         now = time.time()
@@ -32944,16 +32908,13 @@ class MaintenancePortalService:
                         "specialty": specialty,
                         "employee_no": self._mop_field_text(fields, [TEMP_SIGNATURE_EMPLOYEE_NO_FIELD, "工号"]),
                         "certificate": self._mop_field_text(fields, [TEMP_SIGNATURE_CERT_FIELD, "持证"]),
-                        "has_signature": True,
+                        "has_signature": bool(portable_signature),
                         "signature_count": len(attachments),
                         "signature_version": signature_version,
                         "signature_crypto_version": signature_crypto_version,
                         "portable_signature": portable_signature,
+                        "signature_requires_resign": bool(not portable_signature),
                         "latest_publish_time": latest_publish_time,
-                        "signature_preview_url": self._external_signature_preview_url(
-                            record_id=record_id,
-                            signature_version=signature_version,
-                        ),
                         "raw_fields": fields,
                     }
                 )
@@ -33019,14 +32980,22 @@ class MaintenancePortalService:
             {key: value for key, value in person.items() if key != "raw_fields"}
             for person in people
             if matches_query(person)
+            and (
+                not self._building_codes_from_value(person.get("building"))
+                or self._scope_matches_buildings(
+                    scope,
+                    self._building_codes_from_value(person.get("building")),
+                )
+            )
         ]
         limited = filtered[: max(1, min(500, int(limit or 80)))]
+        for person in limited:
+            person.pop("signature_file_token", None)
         if str(notice_key or "").strip().startswith("critical_guard:"):
             for person in limited:
                 if person.get("has_signature") and not person.get("portable_signature"):
                     person["has_signature"] = False
                     person["signature_requires_resign"] = True
-                person.pop("signature_preview_url", None)
                 person.pop("signature_file_token", None)
         return {
             "people": limited,
@@ -33050,6 +33019,18 @@ class MaintenancePortalService:
             token=token,
         )
 
+    def consume_signature_link_token(self, *, record_id: str, token: str) -> bool:
+        return self._state_store.consume_signature_link_token(
+            record_id=record_id,
+            token=token,
+        )
+
+    def release_signature_link_token(self, *, record_id: str, token: str) -> None:
+        self._state_store.release_signature_link_token(
+            record_id=record_id,
+            token=token,
+        )
+
     def mark_signature_link_token_used(self, *, record_id: str, token: str) -> None:
         self._state_store.mark_signature_link_token_used(
             record_id=record_id,
@@ -33062,7 +33043,6 @@ class MaintenancePortalService:
         record_id: str,
         signature_png: str,
         signer_name: str = "",
-        link_token: str = "",
         operator_open_id: str = "",
         operator_name: str = "",
         require_operator_match: bool = False,
@@ -33138,13 +33118,7 @@ class MaintenancePortalService:
         return {
             "record_id": record_id,
             "name": str(person.get("name") or signer_name or ""),
-            "file_token": file_token,
             "signature_version": signature_version,
-            "signature_preview_url": self._signature_preview_url(
-                record_id=record_id,
-                signature_version=signature_version,
-                link_token=link_token,
-            ),
             "has_signature": True,
             "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "notification_result": notification_result,
@@ -33157,10 +33131,24 @@ class MaintenancePortalService:
         record_id: str,
         signature_png: str,
         signer_name: str = "",
+        scope: str = "ALL",
+        notice_key: str = "",
+        role: str = "implementer",
+        operator_open_id: str = "",
     ) -> dict[str, Any]:
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("请选择要保存签名的其他人员。")
+        scope = self._normalize_scope(scope)
+        notice_key = str(notice_key or "").strip()
+        role = str(role or "implementer").strip()
+        operator_open_id = str(operator_open_id or "").strip()
+        if not operator_open_id:
+            raise PortalError("请先登录后再为其他人员网页签名。")
+        if not notice_key:
+            raise PortalError("当前任务缺少签名上下文，请刷新页面后重试。")
+        if role not in {"implementer", "auditor", "inspector"}:
+            raise PortalError("签名角色无效，请重新选择人员。")
         signature_bytes = self._transparent_signature_png(
             self._decode_signature_png(signature_png)
         )
@@ -33171,6 +33159,9 @@ class MaintenancePortalService:
         )
         if not person:
             raise PortalError("其他人员签名记录不存在。")
+        building_codes = self._building_codes_from_value(person.get("building"))
+        if building_codes and not self._scope_matches_buildings(scope, building_codes):
+            raise PortalError("该其他人员签名不属于当前楼栋，无法修改。")
         safe_name = self._safe_mop_path_part(
             signer_name or str(person.get("name") or "external_signature"),
             "external_signature",
@@ -33194,12 +33185,7 @@ class MaintenancePortalService:
             "record_id": record_id,
             "name": name,
             "display_name": name,
-            "file_token": file_token,
             "signature_version": signature_version,
-            "signature_preview_url": self._external_signature_preview_url(
-                record_id=record_id,
-                signature_version=signature_version,
-            ),
             "has_signature": True,
             "signature_count": 1,
             "building": str(person.get("building") or ""),
@@ -33748,10 +33734,7 @@ class MaintenancePortalService:
             "link_url": link_url,
             "open_ids": recipients,
             "text": text,
-            "signature": self._public_temporary_signature_session(
-                session,
-                link_token=str(session.get("token") or ""),
-            ),
+            "signature": self._public_temporary_signature_session(session),
         }
 
     def create_temporary_signature_session(
@@ -33796,10 +33779,7 @@ class MaintenancePortalService:
                 "origin_staff_open_id": str(origin_staff_open_id or "").strip(),
             },
         )
-        return self._public_temporary_signature_session(
-            session,
-            link_token=str(session.get("token") or ""),
-        )
+        return self._public_temporary_signature_session(session)
 
     def build_existing_temporary_signature_link_message(
         self,
@@ -33862,30 +33842,17 @@ class MaintenancePortalService:
             "link_url": link_url,
             "open_ids": recipients,
             "text": text,
-            "signature": self._public_temporary_signature_session(
-                session,
-                link_token=token,
-            ),
+            "signature": self._public_temporary_signature_session(session),
         }
 
     def _public_temporary_signature_session(
         self,
         session: dict[str, Any],
-        *,
-        link_token: str = "",
     ) -> dict[str, Any]:
         payload = session.get("payload") if isinstance(session.get("payload"), dict) else {}
         file_token = str(session.get("signature_file_token") or "").strip()
         temp_id = str(session.get("temp_id") or "").strip()
         status = str(session.get("status") or "pending").strip() or "pending"
-        preview_url = ""
-        if file_token and temp_id:
-            preview_url = (
-                f"/api/signatures/temporary/image?temporary_id={quote(temp_id, safe='')}"
-                f"&v={quote(hashlib.sha1(file_token.encode('utf-8')).hexdigest()[:12], safe='')}"
-            )
-            if link_token:
-                preview_url += f"&token={quote(link_token, safe='')}"
         return {
             "source": "temporary",
             "temp_id": temp_id,
@@ -33895,8 +33862,6 @@ class MaintenancePortalService:
             "name": str(session.get("display_name") or ""),
             "status": status,
             "has_signature": bool(file_token and status == "signed"),
-            "signature_file_token": file_token,
-            "signature_preview_url": preview_url,
             "expires_at": session.get("expires_at"),
             "notice_title": str(payload.get("notice_title") or ""),
             "specialty": str(payload.get("specialty") or ""),
@@ -33917,7 +33882,7 @@ class MaintenancePortalService:
         )
         if not session:
             raise PortalError("临时签名链接无效或已过期。")
-        return self._public_temporary_signature_session(session, link_token=token)
+        return self._public_temporary_signature_session(session)
 
     def list_temporary_signatures(
         self,
@@ -33936,10 +33901,6 @@ class MaintenancePortalService:
             self._public_temporary_signature_session(session)
             for session in sessions
         ]
-        if str(notice_key or "").strip().startswith("critical_guard:"):
-            for item in items:
-                item.pop("signature_preview_url", None)
-                item.pop("signature_file_token", None)
         return {
             "items": items,
             "count": len(sessions),
@@ -34071,10 +34032,7 @@ class MaintenancePortalService:
         )
         with self._external_signature_people_cache_lock:
             self._external_signature_people_cache = None
-        return self._public_temporary_signature_session(
-            updated or {},
-            link_token=token,
-        )
+        return self._public_temporary_signature_session(updated or {})
 
     def temporary_signature_image_bytes(
         self,
@@ -35590,6 +35548,7 @@ class MaintenancePortalService:
         *,
         scope: str = "ALL",
         notice_key: str = "",
+        signature_context_key: str = "",
         operator_open_id: str = "",
         local_file_path: str = "",
         mop_record_id: str = "",
@@ -35625,13 +35584,19 @@ class MaintenancePortalService:
         signatures = [item for item in (signatures or []) if isinstance(item, dict)]
         if not signatures:
             raise PortalError("请选择至少一个维护实施人或维护审核人签名。")
-        if operator_open_id:
-            self._ensure_mop_staff_signature_usage_confirmed(
-                signatures=signatures,
-                scope=scope,
-                notice_key=notice_key,
-                operator_open_id=operator_open_id,
-            )
+        signature_context_key = str(signature_context_key or notice_key or "").strip()
+        self._ensure_mop_staff_signature_usage_confirmed(
+            signatures=signatures,
+            scope=scope,
+            notice_key=signature_context_key,
+            operator_open_id=operator_open_id,
+        )
+        self._ensure_mop_non_staff_signature_context(
+            signatures=signatures,
+            scope=scope,
+            notice_key=signature_context_key,
+            operator_open_id=operator_open_id,
+        )
 
         role_to_label = {
             "implementer": "维护实施人",
@@ -35814,8 +35779,77 @@ class MaintenancePortalService:
             "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+    def _ensure_mop_non_staff_signature_context(
+        self,
+        *,
+        signatures: list[dict[str, Any]],
+        scope: str,
+        notice_key: str,
+        operator_open_id: str,
+    ) -> None:
+        normalized_scope = self._normalize_scope(scope)
+        notice_key = str(notice_key or "").strip()
+        operator_open_id = str(operator_open_id or "").strip()
+        external_people: dict[str, dict[str, Any]] | None = None
+        for item in signatures:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "staff").strip() or "staff"
+            role = str(item.get("role") or "").strip()
+            temp_id = str(item.get("temp_id") or "").strip()
+            record_id = str(item.get("record_id") or "").strip()
+            if source == "temporary" or temp_id:
+                if not temp_id:
+                    raise PortalError("临时签名会话不完整，请重新添加人员。")
+                if not notice_key or not operator_open_id:
+                    raise PortalError("临时签名缺少当前任务或操作人信息，请刷新后重试。")
+                session = self._state_store.get_mop_temporary_signature_session(
+                    temp_id=temp_id
+                )
+                if not session:
+                    raise PortalError("临时签名记录不存在，请重新发送签名链接。")
+                if self._normalize_scope(session.get("scope")) != normalized_scope:
+                    raise PortalError("临时签名不属于当前楼栋，请重新选择。")
+                if str(session.get("notice_key") or "").strip() != notice_key:
+                    raise PortalError("临时签名不属于当前通告和 MOP 附件，请重新选择。")
+                if str(session.get("role") or "").strip() != role:
+                    raise PortalError("临时签名角色与当前签名位置不一致，请重新选择。")
+                if str(session.get("created_by") or "").strip() != operator_open_id:
+                    raise PortalError("临时签名不是由当前登录人创建，无法用于本次 MOP。")
+                if (
+                    str(session.get("status") or "").strip() != "signed"
+                    or not str(session.get("signature_file_token") or "").strip()
+                ):
+                    raise PortalError(f"{session.get('display_name') or '临时人员'} 暂无可用签名。")
+                continue
+            if source != "external":
+                continue
+            if not record_id:
+                raise PortalError("其他人员签名记录不完整，请重新选择。")
+            if not notice_key or not operator_open_id:
+                raise PortalError("其他人员签名缺少当前任务或操作人信息，请刷新后重试。")
+            if external_people is None:
+                external_people = {
+                    str(person.get("record_id") or "").strip(): person
+                    for person in self._load_external_signature_people(force=False)
+                    if str(person.get("record_id") or "").strip()
+                }
+            person = external_people.get(record_id)
+            if not person:
+                raise PortalError("其他人员签名记录不存在，请重新选择。")
+            building_codes = self._building_codes_from_value(person.get("building"))
+            if building_codes and not self._scope_matches_buildings(
+                normalized_scope, building_codes
+            ):
+                raise PortalError("其他人员签名不属于当前楼栋，请重新选择。")
+
     def _mop_signature_people_for_upload(
-        self, signatures: list[dict[str, Any]]
+        self,
+        signatures: list[dict[str, Any]],
+        *,
+        scope: str,
+        notice_key: str,
+        operator_open_id: str,
     ) -> list[dict[str, Any]]:
         role_to_label = {
             "implementer": "维护实施人",
@@ -35851,6 +35885,13 @@ class MaintenancePortalService:
         missing = [label for role, label in role_to_label.items() if role not in present_roles]
         if missing:
             raise PortalError(f"上传已签名 MOP 前请先选择可用签名：{'、'.join(missing)}。")
+
+        self._ensure_mop_non_staff_signature_context(
+            signatures=signatures,
+            scope=scope,
+            notice_key=notice_key,
+            operator_open_id=operator_open_id,
+        )
 
         people = self._load_signature_people(force=False)
         people_by_id = {
@@ -36150,6 +36191,7 @@ class MaintenancePortalService:
         source_record_id: str = "",
         notice_title: str = "",
         notice_key: str = "",
+        signature_context_key: str = "",
         operator_open_id: str = "",
         operator_name: str = "",
         local_file_path: str = "",
@@ -36174,15 +36216,24 @@ class MaintenancePortalService:
             raise PortalError("当前账号无权上传该楼栋的 MOP。")
 
         signature_items = [item for item in (signatures or []) if isinstance(item, dict)]
+        signature_context_key = str(signature_context_key or notice_key or "").strip()
         self._ensure_mop_staff_signature_usage_confirmed(
             signatures=signature_items,
             scope=scope,
-            notice_key=notice_key,
+            notice_key=signature_context_key,
             operator_open_id=operator_open_id,
         )
-        signature_people = self._mop_signature_people_for_upload(signature_items)
+        signature_people = self._mop_signature_people_for_upload(
+            signature_items,
+            scope=scope,
+            notice_key=signature_context_key,
+            operator_open_id=operator_open_id,
+        )
         filled = self.fill_engineer_mop_file(
             scope=scope,
+            notice_key=notice_key,
+            signature_context_key=signature_context_key,
+            operator_open_id=operator_open_id,
             local_file_path=local_file_path,
             mop_record_id=mop_record_id,
             mop_title=mop_title,

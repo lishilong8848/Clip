@@ -39,14 +39,7 @@
           :class="{ ready: row.signed, pending: !row.signed }"
         >
           <div class="signature-preview">
-            <img
-              v-if="row.signed && showSignaturePreview !== false"
-              :src="row.person.signature_preview_url"
-              alt="其他人员签名预览"
-              loading="lazy"
-              @error="emit('image-error', row.person)"
-            />
-            <span v-else>{{ row.signed ? "已签名" : "未签名" }}</span>
+            <span>{{ row.signed ? "已签名" : "未签名" }}</span>
           </div>
           <div class="person-summary">
             <strong>{{ row.display_name }}</strong>
@@ -156,8 +149,7 @@
             :key="String(person.record_id || person.name || '')"
             @click="chooseExternal(person)"
           >
-            <img v-if="showSignaturePreview !== false" :src="person.signature_preview_url" alt="已有其他人员签名" loading="lazy" @error="emit('image-error', person)" />
-            <span v-else class="protected-signature">已签名</span>
+            <span class="protected-signature">已签名</span>
             <span>
               <strong>{{ person.name || "其他人员" }}</strong>
               <small>
@@ -205,13 +197,11 @@ const props = defineProps<{
   personWebSignDisabledReason: (person: Dict) => string;
   draftStatusText: (draft: Dict) => string;
   draftDisabledReason: (draft: Dict) => string;
-  showSignaturePreview?: boolean;
   active?: boolean;
 }>();
 
 const emit = defineEmits<{
   "add-other": [];
-  "image-error": [person: Dict];
   "web-sign-person": [person: Dict];
   "send-temp-person": [person: Dict];
   "remove-person": [key: string];

@@ -69,6 +69,17 @@ class FakeMopUploadService(MaintenancePortalService):
             },
         ]
 
+    def _load_external_signature_people(self, *, force: bool = False) -> list[dict]:
+        return [
+            {
+                "source": "external",
+                "record_id": "external-rec-1",
+                "name": "外部人员",
+                "building": "A楼",
+                "has_signature": True,
+            }
+        ]
+
     def _load_engineer_mop_candidates(self, *, force: bool = False):
         return [], [], {
             "app_token": "mop-app",
@@ -288,12 +299,14 @@ class EngineerMopUploadTests(unittest.TestCase):
     def test_temporary_signature_counts_for_required_roles_without_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)
+            context_key = "notice-1|mop:mop-1|attachment:file-1"
             session = service._state_store.create_mop_temporary_signature_session(
                 scope="A",
-                notice_key="notice-1",
+                notice_key=context_key,
                 role="implementer",
                 display_name="临时人员1",
                 recipient_open_ids=["ou_impl"],
+                created_by="ou_audit",
                 payload={"notice_title": "A楼测试维保", "specialty": "电气"},
             )
             service._state_store.update_mop_temporary_signature_session(
@@ -307,6 +320,8 @@ class EngineerMopUploadTests(unittest.TestCase):
                 scope="A",
                 source_record_id="src-1",
                 notice_title="A楼测试维保",
+                notice_key="notice-1",
+                signature_context_key=context_key,
                 operator_open_id="ou_audit",
                 local_file_path=str(Path(tmpdir) / "source.xlsx"),
                 signatures=[
@@ -332,6 +347,8 @@ class EngineerMopUploadTests(unittest.TestCase):
                 scope="A",
                 source_record_id="src-1",
                 notice_title="A楼测试维保",
+                notice_key="notice-1",
+                signature_context_key="notice-1|mop:mop-1|attachment:file-1",
                 operator_open_id="ou_audit",
                 local_file_path=str(Path(tmpdir) / "source.xlsx"),
                 signatures=[
@@ -349,6 +366,85 @@ class EngineerMopUploadTests(unittest.TestCase):
             self.assertEqual(service.external_image_calls, ["external-rec-1"])
             self.assertEqual(len(result["notification_results"]), 1)
             self.assertEqual(result["notification_results"][0]["open_id"], "ou_audit")
+
+    def test_temporary_signature_cannot_cross_mop_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            session = service._state_store.create_mop_temporary_signature_session(
+                scope="A",
+                notice_key="notice-1|mop:mop-1|attachment:file-1",
+                role="implementer",
+                display_name="临时人员1",
+                recipient_open_ids=[],
+                created_by="ou_audit",
+            )
+            service._state_store.update_mop_temporary_signature_session(
+                temp_id=session["temp_id"],
+                status="signed",
+                temporary_record_id="temp-rec-1",
+                signature_file_token="temp-file-token",
+            )
+
+            with self.assertRaisesRegex(PortalError, "不属于当前通告和 MOP 附件"):
+                service.upload_signed_engineer_mop_file(
+                    scope="A",
+                    source_record_id="src-1",
+                    notice_key="notice-1",
+                    signature_context_key="notice-1|mop:mop-2|attachment:file-2",
+                    operator_open_id="ou_audit",
+                    local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                    signatures=[
+                        {
+                            "source": "temporary",
+                            "role": "implementer",
+                            "temp_id": session["temp_id"],
+                        },
+                        {"source": "staff", "role": "auditor", "record_id": "person-2"},
+                    ],
+                )
+            self.assertEqual(service.upload_calls, [])
+            self.assertEqual(service.patch_calls, [])
+
+    def test_staff_confirmation_uses_signature_context_not_base_notice_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            context_key = "notice-1|mop:mop-1|attachment:file-1"
+            self._confirm_staff_usage(service, notice_key=context_key)
+
+            result = service.upload_signed_engineer_mop_file(
+                scope="A",
+                source_record_id="src-1",
+                notice_key="notice-1",
+                signature_context_key=context_key,
+                operator_open_id="ou_operator",
+                local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                signatures=self._signatures(),
+            )
+
+            self.assertEqual(result["file_token"], "file-token-1")
+
+    def test_external_signature_overwrite_requires_task_context_and_matching_scope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            service._decode_signature_png = lambda _value: b"raw-png"
+            service._transparent_signature_png = lambda value: value
+
+            with self.assertRaisesRegex(PortalError, "缺少签名上下文"):
+                service.save_external_signature_for_person(
+                    record_id="external-rec-1",
+                    signature_png="ignored",
+                    scope="A",
+                    operator_open_id="ou_operator",
+                )
+            with self.assertRaisesRegex(PortalError, "不属于当前楼栋"):
+                service.save_external_signature_for_person(
+                    record_id="external-rec-1",
+                    signature_png="ignored",
+                    scope="B",
+                    notice_key="notice-1|mop:mop-1|attachment:file-1",
+                    role="implementer",
+                    operator_open_id="ou_operator",
+                )
 
     def test_temporary_and_external_signatures_do_not_require_operator_openid(self):
         with tempfile.TemporaryDirectory() as tmpdir:

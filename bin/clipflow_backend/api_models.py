@@ -364,6 +364,9 @@ class ExternalSignatureSaveRequest(APIModel):
     record_id: str = ""
     signature_png: str = ""
     signer_name: str = ""
+    scope: str = "ALL"
+    notice_key: str = ""
+    role: str = Field(default="implementer", max_length=32)
 
 
 class EngineerMopFillRequest(APIModel):
@@ -372,6 +375,8 @@ class EngineerMopFillRequest(APIModel):
     mop_record_id: str = ""
     mop_title: str = ""
     mop_file_name: str = ""
+    notice_key: str = ""
+    signature_context_key: str = ""
     sheet_name: str = ""
     fields: list[dict[str, Any]] = Field(default_factory=list)
     checkboxes: list[dict[str, Any]] = Field(default_factory=list)
@@ -383,7 +388,6 @@ class EngineerMopUploadSignedRequest(EngineerMopFillRequest):
     operation_id: str = Field(default="", max_length=128)
     source_record_id: str = ""
     notice_title: str = ""
-    notice_key: str = ""
 
 
 class EngineerMopResetRequest(APIModel):
