@@ -1165,6 +1165,48 @@ class CriticalGuardStateStoreTests(unittest.TestCase):
                 actor_name="填写人",
             )
 
+    def test_manual_task_reuses_latest_saved_checks_with_different_name(self) -> None:
+        first_key = next(iter(self.initial_cells["checks"]))
+        cells = default_response_cells("设备安全", "A", today="2026-08-03")
+        cells["checks"][first_key] = {
+            "status": "abnormal",
+            "note": "手动任务沿用的异常说明",
+        }
+        self.store.update_critical_guard_response(
+            self.response_id,
+            cells=cells,
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=1,
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+        service = MaintenancePortalService.__new__(MaintenancePortalService)
+        service._state_store = self.store
+
+        task = service.create_critical_guard_task(
+            name="名称完全不同的手动任务",
+            sheet_types=["设备安全"],
+            target_scopes=["A", "B"],
+            operation_id="manual-memory-reuse-operation",
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+
+        by_scope = {item["scope"]: item for item in task["responses"]}
+        self.assertEqual(
+            by_scope["A"]["cells"]["checks"][first_key],
+            {"status": "abnormal", "note": "手动任务沿用的异常说明"},
+        )
+        self.assertEqual(
+            by_scope["B"]["cells"]["checks"][first_key],
+            {"status": "normal", "note": ""},
+        )
+
     def test_scope_template_is_isolated_reused_and_can_restore_default(self) -> None:
         service = MaintenancePortalService.__new__(MaintenancePortalService)
         service._state_store = self.store

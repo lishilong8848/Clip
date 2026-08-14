@@ -218,6 +218,8 @@ WATER_CONSUMPTION_SUPERVISOR_FALLBACKS = {
 CRITICAL_GUARD_WEATHER_URL = "https://www.sm.sjhl.online:3001/api/weather/warning"
 CRITICAL_GUARD_WEATHER_SCOPES = ("A", "B", "C", "D", "E")
 CRITICAL_GUARD_WEATHER_OBSERVER_SCOPE = "H"
+CRITICAL_GUARD_WEATHER_COMPLETION_CHAT_ID = "oc_afb27caf36b3bfeea2de20bd6f955d21"
+CRITICAL_GUARD_WEATHER_MEMORY_KEY = "天气预警自动重保"
 CRITICAL_GUARD_WEATHER_REMINDER_SECONDS = 20 * 60
 CRITICAL_GUARD_WEATHER_POLL_SECONDS = 10 * 60
 CRITICAL_GUARD_ARCHIVE_APP_TOKEN = "Tmn8bjGnpasbLTskafbcRijvnKe"
@@ -1241,6 +1243,16 @@ def send_interactive_to_open_ids(
     )
 
     return send_impl(card, open_ids)
+
+
+def send_interactive_to_chat_id(
+    card: dict[str, Any], chat_id: str
+) -> tuple[bool, str]:
+    from upload_event_module.services.robot_webhook import (
+        send_interactive_to_chat_id as send_impl,
+    )
+
+    return send_impl(card, chat_id)
 
 
 def send_text_to_chat_id(text: str, chat_id: str) -> tuple[bool, str]:
@@ -40861,6 +40873,7 @@ class MaintenancePortalService:
             operator_open_id=operator_open_id,
             operator_name=operator_name or "天气预警自动任务",
             initial_cells_by_sheet={"灾害专项": weather_cells_patch(warning)},
+            memory_key_override=CRITICAL_GUARD_WEATHER_MEMORY_KEY,
         )
         source_payload = self._critical_guard_weather_source_payload(snapshot, warning)
         mapped = self._state_store.put_critical_guard_weather_task(
@@ -40927,6 +40940,26 @@ class MaintenancePortalService:
             include_actions=include_actions,
         )
         ok, message, _results = send_interactive_to_open_ids(card, [open_id])
+        return bool(ok), str(message or "")
+
+    @staticmethod
+    def _send_critical_guard_weather_completion_group_card(
+        *,
+        weather_task: dict[str, Any],
+        progress: dict[str, Any],
+    ) -> tuple[bool, str]:
+        card = build_weather_guard_card(
+            weather_task=weather_task,
+            progress=progress,
+            registration_url="",
+            template_url="",
+            message_kind="completed",
+            include_actions=False,
+        )
+        ok, message = send_interactive_to_chat_id(
+            card,
+            CRITICAL_GUARD_WEATHER_COMPLETION_CHAT_ID,
+        )
         return bool(ok), str(message or "")
 
     def _reconcile_critical_guard_weather_task(
@@ -41060,6 +41093,35 @@ class MaintenancePortalService:
             weather_key,
             scope_state=scope_state,
         )
+        completion_group_key = "_completion_group"
+        completion_group_state = scope_state.get(completion_group_key)
+        if not isinstance(completion_group_state, dict):
+            completion_group_state = {}
+        if progress.get("complete") and not float(
+            completion_group_state.get("sent_at") or 0
+        ):
+            completion_group_state["last_attempt_at"] = now
+            try:
+                ok, message = self._send_critical_guard_weather_completion_group_card(
+                    weather_task=weather_task,
+                    progress=progress,
+                )
+            except Exception as exc:
+                ok, message = False, str(exc) or "飞书群通知发送异常"
+            if ok:
+                sent += 1
+                completion_group_state["sent_at"] = now
+                completion_group_state["last_error"] = ""
+            else:
+                failed += 1
+                completion_group_state["last_error"] = (
+                    message or "全部楼栋完成群通知发送失败"
+                )
+            scope_state[completion_group_key] = completion_group_state
+            weather_task = self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                scope_state=scope_state,
+            )
         archive_result = {"status": str(weather_task.get("archive_status") or "pending")}
         if progress.get("complete"):
             archive_result = self._archive_critical_guard_weather_task(
@@ -41912,6 +41974,7 @@ class MaintenancePortalService:
         operator_open_id: str,
         operator_name: str,
         initial_cells_by_sheet: dict[str, dict[str, Any]] | None = None,
+        memory_key_override: str = "",
     ) -> dict[str, Any]:
         task_name = re.sub(r"\s+", " ", str(name or "").strip())[:160]
         if not task_name:
@@ -41937,7 +42000,7 @@ class MaintenancePortalService:
         if not normalized_scopes:
             raise PortalError("请至少选择一个填写楼栋。")
         normalized_operation_id = str(operation_id or "").strip() or uuid.uuid4().hex
-        memory_key = normalize_task_memory_key(task_name)
+        memory_key = normalize_task_memory_key(memory_key_override or task_name)
         if not memory_key:
             raise PortalError("任务名称无效，请重新填写。")
         task_id = f"guard_{uuid.uuid4().hex}"
@@ -41971,6 +42034,7 @@ class MaintenancePortalService:
                     scope=scope,
                     sheet_type=sheet,
                     template_version=template_version,
+                    fallback_latest=sheet in CRITICAL_GUARD_CHECK_SHEETS,
                 )
                 cells = (
                     memory_cells_for_new_task(

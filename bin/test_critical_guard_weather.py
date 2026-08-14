@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -22,6 +23,7 @@ from lan_bitable_template_portal.critical_guard_weather import (
 )
 from lan_bitable_template_portal.portal_service import (
     BUILDING_OPEN_ID_MAP,
+    CRITICAL_GUARD_WEATHER_MEMORY_KEY,
     CRITICAL_GUARD_WEATHER_SCOPES,
     CRITICAL_GUARD_WEATHER_URL,
     MaintenancePortalService,
@@ -394,6 +396,66 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             "stable-token",
         )
 
+    def test_new_weather_task_reuses_latest_saved_checks_per_scope(self) -> None:
+        service = self._weather_service()
+        previous = service.create_critical_guard_task(
+            name="旧暴雨预警任务",
+            sheet_types=["设备安全"],
+            target_scopes=["A"],
+            operation_id="legacy-weather-memory-task",
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        response = previous["responses"][0]
+        cells = dict(response["cells"])
+        checks = {key: dict(value) for key, value in cells["checks"].items()}
+        first_key = next(iter(checks))
+        checks[first_key] = {"status": "abnormal", "note": "沿用上次检查结果"}
+        cells["checks"] = checks
+        self.store.update_critical_guard_response(
+            response["response_id"],
+            cells=cells,
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=response["version"],
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+
+        weather_task, created = service._ensure_critical_guard_weather_task(
+            snapshot={"weather": {}, "actions": []},
+            warning={
+                "weather_key": "new-weather-memory-key",
+                "id": "new-warning-id",
+                "title": "新的台风预警",
+                "type": "台风",
+                "color": "orange",
+                "guard_level": "二级戒备",
+                "sheet_types": ["设备安全"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+
+        self.assertTrue(created)
+        task = self.store.get_critical_guard_task(
+            weather_task["task_id"], include_all_responses=True
+        ) or {}
+        self.assertEqual(task["memory_key"], CRITICAL_GUARD_WEATHER_MEMORY_KEY)
+        by_scope = {item["scope"]: item for item in task["responses"]}
+        self.assertEqual(
+            by_scope["A"]["cells"]["checks"][first_key],
+            {"status": "abnormal", "note": "沿用上次检查结果"},
+        )
+        self.assertEqual(
+            by_scope["B"]["cells"]["checks"][first_key],
+            {"status": "normal", "note": ""},
+        )
+
     def test_weather_job_cleanup_keeps_recent_terminal_jobs(self) -> None:
         for index in range(5):
             job_id = f"job-{index}"
@@ -699,6 +761,89 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             str(item.get("recipient_open_id") or "") for item in calls
         })
         self.assertTrue(all(item.get("include_actions", True) for item in calls))
+
+    def test_all_completed_card_is_sent_to_group_once(self) -> None:
+        service = self._weather_service()
+        weather_task = self.store.put_critical_guard_weather_task(
+            weather_key="weather-completion-group-key",
+            warning_id="weather-completion-group-warning",
+            warning_title="暴雨蓝色预警",
+            warning_type="暴雨",
+            warning_color="blue",
+            guard_level="三级戒备",
+            sheet_types=["设备安全"],
+            task_id="weather-completion-group-task",
+            source_payload={},
+        )
+        scope_state = {
+            scope: {"initial_sent_at": 1, "completed_notified_at": 1}
+            for scope in CRITICAL_GUARD_WEATHER_SCOPES
+        }
+        scope_state["_h_observer"] = {"sent_at": 1}
+        weather_task = self.store.update_critical_guard_weather_task(
+            "weather-completion-group-key",
+            scope_state=scope_state,
+        )
+        complete_progress = {
+            "registered_scopes": 5,
+            "completed_scopes": 5,
+            "scope_count": 5,
+            "submitted": 5,
+            "total": 5,
+            "abnormal": 0,
+            "scopes": [],
+            "complete": True,
+        }
+        service._state_store.get_critical_guard_task = lambda *_args, **_kwargs: {
+            "task_id": "weather-completion-group-task",
+            "responses": [],
+        }
+        service._archive_critical_guard_weather_task = (
+            lambda *_args, **_kwargs: {"status": "completed"}
+        )
+        cards: list[dict[str, object]] = []
+
+        def capture_group(card, chat_id):
+            cards.append({"card": card, "chat_id": chat_id})
+            return True, "ok"
+
+        with (
+            patch(
+                "lan_bitable_template_portal.portal_service.critical_guard_weather_progress",
+                return_value=complete_progress,
+            ),
+            patch(
+                "lan_bitable_template_portal.portal_service.send_interactive_to_chat_id",
+                side_effect=capture_group,
+            ),
+        ):
+            first = service._reconcile_critical_guard_weather_task(
+                weather_task,
+                now=100,
+            )
+            persisted = self.store.get_critical_guard_weather_task(
+                weather_key="weather-completion-group-key"
+            ) or {}
+            second = service._reconcile_critical_guard_weather_task(
+                persisted,
+                now=101,
+            )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(
+            cards[0]["chat_id"],
+            "oc_afb27caf36b3bfeea2de20bd6f955d21",
+        )
+        self.assertEqual(
+            cards[0]["card"]["header"]["title"]["content"],
+            "南通天气重保 · 全部楼栋已完成",
+        )
+        self.assertEqual(
+            persisted["scope_state"]["_completion_group"]["sent_at"],
+            100,
+        )
+        self.assertEqual(first["notifications_sent"], 1)
+        self.assertEqual(second["notifications_sent"], 0)
 
     def test_manual_trigger_reuses_running_scheduled_job(self) -> None:
         service = self._weather_service()

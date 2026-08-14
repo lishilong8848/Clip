@@ -14897,6 +14897,7 @@ class LanPortalStateStore:
         scope: str,
         sheet_type: str,
         template_version: str = "",
+        fallback_latest: bool = False,
     ) -> dict[str, Any] | None:
         key = self._text(memory_key)
         scope_code = self._text(scope).upper()
@@ -14924,10 +14925,31 @@ class LanPortalStateStore:
                         """,
                         (key, scope_code, sheet),
                     ).fetchone()
+                if not row and fallback_latest:
+                    if version:
+                        row = conn.execute(
+                            """
+                            SELECT * FROM critical_guard_memories
+                            WHERE scope_code=? AND sheet_type=? AND template_version=?
+                            ORDER BY updated_at DESC
+                            LIMIT 1
+                            """,
+                            (scope_code, sheet, version),
+                        ).fetchone()
+                    else:
+                        row = conn.execute(
+                            """
+                            SELECT * FROM critical_guard_memories
+                            WHERE scope_code=? AND sheet_type=?
+                            ORDER BY updated_at DESC
+                            LIMIT 1
+                            """,
+                            (scope_code, sheet),
+                        ).fetchone()
         if not row:
             return None
         return {
-            "memory_key": key,
+            "memory_key": self._text(row["memory_key"]),
             "scope": scope_code,
             "sheet_type": sheet,
             "template_version": self._text(row["template_version"]),

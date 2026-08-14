@@ -363,6 +363,31 @@ def send_interactive_to_open_ids(
     return False, detail or "发送失败", results
 
 
+def send_interactive_to_chat_id(
+    card: dict[str, Any], chat_id: str
+) -> Tuple[bool, str]:
+    """按 chat_id 发送飞书交互卡片。"""
+    chat_id = str(chat_id or "").strip()
+    if not isinstance(card, dict) or not card:
+        return False, "卡片内容为空"
+    if not chat_id:
+        return False, "群 chat_id 为空"
+    token, err = _get_tenant_access_token()
+    if err:
+        return False, err
+    ok, message = _send_interactive_to_receive_id(
+        token,
+        chat_id,
+        card,
+        receive_id_type="chat_id",
+    )
+    if ok:
+        log_info(f"群交互卡片发送成功: chat_id={chat_id}")
+    else:
+        log_error(f"群交互卡片发送失败: chat_id={chat_id} - {message}")
+    return ok, message
+
+
 def send_text_to_chat_id(text: str, chat_id: str) -> Tuple[bool, str]:
     """按 chat_id 发送文本群消息。"""
     text = str(text or "").strip()
