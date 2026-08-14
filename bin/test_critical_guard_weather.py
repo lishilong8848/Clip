@@ -681,7 +681,6 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             registration_url="http://example.test/register",
             template_url="http://example.test/template",
             message_kind="completed",
-            recipient_scope="E",
         )
         self.assertEqual(
             all_card["header"]["title"]["content"],
@@ -791,7 +790,16 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             "submitted": 5,
             "total": 5,
             "abnormal": 0,
-            "scopes": [],
+            "scopes": [
+                {
+                    "scope": scope,
+                    "submitted": 1,
+                    "total": 1,
+                    "complete": True,
+                    "registered": True,
+                }
+                for scope in CRITICAL_GUARD_WEATHER_SCOPES
+            ],
             "complete": True,
         }
         service._state_store.get_critical_guard_task = lambda *_args, **_kwargs: {
@@ -799,7 +807,10 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             "responses": [],
         }
         service._archive_critical_guard_weather_task = (
-            lambda *_args, **_kwargs: {"status": "completed"}
+            lambda *_args, **_kwargs: {
+                "status": "archived",
+                "record_id": "archive-record-id",
+            }
         )
         cards: list[dict[str, object]] = []
 
@@ -829,20 +840,26 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
                 now=101,
             )
 
-        self.assertEqual(len(cards), 1)
-        self.assertEqual(
-            cards[0]["chat_id"],
-            "oc_afb27caf36b3bfeea2de20bd6f955d21",
+        self.assertEqual(len(cards), 6)
+        self.assertTrue(
+            all(
+                item["chat_id"] == "oc_afb27caf36b3bfeea2de20bd6f955d21"
+                for item in cards
+            )
         )
         self.assertEqual(
-            cards[0]["card"]["header"]["title"]["content"],
+            [item["card"]["header"]["title"]["content"] for item in cards[:5]],
+            [f"{scope}楼重保检查 · 本楼已完成" for scope in CRITICAL_GUARD_WEATHER_SCOPES],
+        )
+        self.assertEqual(
+            cards[-1]["card"]["header"]["title"]["content"],
             "南通天气重保 · 全部楼栋已完成",
         )
         self.assertEqual(
-            persisted["scope_state"]["_completion_group"]["sent_at"],
+            persisted["scope_state"]["_archive_completion_group"]["sent_at"],
             100,
         )
-        self.assertEqual(first["notifications_sent"], 1)
+        self.assertEqual(first["notifications_sent"], 6)
         self.assertEqual(second["notifications_sent"], 0)
 
     def test_manual_trigger_reuses_running_scheduled_job(self) -> None:

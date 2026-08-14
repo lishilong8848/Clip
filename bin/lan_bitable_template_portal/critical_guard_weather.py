@@ -315,7 +315,9 @@ def build_weather_guard_card(
     warning_title = _text(weather_task.get("warning_title"))
     guard_level = _text(weather_task.get("guard_level"))
     scope_completed = message_kind == "completed"
-    all_completed = scope_completed and bool(progress.get("complete"))
+    all_completed = (
+        scope_completed and bool(progress.get("complete")) and not recipient_scope
+    )
     kind_prefix = "提醒" if message_kind == "reminder" else "发布"
     title = f"南通天气重保 · {guard_level}"
     if all_completed:
@@ -357,7 +359,8 @@ def build_weather_guard_card(
         )
         if all_completed:
             completion_summary = (
-                f"全部 {progress.get('scope_count', 0)} 个楼栋已完成本次重保检查。"
+                f"全部 {progress.get('scope_count', 0)} 个楼栋已完成本次重保检查，"
+                "汇总结果已成功上传。"
             )
             completion_heading = "**整体完成情况**"
         else:

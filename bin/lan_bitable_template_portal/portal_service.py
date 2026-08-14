@@ -40947,6 +40947,7 @@ class MaintenancePortalService:
         *,
         weather_task: dict[str, Any],
         progress: dict[str, Any],
+        scope: str = "",
     ) -> tuple[bool, str]:
         card = build_weather_guard_card(
             weather_task=weather_task,
@@ -40954,6 +40955,7 @@ class MaintenancePortalService:
             registration_url="",
             template_url="",
             message_kind="completed",
+            recipient_scope=scope,
             include_actions=False,
         )
         ok, message = send_interactive_to_chat_id(
@@ -41047,6 +41049,39 @@ class MaintenancePortalService:
                 scope_state=scope_state,
             )
 
+        for scope_row in progress.get("scopes") or []:
+            scope = str(scope_row.get("scope") or "").strip().upper()
+            if scope not in CRITICAL_GUARD_WEATHER_SCOPES or not scope_row.get(
+                "complete"
+            ):
+                continue
+            state = scope_state.get(scope)
+            if not isinstance(state, dict):
+                state = {}
+            if float(state.get("group_completed_notified_at") or 0):
+                continue
+            state["last_group_completed_attempt_at"] = now
+            try:
+                ok, message = self._send_critical_guard_weather_completion_group_card(
+                    weather_task=weather_task,
+                    progress=progress,
+                    scope=scope,
+                )
+            except Exception as exc:
+                ok, message = False, str(exc) or "飞书群通知发送异常"
+            if ok:
+                sent += 1
+                state["group_completed_notified_at"] = now
+                state["group_last_error"] = ""
+            else:
+                failed += 1
+                state["group_last_error"] = message or f"{scope}楼完成群通知发送失败"
+            scope_state[scope] = state
+            weather_task = self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                scope_state=scope_state,
+            )
+
         observer_state_key = "_h_observer"
         observer_state = scope_state.get(observer_state_key)
         if not isinstance(observer_state, dict):
@@ -41093,11 +41128,17 @@ class MaintenancePortalService:
             weather_key,
             scope_state=scope_state,
         )
-        completion_group_key = "_completion_group"
+        archive_result = {"status": str(weather_task.get("archive_status") or "pending")}
+        if progress.get("complete"):
+            archive_result = self._archive_critical_guard_weather_task(
+                weather_task,
+                task,
+            )
+        completion_group_key = "_archive_completion_group"
         completion_group_state = scope_state.get(completion_group_key)
         if not isinstance(completion_group_state, dict):
             completion_group_state = {}
-        if progress.get("complete") and not float(
+        if archive_result.get("status") == "archived" and not float(
             completion_group_state.get("sent_at") or 0
         ):
             completion_group_state["last_attempt_at"] = now
@@ -41115,18 +41156,12 @@ class MaintenancePortalService:
             else:
                 failed += 1
                 completion_group_state["last_error"] = (
-                    message or "全部楼栋完成群通知发送失败"
+                    message or "全部楼栋完成归档群通知发送失败"
                 )
             scope_state[completion_group_key] = completion_group_state
-            weather_task = self._state_store.update_critical_guard_weather_task(
+            self._state_store.update_critical_guard_weather_task(
                 weather_key,
                 scope_state=scope_state,
-            )
-        archive_result = {"status": str(weather_task.get("archive_status") or "pending")}
-        if progress.get("complete"):
-            archive_result = self._archive_critical_guard_weather_task(
-                weather_task,
-                task,
             )
         return {
             "task_id": str(task.get("task_id") or ""),
