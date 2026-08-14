@@ -3616,11 +3616,14 @@ class LanPortalStateStore:
         keys: set[str] = set()
         target_record_id = canonical_target_record_id(item)
         source_record_id = canonical_source_record_id(item)
+        zhihang_record_id = self._text(item.get("zhihang_record_id"))
         active_item_id = self._text(item.get("active_item_id"))
         if target_record_id:
             keys.add(f"{work_type}:target:{target_record_id}")
         if source_record_id:
             keys.add(f"{work_type}:source:{source_record_id}")
+        if zhihang_record_id:
+            keys.add(f"{work_type}:zhihang:{zhihang_record_id}")
         if active_item_id:
             keys.add(f"{work_type}:active:{active_item_id}")
         title = self._business_merge_text_key(
@@ -4572,7 +4575,9 @@ class LanPortalStateStore:
         self.cleanup_source_snapshots()
         return {"snapshot_id": snapshot_id, "status": "failed", "updated_at": now}
 
-    def get_source_scope_snapshot(self, scope: str) -> dict[str, Any]:
+    def get_source_scope_snapshot(
+        self, scope: str, *, prefer_independent: bool = True
+    ) -> dict[str, Any]:
         scope = self._normalize_source_scope(scope)
         table = self._source_scope_table(scope)
         if not self.db_path.exists():
@@ -4590,7 +4595,7 @@ class LanPortalStateStore:
             for source_key, snapshot in independent.items()
             if snapshot.get("exists")
         }
-        if active_sources:
+        if active_sources and prefer_independent:
             records: list[dict[str, Any]] = []
             zhihang_records: list[dict[str, Any]] = []
             warnings: list[str] = []
@@ -8561,6 +8566,18 @@ class LanPortalStateStore:
             return candidates
 
         parents = list(range(count))
+        strong_ids = [
+            {
+                "target": {value} if (value := canonical_target_record_id(payload)) else set(),
+                "source": {value} if (value := canonical_source_record_id(payload)) else set(),
+                "zhihang": (
+                    {value}
+                    if (value := self._text(payload.get("zhihang_record_id")))
+                    else set()
+                ),
+            }
+            for payload in payloads
+        ]
 
         def find(index: int) -> int:
             while parents[index] != index:
@@ -8571,8 +8588,16 @@ class LanPortalStateStore:
         def union(left: int, right: int) -> None:
             left_root = find(left)
             right_root = find(right)
-            if left_root != right_root:
-                parents[right_root] = left_root
+            if left_root == right_root:
+                return
+            for kind in ("target", "source", "zhihang"):
+                left_values = strong_ids[left_root][kind]
+                right_values = strong_ids[right_root][kind]
+                if left_values and right_values and left_values != right_values:
+                    return
+            parents[right_root] = left_root
+            for kind in ("target", "source", "zhihang"):
+                strong_ids[left_root][kind].update(strong_ids[right_root][kind])
 
         owner_by_key: dict[str, int] = {}
         for index, keys in enumerate(identity_keys):
@@ -8580,16 +8605,6 @@ class LanPortalStateStore:
                 previous = owner_by_key.get(key)
                 if previous is None:
                     owner_by_key[key] = index
-                    continue
-                current_target = canonical_target_record_id(payloads[index])
-                previous_target = canonical_target_record_id(payloads[previous])
-                if (
-                    self._text(payloads[index].get("notice_type")) == "事件通告"
-                    and self._text(payloads[previous].get("notice_type")) == "事件通告"
-                    and current_target
-                    and previous_target
-                    and current_target != previous_target
-                ):
                     continue
                 union(index, previous)
 
@@ -8707,16 +8722,88 @@ class LanPortalStateStore:
                             and source_record_id == existing_source_record_id
                         )
                     )
+                    prefer_explicit_active = bool(
+                        explicit_active_item_id
+                        and not (
+                            self._text(normalized.get("work_type")) == "event"
+                            and same_remote_identity
+                        )
+                        and (
+                            (
+                                record_id
+                                and not explicit_active_item_id.startswith(
+                                    ("manual:", "draft:", "source-")
+                                )
+                            )
+                            or (
+                                allow_revive
+                                and normalized.get("source_snapshot_authoritative")
+                                and not record_id
+                            )
+                        )
+                    )
                     if existing_active_item_id and (
                         not explicit_active_item_id or same_remote_identity
+                    ) and not (
+                        prefer_explicit_active
+                        and existing_active_item_id != explicit_active_item_id
                     ):
                         active_item_id = existing_active_item_id
                         normalized["active_item_id"] = active_item_id
-                    if existing_target_record_id and not record_id:
+                    inherit_existing_target = bool(
+                        existing_target_record_id and not record_id
+                    )
+                    if (
+                        inherit_existing_target
+                        and normalized.get("source_snapshot_authoritative")
+                    ):
+                        inherit_existing_target = bool(
+                            conn.execute(
+                                """
+                                SELECT 1
+                                FROM qt_active_items
+                                WHERE record_id = ?
+                                  AND notice_type = ?
+                                  AND deleted_at IS NULL
+                                LIMIT 1
+                                """,
+                                (existing_target_record_id, notice_type),
+                            ).fetchone()
+                        )
+                    if inherit_existing_target:
                         record_id = existing_target_record_id
                         normalized["record_id"] = existing_target_record_id
                         normalized["target_record_id"] = existing_target_record_id
                         normalized["_is_placeholder_record"] = False
+                existing_active_row = conn.execute(
+                    """
+                    SELECT record_id, notice_type, section, sort_order, origin,
+                           payload_json, deleted_at
+                    FROM qt_active_items
+                    WHERE active_item_id = ?
+                    """,
+                    (active_item_id,),
+                ).fetchone()
+                if (
+                    existing_identity is not None
+                    and existing_active_row is not None
+                    and existing_active_row["deleted_at"] is None
+                ):
+                    existing_payload = self._loads(
+                        str(existing_active_row["payload_json"] or ""), {}
+                    )
+                    if (
+                        self._text(existing_active_row["record_id"]) == record_id
+                        and self._text(existing_active_row["notice_type"]) == notice_type
+                        and self._text(existing_active_row["section"]) == section
+                        and int(existing_active_row["sort_order"] or 0)
+                        == int(sort_order or 0)
+                        and self._text(existing_active_row["origin"]) == origin
+                        and self._stable_json(existing_payload)
+                        == self._stable_json(normalized)
+                    ):
+                        conn.commit()
+                        return False
                 cursor = conn.execute(
                     """
                     INSERT INTO qt_active_items(
@@ -8756,14 +8843,76 @@ class LanPortalStateStore:
                         UPDATE qt_active_items
                         SET deleted_at = ?
                         WHERE record_id = ?
+                          AND notice_type = ?
                           AND active_item_id <> ?
                           AND deleted_at IS NULL
                         """,
-                        (now, record_id, active_item_id),
+                        (now, record_id, notice_type, active_item_id),
                     )
                 self._upsert_notice_identity_locked(conn, normalized, origin=origin)
                 conn.commit()
         return True
+
+    def _delete_qt_active_item_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        active_item_id: str,
+        record_id: str,
+        now: float,
+    ) -> bool:
+        if active_item_id and record_id:
+            active_row = conn.execute(
+                """
+                SELECT active_item_id
+                FROM qt_active_items
+                WHERE active_item_id = ? AND deleted_at IS NULL
+                """,
+                (active_item_id,),
+            ).fetchone()
+            record_rows = conn.execute(
+                """
+                SELECT active_item_id
+                FROM qt_active_items
+                WHERE record_id = ? AND deleted_at IS NULL
+                ORDER BY updated_at DESC
+                """,
+                (record_id,),
+            ).fetchall()
+            if active_row is not None:
+                matched_active_id = self._text(active_row["active_item_id"])
+                if record_rows and not any(
+                    self._text(row["active_item_id"]) == matched_active_id
+                    for row in record_rows
+                ):
+                    return False
+            elif len(record_rows) == 1:
+                matched_active_id = self._text(record_rows[0]["active_item_id"])
+            else:
+                return False
+        elif active_item_id:
+            matched_active_id = active_item_id
+        else:
+            record_rows = conn.execute(
+                """
+                SELECT active_item_id
+                FROM qt_active_items
+                WHERE record_id = ? AND deleted_at IS NULL
+                """,
+                (record_id,),
+            ).fetchall()
+            if len(record_rows) != 1:
+                return False
+            matched_active_id = self._text(record_rows[0]["active_item_id"])
+        cursor = conn.execute(
+            """
+            UPDATE qt_active_items
+            SET deleted_at = ?, updated_at = ?
+            WHERE active_item_id = ? AND deleted_at IS NULL
+            """,
+            (now, now, matched_active_id),
+        )
+        return bool(cursor.rowcount)
 
     def delete_qt_active_item(
         self, *, active_item_id: str = "", record_id: str = ""
@@ -8772,30 +8921,51 @@ class LanPortalStateStore:
         record_id = self._text(record_id)
         if not active_item_id and not record_id:
             return False
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                deleted = self._delete_qt_active_item_locked(
+                    conn,
+                    active_item_id=active_item_id,
+                    record_id=record_id,
+                    now=time.time(),
+                )
+                conn.commit()
+                return deleted
+
+    def delete_qt_active_item_and_enqueue(
+        self,
+        *,
+        active_item_id: str = "",
+        record_id: str = "",
+        channel: str = "qt_action",
+        payload: dict[str, Any] | None = None,
+        enqueue_if_missing: bool = False,
+    ) -> tuple[bool, int]:
+        active_item_id = self._text(active_item_id)
+        record_id = self._text(record_id)
+        if not active_item_id and not record_id:
+            return False, 0
         now = time.time()
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                if active_item_id:
-                    cursor = conn.execute(
-                        """
-                        UPDATE qt_active_items
-                        SET deleted_at = ?, updated_at = ?
-                        WHERE active_item_id = ? AND deleted_at IS NULL
-                        """,
-                        (now, now, active_item_id),
-                    )
-                else:
-                    cursor = conn.execute(
-                        """
-                        UPDATE qt_active_items
-                        SET deleted_at = ?, updated_at = ?
-                        WHERE record_id = ? AND deleted_at IS NULL
-                        """,
-                        (now, now, record_id),
+                deleted = self._delete_qt_active_item_locked(
+                    conn,
+                    active_item_id=active_item_id,
+                    record_id=record_id,
+                    now=now,
+                )
+                event_id = 0
+                if deleted or enqueue_if_missing:
+                    event_id = self._enqueue_outbox_event_locked(
+                        conn,
+                        channel=channel,
+                        payload=payload,
+                        now=now,
                     )
                 conn.commit()
-                return bool(cursor.rowcount)
+                return deleted, event_id
 
     def restore_live_portal_qt_active_items(
         self,
@@ -9159,6 +9329,13 @@ class LanPortalStateStore:
         existing_target_record_id = self._text(existing.get("target_record_id"))
         if is_local_record_id(existing_target_record_id):
             existing_target_record_id = ""
+        if (
+            payload.get("source_snapshot_authoritative")
+            and not target_record_id
+            and existing_target_record_id
+            and self._text(existing.get("status")) in {"结束", "已结束"}
+        ):
+            return existing
         existing_source_record_id = self._text(existing.get("source_record_id"))
         existing_active_item_id = self._text(existing.get("active_item_id"))
         same_remote_identity = bool(
@@ -12351,6 +12528,25 @@ class LanPortalStateStore:
             ),
         }
 
+    def _enqueue_outbox_event_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        channel: str,
+        payload: dict[str, Any] | None,
+        now: float,
+    ) -> int:
+        cursor = conn.execute(
+            """
+            INSERT INTO event_outbox(
+                channel, status, payload_json, attempts, last_error, created_at, updated_at
+            )
+            VALUES (?, 'pending', ?, 0, '', ?, ?)
+            """,
+            (self._text(channel) or "default", self._json(dict(payload or {})), now, now),
+        )
+        return int(cursor.lastrowid or 0)
+
     def enqueue_outbox_event(
         self, channel: str, payload: dict[str, Any] | None
     ) -> int:
@@ -12360,17 +12556,14 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                cursor = conn.execute(
-                    """
-                    INSERT INTO event_outbox(
-                        channel, status, payload_json, attempts, last_error, created_at, updated_at
-                    )
-                    VALUES (?, 'pending', ?, 0, '', ?, ?)
-                    """,
-                    (channel, self._json(normalized), now, now),
+                event_id = self._enqueue_outbox_event_locked(
+                    conn,
+                    channel=channel,
+                    payload=normalized,
+                    now=now,
                 )
                 conn.commit()
-                return int(cursor.lastrowid or 0)
+                return event_id
 
     def list_outbox_events(
         self,

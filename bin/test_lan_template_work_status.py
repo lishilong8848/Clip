@@ -1512,7 +1512,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         duplicate_quarterly = {
             **base,
             "active_item_id": "active-3",
-            "target_record_id": "target-3",
+            "target_record_id": "target-1",
         }
         later_quarterly = {
             **base,
@@ -1591,7 +1591,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     **base,
                     "active_item_id": "active-2",
-                    "target_record_id": "target-2",
+                    "target_record_id": "target-1",
                     "progress": "工作已开始，正在检查设备状态",
                 },
             ],
@@ -3810,6 +3810,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "事件发现来源": "BMS",
                 "事件发生时间": "2026-07-16 09:30",
                 "是否转检修": True,
+                "事件状态": "已结束",
             }
             try:
                 with patch.object(
@@ -3849,6 +3850,145 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             remote_fields,
         )
 
+    def test_qt_event_end_superseded_by_update_does_not_queue_repair_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "rec-event-transfer-race"
+            active = {
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "work_type": WORK_TYPE_EVENT,
+                "notice_type": "事件通告",
+                "scope": "E",
+                "status": "更新",
+                "title": "E楼事件转检修竞态",
+                "building": "E楼",
+                "specialty": "暖通",
+                "event_source": "BMS",
+                "level": "I3",
+                "time_str": "2026-08-14 09:30",
+                "progress": "处理中",
+                "transfer_to_overhaul": True,
+                "text": (
+                    "【事件通告】状态：更新\n"
+                    "【标题】E楼事件转检修竞态\n"
+                    "【事件发生时间】2026-08-14 09:30\n"
+                    "【机楼】E楼\n【专业】暖通\n【来源】BMS\n"
+                    "【等级】I3\n【进展】处理中"
+                ),
+            }
+            store.upsert_qt_active_item(
+                active,
+                section="event",
+                origin="portal",
+                allow_revive=True,
+            )
+            screenshot = store.put_notice_upload_attachment(
+                open_id="event-transfer-race",
+                file_name="event-end.png",
+                mime_type="image/png",
+                content=b"event-end",
+            )
+            request_payload = {
+                "action_type": "end",
+                "operation_id": "qt-event-end-transfer-race",
+                "data_dict": {
+                    **active,
+                    "status": "结束",
+                    "progress": "结束",
+                    "text": active["text"].replace("状态：更新", "状态：结束"),
+                },
+                "screenshot_upload_id": screenshot["upload_id"],
+            }
+            remote_status = "更新"
+            interleaved = False
+            original_release = PortalRuntime._release_event_operation_lock
+
+            def query_remote(_record_id, _notice_type):
+                return True, {
+                    "fields": {
+                        "告警描述": active["title"],
+                        "事件状态": remote_status,
+                        "事件进展": (
+                            "后续更新" if remote_status == "更新" else "结束"
+                        ),
+                        "机楼": "E楼",
+                        "专业": "暖通",
+                        "事件等级": "I3",
+                        "事件发现来源": "BMS",
+                        "事件发生时间": active["time_str"],
+                        "是否转检修": True,
+                    },
+                    "record_version": "v-latest",
+                }
+
+            def write_end(_record_id, _notice_type, _notice_payload):
+                nonlocal remote_status
+                remote_status = "已结束"
+                return True, "结束写入成功"
+
+            def release_then_later_update(lock_key, lock_owner):
+                nonlocal interleaved, remote_status
+                original_release(lock_key, lock_owner)
+                if interleaved or not lock_key or not lock_owner:
+                    return
+                interleaved = True
+                remote_status = "更新"
+                store.upsert_qt_active_item(
+                    {
+                        **active,
+                        "progress": "后续更新",
+                        "text": active["text"].replace("处理中", "后续更新"),
+                    },
+                    section="event",
+                    origin="later_web_update",
+                    allow_revive=True,
+                )
+
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        side_effect=query_remote,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "update_bitable_record_by_payload",
+                        side_effect=write_end,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "upload_media_to_feishu",
+                        return_value=(True, "event-end-token"),
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_release_event_operation_lock",
+                        side_effect=release_then_later_update,
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "enqueue_event_repair_project",
+                        return_value=17,
+                    ) as enqueue_project,
+                ):
+                    result = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(interleaved)
+        self.assertEqual(remote_status, "更新")
+        self.assertFalse(result["repair_project_queued"], result)
+        enqueue_project.assert_not_called()
+
     def test_local_event_end_keeps_success_when_repair_project_queue_fails(self):
         previous_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
@@ -3887,11 +4027,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 },
                 "screenshot_upload_id": screenshot["upload_id"],
             }
+            store.upsert_qt_active_item(
+                request_payload["data_dict"],
+                section="event",
+                origin="portal",
+            )
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {"是否转检修": True}}),
+                    return_value=(
+                        True,
+                        {"fields": {"是否转检修": True, "事件状态": "已结束"}},
+                    ),
                 ), patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
@@ -3904,12 +4052,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     PortalRuntime,
                     "enqueue_event_repair_project",
                     side_effect=PortalError("维修单字段配置不完整"),
-                ), patch.object(
-                    PortalRuntime,
-                    "_enqueue_active_delete_for_ended_notice",
-                    return_value="1",
-                ) as enqueue_active_delete:
+                ):
                     result = PortalRuntime.execute_local_notice_upload(request_payload)
+                    visible = store.list_visible_qt_active_items()
+                    outbox = store.list_outbox_events("qt_action", limit=100)
             finally:
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = previous_store
@@ -3919,7 +4065,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["repair_project_status"], "failed")
         self.assertIn("转检修任务创建失败", result["repair_project_warning"])
         self.assertIn("维修单字段配置不完整", result["message"])
-        enqueue_active_delete.assert_called_once()
+        self.assertEqual(visible, [])
+        self.assertTrue(
+            any(event["payload"].get("kind") == "active_delete" for event in outbox)
+        )
 
     def test_local_event_end_explicit_transfer_cancel_overrides_remote_true(self):
         previous_store = PortalRuntime.state_store
@@ -4433,7 +4582,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {}}),
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                MAINTENANCE_NOTICE_FIELDS["status"]: "已结束",
+                            }
+                        },
+                    ),
                 ), patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
@@ -5612,35 +5768,51 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
 
                 self.assertEqual(len(raw_items), 3)
-                self.assertEqual(len(visible_items), 2)
+                self.assertEqual(len(visible_items), 3)
                 self.assertEqual(
                     {
                         item["active_item_id"]
                         for item in visible_items
                     },
-                    {"active-current-canonical", "active-previous-month"},
+                    {
+                        "active-current-stale",
+                        "active-current-canonical",
+                        "active-previous-month",
+                    },
                 )
                 self.assertEqual(
                     {
                         entry["data"]["active_item_id"]
                         for entry in qt_payload["other"]
                     },
-                    {"active-current-canonical", "active-previous-month"},
+                    {
+                        "active-current-stale",
+                        "active-current-canonical",
+                        "active-previous-month",
+                    },
                 )
                 self.assertEqual(
                     {
                         item["active_item_id"]
                         for item in web_ongoing
                     },
-                    {"active-current-canonical", "active-previous-month"},
+                    {
+                        "active-current-stale",
+                        "active-current-canonical",
+                        "active-previous-month",
+                    },
                 )
-                self.assertEqual(len(service_projection), 2)
+                self.assertEqual(len(service_projection), 3)
                 self.assertEqual(
                     {
                         item["active_item_id"]
                         for item in service_projection
                     },
-                    {"active-current-canonical", "active-previous-month"},
+                    {
+                        "active-current-stale",
+                        "active-current-canonical",
+                        "active-previous-month",
+                    },
                 )
             finally:
                 PortalRuntime.state_store = previous_store
@@ -6172,6 +6344,324 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(payload["active_item_id"], "rec_target_started_change")
         self.assertEqual(payload["target_record_id"], "rec_target_started_change")
 
+    def test_web_start_update_chain_survives_active_target_refresh_in_all_views(self):
+        for source_linked in (True, False):
+            with self.subTest(source_linked=source_linked), tempfile.TemporaryDirectory() as tmp:
+                previous_store = PortalRuntime.state_store
+                previous_service = PortalRuntime.service
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                PortalRuntime.state_store = store
+                PortalRuntime.service = service
+                target_record_id = (
+                    "target-web-chain-source"
+                    if source_linked
+                    else "target-web-chain-only"
+                )
+                source_record_id = "source-web-chain" if source_linked else ""
+                manual_active_id = (
+                    f"manual:lite:C:change:{'source' if source_linked else 'target'}"
+                )
+                title = (
+                    "C楼源关联Web动作链变更"
+                    if source_linked
+                    else "C楼纯目标Web动作链变更"
+                )
+                target_record = {
+                    "record_id": target_record_id,
+                    "display_fields": {
+                        "名称": title,
+                        "变更状态": "开始",
+                        "变更开始时间": _test_datetime(8, "09:00"),
+                        "变更结束时间": _test_datetime(8, "18:00"),
+                        "楼栋": "C楼",
+                        "进度": "准备工作已完成",
+                    },
+                    "raw_fields": {},
+                }
+                if source_linked:
+                    service._change_records = [
+                        _build_change_record(
+                            source_record_id,
+                            building="C楼",
+                            progress="进行中",
+                            title=title,
+                            start_time=_test_datetime(8, "09:00"),
+                            end_time=_test_datetime(8, "18:00"),
+                        )
+                    ]
+                    service._change_loaded_once = True
+
+                def web_payload(action: str, progress: str) -> dict:
+                    status = "开始" if action == "start" else "更新"
+                    payload = {
+                        "action": action,
+                        "active_item_id": (
+                            manual_active_id if action == "start" else target_record_id
+                        ),
+                        "source_record_id": source_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "status": status,
+                        "title": title,
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "start_time": _test_datetime(8, "09:00"),
+                        "end_time": _test_datetime(8, "18:00"),
+                        "progress": progress,
+                        "text": (
+                            f"【变更通告】状态：{status}\n"
+                            f"【名称】{title}\n"
+                            f"【进度】{progress}"
+                        ),
+                    }
+                    return payload
+
+                def assert_shared_active(expected_progress: str) -> None:
+                    qt_rows = store.list_qt_active_items()
+                    qt_cache = ActiveCacheStore(
+                        str(Path(tmp) / "active_cache.json"),
+                        store,
+                    ).load_payload()["other"]
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("C")
+                    self.assertEqual(len(qt_rows), 1)
+                    self.assertEqual(len(qt_cache), 1)
+                    self.assertEqual(len(web_rows), 1)
+                    payloads = [
+                        qt_rows[0]["payload"],
+                        qt_cache[0]["data"],
+                        web_rows[0],
+                    ]
+                    self.assertEqual(
+                        {item.get("active_item_id") for item in payloads},
+                        {target_record_id},
+                    )
+                    self.assertEqual(
+                        {item.get("target_record_id") for item in payloads},
+                        {target_record_id},
+                    )
+                    self.assertEqual(
+                        {str(item.get("source_record_id") or "") for item in payloads},
+                        {source_record_id},
+                    )
+                    self.assertEqual(
+                        {item.get("progress") for item in payloads},
+                        {expected_progress},
+                    )
+
+                try:
+                    stale_payload = web_payload("start", "旧开始进度")
+                    stale_payload["active_item_id"] = manual_active_id
+                    stale_payload["target_record_id"] = target_record_id
+                    stale_payload["record_id"] = target_record_id
+                    self.assertTrue(
+                        store.upsert_qt_active_item(
+                            stale_payload,
+                            section="other",
+                            origin="portal",
+                        )
+                    )
+                    self.assertTrue(
+                        store.delete_qt_active_item(
+                            active_item_id=manual_active_id,
+                            record_id=target_record_id,
+                        )
+                    )
+
+                    PortalRuntime._upsert_backend_active_notice(
+                        web_payload("start", "准备工作已完成"),
+                        remote_record_id=target_record_id,
+                        job_id=f"job-{target_record_id}-start",
+                    )
+                    assert_shared_active("准备工作已完成")
+
+                    service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=[target_record],
+                    )
+                    assert_shared_active("准备工作已完成")
+
+                    self.assertTrue(
+                        store.delete_qt_active_item(
+                            active_item_id=target_record_id,
+                            record_id=target_record_id,
+                        )
+                    )
+                    PortalRuntime._upsert_backend_active_notice(
+                        web_payload("update", "第一次连续更新"),
+                        remote_record_id=target_record_id,
+                        job_id=f"job-{target_record_id}-update-1",
+                    )
+                    assert_shared_active("第一次连续更新")
+
+                    target_record["display_fields"].update(
+                        {"变更状态": "更新", "进度": "第一次连续更新"}
+                    )
+                    service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=[target_record],
+                    )
+                    assert_shared_active("第一次连续更新")
+
+                    PortalRuntime._upsert_backend_active_notice(
+                        web_payload("update", "第二次连续更新"),
+                        remote_record_id=target_record_id,
+                        job_id=f"job-{target_record_id}-update-2",
+                    )
+                    target_record["display_fields"]["进度"] = "第二次连续更新"
+                    service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=[target_record],
+                    )
+                    assert_shared_active("第二次连续更新")
+                finally:
+                    PortalRuntime.state_store = previous_store
+                    PortalRuntime.service = previous_service
+
+    def test_web_start_physically_migrates_source_only_active_to_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.state_store = store
+            PortalRuntime.service = service
+            source_record_id = "source-web-physical-migration"
+            target_record_id = "target-web-physical-migration"
+            title = "C楼Web源条目物理迁移变更"
+            source_record = _build_change_record(
+                source_record_id,
+                building="C楼",
+                progress="进行中",
+                title=title,
+                start_time=_test_datetime(8, "09:00"),
+                end_time=_test_datetime(8, "18:00"),
+            )
+            source_payload = service._source_snapshot_active_payload(source_record)
+            source_active_id = source_payload["active_item_id"]
+            self.assertTrue(source_payload["source_snapshot_authoritative"])
+            self.assertFalse(source_payload.get("target_record_id"))
+            store.upsert_qt_active_item(
+                source_payload,
+                section="other",
+                origin="source_snapshot_refresh",
+            )
+
+            def web_payload(action: str, progress: str) -> dict:
+                status = "开始" if action == "start" else "更新"
+                return {
+                    "action": action,
+                    "active_item_id": (
+                        source_active_id if action == "start" else target_record_id
+                    ),
+                    "source_record_id": source_record_id,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": status,
+                    "title": title,
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "start_time": _test_datetime(8, "09:00"),
+                    "end_time": _test_datetime(8, "18:00"),
+                    "progress": progress,
+                    "text": (
+                        f"【变更通告】状态：{status}\n"
+                        f"【名称】{title}\n"
+                        f"【进度】{progress}"
+                    ),
+                }
+
+            def assert_single_target_bound(expected_progress: str) -> None:
+                raw_rows = store.list_qt_active_items()
+                visible_rows = store.list_visible_qt_active_items()
+                cache_rows = ActiveCacheStore(
+                    str(Path(tmp) / "active_cache.json"),
+                    store,
+                ).load_payload()["other"]
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    web_rows = FastAPIPortalController._get_ongoing("C")
+                self.assertEqual(
+                    [
+                        len(raw_rows),
+                        len(visible_rows),
+                        len(cache_rows),
+                        len(web_rows),
+                    ],
+                    [1, 1, 1, 1],
+                )
+                payloads = [
+                    raw_rows[0]["payload"],
+                    visible_rows[0]["payload"],
+                    cache_rows[0]["data"],
+                    web_rows[0],
+                ]
+                self.assertEqual(
+                    {item.get("active_item_id") for item in payloads},
+                    {target_record_id},
+                )
+                self.assertEqual(
+                    {item.get("target_record_id") for item in payloads},
+                    {target_record_id},
+                )
+                self.assertEqual(
+                    {item.get("source_record_id") for item in payloads},
+                    {source_record_id},
+                )
+                self.assertEqual(
+                    {item.get("progress") for item in payloads},
+                    {expected_progress},
+                )
+
+            try:
+                PortalRuntime._upsert_backend_active_notice(
+                    web_payload("start", "准备工作已完成"),
+                    remote_record_id=target_record_id,
+                    job_id="job-web-physical-migration-start",
+                )
+                assert_single_target_bound("准备工作已完成")
+                outbox = store.list_outbox_events("qt_action", limit=20)
+                self.assertEqual(
+                    [event["payload"].get("kind") for event in outbox],
+                    ["active_upsert", "active_delete"],
+                )
+                self.assertEqual(
+                    outbox[0]["payload"]["payload"]["item"]["active_item_id"],
+                    target_record_id,
+                )
+                self.assertEqual(
+                    outbox[1]["payload"]["payload"]["active_item_id"],
+                    source_active_id,
+                )
+
+                PortalRuntime._upsert_backend_active_notice(
+                    web_payload("update", "连续更新仍保留一条"),
+                    remote_record_id=target_record_id,
+                    job_id="job-web-physical-migration-update",
+                )
+                assert_single_target_bound("连续更新仍保留一条")
+                self.assertEqual(
+                    [
+                        event["payload"].get("kind")
+                        for event in store.list_outbox_events("qt_action", limit=20)
+                    ],
+                    ["active_upsert", "active_delete", "active_upsert"],
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
     def test_backend_clipboard_maintenance_same_title_different_reason_is_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
@@ -6569,9 +7059,31 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
                 signature, count = FastAPIPortalController._scoped_qt_active_signature("C")
 
+                time.sleep(0.002)
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "active-sse-c-1",
+                        "target_record_id": "target-sse-c-1",
+                        "record_id": "target-sse-c-1",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "title": "C楼SSE签名测试",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "text": "【维保通告】状态：更新\n【名称】C楼SSE签名测试\n【进度】第二次更新",
+                    },
+                    section="other",
+                    origin="qt",
+                )
+                updated_signature, updated_count = (
+                    FastAPIPortalController._scoped_qt_active_signature("C")
+                )
+
                 self.assertEqual(empty_count, 0)
                 self.assertEqual(count, 1)
+                self.assertEqual(updated_count, 1)
                 self.assertNotEqual(signature, empty_signature)
+                self.assertNotEqual(updated_signature, signature)
             finally:
                 PortalRuntime.state_store = previous_store
 
@@ -7531,22 +8043,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {"data_dict": item}
                 )
 
-            self.assertTrue(first["ok"])
-            self.assertTrue(first["qt_removed"])
+            self.assertFalse(first["ok"])
+            self.assertTrue(first["authoritative"])
             self.assertFalse(first["remote_deleted"])
-            self.assertTrue(second["ok"])
-            self.assertTrue(second["already_absent"])
+            self.assertFalse(second["ok"])
+            self.assertTrue(second["authoritative"])
             self.assertFalse(second["remote_deleted"])
-            self.assertEqual(store.list_qt_active_items(), [])
+            self.assertEqual(len(store.list_qt_active_items()), 1)
             remote_delete.assert_not_called()
 
     def test_local_remove_active_item_reports_sqlite_delete_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
             item = {
-                "active_item_id": "active-local-remove-failure",
-                "record_id": "recv-local-remove-failure",
-                "target_record_id": "recv-local-remove-failure",
+                "active_item_id": "manual:local-remove-failure",
+                "record_id": "manual:local-remove-failure",
                 "notice_type": "维保通告",
                 "work_type": "maintenance",
                 "building_codes": ["A"],
@@ -7556,7 +8067,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             store.upsert_qt_active_item(item, section="other", origin="qt")
             with patch.object(PortalRuntime, "state_store", store), patch.object(
                 store,
-                "delete_qt_active_item",
+                "delete_qt_active_item_and_enqueue",
                 side_effect=RuntimeError("sqlite locked"),
             ):
                 result = PortalRuntime.execute_local_remove_active_item(
@@ -7905,6 +8416,147 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     store.get_notice_remote_operation(operation_id)["status"],
                     "remote_written",
                 )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+
+    def test_notice_delete_retries_source_reset_after_remote_write_without_redeleting(self):
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = store
+            source_record_id = "source-delete-reset-retry"
+            target_record_id = "target-delete-reset-retry"
+            operation_id = "delete-source-reset-retry-operation"
+            source_record = _build_record(
+                source_record_id,
+                "A楼",
+                "远端删除后重置源计划",
+                _TEST_MONTH_LABEL,
+                status="进行中",
+            )
+            service._records = [source_record]
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+            active_payload = service._source_snapshot_active_payload(source_record)
+            active_payload.update(
+                {
+                    "active_item_id": "active-delete-reset-retry",
+                    "target_record_id": target_record_id,
+                    "record_id": target_record_id,
+                    "status": "开始",
+                    "_is_placeholder_record": False,
+                }
+            )
+            store.upsert_qt_active_item(
+                active_payload,
+                section="other",
+                origin="web",
+            )
+            with service._summary_lock:
+                service._upsert_work_status_item_locked(
+                    active_payload,
+                    action="start",
+                    now=_test_datetime(8, "09:00"),
+                )
+            discard_attempts = 0
+            original_discard = service.discard_deleted_ongoing_state
+
+            def flaky_discard(item, *, scope, reset_source_plan=False):
+                nonlocal discard_attempts
+                discard_attempts += 1
+                if discard_attempts == 1:
+                    raise RuntimeError("source reset temporarily failed")
+                return original_discard(
+                    item,
+                    scope=scope,
+                    reset_source_plan=reset_source_plan,
+                )
+
+            request_payload = {
+                **active_payload,
+                "scope": "A",
+                "operation_id": operation_id,
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                "名称": active_payload["title"],
+                                "楼栋": "A楼",
+                            },
+                            "record_version": "version-delete-reset-retry",
+                        },
+                    ),
+                ) as query_record, patch.object(
+                    portal_server_module,
+                    "delete_bitable_record",
+                    return_value=(True, "删除成功"),
+                ) as delete_record, patch.object(
+                    service,
+                    "discard_deleted_ongoing_state",
+                    side_effect=flaky_discard,
+                ):
+                    first = PortalRuntime.execute_local_delete_active_item(
+                        request_payload
+                    )
+
+                    self.assertFalse(first["ok"])
+                    self.assertTrue(first["remote_deleted"])
+                    self.assertEqual(
+                        store.get_notice_remote_operation(operation_id)["status"],
+                        "remote_written",
+                    )
+                    self.assertEqual(len(store.list_qt_active_items()), 1)
+
+                    second = PortalRuntime.execute_local_delete_active_item(
+                        request_payload
+                    )
+                    third = PortalRuntime.execute_local_delete_active_item(
+                        request_payload
+                    )
+
+                self.assertTrue(second["ok"])
+                self.assertTrue(second["remote_deleted"])
+                self.assertTrue(third["ok"])
+                self.assertTrue(third["deduped"])
+                self.assertTrue(third["local_cleanup_completed"])
+                self.assertEqual(discard_attempts, 2)
+                query_record.assert_called_once()
+                delete_record.assert_called_once_with(
+                    target_record_id,
+                    "维保通告",
+                )
+                self.assertEqual(
+                    store.get_notice_remote_operation(operation_id)["status"],
+                    "completed",
+                )
+                self.assertEqual(store.list_qt_active_items(), [])
+
+                service.reconcile_source_ongoing_items()
+                self.assertEqual(store.list_qt_active_items(), [])
+                reset_items = service._load_work_status_items_locked("A")
+                self.assertEqual(len(reset_items), 1)
+                self.assertTrue(reset_items[0]["reset_after_delete"])
+                self.assertEqual(reset_items[0]["status"], "未开始")
             finally:
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.service = original_service
@@ -9117,7 +9769,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [item["record_id"] for item in campus["records"]],
                 ["c2", "c3"],
             )
-            self.assertEqual(campus["ongoing"], [])
+            self.assertEqual(
+                [item["source_record_id"] for item in campus["ongoing"]],
+                ["c3"],
+            )
 
             with patch.object(
                 service, "_target_records_for_notice_type", return_value=[]
@@ -9126,6 +9781,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(
                 [item["record_id"] for item in single["records"]],
                 ["m1", "c1", "c2", "c3"],
+            )
+            self.assertEqual(
+                [item["source_record_id"] for item in single["ongoing"]],
+                ["c3"],
             )
 
     def test_workbench_month_filter_keeps_all_unfinished_repair_records(self):
@@ -9589,6 +10248,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                                 "record_version": "version-after-write",
                             },
                         ),
+                        (
+                            True,
+                            {
+                                "fields": {
+                                    "名称": "A楼Qt并发测试",
+                                    MAINTENANCE_NOTICE_FIELDS["status"]: "更新",
+                                },
+                                "record_version": "version-after-write",
+                            },
+                        ),
                     ],
                 ), patch.object(
                     portal_server_module,
@@ -9684,6 +10353,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             True,
                             {
                                 "fields": {"标题": "A楼Qt版本回填测试"},
+                                "record_version": "version-after-write",
+                            },
+                        ),
+                        (
+                            True,
+                            {
+                                "fields": {
+                                    "标题": "A楼Qt版本回填测试",
+                                    "事件状态": "处理中",
+                                },
                                 "record_version": "version-after-write",
                             },
                         ),
@@ -11356,7 +12035,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【设备检修】状态：开始", prepared["text"])
             self.assertIn("【备件更换情况】无", prepared["text"])
 
-    def test_started_repair_source_record_stays_in_source_list_without_active_item(self):
+    def test_started_repair_source_record_is_in_source_and_active_lists(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -11373,7 +12052,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual([item["record_id"] for item in result["records"]], ["r1"])
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
-            self.assertEqual(result["ongoing"], [])
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(result["ongoing"][0]["source_record_id"], "r1")
 
     def test_repair_source_ongoing_update_uses_linked_target_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11674,6 +12354,148 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service.ensure_loaded(refresh_if_expired=True)
             self.assertEqual(service.record_load_count, 2)
 
+    def test_partial_per_source_snapshot_does_not_skip_missing_source_loads(self):
+        class PartialSnapshotService(MaintenancePortalService):
+            def __init__(self):
+                super().__init__()
+                self.loaded_sources = []
+
+            def _load_fields(self):
+                self._field_meta_list = []
+                self._field_meta_by_name = {}
+                return []
+
+            def _load_records(self):
+                self.loaded_sources.append("maintenance")
+                self._records = [
+                    _build_record(
+                        "maintenance-loaded-after-partial-snapshot",
+                        "A楼",
+                        "缺失快照后加载的维保",
+                        _TEST_MONTH_LABEL,
+                    )
+                ]
+                self._maintenance_loaded_once = True
+                return self._records
+
+            def _load_change_fields(self):
+                self._change_field_meta_list = []
+                self._change_field_meta_by_name = {}
+                return []
+
+            def _load_change_records(self):
+                self.loaded_sources.append("change")
+                self._change_records = []
+                self._change_loaded_once = True
+                return []
+
+            def _load_zhihang_change_fields(self):
+                self._zhihang_change_field_meta_list = []
+                self._zhihang_change_field_meta_by_name = {}
+                return []
+
+            def _load_zhihang_change_records(self):
+                self.loaded_sources.append("zhihang_change")
+                self._zhihang_change_records = []
+                self._zhihang_change_loaded_once = True
+                return []
+
+            def _load_repair_fields(self):
+                self._repair_field_meta_list = []
+                self._repair_field_meta_by_name = {}
+                return []
+
+            def _load_repair_records(self):
+                self.loaded_sources.append("repair")
+                self._repair_records = []
+                self._repair_loaded_once = True
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), PartialSnapshotService)
+            service._state_store.replace_source_table_snapshot(
+                "change",
+                {
+                    "ALL": [
+                        _build_change_record(
+                            "change-only-snapshot",
+                            building="A楼",
+                            progress="未开始",
+                        )
+                    ]
+                },
+                meta={"last_loaded_at": "2026-08-14 09:00:00"},
+            )
+            self.assertFalse(
+                service._state_store.get_source_scope_snapshot(
+                    "ALL", prefer_independent=False
+                )["exists"]
+            )
+
+            service.ensure_loaded()
+            result = service.query_records(scope="A", ongoing_items=[])
+
+            self.assertTrue(
+                {"maintenance", "zhihang_change", "repair"}.issubset(
+                    service.loaded_sources
+                )
+            )
+            self.assertTrue(service._maintenance_loaded_once)
+            self.assertTrue(service._change_loaded_once)
+            self.assertTrue(service._zhihang_change_loaded_once)
+            self.assertTrue(service._repair_loaded_once)
+            self.assertIn(
+                "maintenance-loaded-after-partial-snapshot",
+                {item["record_id"] for item in result["records"]},
+            )
+
+    def test_optional_change_load_failure_keeps_existing_source_only_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            source_record_id = "change-retained-after-optional-load-failure"
+            source_record = _build_change_record(
+                source_record_id,
+                building="A楼",
+                progress="进行中",
+                title="A楼变更源加载失败仍保留",
+            )
+            service._records = []
+            service._change_records = [source_record]
+            service._repair_records = []
+            service._zhihang_change_records = []
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = False
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+            source_payload = service._source_snapshot_active_payload(source_record)
+            service._state_store.upsert_qt_active_item(
+                source_payload,
+                section="other",
+                origin="source_snapshot_refresh",
+            )
+
+            with patch.object(
+                service,
+                "_load_change_fields",
+                side_effect=RuntimeError("change source unavailable"),
+            ):
+                service.ensure_loaded()
+            result = service.query_records(scope="A", ongoing_items=[])
+
+            self.assertFalse(service._change_loaded_once)
+            qt_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(qt_rows), 1)
+            self.assertEqual(
+                qt_rows[0]["payload"]["source_record_id"],
+                source_record_id,
+            )
+            self.assertFalse(qt_rows[0]["payload"].get("target_record_id"))
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(
+                result["ongoing"][0]["source_record_id"],
+                source_record_id,
+            )
+
     def test_scope_overview_counts_pending_and_ongoing_by_work_type(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -11772,7 +12594,192 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ["m1"],
             )
 
-    def test_source_ongoing_change_is_not_surfaced_without_qt_item(self):
+    def test_historical_maintenance_ongoing_survives_snapshot_and_qt_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            historical_month = _TEST_MONTH_START
+            for _ in range(3):
+                historical_month = (
+                    historical_month - dt.timedelta(days=1)
+                ).replace(day=1)
+            service._records = [
+                _build_record(
+                    "maintenance-historical-ongoing",
+                    "A楼",
+                    "历史月份仍在进行的维保",
+                    f"{historical_month.month}月",
+                    status="进行中",
+                )
+            ]
+
+            service._save_source_scope_snapshots(["maintenance"])
+
+            snapshot = service._state_store.get_source_table_scope_snapshot(
+                "maintenance", "ALL"
+            )
+            self.assertEqual(
+                [item["record_id"] for item in snapshot["records"]],
+                ["maintenance-historical-ongoing"],
+            )
+            active_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            self.assertEqual(
+                active_rows[0]["payload"]["source_record_id"],
+                "maintenance-historical-ongoing",
+            )
+
+    def test_historical_ongoing_sources_survive_snapshots_and_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            historical_month = _TEST_MONTH_START
+            for _ in range(3):
+                historical_month = (
+                    historical_month - dt.timedelta(days=1)
+                ).replace(day=1)
+            historical_start = historical_month.strftime("%Y-%m-08 09:00")
+            historical_end = historical_month.strftime("%Y-%m-08 18:00")
+            repair = _build_repair_record(
+                "repair-historical-ongoing",
+                title="A楼历史月份仍在进行的检修",
+                building="A楼",
+                fault_time=historical_start,
+                expected_time=historical_end,
+                started=True,
+            )
+            repair["display_fields"]["维修开始时间"] = historical_start
+            service._records = [
+                _build_record(
+                    "maintenance-historical-table",
+                    "A楼",
+                    "历史月份仍在进行的维保表驱动",
+                    f"{historical_month.month}月",
+                    status="进行中",
+                )
+            ]
+            service._change_records = [
+                _build_change_record(
+                    "change-historical-ongoing",
+                    building="A楼",
+                    progress="进行中",
+                    title="A楼历史月份仍在进行的变更",
+                    start_time=historical_start,
+                    end_time=historical_end,
+                )
+            ]
+            service._repair_records = [repair]
+            service._zhihang_change_records = [
+                _build_zhihang_change_record(
+                    "zhihang-historical-ongoing",
+                    title="A楼历史月份仍在进行的智航变更",
+                    progress="进行中",
+                    plan_start=historical_start,
+                    plan_end=historical_end,
+                )
+            ]
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+
+            service._save_source_scope_snapshots()
+
+            cases = (
+                ("maintenance", "maintenance-historical-table"),
+                ("change", "change-historical-ongoing"),
+                ("repair", "repair-historical-ongoing"),
+                ("zhihang_change", "zhihang-historical-ongoing"),
+            )
+            for source_key, record_id in cases:
+                with self.subTest(source_key=source_key):
+                    snapshot = service._state_store.get_source_table_scope_snapshot(
+                        source_key, "ALL"
+                    )
+                    self.assertTrue(snapshot["exists"])
+                    self.assertIn(
+                        record_id,
+                        {item["record_id"] for item in snapshot["records"]},
+                    )
+
+            expected_ids = {record_id for _source_key, record_id in cases}
+            active_rows = service._state_store.list_visible_qt_active_items()
+            projected_ids = {
+                row["payload"].get("source_record_id")
+                or row["payload"].get("zhihang_record_id")
+                for row in active_rows
+            }
+            self.assertEqual(projected_ids, expected_ids)
+            result = service.query_records(scope="A", ongoing_items=[])
+            self.assertEqual(
+                {
+                    item.get("source_record_id") or item.get("zhihang_record_id")
+                    for item in result["ongoing"]
+                },
+                expected_ids,
+            )
+
+    def test_standalone_zhihang_ongoing_has_no_target_record_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._zhihang_change_records = [
+                _build_zhihang_change_record(
+                    "zhihang-standalone-ongoing",
+                    title="A楼智航独立变更",
+                    progress="进行中",
+                )
+            ]
+
+            service.reconcile_source_ongoing_items()
+
+            active_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            payload = active_rows[0]["payload"]
+            self.assertNotIn("record_id", payload)
+            self.assertNotIn("target_record_id", payload)
+            self.assertNotIn("source_record_id", payload)
+            self.assertEqual(
+                payload["zhihang_record_id"],
+                "zhihang-standalone-ongoing",
+            )
+            self.assertTrue(str(payload.get("text") or "").strip())
+            result = service.query_records(scope="A", ongoing_items=[])
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(
+                result["ongoing"][0]["zhihang_record_id"],
+                "zhihang-standalone-ongoing",
+            )
+
+    def test_matching_change_sources_reconcile_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            title = "A楼同一项变更"
+            service._change_records = [
+                _build_change_record(
+                    "source-change-shared",
+                    building="A楼",
+                    progress="进行中",
+                    title=title,
+                )
+            ]
+            service._zhihang_change_records = [
+                _build_zhihang_change_record(
+                    "zhihang-change-shared",
+                    title=title,
+                    progress="进行中",
+                )
+            ]
+
+            service.reconcile_source_ongoing_items()
+            repeated = service.reconcile_source_ongoing_items()
+
+            self.assertEqual(repeated["upserted"], 0)
+            self.assertEqual(repeated["removed"], 0)
+            active_rows = service._state_store.list_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            payload = active_rows[0]["payload"]
+            self.assertEqual(payload["source_record_id"], "source-change-shared")
+            self.assertEqual(payload["zhihang_record_id"], "zhihang-change-shared")
+
+    def test_source_ongoing_change_is_reconciled_into_qt_active_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._change_records = [
@@ -11783,26 +12790,33 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     title="C楼柴油发电机测试变更",
                 )
             ]
-            target_records = [
-                {
-                    "record_id": "target-change-1",
-                    "display_fields": {
-                        "名称": "C楼柴油发电机测试变更",
-                        "变更状态": "开始",
-                        "变更开始时间": "2026-05-08 09:00",
-                        "楼栋": "C楼",
-                    },
-                }
-            ]
+            service._change_loaded_once = True
 
             with patch.object(
-                service, "_target_records_for_notice_type", return_value=target_records
+                service, "_target_records_for_notice_type", return_value=[]
             ):
-                merged = service._merge_ongoing_items("C", [])
+                service.reconcile_source_ongoing_items()
 
-            self.assertEqual(merged, [])
+            active_rows = service._state_store.list_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            active_payload = active_rows[0]["payload"]
+            self.assertEqual(
+                active_payload["source_record_id"],
+                "source-change-1",
+            )
+            self.assertEqual(active_payload["work_type"], WORK_TYPE_CHANGE)
+            self.assertFalse(active_payload.get("target_record_id"))
+            self.assertTrue(str(active_payload.get("text") or "").strip())
 
-    def test_query_records_keeps_source_ongoing_change_out_of_active_list(self):
+            service._change_records[0]["display_fields"]["变更进度"] = "已结束"
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                service.reconcile_source_ongoing_items()
+
+            self.assertEqual(service._state_store.list_qt_active_items(), [])
+
+    def test_query_records_surfaces_reconciled_source_ongoing_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._change_records = [
@@ -11814,14 +12828,109 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             ]
 
-            result = service.query_records(scope="C", ongoing_items=[])
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                service.reconcile_source_ongoing_items()
+                result = service.query_records(scope="C", ongoing_items=[])
 
             self.assertEqual(
                 [item["record_id"] for item in result["records"]],
                 ["source-change-recovered"],
             )
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
-            self.assertEqual(result["ongoing"], [])
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(
+                result["ongoing"][0]["source_record_id"],
+                "source-change-recovered",
+            )
+
+    def test_source_reconcile_binds_matching_target_active_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-target-match",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼柴油发电机测试变更",
+                )
+            ]
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "target-change-target-match",
+                    "record_id": "target-change-target-match",
+                    "target_record_id": "target-change-target-match",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "title": "C楼柴油发电机测试变更",
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "status": "开始",
+                    "start_time": _test_datetime(8, "09:00"),
+                    "end_time": _test_datetime(8, "18:00"),
+                    "text": (
+                        "【变更通告】状态：开始\n"
+                        "【名称】C楼柴油发电机测试变更"
+                    ),
+                },
+                section="other",
+                origin="target_snapshot_refresh",
+            )
+
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                service.reconcile_source_ongoing_items()
+
+            active_rows = service._state_store.list_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            self.assertEqual(
+                active_rows[0]["active_item_id"],
+                "target-change-target-match",
+            )
+            self.assertEqual(
+                active_rows[0]["payload"]["source_record_id"],
+                "source-change-target-match",
+            )
+
+    def test_source_active_migrates_to_later_target_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-later-target",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼稍后生成目标的变更",
+                )
+            ]
+            service.reconcile_source_ongoing_items()
+            self.assertEqual(len(service._state_store.list_qt_active_items()), 1)
+
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=[
+                    {
+                        "record_id": "target-change-later-target",
+                        "display_fields": {
+                            "名称": "C楼稍后生成目标的变更",
+                            "变更状态": "开始",
+                            "变更开始时间": "2026-08-08 09:00",
+                            "变更结束时间": "2026-08-08 18:00",
+                            "楼栋": "C楼",
+                        },
+                    }
+                ],
+            )
+
+            active_rows = service._state_store.list_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            payload = active_rows[0]["payload"]
+            self.assertEqual(payload["source_record_id"], "source-change-later-target")
+            self.assertEqual(payload["target_record_id"], "target-change-later-target")
+            self.assertTrue(active_rows[0]["active_item_id"].startswith("target-"))
 
     def test_query_records_does_not_duplicate_recovered_source_ongoing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -12563,6 +13672,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("/api/auth/status?next=", html)
         self.assertIn("window.addEventListener('focus', checkLiteAuthStatus)", html)
         self.assertIn("document.addEventListener('visibilitychange'", html)
+        self.assertIn("function scheduleLiteQtActiveRefresh()", html)
+        self.assertIn("payload?.qt_scope_signature", html)
         self.assertIn("<span>通告处理</span>", html)
         self.assertIn("<span>计划通告列表</span>", html)
         self.assertIn("<span>未结束通告</span>", html)
@@ -12627,11 +13738,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("function ongoingDisplayTitle(draft)", html)
         self.assertIn("const title = ongoingDisplayTitle(draft);", html)
         self.assertIn("setOngoingRowStatus(row, '进行中', 'working');", html)
-        self.assertIn("setLiteStatus(successfulNoticeActionText(payload?.action));", html)
+        self.assertIn("setLiteStatus(successfulNoticeActionText(", html)
         self.assertNotIn("setMetaChip(meta, status, 'ready');", html)
         self.assertNotIn("setMetaChip(meta, String(message).slice", html)
         self.assertNotIn("setMetaChip(meta, String(message || patch.message", html)
         self.assertNotIn("status.textContent = ok ? '发送成功' : '发送失败';", html)
+
+    def test_workbench_lite_skipped_end_keeps_or_rebuilds_ongoing_row(self):
+        html = workbench_lite_module.render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [],
+                "daily_summary": {"stats": {}},
+                "record_type_counts": {},
+                "ongoing_type_counts": {},
+            },
+            session={"user": {"name": "测试用户"}},
+            scope="C",
+            work_type="change",
+        )
+
+        self.assertIn(
+            "const terminalProjectionSkipped = Boolean(patch.terminal_projection_skipped);",
+            html,
+        )
+        self.assertIn(
+            "if (ok && draft.action === 'end' && !terminalProjectionSkipped)",
+            html,
+        )
+        self.assertIn("if (terminalProjectionSkipped) draft.action = 'update';", html)
+        self.assertIn(
+            "if (!row && (draft.action === 'start' || terminalProjectionSkipped))",
+            html,
+        )
+        self.assertIn(
+            "Boolean(job.frontend_patch?.terminal_projection_skipped)",
+            html,
+        )
+        self.assertIn("结束已被后续更新覆盖，通告仍在进行中", html)
 
     def test_qt_manual_update_check_exposes_update_without_auto_apply(self):
         manifest = {
@@ -13857,7 +15001,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     job_id="job-z-reject",
                 )
 
-    def test_source_ongoing_repair_is_not_surfaced_without_qt_item(self):
+    def test_source_ongoing_repair_is_reconciled_into_qt_active_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -13869,26 +15013,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     target_record_id="",
                 )
             ]
-            target_records = [
-                {
-                    "record_id": "target-repair-1",
-                    "display_fields": {
-                        "名称（标题）": "D楼UPS故障检修",
-                        "检修状态": "开始",
-                        "实际开始时间": "2026-05-08 09:00",
-                        "楼栋": "D楼",
-                    },
-                }
-            ]
 
             with patch.object(
-                service, "_target_records_for_notice_type", return_value=target_records
+                service, "_target_records_for_notice_type", return_value=[]
             ):
-                merged = service._merge_ongoing_items("D", [])
+                service.reconcile_source_ongoing_items()
 
-            self.assertEqual(merged, [])
+            active_rows = service._state_store.list_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            active_payload = active_rows[0]["payload"]
+            self.assertEqual(
+                active_payload["source_record_id"],
+                "source-repair-1",
+            )
+            self.assertEqual(active_payload["work_type"], WORK_TYPE_REPAIR)
+            self.assertFalse(active_payload.get("target_record_id"))
+            self.assertTrue(str(active_payload.get("text") or "").strip())
 
-    def test_query_records_keeps_source_ongoing_repair_out_of_active_list(self):
+    def test_query_records_surfaces_reconciled_source_ongoing_repair(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -13901,16 +15043,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             ]
 
-            result = service.query_records(scope="D", ongoing_items=[])
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                service.reconcile_source_ongoing_items()
+                result = service.query_records(scope="D", ongoing_items=[])
 
             self.assertEqual(
                 [item["record_id"] for item in result["records"]],
                 ["source-repair-recovered"],
             )
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
-            self.assertEqual(result["ongoing"], [])
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(
+                result["ongoing"][0]["source_record_id"],
+                "source-repair-recovered",
+            )
 
-    def test_hidden_ongoing_item_is_removed_from_refresh_results(self):
+    def test_source_snapshot_ongoing_overrides_local_hidden_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._change_records = [
@@ -13941,7 +15091,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(merged, [])
             result = service.query_records(scope="C", ongoing_items=[])
-            self.assertEqual(result["ongoing"], [])
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(
+                result["ongoing"][0]["source_record_id"],
+                "source-change-hide",
+            )
 
     def test_successful_resend_clears_deleted_source_hidden_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14169,7 +15323,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(len(merged), 1)
             self.assertEqual(merged[0]["active_item_id"], "active-ended")
 
-    def test_source_ongoing_with_completed_target_match_is_not_displayed(self):
+    def test_source_ongoing_is_displayed_even_if_matching_target_is_completed(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._change_records = [
@@ -14185,19 +15339,598 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "record_id": "target-change-ended",
                     "display_fields": {
                         "名称": "C楼目标已完成变更",
-                        "变更状态": "已结束",
+                        "变更状态": "开始",
                         "变更开始时间": "2026-05-08 09:00",
                         "楼栋": "C楼",
                     },
                 }
             ]
 
-            with patch.object(
-                service, "_target_records_for_notice_type", return_value=target_records
-            ):
-                merged = service._merge_ongoing_items("C", [])
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=target_records,
+            )
+            target_records[0]["display_fields"]["变更状态"] = "已结束"
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=target_records,
+            )
 
-            self.assertEqual(merged, [])
+            active_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(active_rows), 1)
+            payload = active_rows[0]["payload"]
+            self.assertEqual(payload["source_record_id"], "source-change-ended")
+            self.assertFalse(payload.get("target_record_id"))
+            self.assertTrue(active_rows[0]["active_item_id"].startswith("source-"))
+
+    def test_matched_target_then_source_finish_removes_notice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            title = "C楼先结束目标再结束源的变更"
+            service._change_records = [
+                _build_change_record(
+                    "source-target-then-source-finish",
+                    building="C楼",
+                    progress="进行中",
+                    title=title,
+                    start_time=_test_datetime(8, "09:00"),
+                    end_time=_test_datetime(8, "18:00"),
+                )
+            ]
+            service._change_loaded_once = True
+            target_records = [
+                {
+                    "record_id": "target-then-source-finish",
+                    "display_fields": {
+                        "名称": title,
+                        "变更状态": "开始",
+                        "变更开始时间": _test_datetime(8, "09:00"),
+                        "变更结束时间": _test_datetime(8, "18:00"),
+                        "楼栋": "C楼",
+                    },
+                }
+            ]
+
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=target_records,
+            )
+            bound_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(bound_rows), 1)
+            self.assertEqual(
+                bound_rows[0]["payload"]["source_record_id"],
+                "source-target-then-source-finish",
+            )
+            self.assertEqual(
+                bound_rows[0]["payload"]["target_record_id"],
+                "target-then-source-finish",
+            )
+
+            target_records[0]["display_fields"]["变更状态"] = "已结束"
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=target_records,
+            )
+            source_only_rows = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(source_only_rows), 1)
+            self.assertEqual(
+                source_only_rows[0]["payload"]["source_record_id"],
+                "source-target-then-source-finish",
+            )
+            self.assertFalse(source_only_rows[0]["payload"].get("target_record_id"))
+            self.assertFalse(source_only_rows[0].get("record_id"))
+
+            service._change_records = [
+                _build_change_record(
+                    "source-target-then-source-finish",
+                    building="C楼",
+                    progress="已结束",
+                    title=title,
+                    start_time=_test_datetime(8, "09:00"),
+                    end_time=_test_datetime(8, "18:00"),
+                )
+            ]
+            service.reconcile_source_ongoing_items()
+
+            self.assertEqual(
+                service._state_store.list_visible_qt_active_items(),
+                [],
+            )
+
+    def test_visible_projection_keeps_distinct_strong_ids_for_same_business_fields(self):
+        identity_cases = (
+            ("target", "target_record_id"),
+            ("source", "source_record_id"),
+            ("zhihang", "zhihang_record_id"),
+        )
+        for identity_kind, identity_field in identity_cases:
+            with self.subTest(identity_kind=identity_kind), tempfile.TemporaryDirectory() as tmp:
+                store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+                expected_ids = {
+                    f"{identity_kind}-same-business-1",
+                    f"{identity_kind}-same-business-2",
+                }
+                for index, identity_id in enumerate(sorted(expected_ids), start=1):
+                    item = {
+                        "active_item_id": f"active-{identity_kind}-{index}",
+                        identity_field: identity_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "title": "C楼完全相同业务字段变更",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "status": "开始",
+                        "start_time": _test_datetime(8, "09:00"),
+                        "end_time": _test_datetime(8, "18:00"),
+                        "content": "相同内容",
+                        "reason": "相同原因",
+                        "impact": "相同影响",
+                        "text": (
+                            "【变更通告】状态：开始\n"
+                            "【名称】C楼完全相同业务字段变更"
+                        ),
+                    }
+                    if identity_kind == "target":
+                        item["record_id"] = identity_id
+                    else:
+                        item["source_snapshot_authoritative"] = True
+                    self.assertTrue(
+                        store.upsert_qt_active_item(
+                            item,
+                            section="other",
+                            origin="test",
+                        )
+                    )
+
+                self.assertEqual(len(store.list_qt_active_items()), 2)
+                visible = store.list_visible_qt_active_items()
+                self.assertEqual(len(visible), 2)
+                self.assertEqual(
+                    {
+                        row["payload"].get(identity_field)
+                        for row in visible
+                    },
+                    expected_ids,
+                )
+
+    def test_identical_target_refresh_after_source_merge_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            title = "C楼重复刷新幂等变更"
+            service._change_records = [
+                _build_change_record(
+                    "source-idempotent-refresh",
+                    building="C楼",
+                    progress="进行中",
+                    title=title,
+                    start_time=_test_datetime(8, "09:00"),
+                    end_time=_test_datetime(8, "18:00"),
+                )
+            ]
+            target_records = [
+                {
+                    "record_id": "target-idempotent-refresh",
+                    "display_fields": {
+                        "名称": title,
+                        "变更状态": "开始",
+                        "变更开始时间": _test_datetime(8, "09:00"),
+                        "变更结束时间": _test_datetime(8, "18:00"),
+                        "楼栋": "C楼",
+                    },
+                }
+            ]
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=target_records,
+            )
+            outbox_count = len(
+                service._state_store.list_outbox_events("qt_action", limit=1000)
+            )
+
+            repeated = service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                records=target_records,
+            )
+
+            self.assertEqual(repeated["updated"], 0)
+            self.assertEqual(repeated["source_reconcile"]["upserted"], 0)
+            self.assertEqual(
+                len(service._state_store.list_outbox_events("qt_action", limit=1000)),
+                outbox_count,
+            )
+
+    def test_partial_maintenance_snapshot_does_not_delete_existing_change_qt_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            existing_change = {
+                "active_item_id": "source-change-preserved-on-maintenance-refresh",
+                "source_record_id": "change-preserved-on-maintenance-refresh",
+                "source_snapshot_authoritative": True,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "title": "C楼应保留的进行中变更",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "source_progress": "进行中",
+                "status": "更新",
+                "text": "【变更通告】状态：更新\n【名称】C楼应保留的进行中变更",
+            }
+            service._state_store.upsert_qt_active_item(
+                existing_change,
+                section="other",
+                origin="source_snapshot_refresh",
+            )
+            service._records = [
+                _build_record(
+                    "maintenance-only-partial-refresh",
+                    "A楼",
+                    "仅刷新维保源",
+                    _TEST_MONTH_LABEL,
+                    status="进行中",
+                )
+            ]
+            service._change_records = []
+            service._repair_records = []
+            service._zhihang_change_records = []
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = False
+            service._repair_loaded_once = False
+            service._zhihang_change_loaded_once = False
+
+            service._save_source_scope_snapshots(["maintenance"])
+
+            self.assertIn(
+                existing_change["active_item_id"],
+                {
+                    row["active_item_id"]
+                    for row in service._state_store.list_qt_active_items()
+                },
+            )
+
+    def test_delete_qt_active_item_falls_back_to_record_without_double_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-current",
+                    "record_id": "target-current",
+                    "target_record_id": "target-current",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "title": "按目标ID兜底删除",
+                },
+                section="other",
+                origin="test",
+            )
+
+            self.assertTrue(
+                store.delete_qt_active_item(
+                    active_item_id="active-stale",
+                    record_id="target-current",
+                )
+            )
+            self.assertEqual(store.list_qt_active_items(), [])
+
+            for suffix in ("one", "two"):
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": f"active-{suffix}",
+                        "record_id": f"target-{suffix}",
+                        "target_record_id": f"target-{suffix}",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "title": f"冲突删除保护-{suffix}",
+                    },
+                    section="other",
+                    origin="test",
+                )
+
+            self.assertFalse(
+                store.delete_qt_active_item(
+                    active_item_id="active-one",
+                    record_id="target-two",
+                )
+            )
+            self.assertEqual(
+                {row["active_item_id"] for row in store.list_qt_active_items()},
+                {"active-one", "active-two"},
+            )
+
+    def test_qt_active_delete_and_outbox_enqueue_are_atomic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            item = {
+                "active_item_id": "active-atomic-delete",
+                "record_id": "target-atomic-delete",
+                "target_record_id": "target-atomic-delete",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "title": "原子删除测试",
+            }
+            store.upsert_qt_active_item(item, section="other", origin="test")
+            event = {"kind": "active_delete", "payload": item}
+
+            with patch.object(
+                store,
+                "_enqueue_outbox_event_locked",
+                side_effect=RuntimeError("outbox unavailable"),
+            ), self.assertRaises(RuntimeError):
+                store.delete_qt_active_item_and_enqueue(
+                    active_item_id=item["active_item_id"],
+                    record_id=item["target_record_id"],
+                    payload=event,
+                )
+
+            self.assertEqual(len(store.list_qt_active_items()), 1)
+            self.assertEqual(store.list_outbox_events("qt_action"), [])
+
+            deleted, event_id = store.delete_qt_active_item_and_enqueue(
+                active_item_id=item["active_item_id"],
+                record_id=item["target_record_id"],
+                payload=event,
+            )
+            self.assertTrue(deleted)
+            self.assertGreater(event_id, 0)
+            self.assertEqual(store.list_qt_active_items(), [])
+            deleted_again, recovery_event_id = (
+                store.delete_qt_active_item_and_enqueue(
+                    active_item_id=item["active_item_id"],
+                    record_id=item["target_record_id"],
+                    payload=event,
+                    enqueue_if_missing=True,
+                )
+            )
+            self.assertFalse(deleted_again)
+            self.assertGreater(recovery_event_id, event_id)
+
+    def test_authoritative_source_only_local_remove_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            item = {
+                "active_item_id": "source-change-authoritative-local-remove",
+                "source_record_id": "change-authoritative-local-remove",
+                "source_snapshot_authoritative": True,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "title": "C楼权威源通告不可本地移除",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "source_progress": "进行中",
+                "status": "更新",
+                "text": "【变更通告】状态：更新\n【名称】C楼权威源通告不可本地移除",
+            }
+            service._state_store.upsert_qt_active_item(
+                item,
+                section="other",
+                origin="source_snapshot_refresh",
+            )
+
+            with patch.object(PortalRuntime, "service", service), patch.object(
+                PortalRuntime,
+                "state_store",
+                service._state_store,
+            ):
+                result = PortalRuntime.execute_local_remove_active_item(
+                    {"data_dict": item}
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(
+                [
+                    row["active_item_id"]
+                    for row in service._state_store.list_qt_active_items()
+                ],
+                [item["active_item_id"]],
+            )
+
+    def test_reset_deleted_source_stays_hidden_until_local_start_or_update(self):
+        for local_action in ("start", "update"):
+            with self.subTest(local_action=local_action), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                source_record_id = f"maintenance-reset-{local_action}"
+                service._records = [
+                    _build_record(
+                        source_record_id,
+                        "A楼",
+                        "删除重置后仍为进行中的原始源",
+                        _TEST_MONTH_LABEL,
+                        status="进行中",
+                    )
+                ]
+                service._maintenance_loaded_once = True
+                service.reconcile_source_ongoing_items()
+                active_payload = service._state_store.list_qt_active_items()[0][
+                    "payload"
+                ]
+
+                cleanup = service.discard_deleted_ongoing_state(
+                    active_payload,
+                    scope="A",
+                    reset_source_plan=True,
+                )
+                reset_result = service.query_records(
+                    month=_TEST_MONTH_LABEL,
+                    scope="A",
+                    ongoing_items=[],
+                )
+
+                self.assertTrue(cleanup["source_plan_reset"])
+                self.assertEqual(
+                    service._records[0]["display_fields"]["维护实施状态"],
+                    "进行中",
+                )
+                self.assertEqual(reset_result["ongoing"], [])
+                self.assertEqual(reset_result["records"][0]["source_progress"], "未开始")
+                self.assertEqual(
+                    reset_result["records"][0]["work_summary"]["status"],
+                    "未开始",
+                )
+
+                with service._summary_lock:
+                    service._upsert_work_status_item_locked(
+                        {
+                            "source_record_id": source_record_id,
+                            "work_type": WORK_TYPE_MAINTENANCE,
+                            "notice_type": "维保通告",
+                            "title": "EA118机房A楼删除重置后仍为进行中的原始源",
+                            "building": "A楼",
+                            "building_code": "A",
+                            "building_codes": ["A"],
+                        },
+                        action=local_action,
+                        now=_test_datetime(8, "10:00"),
+                    )
+                service.reconcile_source_ongoing_items()
+
+                resumed = service.query_records(
+                    month=_TEST_MONTH_LABEL,
+                    scope="A",
+                    ongoing_items=[],
+                )
+                self.assertEqual(len(resumed["ongoing"]), 1)
+                self.assertEqual(
+                    resumed["ongoing"][0]["source_record_id"],
+                    source_record_id,
+                )
+
+    def test_same_business_zhihang_records_reconcile_idempotently_as_two_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            title = "A楼同标题同时间智航变更"
+            service._zhihang_change_records = [
+                _build_zhihang_change_record(
+                    record_id,
+                    title=title,
+                    progress="进行中",
+                    plan_start=_test_datetime(8, "09:00"),
+                    plan_end=_test_datetime(8, "18:00"),
+                )
+                for record_id in ("zhihang-same-1", "zhihang-same-2")
+            ]
+            service._zhihang_change_loaded_once = True
+
+            service.reconcile_source_ongoing_items()
+            outbox_count = len(
+                service._state_store.list_outbox_events("qt_action", limit=1000)
+            )
+            repeated = service.reconcile_source_ongoing_items()
+
+            visible = service._state_store.list_visible_qt_active_items()
+            self.assertEqual(len(visible), 2)
+            self.assertEqual(
+                {
+                    row["payload"]["zhihang_record_id"]
+                    for row in visible
+                },
+                {"zhihang-same-1", "zhihang-same-2"},
+            )
+            self.assertEqual(repeated["upserted"], 0)
+            self.assertEqual(repeated["removed"], 0)
+            self.assertEqual(
+                len(service._state_store.list_outbox_events("qt_action", limit=1000)),
+                outbox_count,
+            )
+
+    def test_source_without_date_does_not_fuzzy_bind_same_title_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            title = "C楼缺日期不得模糊绑定的变更"
+            service._change_records = [
+                _build_change_record(
+                    "source-change-without-date",
+                    building="C楼",
+                    progress="进行中",
+                    title=title,
+                    start_time="",
+                    end_time="",
+                )
+            ]
+            service._change_loaded_once = True
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "target-change-with-date",
+                    "record_id": "target-change-with-date",
+                    "target_record_id": "target-change-with-date",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "title": title,
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "status": "开始",
+                    "start_time": _test_datetime(8, "09:00"),
+                    "end_time": _test_datetime(8, "18:00"),
+                    "text": f"【变更通告】状态：开始\n【名称】{title}",
+                },
+                section="other",
+                origin="target_snapshot_refresh",
+            )
+
+            service.reconcile_source_ongoing_items()
+
+            rows = {
+                row["active_item_id"]: row["payload"]
+                for row in service._state_store.list_visible_qt_active_items()
+            }
+            self.assertEqual(
+                set(rows),
+                {
+                    "source-change-source-change-without-date",
+                    "target-change-with-date",
+                },
+            )
+            self.assertFalse(
+                rows["source-change-source-change-without-date"].get(
+                    "target_record_id"
+                )
+            )
+            self.assertFalse(
+                rows["target-change-with-date"].get("source_record_id")
+            )
+
+    def test_change_and_repair_keep_same_target_record_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            shared_record_id = "shared-target-record-id"
+            for work_type, notice_type in (
+                (WORK_TYPE_CHANGE, "变更通告"),
+                (WORK_TYPE_REPAIR, "检修通告"),
+            ):
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": f"active-{work_type}-shared-record",
+                        "record_id": shared_record_id,
+                        "target_record_id": shared_record_id,
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "title": f"{notice_type}相同目标记录ID",
+                        "status": "开始",
+                    },
+                    section="other",
+                    origin="test",
+                )
+
+            rows = store.list_qt_active_items()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(
+                {
+                    (row["payload"]["work_type"], row["payload"]["target_record_id"])
+                    for row in rows
+                },
+                {
+                    (WORK_TYPE_CHANGE, shared_record_id),
+                    (WORK_TYPE_REPAIR, shared_record_id),
+                },
+            )
+            self.assertFalse(
+                store.delete_qt_active_item(record_id=shared_record_id)
+            )
+            self.assertEqual(len(store.list_qt_active_items()), 2)
 
     def test_history_summary_filters_month_scope_and_work_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -16299,6 +18032,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "_execute_backend_prepared_upload",
                 ) as remote_upload,
                 patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                MAINTENANCE_NOTICE_FIELDS["status"]: "更新",
+                            },
+                            "record_version": "v-remote-recovery-active",
+                        },
+                    ),
+                ),
+                patch.object(
                     PortalRuntime,
                     "_upsert_backend_active_notice",
                     return_value=1,
@@ -18207,9 +19953,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         PortalRuntime.state_store = store
         PortalRuntime.service = _NativeFastAPIRouteService()
         item = {
-            "active_item_id": "active-api-local-remove",
-            "record_id": "recv-api-local-remove",
-            "target_record_id": "recv-api-local-remove",
+            "active_item_id": "manual:api-local-remove",
+            "record_id": "manual:api-local-remove",
             "notice_type": "维保通告",
             "work_type": "maintenance",
             "title": "A楼接口本地移除测试",
@@ -18240,8 +19985,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     json={
                         "scope": "ALL",
                         "active_item_id": item["active_item_id"],
-                        "target_record_id": item["target_record_id"],
-                        "record_id": item["record_id"],
                         "work_type": item["work_type"],
                         "notice_type": item["notice_type"],
                     },
@@ -18433,6 +20176,134 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions = original_sessions
 
+    def test_fastapi_ongoing_delete_keeps_finalize_source_reset_tombstone(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_auth_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        temp_dir = tempfile.TemporaryDirectory()
+        service = self._new_temp_service(Path(temp_dir.name))
+        store = service._state_store
+        PortalRuntime.service = service
+        PortalRuntime.state_store = store
+        PortalRuntime.auth_manager._state_store = store
+        source_record_id = "source-fastapi-delete-tombstone"
+        target_record_id = "target-fastapi-delete-tombstone"
+        source_record = _build_record(
+            source_record_id,
+            "A楼",
+            "FastAPI 删除后保留源计划墓碑",
+            _TEST_MONTH_LABEL,
+            status="进行中",
+        )
+        service._records = [source_record]
+        service._maintenance_loaded_once = True
+        service._change_loaded_once = True
+        service._repair_loaded_once = True
+        service._zhihang_change_loaded_once = True
+        active_payload = service._source_snapshot_active_payload(source_record)
+        active_payload.update(
+            {
+                "active_item_id": "active-fastapi-delete-tombstone",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "status": "开始",
+                "_is_placeholder_record": False,
+            }
+        )
+        store.upsert_qt_active_item(
+            active_payload,
+            section="other",
+            origin="web",
+        )
+        with service._summary_lock:
+            service._upsert_work_status_item_locked(
+                active_payload,
+                action="start",
+                now=_test_datetime(8, "09:00"),
+            )
+        PortalRuntime.auth_manager.upsert_permission_user(
+            open_id="ou_delete_tombstone",
+            name="测试用户",
+            role="admin",
+            scopes=["ALL"],
+            enabled=True,
+            updated_by="test",
+        )
+        session_id = "delete-route-tombstone-session"
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试用户", "open_id": "ou_delete_tombstone"},
+                "role": "admin",
+                "allowed_scopes": ["ALL"],
+                "expires_at": time.time() + 3600,
+            }
+        client = TestClient(controller._build_app())
+        try:
+            with patch.object(
+                portal_server_module,
+                "external_real_write_guard",
+                return_value={
+                    "mock_external": False,
+                    "real_write_allowed": True,
+                    "reason": "",
+                },
+            ), patch.object(
+                portal_server_module,
+                "query_record_by_id",
+                return_value=(
+                    True,
+                    {
+                        "fields": {
+                            "名称": active_payload["title"],
+                            "楼栋": "A楼",
+                        },
+                        "record_version": "version-fastapi-delete-tombstone",
+                    },
+                ),
+            ), patch.object(
+                portal_server_module,
+                "delete_bitable_record",
+                return_value=(True, "删除成功"),
+            ) as delete_record, patch.object(
+                service,
+                "discard_deleted_ongoing_state",
+                wraps=service.discard_deleted_ongoing_state,
+            ) as discard_state:
+                response = client.post(
+                    "/api/ongoing-items/delete",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+                    json={
+                        **active_payload,
+                        "scope": "A",
+                        "operation_id": "fastapi-delete-tombstone-operation",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["data"]["remote_deleted"])
+            delete_record.assert_called_once_with(target_record_id, "维保通告")
+            self.assertEqual(discard_state.call_count, 1)
+            self.assertTrue(discard_state.call_args.kwargs["reset_source_plan"])
+            self.assertEqual(store.list_qt_active_items(), [])
+            reset_items = service._load_work_status_items_locked("A")
+            self.assertEqual(len(reset_items), 1)
+            self.assertTrue(reset_items[0]["reset_after_delete"])
+            self.assertEqual(reset_items[0]["status"], "未开始")
+
+            service.reconcile_source_ongoing_items()
+            self.assertEqual(store.list_qt_active_items(), [])
+        finally:
+            store.shutdown_write_worker(timeout=2.0)
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            PortalRuntime.auth_manager._state_store = original_auth_state_store
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+            temp_dir.cleanup()
+
     def test_fastapi_ongoing_delete_recovers_after_remote_delete(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_service = PortalRuntime.service
@@ -18457,16 +20328,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ), patch.object(
                 PortalRuntime,
                 "execute_local_delete_active_item",
-                return_value={
-                    "ok": False,
-                    "message": "目标多维已删除，但本地清理首次失败。",
-                    "remote_deleted": True,
-                    "record_id": "target-web-delete-recovered",
-                    "active_item_id": "active-web-delete-recovered",
-                    "source_record_id": "source-web-delete-recovered",
-                    "work_type": "maintenance",
-                },
-            ):
+                side_effect=[
+                    {
+                        "ok": False,
+                        "message": "目标多维已删除，但本地清理首次失败。",
+                        "remote_deleted": True,
+                        "record_id": "target-web-delete-recovered",
+                        "active_item_id": "active-web-delete-recovered",
+                        "source_record_id": "source-web-delete-recovered",
+                        "work_type": "maintenance",
+                    },
+                    {
+                        "ok": True,
+                        "remote_deleted": True,
+                        "local_cleanup_completed": True,
+                        "source_plan_reset": True,
+                        "record_id": "target-web-delete-recovered",
+                        "active_item_id": "active-web-delete-recovered",
+                        "source_record_id": "source-web-delete-recovered",
+                        "work_type": "maintenance",
+                    },
+                ],
+            ) as delete_active:
                 response = client.post(
                     "/api/ongoing-items/delete",
                     json={
@@ -18486,6 +20369,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(data["cleanup_recovered"])
             self.assertTrue(data["source_plan_reset"])
             self.assertIn("本地清理首次失败", data["cleanup_warning"])
+            self.assertEqual(delete_active.call_count, 2)
         finally:
             PortalRuntime.service = original_service
             PortalRuntime.state_store = original_state_store
@@ -18668,16 +20552,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with patch.object(
                 PortalRuntime,
                 "execute_local_delete_active_item",
-                return_value={
-                    "ok": False,
-                    "message": "目标多维已删除，但本地清理首次失败。",
-                    "remote_deleted": True,
-                    "record_id": "target-delete-recovered",
-                    "active_item_id": "active-delete-recovered",
-                    "source_record_id": "source-delete-recovered",
-                    "work_type": "maintenance",
-                },
-            ):
+                side_effect=[
+                    {
+                        "ok": False,
+                        "message": "目标多维已删除，但本地清理首次失败。",
+                        "remote_deleted": True,
+                        "record_id": "target-delete-recovered",
+                        "active_item_id": "active-delete-recovered",
+                        "source_record_id": "source-delete-recovered",
+                        "work_type": "maintenance",
+                    },
+                    {
+                        "ok": True,
+                        "remote_deleted": True,
+                        "local_cleanup_completed": True,
+                        "source_plan_reset": True,
+                        "record_id": "target-delete-recovered",
+                        "active_item_id": "active-delete-recovered",
+                        "source_record_id": "source-delete-recovered",
+                        "work_type": "maintenance",
+                    },
+                ],
+            ) as delete_active:
                 response = client.post(
                     "/api/qt/commands",
                     json={
@@ -18699,6 +20595,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(data["remote_deleted"])
             self.assertTrue(data["cleanup_recovered"])
             self.assertTrue(data["source_plan_reset"])
+            self.assertEqual(delete_active.call_count, 2)
             leased = PortalRuntime.state_store.lease_outbox_events(
                 "qt_action", limit=1, lease_seconds=5
             )
@@ -21134,7 +23031,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("function currentNoticeMatchesDraft(form, draft)", html)
         self.assertIn("function clearCompletedCurrentNotice(draft)", html)
         self.assertIn("if (!currentNoticeMatchesDraft(form, draft)) return false", html)
-        self.assertEqual(html.count("clearCompletedCurrentNotice(draft);"), 2)
+        self.assertEqual(html.count("clearCompletedCurrentNotice(draft);"), 3)
         self.assertIn("form.replaceWith(empty);", html)
         self.assertIn("url.searchParams.delete(key);", html)
 
@@ -30542,6 +32439,42 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertFalse(lifecycle["finished"])
         self.assertEqual(lifecycle["ended_at"], "")
 
+    def test_target_status_matrix_keeps_every_unfinished_state_active(self):
+        service = _TestMaintenancePortalService()
+        cases = {
+            "开始": True,
+            "更新": True,
+            "进行中": True,
+            "处理中": True,
+            "执行中": True,
+            "实施中": True,
+            "维修中": True,
+            "已开始": True,
+            "未结束": True,
+            "未完成": True,
+            "未开始": False,
+            "已结束": False,
+            "已完成": False,
+            "取消": False,
+        }
+
+        for status, expected_active in cases.items():
+            with self.subTest(status=status):
+                lifecycle = service._target_record_lifecycle(
+                    work_type=WORK_TYPE_CHANGE,
+                    notice_type="变更通告",
+                    target_record={
+                        "record_id": f"target-status-{status}",
+                        "display_fields": {
+                            "变更状态": status,
+                            "变更开始时间": "2026-08-03 09:00",
+                            "变更结束时间": "2026-08-09 23:00",
+                        },
+                        "raw_fields": {},
+                    },
+                )
+                self.assertEqual(lifecycle["active"], expected_active)
+
     def test_change_target_refresh_restores_all_started_manual_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -30720,12 +32653,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_target_snapshot_refresh_removes_remote_deleted_active_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
             service = self._new_temp_service(Path(tmp))
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.service = service
             target_record_id = "rec_target_deleted"
-            source_record_id = "rec_source_deleted"
             active_payload = {
                 "active_item_id": "active-target-deleted",
-                "source_record_id": source_record_id,
                 "target_record_id": target_record_id,
                 "record_id": target_record_id,
                 "work_type": WORK_TYPE_CHANGE,
@@ -30740,42 +32675,495 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 section="other",
                 origin="portal",
             )
-            with service._summary_lock:
-                service._upsert_work_status_item_locked(
-                    active_payload,
-                    action="start",
-                    now=_test_datetime(8, "09:00"),
-                )
-
-            result = service._reconcile_notice_target_snapshot(
-                work_type=WORK_TYPE_CHANGE,
-                notice_type="变更通告",
-                records=[],
-            )
-
-            self.assertEqual(result["missing_removed"], 1)
-            self.assertEqual(service._state_store.list_qt_active_items(), [])
-            self.assertIsNone(
-                service._state_store.resolve_notice_identity(
+            try:
+                first = service._reconcile_notice_target_snapshot(
                     work_type=WORK_TYPE_CHANGE,
-                    target_record_id=target_record_id,
+                    notice_type="变更通告",
+                    records=[],
                 )
+
+                self.assertEqual(first["missing_deferred"], 1)
+                self.assertEqual(first["missing_removed"], 0)
+                qt_rows = service._state_store.list_qt_active_items()
+                cache_rows = ActiveCacheStore(
+                    str(Path(tmp) / "active_cache.json"),
+                    service._state_store,
+                ).load_payload()["other"]
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    web_rows = FastAPIPortalController._get_ongoing("A")
+                self.assertEqual([len(qt_rows), len(cache_rows), len(web_rows)], [1, 1, 1])
+                self.assertEqual(
+                    qt_rows[0]["payload"]["target_record_id"],
+                    target_record_id,
+                )
+
+                deferred_payload = dict(qt_rows[0]["payload"])
+                deferred_payload["_target_snapshot_missing_since"] = time.time() - 3600
+                service._state_store.upsert_qt_active_item(
+                    deferred_payload,
+                    section="other",
+                    origin="portal",
+                )
+                with patch.object(
+                    service,
+                    "_load_table_fields",
+                    return_value=([], {}),
+                ), patch.object(
+                    service,
+                    "_request_json",
+                    side_effect=PortalError(
+                        "飞书接口失败: code=1254043, msg=RecordIdNotFound"
+                    ),
+                ) as read_target:
+                    second = service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=[],
+                    )
+
+                self.assertEqual(second["missing_removed"], 1)
+                read_target.assert_called_once()
+                self.assertEqual(
+                    read_target.call_args.args[0],
+                    f"records/{target_record_id}",
+                )
+                self.assertEqual(service._state_store.list_qt_active_items(), [])
+                self.assertEqual(
+                    ActiveCacheStore(
+                        str(Path(tmp) / "active_cache.json"),
+                        service._state_store,
+                    ).load_payload()["other"],
+                    [],
+                )
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    self.assertEqual(FastAPIPortalController._get_ongoing("A"), [])
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_target_snapshot_missing_after_grace_requires_strong_record_confirmation(self):
+        scenarios = (
+            ("active", "更新", None, True),
+            (
+                "transient_error",
+                "",
+                PortalError("飞书接口失败: code=99991668, msg=request timeout"),
+                True,
+            ),
+            (
+                "not_found",
+                "",
+                PortalError("飞书接口失败: code=1254043, msg=RecordIdNotFound"),
+                False,
+            ),
+            ("finished", "已结束", None, False),
+        )
+        for scenario, target_status, read_error, should_remain in scenarios:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                target_record_id = f"target-missing-confirm-{scenario}"
+                service._state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": f"active-missing-confirm-{scenario}",
+                        "target_record_id": target_record_id,
+                        "record_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "status": "更新",
+                        "title": f"A楼目标漏读确认-{scenario}",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "start_time": _test_datetime(8, "09:00"),
+                        "text": f"【变更通告】状态：更新\n【名称】A楼目标漏读确认-{scenario}",
+                    },
+                    section="other",
+                    origin="portal",
+                )
+
+                first = service._reconcile_notice_target_snapshot(
+                    work_type=WORK_TYPE_CHANGE,
+                    notice_type="变更通告",
+                    records=[],
+                )
+                self.assertEqual(first["missing_deferred"], 1)
+                deferred_row = service._state_store.list_qt_active_items()[0]
+                deferred_payload = dict(deferred_row["payload"])
+                deferred_payload["_target_snapshot_missing_since"] = time.time() - 3600
+                service._state_store.upsert_qt_active_item(
+                    deferred_payload,
+                    section="other",
+                    origin="portal",
+                )
+
+                def read_target(path, **_kwargs):
+                    if read_error is not None:
+                        raise read_error
+                    return {
+                        "code": 0,
+                        "data": {
+                            "record": {
+                                "record_id": target_record_id,
+                                "fields": {
+                                    "变更状态": target_status,
+                                    "名称": f"A楼目标漏读确认-{scenario}",
+                                    "楼栋": "A楼",
+                                    "变更开始时间": _test_datetime(8, "09:00"),
+                                    "变更结束时间": "",
+                                    "进度": "强读确认进度",
+                                },
+                            }
+                        },
+                    }
+
+                with patch.object(
+                    service,
+                    "_load_table_fields",
+                    return_value=([], {}),
+                ), patch.object(
+                    service,
+                    "_request_json",
+                    side_effect=read_target,
+                ) as strong_read:
+                    result = service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=[],
+                    )
+
+                self.assertEqual(strong_read.call_count, 1)
+                self.assertEqual(
+                    strong_read.call_args.args[0],
+                    f"records/{target_record_id}",
+                )
+                remaining = service._state_store.list_visible_qt_active_items()
+                self.assertEqual(bool(remaining), should_remain)
+                if should_remain:
+                    self.assertEqual(result["missing_removed"], 0)
+                    self.assertEqual(result["finished_removed"], 0)
+                else:
+                    self.assertEqual(
+                        result["missing_removed"] + result["finished_removed"],
+                        1,
+                    )
+
+    def test_confirmed_missing_target_falls_back_to_source_only_active_notice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            service = self._new_temp_service(Path(tmp))
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.service = service
+            source_record_id = "source-target-missing-fallback"
+            target_record_id = "target-missing-fallback"
+            title = "A楼目标缺失后保留源变更"
+            service._change_records = [
+                _build_change_record(
+                    source_record_id,
+                    building="A楼",
+                    progress="进行中",
+                    title=title,
+                    start_time=_test_datetime(8, "09:00"),
+                    end_time=_test_datetime(8, "18:00"),
+                )
+            ]
+            service._change_loaded_once = True
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-target-missing-fallback",
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "record_id": target_record_id,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": "更新",
+                    "title": title,
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "start_time": _test_datetime(8, "09:00"),
+                    "end_time": _test_datetime(8, "18:00"),
+                    "text": f"【变更通告】状态：更新\n【名称】{title}",
+                },
+                section="other",
+                origin="portal",
             )
-            source = _build_change_record(
-                source_record_id,
-                building="A楼",
-                progress="进行中",
-                title="A楼源表变更",
+            try:
+                first = service._reconcile_notice_target_snapshot(
+                    work_type=WORK_TYPE_CHANGE,
+                    notice_type="变更通告",
+                    records=[],
+                )
+                self.assertEqual(first["missing_deferred"], 1)
+                deferred_rows = service._state_store.list_qt_active_items()
+                self.assertEqual(len(deferred_rows), 1)
+                deferred_payload = dict(deferred_rows[0]["payload"])
+                deferred_payload["_target_snapshot_missing_since"] = time.time() - 3600
+                service._state_store.upsert_qt_active_item(
+                    deferred_payload,
+                    section="other",
+                    origin="portal",
+                )
+
+                with patch.object(
+                    service,
+                    "_load_table_fields",
+                    return_value=([], {}),
+                ), patch.object(
+                    service,
+                    "_request_json",
+                    side_effect=PortalError(
+                        "飞书接口失败: code=1254043, msg=RecordIdNotFound"
+                    ),
+                ) as read_target:
+                    second = service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=[],
+                    )
+
+                self.assertEqual(second["missing_removed"], 1)
+                read_target.assert_called_once()
+                self.assertEqual(
+                    read_target.call_args.args[0],
+                    f"records/{target_record_id}",
+                )
+                qt_rows = service._state_store.list_visible_qt_active_items()
+                cache_rows = ActiveCacheStore(
+                    str(Path(tmp) / "active_cache.json"),
+                    service._state_store,
+                ).load_payload()["other"]
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    web_rows = FastAPIPortalController._get_ongoing("A")
+                self.assertEqual([len(qt_rows), len(cache_rows), len(web_rows)], [1, 1, 1])
+                payloads = [
+                    qt_rows[0]["payload"],
+                    cache_rows[0]["data"],
+                    web_rows[0],
+                ]
+                self.assertEqual(
+                    {item.get("source_record_id") for item in payloads},
+                    {source_record_id},
+                )
+                self.assertEqual(
+                    {str(item.get("target_record_id") or "") for item in payloads},
+                    {""},
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_stale_target_snapshot_cannot_overwrite_newer_qt_item(self):
+        for snapshot_kind in ("empty", "finished", "active"):
+            with self.subTest(snapshot_kind=snapshot_kind), tempfile.TemporaryDirectory() as tmp:
+                previous_store = PortalRuntime.state_store
+                previous_service = PortalRuntime.service
+                service = self._new_temp_service(Path(tmp))
+                PortalRuntime.state_store = service._state_store
+                PortalRuntime.service = service
+                target_record_id = f"target-newer-than-{snapshot_kind}-snapshot"
+                title = f"A楼晚于{snapshot_kind}快照写入的变更"
+                snapshot_started_at = time.time() - 3600
+                service._state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": f"active-newer-than-{snapshot_kind}-snapshot",
+                        "target_record_id": target_record_id,
+                        "record_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "status": "更新",
+                        "title": title,
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "start_time": _test_datetime(8, "09:00"),
+                        "end_time": _test_datetime(8, "18:00"),
+                        "progress": "最新网页更新",
+                        "text": f"【变更通告】状态：更新\n【名称】{title}",
+                    },
+                    section="other",
+                    origin="portal",
+                )
+                records = []
+                if snapshot_kind in {"finished", "active"}:
+                    records = [
+                        {
+                            "record_id": target_record_id,
+                            "display_fields": {
+                                "名称": title,
+                                "变更状态": (
+                                    "已结束" if snapshot_kind == "finished" else "更新"
+                                ),
+                                "变更开始时间": _test_datetime(8, "09:00"),
+                                "变更结束时间": _test_datetime(8, "18:00"),
+                                "楼栋": "A楼",
+                                "进度": "旧快照进度",
+                            },
+                            "raw_fields": {},
+                        }
+                    ]
+                try:
+                    before = service._state_store.list_qt_active_items()[0]
+                    self.assertGreater(before["updated_at"], snapshot_started_at)
+
+                    result = service._reconcile_notice_target_snapshot(
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type="变更通告",
+                        records=records,
+                        snapshot_started_at=snapshot_started_at,
+                    )
+
+                    if snapshot_kind == "empty":
+                        self.assertEqual(result["missing_deferred"], 1)
+                        self.assertNotIn(
+                            "_target_snapshot_missing_since",
+                            service._state_store.list_qt_active_items()[0]["payload"],
+                        )
+                    elif snapshot_kind == "finished":
+                        self.assertEqual(result["finished_removed"], 0)
+                        self.assertTrue(result["warnings"])
+                    else:
+                        self.assertEqual(result["updated"], 0)
+                        self.assertTrue(result["warnings"])
+                        self.assertEqual(
+                            service._state_store.list_qt_active_items()[0]["payload"][
+                                "progress"
+                            ],
+                            "最新网页更新",
+                        )
+                    qt_rows = service._state_store.list_visible_qt_active_items()
+                    cache_rows = ActiveCacheStore(
+                        str(Path(tmp) / "active_cache.json"),
+                        service._state_store,
+                    ).load_payload()["other"]
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("A")
+                    self.assertEqual(
+                        [len(qt_rows), len(cache_rows), len(web_rows)],
+                        [1, 1, 1],
+                    )
+                    self.assertEqual(
+                        {
+                            qt_rows[0]["payload"]["target_record_id"],
+                            cache_rows[0]["data"]["target_record_id"],
+                            web_rows[0]["target_record_id"],
+                        },
+                        {target_record_id},
+                    )
+                finally:
+                    PortalRuntime.state_store = previous_store
+                    PortalRuntime.service = previous_service
+
+    def test_stale_active_target_snapshot_cannot_restore_explicitly_deleted_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            service = self._new_temp_service(Path(tmp))
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.service = service
+            target_record_id = "target-deleted-after-active-snapshot"
+            active_item_id = "active-deleted-after-active-snapshot"
+            title = "A楼显式删除不得被旧快照复活的变更"
+            active_payload = {
+                "active_item_id": active_item_id,
+                "target_record_id": target_record_id,
+                "record_id": target_record_id,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "开始",
+                "title": title,
+                "building": "A楼",
+                "building_codes": ["A"],
+                "start_time": _test_datetime(8, "09:00"),
+                "end_time": _test_datetime(8, "18:00"),
+                "text": f"【变更通告】状态：开始\n【名称】{title}",
+            }
+            stale_active_snapshot = [
+                {
+                    "record_id": target_record_id,
+                    "display_fields": {
+                        "名称": title,
+                        "变更状态": "开始",
+                        "变更开始时间": _test_datetime(8, "09:00"),
+                        "变更结束时间": _test_datetime(8, "18:00"),
+                        "楼栋": "A楼",
+                    },
+                    "raw_fields": {},
+                }
+            ]
+            service._state_store.upsert_qt_active_item(
+                active_payload,
+                section="other",
+                origin="portal",
             )
-            summaries = service._work_status_by_records([source], scope="A")
-            self.assertEqual(
-                summaries[source_record_id]["status"],
-                "未开始",
-            )
-            self.assertEqual(
-                service._serialize_record(source, summaries)["source_progress"],
-                "未开始",
-            )
+            snapshot_started_at = time.time()
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(
+                        True,
+                        {
+                            "fields": {
+                                "名称": title,
+                                "变更状态": "开始",
+                                "楼栋": "A楼",
+                            }
+                        },
+                    )), patch.object(
+                        portal_server_module,
+                        "delete_bitable_record",
+                        return_value=(True, "deleted"),
+                    ):
+                    deleted = PortalRuntime.execute_local_delete_active_item(
+                        {
+                            "data_dict": {
+                                **active_payload,
+                                "operation_id": "delete-after-active-snapshot",
+                            }
+                        }
+                    )
+
+                self.assertTrue(deleted["ok"])
+                self.assertTrue(deleted["remote_deleted"])
+                self.assertEqual(service._state_store.list_qt_active_items(), [])
+                deleted_row = service._state_store.list_qt_active_items(
+                    include_deleted=True
+                )[0]
+                self.assertGreater(deleted_row["deleted_at"], snapshot_started_at)
+                outbox_count_before = len(
+                    service._state_store.list_outbox_events("qt_action", limit=100)
+                )
+
+                result = service._reconcile_notice_target_snapshot(
+                    work_type=WORK_TYPE_CHANGE,
+                    notice_type="变更通告",
+                    records=stale_active_snapshot,
+                    snapshot_started_at=snapshot_started_at,
+                )
+
+                self.assertEqual(result["restored"], 0)
+                self.assertEqual(service._state_store.list_qt_active_items(), [])
+                self.assertEqual(
+                    len(service._state_store.list_outbox_events("qt_action", limit=100)),
+                    outbox_count_before,
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
 
     def test_target_snapshot_refresh_restores_active_remote_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -30918,6 +33306,2793 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.maintenance_refresh_last_finished = 0.0
                 PortalRuntime.maintenance_refresh_started_at = 0.0
                 PortalRuntime.maintenance_refresh_completed_at = 0.0
+
+    def test_work_status_upsert_keeps_conflicting_strong_id_items_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            common = {
+                "scope": "C",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "fallback_key": "change:C楼:同名变更",
+                "work_fallback_key": "C楼:同名变更",
+                "title": "C楼同名并行变更",
+                "building": "C楼",
+                "building_code": "C",
+                "building_codes": ["C"],
+                "status": "进行中",
+            }
+            with service._summary_lock:
+                for suffix in ("one", "two"):
+                    service._upsert_work_status_item_locked(
+                        {
+                            **common,
+                            "key": f"change:source-{suffix}",
+                            "source_record_id": f"source-{suffix}",
+                            "target_record_id": f"target-{suffix}",
+                            "active_item_id": f"active-{suffix}",
+                        },
+                        action="start",
+                        now=f"2026-08-14 10:0{1 if suffix == 'one' else 2}",
+                    )
+
+                items = service._load_work_status_items_locked("C")
+
+            self.assertEqual(len(items), 2)
+            self.assertEqual(
+                {item["source_record_id"] for item in items},
+                {"source-one", "source-two"},
+            )
+            self.assertEqual(
+                {item["target_record_id"] for item in items},
+                {"target-one", "target-two"},
+            )
+
+    def test_discard_work_status_does_not_remove_conflicting_strong_id_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            common = {
+                "scope": "C",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "fallback_key": "change:C楼:同名变更",
+                "work_fallback_key": "C楼:同名变更",
+                "title": "C楼同名并行变更",
+                "building": "C楼",
+                "building_code": "C",
+                "building_codes": ["C"],
+                "status": "进行中",
+            }
+            items = [
+                {
+                    **common,
+                    "key": f"change:source-{suffix}",
+                    "source_record_id": f"source-{suffix}",
+                    "target_record_id": f"target-{suffix}",
+                    "active_item_id": f"active-{suffix}",
+                    "actions": [],
+                }
+                for suffix in ("one", "two")
+            ]
+            with service._summary_lock:
+                service._save_work_status_locked(
+                    {
+                        "version": 1,
+                        "building": "C楼",
+                        "building_code": "C",
+                        "items": items,
+                    },
+                    building="C楼",
+                    building_code="C",
+                )
+
+            removed = service.discard_deleted_ongoing_state(
+                items[0],
+                scope="C",
+                reset_source_plan=False,
+            )
+            remaining = service._load_work_status_items_locked("C")
+
+            self.assertEqual(removed["work_status_removed"], 1)
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["source_record_id"], "source-two")
+            self.assertEqual(remaining[0]["target_record_id"], "target-two")
+
+    def test_web_start_update_rejects_immediate_local_remove_in_all_views(self):
+        for action in ("start", "update"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-web-local-remove-{action}"
+                status = "开始" if action == "start" else "更新"
+                prepared = {
+                    "action": action,
+                    "active_item_id": (
+                        f"manual:lite:C:change:{action}"
+                        if action == "start"
+                        else target_record_id
+                    ),
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": status,
+                    "title": f"C楼Web{status}后不可本地移除",
+                    "building": "C楼",
+                    "building_code": "C",
+                    "building_codes": ["C"],
+                    "start_time": _test_datetime(8, "09:00"),
+                    "end_time": _test_datetime(8, "18:00"),
+                    "progress": f"Web{status}已成功",
+                    "text": (
+                        f"【变更通告】状态：{status}\n"
+                        f"【名称】C楼Web{status}后不可本地移除\n"
+                        f"【进度】Web{status}已成功"
+                    ),
+                }
+
+                with patch.object(PortalRuntime, "service", service), patch.object(
+                    PortalRuntime,
+                    "state_store",
+                    store,
+                ):
+                    event_id = PortalRuntime._upsert_backend_active_notice(
+                        prepared,
+                        remote_record_id=target_record_id,
+                        job_id=f"job-web-local-remove-{action}",
+                    )
+                    projected = store.list_qt_active_items()[0]["payload"]
+                    result = PortalRuntime.execute_local_remove_active_item(
+                        {"data_dict": projected}
+                    )
+                    qt_rows = store.list_visible_qt_active_items()
+                    cache_rows = ActiveCacheStore(
+                        str(Path(tmp) / "active_cache.json"),
+                        store,
+                    ).load_payload()["other"]
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("C")
+                    outbox = store.list_outbox_events("qt_action")
+
+                self.assertTrue(event_id)
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["authoritative"])
+                self.assertEqual([len(qt_rows), len(cache_rows), len(web_rows)], [1, 1, 1])
+                self.assertEqual(
+                    {
+                        qt_rows[0]["payload"]["target_record_id"],
+                        cache_rows[0]["data"]["target_record_id"],
+                        web_rows[0]["target_record_id"],
+                    },
+                    {target_record_id},
+                )
+                self.assertTrue(
+                    any(
+                        event["payload"].get("kind") == "active_upsert"
+                        and event["payload"]
+                        .get("payload", {})
+                        .get("item", {})
+                        .get("record_id")
+                        == target_record_id
+                        for event in outbox
+                    )
+                )
+
+    def test_qt_workflow_keeps_authoritative_source_only_item_on_backend_reject(self):
+        class _Item:
+            def __init__(self, payload):
+                self.payload = dict(payload)
+
+        class _Harness(MainWindowWorkflowMixin):
+            def __init__(self, cache_store, payload):
+                self.cache_store = cache_store
+                self.item = _Item(payload)
+                self.list_widget = object()
+                self.ui_visible = True
+                self.remove_calls = 0
+                self.cache_delete_calls = 0
+                self.messages = []
+                self.backend_result = {}
+                self.finished = threading.Event()
+                self._today_in_progress_pending_record_ids = set()
+                self._today_in_progress_synced_record_ids = set()
+                self.pending_new_by_record_id = {}
+                self.pending_replace_by_record_id = {}
+                self.pending_update_after_upload = {}
+                self.pending_action_record_ids = set()
+                self.pending_action_types = {}
+
+            @staticmethod
+            def _is_screenshot_dialog_active():
+                return False
+
+            def _find_active_item_by_record_id(self, _record_id):
+                return None, None
+
+            def _find_active_item_by_active_item_id(self, active_item_id):
+                if (
+                    self.ui_visible
+                    and active_item_id == self.item.payload.get("active_item_id")
+                ):
+                    return self.list_widget, self.item
+                return None, None
+
+            def _is_valid_list_item(self, item):
+                return self.ui_visible and item is self.item
+
+            @staticmethod
+            def _safe_item_widget(_list_widget, _item):
+                return None
+
+            def _remove_active_item_widget_only(self, _list_widget, item):
+                if self._is_valid_list_item(item):
+                    self.remove_calls += 1
+                    self.ui_visible = False
+
+            def _delete_active_cache_record(self, data_dict):
+                self.cache_delete_calls += 1
+                return self.cache_store.delete_record(
+                    record_id=str(data_dict.get("record_id") or ""),
+                    active_item_id=str(data_dict.get("active_item_id") or ""),
+                )
+
+            def _submit_delete_active_item_to_backend(self, data_dict):
+                result = PortalRuntime.execute_local_remove_active_item(
+                    {"data_dict": data_dict}
+                )
+                self.backend_result = dict(result)
+                return (
+                    bool(result.get("ok")),
+                    str(result.get("message") or ""),
+                    result,
+                )
+
+            @staticmethod
+            def _clear_upload_queue(_record_id):
+                return None
+
+            @staticmethod
+            def request_active_cache_save(*_args, **_kwargs):
+                return None
+
+            def show_message(self, message):
+                self.messages.append(str(message or ""))
+
+            def _enqueue_ui_mutation(self, _name, callback):
+                callback()
+                self.finished.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            payload = {
+                "active_item_id": "source-change-qt-workflow-authoritative",
+                "source_record_id": "change-qt-workflow-authoritative",
+                "source_snapshot_authoritative": True,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "更新",
+                "title": "C楼源表进行中通告不可本地移除",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "source_progress": "进行中",
+                "text": "【变更通告】状态：更新\n【名称】C楼源表进行中通告不可本地移除",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="source_snapshot_refresh",
+                )
+            )
+            cache_store = ActiveCacheStore(
+                str(Path(tmp) / "active_cache.json"),
+                store,
+            )
+            harness = _Harness(cache_store, payload)
+
+            with patch.object(PortalRuntime, "service", service), patch.object(
+                PortalRuntime,
+                "state_store",
+                store,
+            ):
+                harness._delete_active_item(dict(payload))
+                self.assertTrue(harness.finished.wait(timeout=2))
+                sqlite_rows = store.list_visible_qt_active_items()
+                qt_rows = cache_store.load_payload()["other"]
+                with patch.object(
+                    PortalRuntime,
+                    "restore_live_portal_active_items",
+                    return_value={"restored": 0},
+                ):
+                    web_rows = FastAPIPortalController._get_ongoing("C")
+
+            self.assertFalse(harness.backend_result["ok"])
+            self.assertTrue(harness.backend_result["authoritative"])
+            self.assertEqual(harness.remove_calls, 0)
+            self.assertEqual(harness.cache_delete_calls, 0)
+            self.assertTrue(harness.ui_visible)
+            self.assertEqual([len(sqlite_rows), len(qt_rows), len(web_rows)], [1, 1, 1])
+            self.assertEqual(
+                {
+                    sqlite_rows[0]["payload"]["source_record_id"],
+                    qt_rows[0]["data"]["source_record_id"],
+                    web_rows[0]["source_record_id"],
+                },
+                {payload["source_record_id"]},
+            )
+            self.assertFalse(
+                any("本地已移除" in message for message in harness.messages)
+            )
+
+    def test_qt_active_delta_upsert_wins_over_stale_delete_for_same_target(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        previous_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "old-active",
+                        "target_record_id": "shared-target",
+                        "record_id": "shared-target",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "title": "A楼身份迁移变更",
+                    },
+                    section="other",
+                    origin="qt",
+                )
+                response = TestClient(controller._build_app()).post(
+                    "/api/qt/active-items/delta",
+                    json={
+                        "upserts": [
+                            {
+                                "data": {
+                                    "active_item_id": "new-active",
+                                    "target_record_id": "shared-target",
+                                    "record_id": "shared-target",
+                                    "work_type": WORK_TYPE_CHANGE,
+                                    "notice_type": "变更通告",
+                                    "title": "A楼身份迁移变更",
+                                    "progress": "最新进度",
+                                },
+                                "section": "other",
+                            }
+                        ],
+                        "deletes": [
+                            {
+                                "active_item_id": "old-active",
+                                "record_id": "shared-target",
+                            }
+                        ],
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                rows = store.list_qt_active_items()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["active_item_id"], "new-active")
+                self.assertEqual(rows[0]["payload"]["progress"], "最新进度")
+                self.assertEqual(response.json()["data"]["deleted"], 0)
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_web_end_finalize_does_not_remove_newer_qt_update_for_same_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "target-end-update-race"
+            source_record_id = "source-end-update-race"
+            initial_payload = {
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "source_record_id": source_record_id,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "开始",
+                "title": "C楼结束更新竞态",
+                "building": "C楼",
+                "building_code": "C",
+                "building_codes": ["C"],
+                "start_time": "2026-08-14 09:00",
+                "end_time": "2026-08-14 18:00",
+                "progress": "初始进行中",
+                "text": (
+                    "【变更通告】状态：开始\n"
+                    "【名称】C楼结束更新竞态\n"
+                    "【进度】初始进行中"
+                ),
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    initial_payload,
+                    section="other",
+                    origin="portal",
+                    allow_revive=True,
+                )
+            )
+            screenshot = store.put_notice_upload_attachment(
+                open_id="qt-end-update-race",
+                file_name="change-update.png",
+                mime_type="image/png",
+                content=b"change-update",
+            )
+            end_job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "scope": "C",
+                    "record_id": source_record_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "active_item_id": target_record_id,
+                    "operation_id": "web-end-update-race",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                end_job_id,
+                phase="remote_written",
+                remote_written=True,
+                remote_record_id=target_record_id,
+                target_record_id=target_record_id,
+                remote_result_message="目标结束已写入",
+                restart_recovered=True,
+                prepared={
+                    **initial_payload,
+                    "action": "end",
+                    "status": "结束",
+                    "progress": "结束",
+                    "text": (
+                        "【变更通告】状态：结束\n"
+                        "【名称】C楼结束更新竞态\n"
+                        "【进度】结束"
+                    ),
+                    "skip_personal_message": False,
+                    "message_sent": False,
+                },
+            )
+
+            remote_state = {"status": "已结束", "version": 1}
+            message_started = threading.Event()
+            allow_end_finalize = threading.Event()
+            worker_errors = []
+
+            def block_personal_message(_prepared):
+                message_started.set()
+                if not allow_end_finalize.wait(timeout=5):
+                    raise TimeoutError("测试未放行 end 本地完成")
+                return True, "个人消息已发送"
+
+            def query_remote(_record_id, _notice_type):
+                return True, {
+                    "fields": {
+                        "名称": initial_payload["title"],
+                        "变更状态": remote_state["status"],
+                    },
+                    "record_version": f"v{remote_state['version']}",
+                }
+
+            def update_remote(_record_id, _notice_type, _notice_payload):
+                remote_state["status"] = "更新"
+                remote_state["version"] += 1
+                return True, "更新成功"
+
+            def run_end_worker():
+                try:
+                    PortalRuntime._process_maintenance_action_job(end_job_id)
+                except BaseException as exc:  # pragma: no cover - assertion reports it
+                    worker_errors.append(exc)
+
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(
+                        service,
+                        "send_action_personal_message",
+                        side_effect=block_personal_message,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        side_effect=query_remote,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "upload_media_to_feishu",
+                        return_value=(True, "change-update-token"),
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "update_bitable_record_by_payload",
+                        side_effect=update_remote,
+                    ),
+                ):
+                    worker = threading.Thread(target=run_end_worker, daemon=True)
+                    worker.start()
+                    self.assertTrue(message_started.wait(timeout=2))
+
+                    update_result = PortalRuntime.execute_local_notice_upload(
+                        {
+                            "action_type": "update",
+                            "operation_id": "qt-update-after-web-end",
+                            "data_dict": {
+                                **initial_payload,
+                                "status": "更新",
+                                "progress": "并发更新成功",
+                                "text": (
+                                    "【变更通告】状态：更新\n"
+                                    "【名称】C楼结束更新竞态\n"
+                                    "【进度】并发更新成功"
+                                ),
+                            },
+                            "screenshot_upload_id": screenshot["upload_id"],
+                            "response_time": "2026-08-14 10:30",
+                            "robot_group_choice": "auto",
+                        }
+                    )
+                    self.assertTrue(update_result["ok"], update_result)
+                    allow_end_finalize.set()
+                    worker.join(timeout=5)
+                    self.assertFalse(worker.is_alive())
+
+                    sqlite_rows = store.list_visible_qt_active_items()
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("C")
+                    outbox = store.list_outbox_events("qt_action", limit=100)
+                    completed = service.get_job(end_job_id)
+            finally:
+                allow_end_finalize.set()
+                store.shutdown_write_worker(timeout=2.0)
+
+            qt_visible = True
+            for event in outbox:
+                envelope = event.get("payload") or {}
+                event_payload = envelope.get("payload") or {}
+                if envelope.get("kind") == "active_upsert":
+                    item = event_payload.get("item") or {}
+                    item_payload = item.get("payload") or {}
+                    if str(
+                        item_payload.get("target_record_id")
+                        or item.get("record_id")
+                        or ""
+                    ) == target_record_id:
+                        qt_visible = True
+                elif envelope.get("kind") == "active_delete":
+                    if str(
+                        event_payload.get("target_record_id")
+                        or event_payload.get("record_id")
+                        or ""
+                    ) == target_record_id:
+                        qt_visible = False
+
+            self.assertFalse(worker_errors, worker_errors)
+            self.assertEqual(remote_state["status"], "更新")
+            self.assertTrue(
+                completed["frontend_patch"]["terminal_projection_skipped"]
+            )
+            self.assertEqual(
+                [len(sqlite_rows), len(web_rows), int(qt_visible)],
+                [1, 1, 1],
+                "远端已被更新回进行中，旧 end 本地完成不得删除新投影",
+            )
+
+    def test_web_end_finalize_removes_projection_when_point_read_is_finished(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "target-end-point-read-finished"
+            source_record_id = "source-end-point-read-finished"
+            active_payload = {
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "source_record_id": source_record_id,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "开始",
+                "title": "C楼明确结束正向用例",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "text": (
+                    "【变更通告】状态：开始\n"
+                    "【名称】C楼明确结束正向用例"
+                ),
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    active_payload,
+                    section="other",
+                    origin="portal",
+                    allow_revive=True,
+                )
+            )
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "scope": "C",
+                    "record_id": source_record_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "active_item_id": target_record_id,
+                    "operation_id": "web-end-point-read-finished",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="remote_written",
+                remote_written=True,
+                remote_record_id=target_record_id,
+                target_record_id=target_record_id,
+                remote_result_message="目标结束已写入",
+                prepared={
+                    **active_payload,
+                    "action": "end",
+                    "status": "结束",
+                    "progress": "已结束",
+                    "text": (
+                        "【变更通告】状态：结束\n"
+                        "【名称】C楼明确结束正向用例"
+                    ),
+                    "skip_personal_message": True,
+                    "message_sent": True,
+                },
+            )
+
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        return_value=(
+                            True,
+                            {
+                                "fields": {
+                                    "名称": active_payload["title"],
+                                    "变更状态": "结束",
+                                },
+                                "record_version": "v-ended",
+                            },
+                        ),
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_execute_backend_prepared_upload",
+                    ) as remote_upload,
+                ):
+                    PortalRuntime._process_maintenance_action_job(job_id)
+                    sqlite_rows = store.list_visible_qt_active_items()
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("C")
+                    outbox = store.list_outbox_events("qt_action", limit=100)
+                    completed = service.get_job(job_id)
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+            remote_upload.assert_not_called()
+            self.assertEqual(completed["phase"], "success")
+            self.assertFalse(
+                completed["frontend_patch"]["terminal_projection_skipped"]
+            )
+            self.assertEqual([len(sqlite_rows), len(web_rows)], [0, 0])
+            self.assertTrue(
+                any(
+                    event.get("payload", {}).get("kind") == "active_delete"
+                    and str(
+                        event.get("payload", {})
+                        .get("payload", {})
+                        .get("target_record_id")
+                        or event.get("payload", {})
+                        .get("payload", {})
+                        .get("record_id")
+                        or ""
+                    )
+                    == target_record_id
+                    for event in outbox
+                )
+            )
+
+    def test_web_end_finished_target_falls_back_to_ongoing_source_in_all_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "target-end-source-fallback"
+            source_record_id = "source-end-source-fallback"
+            title = "C楼目标结束源表仍进行"
+            service._change_records = [
+                _build_change_record(
+                    source_record_id,
+                    building="C楼",
+                    progress="进行中",
+                    title=title,
+                    start_time="2026-08-14 09:00",
+                    end_time="2026-08-14 18:00",
+                )
+            ]
+            service._change_loaded_once = True
+            target_payload = {
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "source_record_id": source_record_id,
+                "source_snapshot_authoritative": True,
+                "source_progress": "进行中",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "开始",
+                "title": title,
+                "building": "C楼",
+                "building_codes": ["C"],
+                "text": f"【变更通告】状态：开始\n【名称】{title}",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    target_payload,
+                    section="other",
+                    origin="source_snapshot_refresh",
+                    allow_revive=True,
+                )
+            )
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "scope": "C",
+                    "record_id": source_record_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "active_item_id": target_record_id,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "operation_id": "web-end-source-fallback",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="remote_written",
+                remote_written=True,
+                remote_record_id=target_record_id,
+                target_record_id=target_record_id,
+                remote_result_message="目标结束已写入",
+                prepared={
+                    **target_payload,
+                    "action": "end",
+                    "status": "结束",
+                    "progress": "目标已结束",
+                    "text": f"【变更通告】状态：结束\n【名称】{title}",
+                    "skip_personal_message": True,
+                    "message_sent": True,
+                },
+            )
+
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        return_value=(
+                            True,
+                            {
+                                "fields": {
+                                    CHANGE_NOTICE_FIELDS["title"]: title,
+                                    CHANGE_NOTICE_FIELDS["status"]: "已结束",
+                                    CHANGE_NOTICE_FIELDS["progress"]: "已结束",
+                                    CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                                    CHANGE_NOTICE_FIELDS["building"]: "C楼",
+                                },
+                                "record_version": "v-source-fallback-ended",
+                            },
+                        ),
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_execute_backend_prepared_upload",
+                    ) as remote_upload,
+                ):
+                    PortalRuntime._process_maintenance_action_job(job_id)
+                    sqlite_rows = store.list_visible_qt_active_items()
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("C")
+                    outbox = store.list_outbox_events("qt_action", limit=100)
+                    completed = service.get_job(job_id)
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+            qt_payload = dict(target_payload)
+            for event in outbox:
+                envelope = event.get("payload") or {}
+                event_payload = envelope.get("payload") or {}
+                if envelope.get("kind") == "active_delete":
+                    if str(
+                        event_payload.get("target_record_id")
+                        or event_payload.get("record_id")
+                        or ""
+                    ) == target_record_id:
+                        qt_payload = {}
+                elif envelope.get("kind") == "active_upsert":
+                    item = event_payload.get("item") or {}
+                    candidate = item.get("payload") or {}
+                    if candidate.get("source_record_id") == source_record_id:
+                        qt_payload = candidate
+
+            remote_upload.assert_not_called()
+            self.assertEqual(completed["phase"], "success")
+            self.assertTrue(completed["frontend_patch"]["source_fallback_active"])
+            self.assertEqual([len(sqlite_rows), len(web_rows), bool(qt_payload)], [1, 1, True])
+            for view, payload in {
+                "sqlite": sqlite_rows[0]["payload"],
+                "web": web_rows[0],
+                "qt": qt_payload,
+            }.items():
+                self.assertEqual(payload["source_record_id"], source_record_id)
+                self.assertFalse(payload.get("target_record_id"), (view, payload))
+                self.assertFalse(payload.get("record_id"), (view, payload))
+
+    def test_remote_written_first_projection_does_not_revive_later_finished_target(self):
+        for action in ("start", "update"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-first-projection-finished-{action}"
+                source_record_id = f"source-first-projection-finished-{action}"
+                title = f"A楼{action}首次投影竞态"
+                prepared = {
+                    "action": action,
+                    "scope": "A",
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": "开始" if action == "start" else "更新",
+                    "title": title,
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "progress": "旧进展",
+                    "skip_personal_message": True,
+                    "message_sent": True,
+                    "text": (
+                        f"【变更通告】状态："
+                        f"{'开始' if action == 'start' else '更新'}\n"
+                        f"【名称】{title}\n【进度】旧进展"
+                    ),
+                }
+                if action == "update":
+                    self.assertTrue(
+                        store.upsert_qt_active_item(
+                            prepared,
+                            section="other",
+                            origin="portal",
+                            allow_revive=True,
+                        )
+                    )
+                request_record_id = (
+                    source_record_id if action == "start" else target_record_id
+                )
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": action,
+                        "scope": "A",
+                        "record_id": request_record_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "operation_id": f"first-projection-finished-{action}",
+                    }
+                )
+                self.assertTrue(should_start)
+                service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=target_record_id,
+                    target_record_id=target_record_id,
+                    remote_result_message="旧动作远端已写入",
+                    prepared=prepared,
+                )
+
+                original_begin = PortalRuntime._begin_notice_remote_operation
+                interleaved = False
+
+                def begin_with_later_end(**kwargs):
+                    nonlocal interleaved
+                    operation = original_begin(**kwargs)
+                    if interleaved:
+                        return operation
+                    interleaved = True
+                    lock_key, lock_owner, lock_error = (
+                        PortalRuntime._acquire_event_operation_lock(
+                            prepared,
+                            action_type="later_end",
+                            target_record_id=target_record_id,
+                            record_id=target_record_id,
+                        )
+                    )
+                    self.assertFalse(lock_error)
+                    try:
+                        store.delete_qt_active_item_and_enqueue(
+                            active_item_id=target_record_id,
+                            record_id=target_record_id,
+                            channel="qt_action",
+                            enqueue_if_missing=True,
+                            payload={
+                                "kind": "active_delete",
+                                "payload": {
+                                    "active_item_id": target_record_id,
+                                    "record_id": target_record_id,
+                                    "target_record_id": target_record_id,
+                                },
+                            },
+                        )
+                        store.upsert_notice_identity(
+                            {**prepared, "action": "end", "status": "已结束"},
+                            origin="later_end",
+                        )
+                    finally:
+                        PortalRuntime._release_event_operation_lock(
+                            lock_key,
+                            lock_owner,
+                        )
+                    return operation
+
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            PortalRuntime,
+                            "_begin_notice_remote_operation",
+                            side_effect=begin_with_later_end,
+                        ),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            return_value=(
+                                True,
+                                {
+                                    "fields": {
+                                        CHANGE_NOTICE_FIELDS["title"]: title,
+                                        CHANGE_NOTICE_FIELDS["status"]: "已结束",
+                                        CHANGE_NOTICE_FIELDS["progress"]: "已结束",
+                                        CHANGE_NOTICE_FIELDS["building"]: "A楼",
+                                    },
+                                    "record_version": "v-later-finished",
+                                },
+                            ),
+                        ) as point_read,
+                    ):
+                        PortalRuntime._process_maintenance_action_job(job_id)
+                        visible_rows = store.list_visible_qt_active_items()
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                self.assertTrue(interleaved)
+                self.assertGreaterEqual(point_read.call_count, 1)
+                self.assertEqual(
+                    visible_rows,
+                    [],
+                    "后续 end 已使目标终态，旧 start/update 首次投影不得复活",
+                )
+
+    def test_qt_direct_action_projection_yields_to_later_opposite_web_action(self):
+        for qt_action in ("end", "update"):
+            with self.subTest(qt_action=qt_action), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-qt-{qt_action}-web-opposite"
+                source_record_id = f"source-qt-{qt_action}-web-opposite"
+                title = f"A楼Qt{qt_action}后Web相反操作"
+                active = {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": "维保通告",
+                    "status": "更新",
+                    "title": title,
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "progress": "Qt操作前",
+                    "text": f"【维保通告】状态：更新\n【名称】{title}",
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        active,
+                        section="other",
+                        origin="portal",
+                        allow_revive=True,
+                    )
+                )
+                screenshot_upload_id = ""
+                if qt_action == "update":
+                    screenshot_upload_id = store.put_notice_upload_attachment(
+                        open_id="qt-opposite-race",
+                        file_name="update.png",
+                        mime_type="image/png",
+                        content=b"update",
+                    )["upload_id"]
+                remote = {"status": "更新", "version": 1}
+                interleaved = False
+                original_release = PortalRuntime._release_event_operation_lock
+                original_upsert = PortalRuntime._upsert_backend_active_notice
+                original_delete = PortalRuntime._enqueue_active_delete_for_ended_notice
+
+                def query_remote(_record_id, _notice_type):
+                    return True, {
+                        "fields": {
+                            MAINTENANCE_NOTICE_FIELDS["name"]: title,
+                            MAINTENANCE_NOTICE_FIELDS["status"]: remote["status"],
+                            MAINTENANCE_NOTICE_FIELDS["progress"]: (
+                                "Web后续更新"
+                                if remote["status"] == "更新"
+                                else "已结束"
+                            ),
+                            MAINTENANCE_NOTICE_FIELDS["building"]: "A楼",
+                        },
+                        "record_version": f"v{remote['version']}",
+                    }
+
+                def write_qt_remote(_record_id, _notice_type, _notice_payload):
+                    remote["status"] = "已结束" if qt_action == "end" else "更新"
+                    remote["version"] += 1
+                    return True, f"Qt {qt_action} 写入成功"
+
+                def release_then_later_web_action(lock_key, lock_owner):
+                    nonlocal interleaved
+                    original_release(lock_key, lock_owner)
+                    if interleaved or not lock_key or not lock_owner:
+                        return
+                    interleaved = True
+                    opposite = "update" if qt_action == "end" else "end"
+                    web_payload = {
+                        **active,
+                        "action": opposite,
+                        "status": "更新" if opposite == "update" else "已结束",
+                        "progress": "Web后续更新" if opposite == "update" else "已结束",
+                        "text": (
+                            f"【维保通告】状态："
+                            f"{'更新' if opposite == 'update' else '结束'}\n"
+                            f"【名称】{title}"
+                        ),
+                    }
+                    web_lock_key, web_lock_owner, web_lock_error = (
+                        PortalRuntime._acquire_event_operation_lock(
+                            web_payload,
+                            action_type=f"later_web_{opposite}",
+                            target_record_id=target_record_id,
+                            record_id=target_record_id,
+                        )
+                    )
+                    self.assertFalse(web_lock_error)
+                    try:
+                        remote["status"] = "更新" if opposite == "update" else "已结束"
+                        remote["version"] += 1
+                        if opposite == "update":
+                            original_upsert(
+                                web_payload,
+                                remote_record_id=target_record_id,
+                                job_id=f"later-web-{opposite}",
+                            )
+                        else:
+                            original_delete(
+                                web_payload,
+                                remote_record_id=target_record_id,
+                                job_id=f"later-web-{opposite}",
+                            )
+                            store.upsert_notice_identity(
+                                web_payload,
+                                origin="later_web_end",
+                            )
+                    finally:
+                        original_release(web_lock_key, web_lock_owner)
+
+                request_payload = {
+                    "action_type": qt_action,
+                    "operation_id": f"qt-{qt_action}-web-opposite",
+                    "data_dict": {
+                        **active,
+                        "status": "结束" if qt_action == "end" else "更新",
+                        "progress": f"Qt {qt_action}",
+                        "text": (
+                            f"【维保通告】状态："
+                            f"{'结束' if qt_action == 'end' else '更新'}\n"
+                            f"【名称】{title}"
+                        ),
+                    },
+                    "response_time": "2026-08-14 21:10",
+                    "robot_group_choice": "auto",
+                }
+                if screenshot_upload_id:
+                    request_payload["screenshot_upload_id"] = screenshot_upload_id
+
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            service,
+                            "_has_existing_site_photo_for_notice",
+                            return_value=True,
+                        ),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            side_effect=query_remote,
+                        ),
+                        patch.object(
+                            portal_server_module,
+                            "update_bitable_record_by_payload",
+                            side_effect=write_qt_remote,
+                        ),
+                        patch.object(
+                            portal_server_module,
+                            "upload_media_to_feishu",
+                            return_value=(True, "qt-opposite-race-token"),
+                        ),
+                        patch.object(
+                            PortalRuntime,
+                            "_release_event_operation_lock",
+                            side_effect=release_then_later_web_action,
+                        ),
+                    ):
+                        result = PortalRuntime.execute_local_notice_upload(
+                            request_payload
+                        )
+                        sqlite_rows = store.list_visible_qt_active_items()
+                        with patch.object(
+                            PortalRuntime,
+                            "restore_live_portal_active_items",
+                            return_value={"restored": 0},
+                        ):
+                            web_rows = FastAPIPortalController._get_ongoing("A")
+                        outbox = store.list_outbox_events("qt_action", limit=100)
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                qt_visible = True
+                qt_progress = active["progress"]
+                for event in outbox:
+                    envelope = event.get("payload") or {}
+                    event_payload = envelope.get("payload") or {}
+                    if envelope.get("kind") == "active_upsert":
+                        item = event_payload.get("item") or {}
+                        candidate = item.get("payload") or {}
+                        if str(
+                            candidate.get("target_record_id")
+                            or item.get("record_id")
+                            or ""
+                        ) == target_record_id:
+                            qt_visible = True
+                            qt_progress = str(candidate.get("progress") or "")
+                    elif envelope.get("kind") == "active_delete" and str(
+                        event_payload.get("target_record_id")
+                        or event_payload.get("record_id")
+                        or ""
+                    ) == target_record_id:
+                        qt_visible = False
+                        qt_progress = ""
+
+                expected_active = qt_action == "end"
+                self.assertTrue(result["ok"], result)
+                self.assertTrue(interleaved)
+                self.assertEqual(remote["status"], "更新" if expected_active else "已结束")
+                self.assertEqual(
+                    [bool(sqlite_rows), bool(web_rows), qt_visible],
+                    [expected_active, expected_active, expected_active],
+                    "Qt 远端写入后的本地投影不得覆盖后续 Web 相反操作",
+                )
+                if expected_active:
+                    self.assertEqual(sqlite_rows[0]["payload"]["progress"], "Web后续更新")
+                    self.assertEqual(web_rows[0]["progress"], "Web后续更新")
+                    self.assertEqual(qt_progress, "Web后续更新")
+
+    def test_qt_update_does_not_restore_target_after_later_remote_delete(self):
+        for source_active in (False, True):
+            with self.subTest(source_active=source_active), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-qt-update-deleted-{int(source_active)}"
+                source_record_id = f"source-qt-update-deleted-{int(source_active)}"
+                title = "A楼Qt更新后目标被删除"
+                service._change_records = (
+                    [
+                        _build_change_record(
+                            source_record_id,
+                            building="A楼",
+                            progress="进行中",
+                            title=title,
+                            start_time="2026-08-14 09:00",
+                            end_time="2026-08-14 18:00",
+                        )
+                    ]
+                    if source_active
+                    else []
+                )
+                service._change_loaded_once = True
+                active = {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "source_snapshot_authoritative": True,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": "更新",
+                    "title": title,
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "progress": "Qt更新前",
+                    "text": (
+                        f"【变更通告】状态：更新\n"
+                        f"【名称】{title}\n【进度】Qt更新前"
+                    ),
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        active,
+                        section="other",
+                        origin="portal",
+                        allow_revive=True,
+                    )
+                )
+                screenshot = store.put_notice_upload_attachment(
+                    open_id="qt-update-later-delete",
+                    file_name="update.png",
+                    mime_type="image/png",
+                    content=b"update",
+                )
+                remote_exists = True
+                interleaved = False
+                original_release = PortalRuntime._release_event_operation_lock
+
+                def query_remote(_record_id, _notice_type):
+                    if not remote_exists:
+                        return False, "record not found"
+                    return True, {
+                        "fields": {
+                            CHANGE_NOTICE_FIELDS["title"]: title,
+                            CHANGE_NOTICE_FIELDS["status"]: "更新",
+                            CHANGE_NOTICE_FIELDS["progress"]: "Qt更新",
+                            CHANGE_NOTICE_FIELDS["building"]: "A楼",
+                        },
+                        "record_version": "v-before-delete",
+                    }
+
+                def release_then_remote_delete(lock_key, lock_owner):
+                    nonlocal interleaved, remote_exists
+                    original_release(lock_key, lock_owner)
+                    if interleaved or not lock_key or not lock_owner:
+                        return
+                    interleaved = True
+                    delete_lock_key, delete_lock_owner, delete_lock_error = (
+                        PortalRuntime._acquire_event_operation_lock(
+                            active,
+                            action_type="later_remote_delete",
+                            target_record_id=target_record_id,
+                            record_id=target_record_id,
+                        )
+                    )
+                    self.assertFalse(delete_lock_error)
+                    try:
+                        remote_exists = False
+                        store.delete_qt_active_item_and_enqueue(
+                            active_item_id=target_record_id,
+                            record_id=target_record_id,
+                            channel="qt_action",
+                            payload={
+                                "kind": "active_delete",
+                                "payload": {
+                                    "active_item_id": target_record_id,
+                                    "record_id": target_record_id,
+                                    "target_record_id": target_record_id,
+                                    "source_record_id": source_record_id,
+                                    "work_type": WORK_TYPE_CHANGE,
+                                },
+                            },
+                        )
+                    finally:
+                        original_release(delete_lock_key, delete_lock_owner)
+
+                request_payload = {
+                    "action_type": "update",
+                    "operation_id": f"qt-update-later-delete-{int(source_active)}",
+                    "screenshot_upload_id": screenshot["upload_id"],
+                    "data_dict": {
+                        **active,
+                        "progress": "Qt更新",
+                        "text": (
+                            f"【变更通告】状态：更新\n"
+                            f"【名称】{title}\n【进度】Qt更新"
+                        ),
+                    },
+                    "response_time": "2026-08-14 21:25",
+                    "robot_group_choice": "auto",
+                }
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            side_effect=query_remote,
+                        ),
+                        patch.object(
+                            portal_server_module,
+                            "update_bitable_record_by_payload",
+                            return_value=(True, "Qt更新成功"),
+                        ),
+                        patch.object(
+                            portal_server_module,
+                            "upload_media_to_feishu",
+                            return_value=(True, "qt-update-later-delete-token"),
+                        ),
+                        patch.object(
+                            PortalRuntime,
+                            "_release_event_operation_lock",
+                            side_effect=release_then_remote_delete,
+                        ),
+                    ):
+                        result = PortalRuntime.execute_local_notice_upload(
+                            request_payload
+                        )
+                        sqlite_rows = store.list_visible_qt_active_items()
+                        with patch.object(
+                            PortalRuntime,
+                            "restore_live_portal_active_items",
+                            return_value={"restored": 0},
+                        ):
+                            web_rows = FastAPIPortalController._get_ongoing("A")
+                        outbox = store.list_outbox_events("qt_action", limit=100)
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                qt_payload = dict(active)
+                for event in outbox:
+                    envelope = event.get("payload") or {}
+                    event_payload = envelope.get("payload") or {}
+                    if envelope.get("kind") == "active_delete" and (
+                        str(
+                            event_payload.get("target_record_id")
+                            or event_payload.get("record_id")
+                            or ""
+                        )
+                        == target_record_id
+                    ):
+                        qt_payload = {}
+                    elif envelope.get("kind") == "active_upsert":
+                        item = event_payload.get("item") or {}
+                        candidate = item.get("payload") or {}
+                        if (
+                            candidate.get("source_record_id") == source_record_id
+                            or str(
+                                candidate.get("target_record_id")
+                                or item.get("record_id")
+                                or ""
+                            )
+                            == target_record_id
+                        ):
+                            qt_payload = candidate
+
+                expected_visible = 1 if source_active else 0
+                self.assertTrue(result["ok"], result)
+                self.assertTrue(interleaved)
+                self.assertFalse(remote_exists)
+                self.assertEqual(
+                    [len(sqlite_rows), len(web_rows), int(bool(qt_payload))],
+                    [expected_visible, expected_visible, expected_visible],
+                )
+                if source_active:
+                    for view, item in {
+                        "sqlite": sqlite_rows[0]["payload"],
+                        "web": web_rows[0],
+                        "qt": qt_payload,
+                    }.items():
+                        self.assertEqual(item.get("source_record_id"), source_record_id)
+                        self.assertFalse(item.get("target_record_id"), (view, item))
+                        self.assertFalse(item.get("record_id"), (view, item))
+
+    def test_remote_written_start_update_projection_failure_is_not_terminal_success(self):
+        for action in ("start", "update"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-projection-failure-{action}"
+                source_record_id = f"source-projection-failure-{action}"
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": action,
+                        "scope": "A",
+                        "record_id": source_record_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "operation_id": f"projection-failure-{action}",
+                    }
+                )
+                self.assertTrue(should_start)
+                service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=target_record_id,
+                    target_record_id=target_record_id,
+                    remote_result_message="目标多维已写入",
+                    restart_recovered=True,
+                    prepared={
+                        "action": action,
+                        "scope": "A",
+                        "work_type": WORK_TYPE_MAINTENANCE,
+                        "notice_type": "维保通告",
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": (
+                            f"active-projection-failure-{action}"
+                            if action == "start"
+                            else target_record_id
+                        ),
+                        "title": f"A楼{action}投影失败",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "status": "开始" if action == "start" else "更新",
+                        "progress": "远端已成功",
+                        "skip_personal_message": True,
+                        "message_sent": True,
+                        "text": (
+                            f"【维保通告】状态："
+                            f"{'开始' if action == 'start' else '更新'}\n"
+                            f"【名称】A楼{action}投影失败"
+                        ),
+                    },
+                )
+                self.assertTrue(
+                    store.upsert_runtime_queue_item("qt_action", job_id)
+                )
+
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            PortalRuntime,
+                            "_execute_backend_prepared_upload",
+                        ) as remote_upload,
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            return_value=(
+                                True,
+                                {
+                                    "fields": {
+                                        MAINTENANCE_NOTICE_FIELDS["name"]: f"A楼{action}投影失败",
+                                        MAINTENANCE_NOTICE_FIELDS["status"]: "更新",
+                                        MAINTENANCE_NOTICE_FIELDS["progress"]: "远端已成功",
+                                        MAINTENANCE_NOTICE_FIELDS["actual_start"]: "2026-08-14 09:00",
+                                        MAINTENANCE_NOTICE_FIELDS["building"]: "A楼",
+                                    },
+                                    "record_version": "v-projection-recovered",
+                                },
+                            ),
+                        ),
+                    ):
+                        with patch.object(
+                            store,
+                            "upsert_qt_active_item",
+                            side_effect=RuntimeError("qta unavailable"),
+                        ) as qta_upsert:
+                            PortalRuntime._process_maintenance_action_job(job_id)
+                        pending = service.get_job(job_id)
+                        queued = store.list_runtime_queue_items(
+                            "qt_action",
+                            statuses=("queued",),
+                            due_only=False,
+                        )
+
+                        PortalRuntime._process_maintenance_action_job(job_id)
+                        completed = service.get_job(job_id)
+                        operation = store.get_notice_remote_operation(
+                            f"notice_action:{job_id}"
+                        )
+                        active_rows = store.list_visible_qt_active_items()
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                remote_upload.assert_not_called()
+                self.assertGreaterEqual(qta_upsert.call_count, 1)
+                self.assertEqual(pending["phase"], "remote_written")
+                self.assertTrue(pending["projection_pending"])
+                self.assertEqual([item["job_id"] for item in queued], [job_id])
+                self.assertEqual(completed["phase"], "success", completed)
+                self.assertEqual(operation["status"], "completed")
+                self.assertEqual(len(active_rows), 1)
+                self.assertFalse(
+                    completed.get("message_warning"),
+                    "qta 重试成功后不应仍保留投影失败警告",
+                )
+
+    def test_remote_written_projection_pending_reuses_same_operation_id(self):
+        for action in ("start", "update"):
+            for phase in ("remote_intent", "remote_written"):
+                with self.subTest(action=action, phase=phase), tempfile.TemporaryDirectory() as tmp:
+                    service = self._new_temp_service(Path(tmp))
+                    target_record_id = f"target-same-operation-{action}-{phase}"
+                    source_record_id = f"source-same-operation-{action}-{phase}"
+                    request_payload = {
+                        "action": action,
+                        "scope": "A",
+                        "record_id": source_record_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "operation_id": f"same-operation-{action}-{phase}",
+                    }
+                    try:
+                        job_id, should_start = service.create_action_job(request_payload)
+                        self.assertTrue(should_start)
+                        service.mark_job(
+                            job_id,
+                            phase=phase,
+                            remote_intent=phase == "remote_intent",
+                            remote_written=phase == "remote_written",
+                            projection_pending=phase == "remote_written",
+                            remote_record_id=(
+                                target_record_id if phase == "remote_written" else ""
+                            ),
+                            target_record_id=target_record_id,
+                        )
+
+                        repeated_job_id, repeated_should_start = service.create_action_job(
+                            request_payload
+                        )
+                    finally:
+                        service._state_store.shutdown_write_worker(timeout=2.0)
+
+                    self.assertEqual(repeated_job_id, job_id)
+                    self.assertFalse(repeated_should_start)
+
+    def test_remote_intent_blocks_new_same_target_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            target_record_id = "target-remote-intent-order"
+            common = {
+                "action": "update",
+                "scope": "A",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "active_item_id": target_record_id,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+            }
+            try:
+                first_job_id, first_should_start = service.create_action_job(
+                    {**common, "operation_id": "remote-intent-first"}
+                )
+                self.assertTrue(first_should_start)
+                service.mark_job(
+                    first_job_id,
+                    phase="remote_intent",
+                    remote_intent=True,
+                    target_record_id=target_record_id,
+                )
+                second_job_id, second_should_start = service.create_action_job(
+                    {**common, "operation_id": "remote-intent-second"}
+                )
+                second_job = service.get_job(second_job_id)
+            finally:
+                service._state_store.shutdown_write_worker(timeout=2.0)
+
+            self.assertTrue(second_should_start)
+            self.assertEqual(second_job["depends_on_job_id"], first_job_id)
+            self.assertEqual(second_job["depends_on_phase"], "remote_intent")
+
+    def test_projection_pending_old_retry_does_not_rollback_new_same_target_update(self):
+        for old_action in ("start", "update"):
+            with self.subTest(old_action=old_action), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-projection-order-{old_action}"
+                source_record_id = f"source-projection-order-{old_action}"
+                title = f"A楼{old_action}投影排序"
+
+                def prepared_payload(action, progress):
+                    return {
+                        "action": action,
+                        "scope": "A",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": (
+                            f"active-old-{old_action}"
+                            if action == "start"
+                            else target_record_id
+                        ),
+                        "title": title,
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "status": "开始" if action == "start" else "更新",
+                        "progress": progress,
+                        "start_time": "2026-08-14 09:00",
+                        "end_time": "2026-08-14 18:00",
+                        "skip_personal_message": True,
+                        "message_sent": True,
+                        "text": (
+                            f"【变更通告】状态："
+                            f"{'开始' if action == 'start' else '更新'}\n"
+                            f"【名称】{title}\n"
+                            f"【进度】{progress}"
+                        ),
+                    }
+
+                old_request = {
+                    "action": old_action,
+                    "scope": "A",
+                    "record_id": source_record_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "active_item_id": (
+                        f"active-old-{old_action}"
+                        if old_action == "start"
+                        else target_record_id
+                    ),
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "operation_id": f"old-projection-{old_action}",
+                }
+                old_job_id, should_start = service.create_action_job(old_request)
+                self.assertTrue(should_start)
+                service.mark_job(
+                    old_job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=target_record_id,
+                    target_record_id=target_record_id,
+                    remote_result_message="旧远端写入已完成",
+                    prepared=prepared_payload(old_action, "old"),
+                )
+                self.assertTrue(
+                    store.upsert_runtime_queue_item("qt_action", old_job_id)
+                )
+
+                remote_state = {"progress": "old", "version": 1}
+
+                def query_remote(_record_id, _notice_type):
+                    return True, {
+                        "fields": {
+                            CHANGE_NOTICE_FIELDS["title"]: title,
+                            CHANGE_NOTICE_FIELDS["status"]: "更新",
+                            CHANGE_NOTICE_FIELDS["progress"]: remote_state["progress"],
+                            CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                            CHANGE_NOTICE_FIELDS["end_time"]: "2026-08-14 18:00",
+                            CHANGE_NOTICE_FIELDS["building"]: "A楼",
+                        },
+                        "record_version": f"v{remote_state['version']}",
+                    }
+
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            side_effect=query_remote,
+                        ),
+                        patch.object(
+                            PortalRuntime,
+                            "_execute_backend_prepared_upload",
+                        ) as remote_upload,
+                    ):
+                        with patch.object(
+                            store,
+                            "upsert_qt_active_item",
+                            side_effect=RuntimeError("old projection unavailable"),
+                        ):
+                            PortalRuntime._process_maintenance_action_job(old_job_id)
+                        old_pending = service.get_job(old_job_id)
+
+                        new_request = {
+                            "action": "update",
+                            "scope": "A",
+                            "record_id": target_record_id,
+                            "source_record_id": source_record_id,
+                            "target_record_id": target_record_id,
+                            "active_item_id": target_record_id,
+                            "work_type": WORK_TYPE_CHANGE,
+                            "notice_type": "变更通告",
+                            "operation_id": f"new-projection-{old_action}",
+                        }
+                        new_job_id, new_should_start = service.create_action_job(
+                            new_request
+                        )
+                        self.assertTrue(new_should_start)
+                        new_job = service.get_job(new_job_id)
+                        service.mark_job(
+                            new_job_id,
+                            phase="remote_written",
+                            remote_written=True,
+                            remote_record_id=target_record_id,
+                            target_record_id=target_record_id,
+                            remote_result_message="新更新已写入",
+                            prepared=prepared_payload("update", "new"),
+                        )
+                        remote_state.update(progress="new", version=2)
+
+                        # Direct processing models another worker/process that has
+                        # already completed the newer target update.  The old
+                        # projection retry must still be safe if it arrives late.
+                        PortalRuntime._process_maintenance_action_job(new_job_id)
+                        PortalRuntime._process_maintenance_action_job(old_job_id)
+
+                        old_completed = service.get_job(old_job_id)
+                        sqlite_rows = store.list_visible_qt_active_items()
+                        with patch.object(
+                            PortalRuntime,
+                            "restore_live_portal_active_items",
+                            return_value={"restored": 0},
+                        ):
+                            web_rows = FastAPIPortalController._get_ongoing("A")
+                        outbox = store.list_outbox_events("qt_action", limit=100)
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                qt_progress = ""
+                for event in outbox:
+                    envelope = event.get("payload") or {}
+                    event_payload = envelope.get("payload") or {}
+                    if envelope.get("kind") != "active_upsert":
+                        continue
+                    item = event_payload.get("item") or {}
+                    item_payload = item.get("payload") or {}
+                    if str(
+                        item_payload.get("target_record_id")
+                        or item.get("record_id")
+                        or ""
+                    ) == target_record_id:
+                        qt_progress = str(item_payload.get("progress") or "")
+
+                remote_upload.assert_not_called()
+                self.assertEqual(old_pending["phase"], "remote_written")
+                self.assertEqual(
+                    {
+                        "depends_on": new_job.get("depends_on_job_id"),
+                        "old_phase": old_completed.get("phase"),
+                        "remote_progress": remote_state["progress"],
+                        "sqlite_progress": (
+                            sqlite_rows[0]["payload"].get("progress")
+                            if len(sqlite_rows) == 1
+                            else ""
+                        ),
+                        "web_progress": (
+                            web_rows[0].get("progress") if len(web_rows) == 1 else ""
+                        ),
+                        "qt_progress": qt_progress,
+                    },
+                    {
+                        "depends_on": old_job_id,
+                        "old_phase": "success",
+                        "remote_progress": "new",
+                        "sqlite_progress": "new",
+                        "web_progress": "new",
+                        "qt_progress": "new",
+                    },
+                )
+
+    def test_projection_pending_retry_finished_target_is_terminal_noop(self):
+        for source_active in (False, True):
+            with self.subTest(source_active=source_active), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-retry-finished-{int(source_active)}"
+                source_record_id = f"source-retry-finished-{int(source_active)}"
+                title = "C楼旧更新重试遇到目标已结束"
+                service._change_records = (
+                    [
+                        _build_change_record(
+                            source_record_id,
+                            building="C楼",
+                            progress="进行中",
+                            title=title,
+                            start_time="2026-08-14 09:00",
+                            end_time="2026-08-14 18:00",
+                        )
+                    ]
+                    if source_active
+                    else []
+                )
+                service._change_loaded_once = True
+                target_payload = {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": "更新",
+                    "title": title,
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "start_time": "2026-08-14 09:00",
+                    "end_time": "2026-08-14 18:00",
+                    "progress": "目标结束前的进展",
+                    "text": (
+                        "【变更通告】状态：更新\n"
+                        f"【名称】{title}\n"
+                        "【进度】目标结束前的进展"
+                    ),
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        target_payload,
+                        section="other",
+                        origin="portal",
+                        allow_revive=True,
+                    )
+                )
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": "update",
+                        "scope": "C",
+                        "record_id": target_record_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "operation_id": f"retry-finished-{int(source_active)}",
+                    }
+                )
+                self.assertTrue(should_start)
+                service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=target_record_id,
+                    target_record_id=target_record_id,
+                    remote_result_message="旧更新远端曾写入成功",
+                    prepared={
+                        **target_payload,
+                        "action": "update",
+                        "progress": "不得迟到回写的旧进展",
+                        "text": (
+                            "【变更通告】状态：更新\n"
+                            f"【名称】{title}\n"
+                            "【进度】不得迟到回写的旧进展"
+                        ),
+                        "skip_personal_message": False,
+                        "message_sent": False,
+                    },
+                )
+                self.assertTrue(
+                    store.upsert_runtime_queue_item("qt_action", job_id)
+                )
+
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            side_effect=[
+                                (
+                                    True,
+                                    {
+                                        "fields": {
+                                            CHANGE_NOTICE_FIELDS["title"]: title,
+                                            CHANGE_NOTICE_FIELDS["status"]: "更新",
+                                            CHANGE_NOTICE_FIELDS["progress"]: "目标结束前的进展",
+                                            CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                                            CHANGE_NOTICE_FIELDS["end_time"]: "2026-08-14 18:00",
+                                            CHANGE_NOTICE_FIELDS["building"]: "C楼",
+                                        },
+                                        "record_version": "v-active-before-retry",
+                                    },
+                                ),
+                                (
+                                    True,
+                                    {
+                                        "fields": {
+                                            CHANGE_NOTICE_FIELDS["title"]: title,
+                                            CHANGE_NOTICE_FIELDS["status"]: "已结束",
+                                            CHANGE_NOTICE_FIELDS["progress"]: "已结束",
+                                            CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                                            CHANGE_NOTICE_FIELDS["end_time"]: "2026-08-14 18:00",
+                                            CHANGE_NOTICE_FIELDS["building"]: "C楼",
+                                        },
+                                        "record_version": "v-finished-after-old-update",
+                                    },
+                                ),
+                            ],
+                        ) as point_read,
+                        patch.object(
+                            PortalRuntime,
+                            "_execute_backend_prepared_upload",
+                        ) as remote_upload,
+                        patch.object(
+                            service,
+                            "send_action_personal_message",
+                            return_value=(True, "不应发送"),
+                        ) as personal_message,
+                    ):
+                        with patch.object(
+                            store,
+                            "upsert_qt_active_item",
+                            side_effect=RuntimeError("first projection unavailable"),
+                        ):
+                            PortalRuntime._process_maintenance_action_job(job_id)
+                        pending = service.get_job(job_id)
+
+                        PortalRuntime._process_maintenance_action_job(job_id)
+                        completed = service.get_job(job_id)
+                        sqlite_rows = store.list_visible_qt_active_items()
+                        identity = store.resolve_notice_identity(
+                            work_type=WORK_TYPE_CHANGE,
+                            target_record_id=target_record_id,
+                        )
+                        with service._summary_lock:
+                            work_status_rows = [
+                                item
+                                for item in service._load_work_status_items_locked("C")
+                                if str(item.get("source_record_id") or "")
+                                == source_record_id
+                                or str(item.get("target_record_id") or "")
+                                == target_record_id
+                            ]
+                        with patch.object(
+                            PortalRuntime,
+                            "restore_live_portal_active_items",
+                            return_value={"restored": 0},
+                        ):
+                            web_rows = FastAPIPortalController._get_ongoing("C")
+                        outbox = store.list_outbox_events("qt_action", limit=100)
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                qt_payload = dict(target_payload)
+                for event in outbox:
+                    envelope = event.get("payload") or {}
+                    event_payload = envelope.get("payload") or {}
+                    if envelope.get("kind") == "active_delete":
+                        if str(
+                            event_payload.get("target_record_id")
+                            or event_payload.get("record_id")
+                            or ""
+                        ) == target_record_id:
+                            qt_payload = {}
+                    elif envelope.get("kind") == "active_upsert":
+                        item = event_payload.get("item") or {}
+                        candidate = item.get("payload") or {}
+                        if candidate.get("source_record_id") == source_record_id:
+                            qt_payload = candidate
+
+                remote_upload.assert_not_called()
+                personal_message.assert_not_called()
+                self.assertEqual(point_read.call_count, 2)
+                self.assertEqual(pending["phase"], "remote_written")
+                self.assertTrue(pending["projection_pending"])
+                self.assertEqual(completed["phase"], "success", completed)
+                self.assertTrue(
+                    completed["frontend_patch"][
+                        "projection_superseded_by_terminal"
+                    ]
+                )
+                self.assertEqual(
+                    completed["frontend_patch"]["source_fallback_active"],
+                    source_active,
+                )
+                self.assertIsNotNone(identity)
+                self.assertEqual(identity["status"], "已结束")
+                self.assertTrue(work_status_rows)
+                self.assertEqual(
+                    {str(item.get("status") or "") for item in work_status_rows},
+                    {"已结束"},
+                )
+                self.assertNotIn(
+                    "不得迟到回写的旧进展",
+                    {str(item.get("progress") or "") for item in work_status_rows},
+                )
+
+                expected_visible = 1 if source_active else 0
+                self.assertEqual(
+                    [len(sqlite_rows), len(web_rows), int(bool(qt_payload))],
+                    [expected_visible, expected_visible, expected_visible],
+                )
+                if source_active:
+                    for view, payload in {
+                        "sqlite": sqlite_rows[0]["payload"],
+                        "web": web_rows[0],
+                        "qt": qt_payload,
+                    }.items():
+                        self.assertEqual(
+                            payload.get("source_record_id"), source_record_id
+                        )
+                        self.assertFalse(
+                            payload.get("target_record_id"), (view, payload)
+                        )
+                        self.assertFalse(payload.get("record_id"), (view, payload))
+                        self.assertNotEqual(
+                            payload.get("progress"),
+                            "不得迟到回写的旧进展",
+                        )
+
+    def test_qt_direct_update_projects_latest_later_web_update_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "target-qt-old-web-new"
+            source_record_id = "source-qt-old-web-new"
+            title = "A楼同向更新竞态"
+            active = {
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "source_record_id": source_record_id,
+                "work_type": WORK_TYPE_MAINTENANCE,
+                "notice_type": "维保通告",
+                "status": "更新",
+                "title": title,
+                "building": "A楼",
+                "building_codes": ["A"],
+                "progress": "初始",
+                "text": (
+                    f"【维保通告】状态：更新\n【名称】{title}\n【进度】初始"
+                ),
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    active,
+                    section="other",
+                    origin="portal",
+                    allow_revive=True,
+                )
+            )
+            screenshot = store.put_notice_upload_attachment(
+                open_id="same-update-race",
+                file_name="update.png",
+                mime_type="image/png",
+                content=b"update",
+            )
+            remote = {"progress": "初始", "version": 1}
+            interleaved = False
+            original_release = PortalRuntime._release_event_operation_lock
+            original_upsert = PortalRuntime._upsert_backend_active_notice
+
+            def query_remote(_record_id, _notice_type):
+                return True, {
+                    "fields": {
+                        MAINTENANCE_NOTICE_FIELDS["name"]: title,
+                        MAINTENANCE_NOTICE_FIELDS["status"]: "更新",
+                        MAINTENANCE_NOTICE_FIELDS["progress"]: remote["progress"],
+                        MAINTENANCE_NOTICE_FIELDS["building"]: "A楼",
+                    },
+                    "record_version": f"v{remote['version']}",
+                }
+
+            def write_qt_update(_record_id, _notice_type, _notice_payload):
+                remote.update(progress="Qt旧更新", version=2)
+                return True, "Qt更新成功"
+
+            def release_then_later_web_update(lock_key, lock_owner):
+                nonlocal interleaved
+                original_release(lock_key, lock_owner)
+                if interleaved or not lock_key or not lock_owner:
+                    return
+                interleaved = True
+                remote.update(progress="Web后续更新", version=3)
+                newer = {
+                    **active,
+                    "progress": "Web后续更新",
+                    "text": (
+                        f"【维保通告】状态：更新\n【名称】{title}\n"
+                        "【进度】Web后续更新"
+                    ),
+                }
+                web_lock_key, web_lock_owner, web_lock_error = (
+                    PortalRuntime._acquire_event_operation_lock(
+                        newer,
+                        action_type="later_web_update",
+                        target_record_id=target_record_id,
+                        record_id=target_record_id,
+                    )
+                )
+                self.assertFalse(web_lock_error)
+                try:
+                    original_upsert(
+                        newer,
+                        remote_record_id=target_record_id,
+                        job_id="later-web-update",
+                    )
+                finally:
+                    original_release(web_lock_key, web_lock_owner)
+
+            request_payload = {
+                "action_type": "update",
+                "operation_id": "qt-old-web-new",
+                "screenshot_upload_id": screenshot["upload_id"],
+                "data_dict": {
+                    **active,
+                    "progress": "Qt旧更新",
+                    "text": (
+                        f"【维保通告】状态：更新\n【名称】{title}\n"
+                        "【进度】Qt旧更新"
+                    ),
+                },
+            }
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(
+                        service,
+                        "_has_existing_site_photo_for_notice",
+                        return_value=True,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        side_effect=query_remote,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "update_bitable_record_by_payload",
+                        side_effect=write_qt_update,
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "upload_media_to_feishu",
+                        return_value=(True, "same-update-token"),
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_release_event_operation_lock",
+                        side_effect=release_then_later_web_update,
+                    ),
+                ):
+                    result = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
+                    sqlite_rows = store.list_visible_qt_active_items()
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("A")
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(interleaved)
+        self.assertEqual(remote["progress"], "Web后续更新")
+        self.assertEqual(len(sqlite_rows), 1)
+        self.assertEqual(len(web_rows), 1)
+        self.assertEqual(sqlite_rows[0]["payload"].get("progress"), "Web后续更新")
+        self.assertEqual(web_rows[0].get("progress"), "Web后续更新")
+
+    def test_web_projection_not_found_is_terminal_and_reconciles_source(self):
+        for source_active in (False, True):
+            with self.subTest(source_active=source_active), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-web-not-found-{int(source_active)}"
+                source_record_id = f"source-web-not-found-{int(source_active)}"
+                title = "A楼Web旧更新遇到目标已删除"
+                service._change_records = (
+                    [
+                        _build_change_record(
+                            source_record_id,
+                            building="A楼",
+                            progress="进行中",
+                            title=title,
+                            start_time="2026-08-14 09:00",
+                            end_time="2026-08-14 18:00",
+                        )
+                    ]
+                    if source_active
+                    else []
+                )
+                service._change_loaded_once = True
+                prepared = {
+                    "action": "update",
+                    "scope": "A",
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "source_snapshot_authoritative": True,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": "更新",
+                    "title": title,
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "progress": "不得恢复的旧进展",
+                    "skip_personal_message": False,
+                    "message_sent": False,
+                    "text": (
+                        f"【变更通告】状态：更新\n【名称】{title}\n"
+                        "【进度】不得恢复的旧进展"
+                    ),
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        prepared,
+                        section="other",
+                        origin="portal",
+                        allow_revive=True,
+                    )
+                )
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": "update",
+                        "scope": "A",
+                        "record_id": target_record_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "operation_id": f"web-not-found-{int(source_active)}",
+                    }
+                )
+                self.assertTrue(should_start)
+                service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=target_record_id,
+                    target_record_id=target_record_id,
+                    remote_result_message="旧更新曾写入成功",
+                    prepared=prepared,
+                )
+                self.assertTrue(
+                    store.upsert_runtime_queue_item("qt_action", job_id)
+                )
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            return_value=(False, "record not found"),
+                        ),
+                        patch.object(
+                            PortalRuntime,
+                            "_execute_backend_prepared_upload",
+                        ) as remote_upload,
+                        patch.object(
+                            service,
+                            "send_action_personal_message",
+                            return_value=(True, "不应发送"),
+                        ) as personal_message,
+                    ):
+                        PortalRuntime._process_maintenance_action_job(job_id)
+                        completed = service.get_job(job_id)
+                        sqlite_rows = store.list_visible_qt_active_items()
+                        queued = store.list_runtime_queue_items(
+                            "qt_action",
+                            statuses=("queued", "processing"),
+                            due_only=False,
+                        )
+                        with patch.object(
+                            PortalRuntime,
+                            "restore_live_portal_active_items",
+                            return_value={"restored": 0},
+                        ):
+                            web_rows = FastAPIPortalController._get_ongoing("A")
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                remote_upload.assert_not_called()
+                personal_message.assert_not_called()
+                self.assertEqual(completed.get("phase"), "success", completed)
+                self.assertFalse(completed.get("projection_pending"), completed)
+                self.assertEqual(queued, [])
+                expected_visible = 1 if source_active else 0
+                self.assertEqual(
+                    [len(sqlite_rows), len(web_rows)],
+                    [expected_visible, expected_visible],
+                )
+                if source_active:
+                    for payload in (sqlite_rows[0]["payload"], web_rows[0]):
+                        self.assertEqual(
+                            payload.get("source_record_id"), source_record_id
+                        )
+                        self.assertFalse(payload.get("target_record_id"), payload)
+                        self.assertFalse(payload.get("record_id"), payload)
+                        self.assertNotEqual(
+                            payload.get("progress"), "不得恢复的旧进展"
+                        )
+
+    def test_web_end_not_found_is_terminal_and_reconciles_source(self):
+        for source_active in (False, True):
+            with self.subTest(source_active=source_active), tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                store = service._state_store
+                target_record_id = f"target-web-end-not-found-{int(source_active)}"
+                source_record_id = f"source-web-end-not-found-{int(source_active)}"
+                title = "B楼Web结束遇到目标已删除"
+                service._change_records = (
+                    [
+                        _build_change_record(
+                            source_record_id,
+                            building="B楼",
+                            progress="进行中",
+                            title=title,
+                            start_time="2026-08-14 09:00",
+                            end_time="2026-08-14 18:00",
+                        )
+                    ]
+                    if source_active
+                    else []
+                )
+                service._change_loaded_once = True
+                active = {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "source_snapshot_authoritative": True,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "status": "更新",
+                    "title": title,
+                    "building": "B楼",
+                    "building_codes": ["B"],
+                    "progress": "结束前进展",
+                    "text": (
+                        f"【变更通告】状态：更新\n【名称】{title}\n"
+                        "【进度】结束前进展"
+                    ),
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        active,
+                        section="other",
+                        origin="portal",
+                        allow_revive=True,
+                    )
+                )
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": "end",
+                        "scope": "B",
+                        "record_id": target_record_id,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": target_record_id,
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "变更通告",
+                        "operation_id": f"web-end-not-found-{int(source_active)}",
+                    }
+                )
+                self.assertTrue(should_start)
+                service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    remote_record_id=target_record_id,
+                    target_record_id=target_record_id,
+                    remote_result_message="结束曾写入成功",
+                    prepared={
+                        **active,
+                        "action": "end",
+                        "status": "结束",
+                        "progress": "结束",
+                        "skip_personal_message": True,
+                        "message_sent": True,
+                        "text": (
+                            f"【变更通告】状态：结束\n【名称】{title}\n"
+                            "【进度】结束"
+                        ),
+                    },
+                )
+                self.assertTrue(
+                    store.upsert_runtime_queue_item("qt_action", job_id)
+                )
+                try:
+                    with (
+                        patch.object(PortalRuntime, "service", service),
+                        patch.object(PortalRuntime, "state_store", store),
+                        patch.object(
+                            portal_server_module,
+                            "query_record_by_id",
+                            return_value=(False, "record not found"),
+                        ),
+                        patch.object(
+                            PortalRuntime,
+                            "_execute_backend_prepared_upload",
+                        ) as remote_upload,
+                    ):
+                        PortalRuntime._process_maintenance_action_job(job_id)
+                        completed = service.get_job(job_id)
+                        sqlite_rows = store.list_visible_qt_active_items()
+                        queued = store.list_runtime_queue_items(
+                            "qt_action",
+                            statuses=("queued", "processing"),
+                            due_only=False,
+                        )
+                        with patch.object(
+                            PortalRuntime,
+                            "restore_live_portal_active_items",
+                            return_value={"restored": 0},
+                        ):
+                            web_rows = FastAPIPortalController._get_ongoing("B")
+                finally:
+                    store.shutdown_write_worker(timeout=2.0)
+
+                remote_upload.assert_not_called()
+                self.assertEqual(completed.get("phase"), "success", completed)
+                self.assertEqual(queued, [])
+                expected_visible = 1 if source_active else 0
+                self.assertEqual(
+                    [len(sqlite_rows), len(web_rows)],
+                    [expected_visible, expected_visible],
+                )
+                if source_active:
+                    for payload in (sqlite_rows[0]["payload"], web_rows[0]):
+                        self.assertEqual(
+                            payload.get("source_record_id"), source_record_id
+                        )
+                        self.assertFalse(payload.get("target_record_id"), payload)
+                        self.assertFalse(payload.get("record_id"), payload)
+
+    def test_source_fallback_frontend_patch_uses_canonical_source_only_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            source_record_id = "source-frontend-fallback"
+            target_record_id = "target-frontend-fallback"
+            source_active_item_id = (
+                f"source-{WORK_TYPE_CHANGE}-{source_record_id}"
+            )
+            source_only = {
+                "active_item_id": source_active_item_id,
+                "source_record_id": source_record_id,
+                "source_snapshot_authoritative": True,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "进行中",
+                "title": "C楼目标结束源表仍进行",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "progress": "源表仍进行",
+                "text": (
+                    "【变更通告】状态：更新\n"
+                    "【名称】C楼目标结束源表仍进行\n"
+                    "【进度】源表仍进行"
+                ),
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    source_only,
+                    section="other",
+                    origin="source_snapshot_refresh",
+                    allow_revive=True,
+                )
+            )
+            try:
+                patch_payload = service._build_action_frontend_patch(
+                    {
+                        "prepared": {
+                            **source_only,
+                            "active_item_id": target_record_id,
+                            "record_id": target_record_id,
+                            "target_record_id": target_record_id,
+                            "action": "end",
+                            "preserve_ongoing_source_after_target_end": True,
+                        },
+                        "request": {"action": "end"},
+                    },
+                    success=True,
+                    record_id=target_record_id,
+                    active_item_id=target_record_id,
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+        self.assertTrue(patch_payload["source_fallback_active"])
+        self.assertEqual(patch_payload["active_item_id"], source_active_item_id)
+        self.assertEqual(patch_payload["target_record_id"], "")
+        self.assertEqual(patch_payload["record_id"], "")
+
+    def test_qt_completed_start_replay_does_not_revive_finished_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "target-qt-completed-start-replay"
+            source_record_id = "source-qt-completed-start-replay"
+            title = "A楼Qt开始操作终态重放"
+            service._change_records = []
+            service._change_loaded_once = True
+            request_payload = {
+                "action_type": "upload",
+                "operation_id": "qt-completed-start-replay",
+                "data_dict": {
+                    "active_item_id": "active-qt-completed-start-replay",
+                    "record_id": "local_qt_completed_start_replay",
+                    "source_record_id": source_record_id,
+                    "notice_type": "变更通告",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "scope": "A",
+                    "title": title,
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "specialty": "电气",
+                    "start_time": "2026-08-14 09:00",
+                    "end_time": "2026-08-14 18:00",
+                    "text": (
+                        "【变更通告】状态：开始\n"
+                        f"【名称】{title}\n"
+                        "【时间】2026-08-14 09:00~2026-08-14 18:00\n"
+                        "【进度】开始执行"
+                    ),
+                },
+            }
+            active_remote = {
+                "fields": {
+                    CHANGE_NOTICE_FIELDS["title"]: title,
+                    CHANGE_NOTICE_FIELDS["status"]: "开始",
+                    CHANGE_NOTICE_FIELDS["progress"]: "开始执行",
+                    CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                    CHANGE_NOTICE_FIELDS["building"]: "A楼",
+                },
+                "record_version": "v-start-active",
+            }
+            finished_remote = {
+                "fields": {
+                    CHANGE_NOTICE_FIELDS["title"]: title,
+                    CHANGE_NOTICE_FIELDS["status"]: "已结束",
+                    CHANGE_NOTICE_FIELDS["progress"]: "已结束",
+                    CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                    CHANGE_NOTICE_FIELDS["building"]: "A楼",
+                },
+                "record_version": "v-start-finished",
+            }
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(PortalRuntime, "local_upload_locks", {}),
+                    patch.object(PortalRuntime, "local_upload_created_targets", {}),
+                    patch.object(
+                        portal_server_module,
+                        "external_real_write_guard",
+                        return_value={
+                            "mock_external": False,
+                            "real_write_allowed": True,
+                            "reason": "",
+                        },
+                    ),
+                    patch.object(
+                        portal_server_module,
+                        "create_bitable_record_by_payload",
+                        return_value=(True, target_record_id),
+                    ) as create_record,
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        side_effect=[
+                            (True, active_remote),
+                            (True, finished_remote),
+                        ],
+                    ) as query_record,
+                ):
+                    first = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
+                    first_rows = store.list_visible_qt_active_items()
+                    self.assertEqual(len(first_rows), 1)
+                    store.delete_qt_active_item(
+                        active_item_id=first_rows[0]["active_item_id"]
+                    )
+                    self.assertEqual(store.list_visible_qt_active_items(), [])
+
+                    replay = PortalRuntime.execute_local_notice_upload(
+                        request_payload
+                    )
+                    replay_rows = store.list_visible_qt_active_items()
+                    operation = store.get_notice_remote_operation(
+                        request_payload["operation_id"]
+                    )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(replay["ok"], replay)
+        self.assertTrue(replay.get("deduped"), replay)
+        self.assertEqual(replay["real_record_id"], target_record_id)
+        self.assertEqual(replay_rows, [])
+        self.assertEqual(operation.get("status"), "completed")
+        create_record.assert_called_once()
+        self.assertEqual(query_record.call_count, 2)
+
+    def test_web_end_source_reconcile_failure_retries_without_remote_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            target_record_id = "target-web-end-reconcile-retry"
+            source_record_id = "source-web-end-reconcile-retry"
+            title = "B楼Web结束源回退补偿"
+            service._change_records = [
+                _build_change_record(
+                    source_record_id,
+                    building="B楼",
+                    progress="进行中",
+                    title=title,
+                    start_time="2026-08-14 09:00",
+                    end_time="2026-08-14 18:00",
+                )
+            ]
+            service._change_loaded_once = True
+            active = {
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "source_record_id": source_record_id,
+                "source_snapshot_authoritative": True,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "status": "更新",
+                "title": title,
+                "building": "B楼",
+                "building_codes": ["B"],
+                "progress": "目标结束前进展",
+                "text": (
+                    f"【变更通告】状态：更新\n【名称】{title}\n"
+                    "【进度】目标结束前进展"
+                ),
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    active,
+                    section="other",
+                    origin="portal",
+                    allow_revive=True,
+                )
+            )
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "scope": "B",
+                    "record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "active_item_id": target_record_id,
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "operation_id": "web-end-reconcile-retry",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="remote_written",
+                remote_written=True,
+                remote_record_id=target_record_id,
+                target_record_id=target_record_id,
+                remote_result_message="结束曾写入成功",
+                prepared={
+                    **active,
+                    "action": "end",
+                    "status": "结束",
+                    "progress": "已结束",
+                    "skip_personal_message": True,
+                    "message_sent": True,
+                    "text": (
+                        f"【变更通告】状态：结束\n【名称】{title}\n"
+                        "【进度】已结束"
+                    ),
+                },
+            )
+            self.assertTrue(store.upsert_runtime_queue_item("qt_action", job_id))
+            real_reconcile = service.reconcile_source_ongoing_items
+            reconcile_calls = 0
+
+            def flaky_reconcile():
+                nonlocal reconcile_calls
+                reconcile_calls += 1
+                if reconcile_calls == 1:
+                    raise RuntimeError("source reconcile unavailable")
+                return real_reconcile()
+
+            finished_remote = {
+                "fields": {
+                    CHANGE_NOTICE_FIELDS["title"]: title,
+                    CHANGE_NOTICE_FIELDS["status"]: "已结束",
+                    CHANGE_NOTICE_FIELDS["progress"]: "已结束",
+                    CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                    CHANGE_NOTICE_FIELDS["building"]: "B楼",
+                },
+                "record_version": "v-web-end-reconcile-finished",
+            }
+            try:
+                with (
+                    patch.object(PortalRuntime, "service", service),
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(
+                        portal_server_module,
+                        "query_record_by_id",
+                        return_value=(True, finished_remote),
+                    ) as query_record,
+                    patch.object(
+                        service,
+                        "reconcile_source_ongoing_items",
+                        side_effect=flaky_reconcile,
+                    ),
+                    patch.object(
+                        PortalRuntime,
+                        "_execute_backend_prepared_upload",
+                    ) as remote_upload,
+                ):
+                    PortalRuntime._process_maintenance_action_job(job_id)
+                    pending = service.get_job(job_id)
+                    pending_queue = store.list_runtime_queue_items(
+                        "qt_action",
+                        statuses=("queued", "processing"),
+                        due_only=False,
+                    )
+
+                    PortalRuntime._process_maintenance_action_job(job_id)
+                    completed = service.get_job(job_id)
+                    completed_queue = store.list_runtime_queue_items(
+                        "qt_action",
+                        statuses=("queued", "processing"),
+                        due_only=False,
+                    )
+                    sqlite_rows = store.list_visible_qt_active_items()
+                    with patch.object(
+                        PortalRuntime,
+                        "restore_live_portal_active_items",
+                        return_value={"restored": 0},
+                    ):
+                        web_rows = FastAPIPortalController._get_ongoing("B")
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+
+        remote_upload.assert_not_called()
+        self.assertEqual(pending.get("phase"), "remote_written", pending)
+        self.assertTrue(pending.get("projection_pending"), pending)
+        self.assertEqual(len(pending_queue), 1)
+        self.assertEqual(completed.get("phase"), "success", completed)
+        self.assertFalse(completed.get("projection_pending"), completed)
+        self.assertEqual(completed_queue, [])
+        self.assertEqual(reconcile_calls, 2)
+        self.assertEqual(query_record.call_count, 2)
+        self.assertEqual([len(sqlite_rows), len(web_rows)], [1, 1])
+        for payload in (sqlite_rows[0]["payload"], web_rows[0]):
+            self.assertEqual(payload.get("source_record_id"), source_record_id)
+            self.assertFalse(payload.get("target_record_id"), payload)
+            self.assertFalse(payload.get("record_id"), payload)
 
 
 if __name__ == "__main__":

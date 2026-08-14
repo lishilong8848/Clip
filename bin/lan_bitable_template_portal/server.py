@@ -36,6 +36,7 @@ from .portal_service import (
     external_real_write_guard,
 )
 from .identity_utils import (
+    canonical_source_record_id,
     canonical_target_record_id,
     is_local_record_id,
     normalize_notice_identity_payload,
@@ -851,6 +852,11 @@ class PortalRuntime:
 
     @classmethod
     def restore_live_portal_active_items(cls) -> dict:
+        source_result: dict = {}
+        try:
+            source_result = cls.service.reconcile_source_ongoing_items()
+        except Exception as exc:
+            log_warning(f"源表未结束通告对账失败: {exc}")
         try:
             result = cls.state_store.restore_live_portal_qt_active_items()
         except Exception as exc:
@@ -861,7 +867,11 @@ class PortalRuntime:
             for item in (result.get("items") or [])
             if isinstance(item, dict)
         ]
-        if not items:
+        source_changed = bool(
+            source_result.get("upserted") or source_result.get("removed")
+        )
+        result["source_reconcile"] = source_result
+        if not items and not source_changed:
             return result
         for item in items:
             try:
@@ -886,6 +896,20 @@ class PortalRuntime:
         except Exception:
             pass
         return result
+
+    @classmethod
+    def _reconcile_source_ongoing_after_target_terminal(cls) -> dict:
+        if getattr(cls.service, "_state_store", None) is not cls.state_store:
+            return {}
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return cls.service.reconcile_source_ongoing_items()
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+        raise RuntimeError(f"源表未结束通告恢复失败：{last_error}") from last_error
 
     @classmethod
     def _prune_payload_cache_locked(cls, now: float) -> None:
@@ -2982,17 +3006,30 @@ class PortalRuntime:
                     scope=scope,
                     deleted_by=payload["_auth_open_id"],
                 )
-                data.update(
-                    self.service.discard_deleted_ongoing_state(
-                        cleanup_payload,
-                        scope=scope,
-                        reset_source_plan=bool(
-                            accepted.get("remote_deleted")
-                            if isinstance(accepted, dict)
-                            else False
-                        ),
+                if isinstance(accepted, dict):
+                    for field_name in (
+                        "work_status_removed",
+                        "daily_summary_removed",
+                        "source_plan_reset",
+                    ):
+                        if field_name in accepted:
+                            data[field_name] = accepted[field_name]
+                if not bool(
+                    accepted.get("local_cleanup_completed")
+                    if isinstance(accepted, dict)
+                    else False
+                ):
+                    data.update(
+                        self.service.discard_deleted_ongoing_state(
+                            cleanup_payload,
+                            scope=scope,
+                            reset_source_plan=bool(
+                                accepted.get("remote_deleted")
+                                if isinstance(accepted, dict)
+                                else False
+                            ),
+                        )
                     )
-                )
                 PortalRuntime.clear_payload_cache()
                 data["qt_deleted"] = True
                 data["remote_deleted"] = bool(
@@ -3036,23 +3073,25 @@ class PortalRuntime:
                     self.service.discard_deleted_ongoing_state(payload, scope=scope)
                 )
                 PortalRuntime.clear_payload_cache()
-                event_id = PortalRuntime.state_store.enqueue_outbox_event(
-                    "qt_action",
-                    {
-                        "kind": "active_delete",
-                        "payload": {
-                            "active_item_id": str(payload.get("active_item_id") or ""),
-                            "record_id": str(
-                                (result or {}).get("record_id")
-                                or payload.get("target_record_id")
-                                or ""
-                            ),
-                            "source_record_id": str(payload.get("source_record_id") or ""),
-                            "work_type": str(payload.get("work_type") or ""),
-                            "notice_type": str(payload.get("notice_type") or ""),
+                event_id = (result or {}).get("qt_event_id") or ""
+                if not event_id:
+                    event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": str(payload.get("active_item_id") or ""),
+                                "record_id": str(
+                                    (result or {}).get("record_id")
+                                    or payload.get("target_record_id")
+                                    or ""
+                                ),
+                                "source_record_id": str(payload.get("source_record_id") or ""),
+                                "work_type": str(payload.get("work_type") or ""),
+                                "notice_type": str(payload.get("notice_type") or ""),
+                            },
                         },
-                    },
-                )
+                    )
                 data["qt_deleted"] = bool(
                     result.get("qt_removed") or result.get("already_absent")
                 )
@@ -5805,6 +5844,7 @@ class PortalRuntime:
         notice_type: str,
         target_record_id: str,
         action: str = "",
+        confirm_remote_state: bool = False,
     ) -> str:
         target_record_id = str(target_record_id or "").strip()
         if not target_record_id:
@@ -5834,17 +5874,83 @@ class PortalRuntime:
             action=normalized_action,
         )
         record_version = cls._expected_remote_record_version(payload)
-        if not record_version and not is_local_record_id(target_record_id):
-            guard = external_real_write_guard()
-            if not guard.get("mock_external"):
-                ok_query, query_result = query_record_by_id(
-                    target_record_id,
-                    notice_type,
+        guard = external_real_write_guard()
+        if (
+            (confirm_remote_state or not record_version)
+            and not is_local_record_id(target_record_id)
+            and not guard.get("mock_external")
+        ):
+            ok_query, query_result = query_record_by_id(
+                target_record_id,
+                notice_type,
+            )
+            if ok_query and isinstance(query_result, dict):
+                record_version = str(
+                    query_result.get("record_version") or record_version or ""
+                ).strip()
+            if confirm_remote_state:
+                latest_fields = (
+                    query_result.get("fields")
+                    if ok_query
+                    and isinstance(query_result, dict)
+                    and isinstance(query_result.get("fields"), dict)
+                    else {}
                 )
-                if ok_query and isinstance(query_result, dict):
-                    record_version = str(
-                        query_result.get("record_version") or ""
-                    ).strip()
+                work_type = str(
+                    payload.get("work_type")
+                    or payload.get("lan_work_type")
+                    or cls._notice_work_type_from_notice_type(notice_type)
+                    or ""
+                ).strip()
+                lifecycle = (
+                    cls.service._target_record_lifecycle(
+                        work_type=work_type,
+                        notice_type=notice_type,
+                        target_record={
+                            "record_id": target_record_id,
+                            "display_fields": latest_fields,
+                        },
+                    )
+                    if latest_fields
+                    else {}
+                )
+                if not ok_query and cls._remote_record_not_found(query_result):
+                    cls._enqueue_active_delete_for_ended_notice(
+                        payload,
+                        remote_record_id=target_record_id,
+                    )
+                    cls.state_store.mark_notice_identity_deleted(
+                        work_type=work_type,
+                        active_item_id=str(payload.get("active_item_id") or ""),
+                        source_record_id=canonical_source_record_id(payload),
+                        target_record_id=target_record_id,
+                    )
+                    cls._reconcile_source_ongoing_after_target_terminal()
+                    return record_version
+                if lifecycle.get("finished"):
+                    cls.service._reconcile_notice_target_snapshot(
+                        work_type=work_type,
+                        notice_type=notice_type,
+                        records=[
+                            {
+                                "record_id": target_record_id,
+                                "display_fields": latest_fields,
+                            }
+                        ],
+                    )
+                    return record_version
+                if not lifecycle.get("active"):
+                    return record_version
+                payload = cls.service._target_snapshot_active_payload(
+                    work_type=work_type,
+                    notice_type=notice_type,
+                    target_record={
+                        "record_id": target_record_id,
+                        "display_fields": latest_fields,
+                    },
+                    current_payload=payload,
+                )
+                payload["action"] = normalized_action
         cls._rebase_remote_record_version(
             payload,
             record_version,
@@ -5880,6 +5986,7 @@ class PortalRuntime:
                 section=section,
                 sort_order=0,
                 origin="qt_upload",
+                allow_revive=True,
             )
             cls.state_store.enqueue_outbox_event(
                 "qt_action",
@@ -5901,6 +6008,7 @@ class PortalRuntime:
             )
         except Exception as exc:
             log_warning(f"Qt 上传目标 ID 回写 active item 失败: {exc}")
+            raise
         return record_version
 
     @classmethod
@@ -6396,7 +6504,7 @@ class PortalRuntime:
                     "payload": event_payload,
                 },
             )
-        else:
+        elif not int((local_result or {}).get("qt_event_id") or 0):
             cls.state_store.enqueue_outbox_event(
                 "qt_action",
                 {
@@ -6429,7 +6537,11 @@ class PortalRuntime:
             "notice_type": str(prepared.get("notice_type") or "").strip(),
             "work_type": str(prepared.get("work_type") or "").strip(),
             "scope": str(prepared.get("scope") or "").strip(),
-            "active_item_id": str(prepared.get("active_item_id") or "").strip(),
+            "active_item_id": (
+                ""
+                if action == "start"
+                else str(prepared.get("active_item_id") or "").strip()
+            ),
             "source_record_id": str(prepared.get("source_record_id") or "").strip(),
             "target_record_id": (
                 ""
@@ -7411,17 +7523,34 @@ class PortalRuntime:
         )
         notice_type = str(event_payload.get("notice_type") or "").strip()
         section = "event" if notice_type == "事件通告" else "other"
+        active_item_id = str(event_payload.get("active_item_id") or "").strip()
+        target_record_id = str(event_payload.get("target_record_id") or "").strip()
+        source_record_id = canonical_source_record_id(event_payload)
+        work_type = str(event_payload.get("work_type") or "").strip()
+        superseded_active_ids: list[str] = []
+        if source_record_id and active_item_id:
+            for row in cls.state_store.list_qt_active_items(include_deleted=False):
+                row_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                row_active_id = str(row.get("active_item_id") or "").strip()
+                row_target_id = canonical_target_record_id(row_payload)
+                if (
+                    row_active_id
+                    and row_active_id != active_item_id
+                    and canonical_source_record_id(row_payload) == source_record_id
+                    and (not work_type or str(row_payload.get("work_type") or "").strip() == work_type)
+                    and (not row_target_id or row_target_id == target_record_id)
+                ):
+                    superseded_active_ids.append(row_active_id)
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                saved = cls.state_store.upsert_qt_active_item(
+                cls.state_store.upsert_qt_active_item(
                     event_payload,
                     section=section,
                     sort_order=0,
                     origin=str(event_payload.get("origin") or "portal"),
+                    allow_revive=True,
                 )
-                if not saved:
-                    raise PortalError("进行中通告缺少可保存的本地条目ID。")
                 last_error = None
                 break
             except Exception as exc:
@@ -7439,8 +7568,6 @@ class PortalRuntime:
                 cls.service._touch_state_cache_version()
         except Exception:
             pass
-        active_item_id = str(event_payload.get("active_item_id") or "").strip()
-        target_record_id = str(event_payload.get("target_record_id") or "").strip()
         projected_item = {
             "active_item_id": active_item_id,
             "record_id": target_record_id,
@@ -7451,7 +7578,7 @@ class PortalRuntime:
             "payload": event_payload,
         }
         try:
-            return cls.state_store.enqueue_outbox_event(
+            event_id = cls.state_store.enqueue_outbox_event(
                 "qt_action",
                 {
                     "kind": "active_upsert",
@@ -7463,14 +7590,41 @@ class PortalRuntime:
                 },
             )
         except Exception as exc:
-            # SQLite active state is already durable. Qt can restore it on the
-            # next poll/restart even if this transient notification enqueue fails.
             log_warning(f"Qt active 通知投递失败: job_id={job_id}, error={exc}")
-            return ""
+            raise
+        for old_active_item_id in superseded_active_ids:
+            try:
+                deleted, _delete_event_id = cls.state_store.delete_qt_active_item_and_enqueue(
+                    active_item_id=old_active_item_id,
+                    channel="qt_action",
+                    payload={
+                        "kind": "active_delete",
+                        "job_id": str(job_id or event_payload.get("job_id") or ""),
+                        "payload": {
+                            "active_item_id": old_active_item_id,
+                            "record_id": "",
+                            "target_record_id": "",
+                            "source": "portal_identity_migration",
+                        },
+                    },
+                )
+                if not deleted:
+                    continue
+            except Exception as exc:
+                log_warning(
+                    "Qt 旧 active 身份清理通知投递失败: "
+                    f"active_item_id={old_active_item_id}, error={exc}"
+                )
+        return event_id
 
     @classmethod
     def _enqueue_active_delete_for_ended_notice(
-        cls, prepared: dict, *, remote_record_id: str = "", job_id: str = ""
+        cls,
+        prepared: dict,
+        *,
+        remote_record_id: str = "",
+        job_id: str = "",
+        enqueue_if_missing: bool = True,
     ) -> str:
         prepared = normalize_notice_identity_payload(dict(prepared or {}))
         target_record_id = (
@@ -7478,16 +7632,11 @@ class PortalRuntime:
             or str(prepared.get("target_record_id") or "").strip()
         )
         active_item_id = str(prepared.get("active_item_id") or "").strip()
-        try:
-            cls.state_store.delete_qt_active_item(
-                active_item_id=active_item_id,
-                record_id=target_record_id,
-            )
-        except Exception:
-            pass
-        return cls.state_store.enqueue_outbox_event(
-            "qt_action",
-            {
+        _deleted, event_id = cls.state_store.delete_qt_active_item_and_enqueue(
+            active_item_id=active_item_id,
+            record_id=target_record_id,
+            channel="qt_action",
+            payload={
                 "kind": "active_delete",
                 "job_id": str(job_id or prepared.get("job_id") or ""),
                 "payload": {
@@ -7510,7 +7659,9 @@ class PortalRuntime:
                     "notice_type": str(prepared.get("notice_type") or ""),
                 },
             },
+            enqueue_if_missing=enqueue_if_missing,
         )
+        return event_id
 
     @classmethod
     def execute_local_notice_upload(cls, request_payload: dict) -> dict:
@@ -7863,6 +8014,7 @@ class PortalRuntime:
                         notice_type=notice_type,
                         target_record_id=operation_target,
                         action="start",
+                        confirm_remote_state=True,
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -7909,6 +8061,7 @@ class PortalRuntime:
                         notice_type=notice_type,
                         target_record_id=reconciled_record_id,
                         action="start",
+                        confirm_remote_state=True,
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -7958,6 +8111,7 @@ class PortalRuntime:
                             notice_type=notice_type,
                             target_record_id=cached_target,
                             action="start",
+                            confirm_remote_state=True,
                         )
                         cls._mark_notice_remote_operation(
                             operation_id,
@@ -7987,6 +8141,7 @@ class PortalRuntime:
                         notice_type=notice_type,
                         target_record_id=existing_target,
                         action="start",
+                        confirm_remote_state=True,
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -8030,6 +8185,18 @@ class PortalRuntime:
                         ).strip()
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = real_record_id
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="remote_written",
+                        target_record_id=real_record_id,
+                        observed_record_version=str(
+                            data.get("record_version") or ""
+                        ),
+                        result={
+                            "record_id": real_record_id,
+                            "message": str(result or ""),
+                        },
+                    )
                     record_version = cls._remember_local_upload_target(
                         data,
                         notice_type=notice_type,
@@ -8358,6 +8525,8 @@ class PortalRuntime:
         repair_project_queue_id = 0
         repair_project_queued = False
         repair_project_warning = ""
+        repair_project_request: dict[str, Any] = {}
+        target_end_confirmed = False
         if success and action_type == "end" and notice_type == "事件通告":
             transfer_requested = MaintenancePortalService._truthy_flag(
                 data.get("transfer_to_overhaul")
@@ -8393,26 +8562,15 @@ class PortalRuntime:
                     if month_match
                     else time.strftime("%Y-%m")
                 )
-                try:
-                    repair_project_queue_id = cls.enqueue_event_repair_project(
-                        event_record_id=target_record_id,
-                        notice_data=data,
-                        remote_fields=remote_fields_for_action,
-                        scope=str(scope_value or "ALL"),
-                        source_month=source_month,
-                    )
-                    repair_project_queued = repair_project_queue_id > 0
-                except Exception as exc:
-                    repair_project_warning = (
-                        f"事件已正常结束，但转检修任务创建失败：{exc}"
-                    )
-        if success and action_type == "end":
-            cls._enqueue_active_delete_for_ended_notice(
-                data,
-                remote_record_id=target_record_id,
-                job_id=str(payload.get("job_id") or ""),
-            )
-        elif success and action_type == "update":
+                repair_project_request = {
+                    "event_record_id": target_record_id,
+                    "notice_data": data,
+                    "remote_fields": remote_fields_for_action,
+                    "scope": str(scope_value or "ALL"),
+                    "source_month": source_month,
+                }
+        active_projection_warning = ""
+        if success and action_type in {"end", "update"}:
             updated_active_payload = {
                 **data,
                 "record_id": target_record_id,
@@ -8423,18 +8581,143 @@ class PortalRuntime:
                 "_last_upload_error": "",
                 "binding_status": "bound",
             }
-            cls._remember_local_upload_target(
-                updated_active_payload,
-                notice_type=notice_type,
-                target_record_id=target_record_id,
-                action="update",
+            projection_lock_key, projection_lock_owner, projection_lock_error = (
+                cls._acquire_event_operation_lock(
+                    data,
+                    action_type=f"{action_type}_projection",
+                    target_record_id=target_record_id,
+                    record_id=target_record_id,
+                )
             )
+            try:
+                if projection_lock_error:
+                    active_projection_warning = projection_lock_error
+                else:
+                    work_type = str(
+                        data.get("work_type")
+                        or cls._notice_work_type_from_notice_type(notice_type)
+                        or ""
+                    ).strip()
+                    ok_latest, latest_result = query_record_by_id(
+                        target_record_id,
+                        notice_type,
+                    )
+                    latest_fields = (
+                        latest_result.get("fields")
+                        if ok_latest and isinstance(latest_result, dict)
+                        else {}
+                    )
+                    if not ok_latest and cls._remote_record_not_found(latest_result):
+                        cls._enqueue_active_delete_for_ended_notice(
+                            data,
+                            remote_record_id=target_record_id,
+                            job_id=str(payload.get("job_id") or ""),
+                        )
+                        cls.state_store.mark_notice_identity_deleted(
+                            work_type=work_type,
+                            active_item_id=str(data.get("active_item_id") or ""),
+                            source_record_id=canonical_source_record_id(data),
+                            target_record_id=target_record_id,
+                        )
+                        cls._reconcile_source_ongoing_after_target_terminal()
+                        active_projection_warning = (
+                            "目标记录已被后续操作删除，未恢复目标未结束显示。"
+                        )
+                    elif not isinstance(latest_fields, dict) or not latest_fields:
+                        active_projection_warning = (
+                            "目标最新状态读取失败，已保留当前未结束显示等待对账。"
+                        )
+                        if action_type == "update" and ok_latest:
+                            cls._remember_local_upload_target(
+                                updated_active_payload,
+                                notice_type=notice_type,
+                                target_record_id=target_record_id,
+                                action="update",
+                            )
+                    else:
+                        lifecycle = cls.service._target_record_lifecycle(
+                            work_type=work_type,
+                            notice_type=notice_type,
+                            target_record={
+                                "record_id": target_record_id,
+                                "display_fields": latest_fields,
+                            },
+                        )
+                        if lifecycle.get("finished"):
+                            target_end_confirmed = True
+                            cls._enqueue_active_delete_for_ended_notice(
+                                data,
+                                remote_record_id=target_record_id,
+                                job_id=str(payload.get("job_id") or ""),
+                            )
+                            cls.state_store.upsert_notice_identity(
+                                {
+                                    **data,
+                                    "record_id": target_record_id,
+                                    "target_record_id": target_record_id,
+                                    "status": "已结束",
+                                    "action": "end",
+                                },
+                                origin="qt_target_confirmed_finished",
+                            )
+                            cls._reconcile_source_ongoing_after_target_terminal()
+                            if action_type == "update":
+                                active_projection_warning = (
+                                    "本次更新已被后续结束覆盖，未恢复未结束显示。"
+                                )
+                        elif lifecycle.get("active"):
+                            if action_type == "end":
+                                active_projection_warning = (
+                                    "本次结束已被后续更新覆盖，通告仍在进行中。"
+                                )
+                            else:
+                                latest_active_payload = (
+                                    cls.service._target_snapshot_active_payload(
+                                        work_type=work_type,
+                                        notice_type=notice_type,
+                                        target_record={
+                                            "record_id": target_record_id,
+                                            "display_fields": latest_fields,
+                                        },
+                                        current_payload=updated_active_payload,
+                                    )
+                                )
+                                latest_active_payload["action"] = "update"
+                                cls._remember_local_upload_target(
+                                    latest_active_payload,
+                                    notice_type=notice_type,
+                                    target_record_id=target_record_id,
+                                    action="update",
+                                )
+                        else:
+                            active_projection_warning = (
+                                "目标最新状态无法确认，已保留当前未结束显示等待对账。"
+                            )
+            finally:
+                cls._release_event_operation_lock(
+                    projection_lock_key,
+                    projection_lock_owner,
+                )
+        if repair_project_request and target_end_confirmed:
+            try:
+                repair_project_queue_id = cls.enqueue_event_repair_project(
+                    **repair_project_request
+                )
+                repair_project_queued = repair_project_queue_id > 0
+            except Exception as exc:
+                repair_project_warning = (
+                    f"事件已正常结束，但转检修任务创建失败：{exc}"
+                )
         robot_result = (
             cls._robot_result_from_notice_payload(notice_payload)
             if success
             else {}
         )
         result_message = str(result or "")
+        if active_projection_warning:
+            result_message = "；".join(
+                item for item in (result_message, active_projection_warning) if item
+            )
         if repair_project_queued:
             result_message = "；".join(
                 item
@@ -8495,16 +8778,41 @@ class PortalRuntime:
         target_record_id: str,
         checkpoint_id: str,
     ) -> dict:
+        cleanup_result: dict[str, Any] = {}
         try:
+            cleanup_result = cls.service.discard_deleted_ongoing_state(
+                {
+                    "active_item_id": active_item_id,
+                    "source_record_id": source_record_id,
+                    "target_record_id": target_record_id,
+                    "record_id": target_record_id,
+                    "work_type": work_type,
+                },
+                scope="ALL",
+                reset_source_plan=bool(source_record_id),
+            )
             cls.state_store.mark_notice_identity_deleted(
                 work_type=work_type,
                 active_item_id=active_item_id,
                 source_record_id=source_record_id,
                 target_record_id=target_record_id,
             )
-            cls.state_store.delete_qt_active_item(
+            _qt_deleted, qt_event_id = cls.state_store.delete_qt_active_item_and_enqueue(
                 active_item_id=active_item_id,
                 record_id=target_record_id,
+                channel="qt_action",
+                enqueue_if_missing=True,
+                payload={
+                    "kind": "active_delete",
+                    "payload": {
+                        "active_item_id": active_item_id,
+                        "record_id": target_record_id,
+                        "target_record_id": target_record_id,
+                        "source_record_id": source_record_id,
+                        "work_type": work_type,
+                        "source": "remote_delete_finalize",
+                    },
+                },
             )
         except Exception as exc:
             message = (
@@ -8542,6 +8850,9 @@ class PortalRuntime:
                 "undo_id": checkpoint_id,
                 "remote_deleted": True,
                 "message": "",
+                "local_cleanup_completed": True,
+                "qt_event_id": qt_event_id,
+                **cleanup_result,
             },
             error="",
         )
@@ -8556,6 +8867,9 @@ class PortalRuntime:
             "remote_deleted": True,
             "undo_id": checkpoint_id,
             "undo_available": bool(checkpoint_id),
+            "local_cleanup_completed": True,
+            "qt_event_id": qt_event_id,
+            **cleanup_result,
         }
 
     @classmethod
@@ -8595,7 +8909,19 @@ class PortalRuntime:
                 if current in (None, "", [], {}):
                     payload[key] = copy.deepcopy(value)
             resolved_target = str(identity.get("target_record_id") or "").strip()
-            if resolved_target:
+            identity_finished = any(
+                MaintenancePortalService._target_status_is_finished(value)
+                for value in (
+                    identity.get("status"),
+                    identity_payload.get("status"),
+                    identity_payload.get("target_record_status"),
+                )
+            )
+            if identity_finished and not target_record_id:
+                for field_name in ("record_id", "target_record_id"):
+                    if str(payload.get(field_name) or "").strip() == resolved_target:
+                        payload.pop(field_name, None)
+            if resolved_target and not identity_finished:
                 target_record_id = resolved_target
             active_item_id = active_item_id or str(
                 identity.get("active_item_id") or ""
@@ -8726,6 +9052,19 @@ class PortalRuntime:
                     "remote_deleted": True,
                     "undo_id": str(result_payload.get("undo_id") or ""),
                     "undo_available": bool(result_payload.get("undo_id")),
+                    "local_cleanup_completed": bool(
+                        result_payload.get("local_cleanup_completed")
+                    ),
+                    "work_status_removed": int(
+                        result_payload.get("work_status_removed") or 0
+                    ),
+                    "daily_summary_removed": int(
+                        result_payload.get("daily_summary_removed") or 0
+                    ),
+                    "source_plan_reset": bool(
+                        result_payload.get("source_plan_reset")
+                    ),
+                    "qt_event_id": int(result_payload.get("qt_event_id") or 0),
                     "deduped": True,
                 }
             if operation_status == "remote_written":
@@ -8990,10 +9329,80 @@ class PortalRuntime:
                 active_item_id = str(identity.get("active_item_id") or "").strip()
         if not active_item_id and not target_record_id and not source_record_id:
             return {"ok": False, "message": "缺少本地移除所需的通告标识。"}
+        authoritative = bool(
+            payload.get("source_snapshot_authoritative")
+            or payload.get("target_snapshot_authoritative")
+            or (target_record_id and not is_local_record_id(target_record_id))
+        )
+        if not authoritative:
+            try:
+                for row in cls.state_store.list_qt_active_items():
+                    row_payload = (
+                        row.get("payload")
+                        if isinstance(row.get("payload"), dict)
+                        else {}
+                    )
+                    row_work_type = str(row_payload.get("work_type") or "").strip()
+                    if work_type and row_work_type and row_work_type != work_type:
+                        continue
+                    if not (
+                        (
+                            active_item_id
+                            and str(row.get("active_item_id") or "").strip()
+                            == active_item_id
+                        )
+                        or (
+                            target_record_id
+                            and str(
+                                canonical_target_record_id(row_payload)
+                                or row.get("record_id")
+                                or ""
+                            ).strip()
+                            == target_record_id
+                        )
+                        or (
+                            source_record_id
+                            and canonical_source_record_id(row_payload)
+                            == source_record_id
+                        )
+                    ):
+                        continue
+                    authoritative = bool(
+                        row_payload.get("source_snapshot_authoritative")
+                        or row_payload.get("target_snapshot_authoritative")
+                    )
+                    if authoritative:
+                        break
+            except Exception:
+                authoritative = False
+        if authoritative:
+            return {
+                "ok": False,
+                "message": (
+                    "当前通告仍由源表或目标表标记为未结束，"
+                    "不能仅移除显示。请先结束通告或更新源状态。"
+                ),
+                "record_id": target_record_id,
+                "active_item_id": active_item_id,
+                "remote_deleted": False,
+                "authoritative": True,
+            }
         try:
-            qt_removed = cls.state_store.delete_qt_active_item(
+            qt_removed, qt_event_id = cls.state_store.delete_qt_active_item_and_enqueue(
                 active_item_id=active_item_id,
                 record_id=target_record_id,
+                channel="qt_action",
+                payload={
+                    "kind": "active_delete",
+                    "payload": {
+                        "active_item_id": active_item_id,
+                        "record_id": target_record_id,
+                        "target_record_id": target_record_id,
+                        "source_record_id": source_record_id,
+                        "work_type": work_type,
+                        "source": "local_remove",
+                    },
+                },
             )
         except Exception as exc:
             return {
@@ -9068,6 +9477,7 @@ class PortalRuntime:
             "already_absent": bool(already_absent),
             "identity_removed": bool(identity_removed),
             "remote_deleted": False,
+            "qt_event_id": qt_event_id,
         }
 
     @classmethod
@@ -9191,6 +9601,9 @@ class PortalRuntime:
                     current_job.get("message_sent")
                     or prepared.get("message_sent")
                 )
+                stored_operation = (
+                    cls._get_notice_remote_operation(remote_operation_id) or {}
+                )
                 existing_operation = cls._begin_notice_remote_operation(
                     operation_id=remote_operation_id,
                     operation_type=str(prepared.get("action") or "notice_action"),
@@ -9199,7 +9612,12 @@ class PortalRuntime:
                         or prepared.get("active_item_id")
                         or job_id
                     ),
-                    request=cls._notice_remote_operation_request(prepared),
+                    request=(
+                        stored_operation.get("request")
+                        if isinstance(stored_operation.get("request"), dict)
+                        and stored_operation.get("request")
+                        else cls._notice_remote_operation_request(prepared)
+                    ),
                     target_record_id=remote_record_id,
                     expected_record_version=cls._expected_remote_record_version(
                         prepared
@@ -9439,6 +9857,13 @@ class PortalRuntime:
                         remote_operation_id=remote_operation_id,
                         remote_intent=False,
                         prepared=prepared,
+                        target_key=cls.service._action_target_key(
+                            {
+                                **prepared,
+                                "action": "update",
+                                "target_record_id": str(remote_record_id or ""),
+                            }
+                        ),
                         restart_recovered=True,
                     )
             if not ok:
@@ -9511,6 +9936,13 @@ class PortalRuntime:
                     target_record_id=resolved_remote_record_id,
                     remote_result_message=str(result_message or ""),
                     prepared=prepared,
+                    target_key=cls.service._action_target_key(
+                        {
+                            **prepared,
+                            "action": "update",
+                            "target_record_id": resolved_remote_record_id,
+                        }
+                    ),
                     restart_recovered=False,
                 )
                 current_job = cls.service.get_job(job_id) or {}
@@ -9567,19 +9999,216 @@ class PortalRuntime:
             # delivery so a messaging timeout cannot leave both interfaces stale.
             qt_event_id: int | str = ""
             projection_warning = ""
+            projection_notice = ""
             if action in {"start", "update"}:
                 try:
-                    qt_event_id = cls._upsert_backend_active_notice(
-                        prepared,
-                        remote_record_id=resolved_remote_record_id,
-                        job_id=job_id,
-                    )
+                    projection_payload = prepared
+                    projection_lock_key = ""
+                    projection_lock_owner = ""
+                    try:
+                        if resolved_remote_record_id:
+                            (
+                                projection_lock_key,
+                                projection_lock_owner,
+                                projection_lock_error,
+                            ) = cls._acquire_event_operation_lock(
+                                prepared,
+                                action_type="projection_retry",
+                                target_record_id=resolved_remote_record_id,
+                                record_id=resolved_remote_record_id,
+                            )
+                            if projection_lock_error:
+                                raise RuntimeError(projection_lock_error)
+                            ok_latest, latest_result = query_record_by_id(
+                                resolved_remote_record_id,
+                                str(prepared.get("notice_type") or ""),
+                            )
+                            latest_fields = (
+                                latest_result.get("fields")
+                                if ok_latest and isinstance(latest_result, dict)
+                                else {}
+                            )
+                            target_missing = bool(
+                                not ok_latest
+                                and cls._remote_record_not_found(latest_result)
+                            )
+                            terminal_projection = False
+                            if target_missing:
+                                cls._enqueue_active_delete_for_ended_notice(
+                                    prepared,
+                                    remote_record_id=resolved_remote_record_id,
+                                    job_id=job_id,
+                                )
+                                cls.state_store.mark_notice_identity_deleted(
+                                    work_type=str(prepared.get("work_type") or ""),
+                                    active_item_id=str(
+                                        prepared.get("active_item_id") or ""
+                                    ),
+                                    source_record_id=canonical_source_record_id(
+                                        prepared
+                                    ),
+                                    target_record_id=resolved_remote_record_id,
+                                )
+                                cls._reconcile_source_ongoing_after_target_terminal()
+                                terminal_projection = True
+                                projection_notice = (
+                                    "目标记录已被后续操作删除，本次旧的开始/更新投影"
+                                    "未再恢复。"
+                                )
+                            elif not isinstance(latest_fields, dict) or not latest_fields:
+                                raise RuntimeError(
+                                    "目标记录最新状态读取失败，稍后继续恢复进行中显示"
+                                )
+                            if not target_missing:
+                                lifecycle = cls.service._target_record_lifecycle(
+                                    work_type=str(prepared.get("work_type") or ""),
+                                    notice_type=str(
+                                        prepared.get("notice_type") or ""
+                                    ),
+                                    target_record={
+                                        "record_id": resolved_remote_record_id,
+                                        "display_fields": latest_fields,
+                                    },
+                                )
+                                if lifecycle.get("finished"):
+                                    cls.service._reconcile_notice_target_snapshot(
+                                        work_type=str(
+                                            prepared.get("work_type") or ""
+                                        ),
+                                        notice_type=str(
+                                            prepared.get("notice_type") or ""
+                                        ),
+                                        records=[
+                                            {
+                                                "record_id": resolved_remote_record_id,
+                                                "display_fields": latest_fields,
+                                            }
+                                        ],
+                                    )
+                                    terminal_projection = True
+                                    projection_notice = (
+                                        "目标记录已被后续操作结束，本次旧的开始/更新投影"
+                                        "未再恢复。"
+                                    )
+                                elif not lifecycle.get("active"):
+                                    raise RuntimeError(
+                                        "目标记录当前是否未结束尚无法确认，稍后继续恢复"
+                                    )
+                                else:
+                                    original_action = action
+                                    projection_payload = (
+                                        cls.service._target_snapshot_active_payload(
+                                            work_type=str(
+                                                prepared.get("work_type") or ""
+                                            ),
+                                            notice_type=str(
+                                                prepared.get("notice_type") or ""
+                                            ),
+                                            target_record={
+                                                "record_id": resolved_remote_record_id,
+                                                "display_fields": latest_fields,
+                                            },
+                                            current_payload=prepared,
+                                        )
+                                    )
+                                    projection_payload["action"] = original_action
+                                    prepared = projection_payload
+                                    cls.service.mark_job(job_id, prepared=prepared)
+                            if terminal_projection:
+                                prepared["projection_superseded_by_terminal"] = True
+                                prepared["skip_personal_message"] = True
+                                prepared["message_sent"] = True
+                                source_record_id = canonical_source_record_id(prepared)
+                                zhihang_record_id = str(
+                                    prepared.get("zhihang_record_id") or ""
+                                ).strip()
+                                prepared[
+                                    "projection_terminal_source_fallback"
+                                ] = bool(
+                                    (source_record_id or zhihang_record_id)
+                                    and any(
+                                        (
+                                            source_record_id
+                                            and canonical_source_record_id(
+                                                row.get("payload")
+                                                if isinstance(row.get("payload"), dict)
+                                                else {}
+                                            )
+                                            == source_record_id
+                                            or zhihang_record_id
+                                            and str(
+                                                (
+                                                    row.get("payload")
+                                                    if isinstance(
+                                                        row.get("payload"), dict
+                                                    )
+                                                    else {}
+                                                ).get("zhihang_record_id")
+                                                or ""
+                                            ).strip()
+                                            == zhihang_record_id
+                                        )
+                                        and not canonical_target_record_id(
+                                            row.get("payload")
+                                            if isinstance(row.get("payload"), dict)
+                                            else {}
+                                        )
+                                        for row in cls.state_store.list_visible_qt_active_items()
+                                    )
+                                )
+                        if not prepared.get("projection_superseded_by_terminal"):
+                            qt_event_id = cls._upsert_backend_active_notice(
+                                projection_payload,
+                                remote_record_id=resolved_remote_record_id,
+                                job_id=job_id,
+                            )
+                    finally:
+                        cls._release_event_operation_lock(
+                            projection_lock_key,
+                            projection_lock_owner,
+                        )
+                    if current_job.get("projection_pending") or int(
+                        current_job.get("projection_retry_count") or 0
+                    ):
+                        cls.service.mark_job(
+                            job_id,
+                            projection_pending=False,
+                            projection_retry_count=0,
+                            message_warning="",
+                        )
+                        current_job = cls.service.get_job(job_id) or {}
                 except Exception as exc:
                     projection_warning = f"界面进行中状态同步失败：{exc}"
                     log_warning(
                         f"通告远端已成功，但本地进行中状态同步失败: "
                         f"job_id={job_id}, error={exc}"
                     )
+                    retry_count = int(
+                        (cls.service.get_job(job_id) or {}).get(
+                            "projection_retry_count"
+                        )
+                        or 0
+                    ) + 1
+                    cls.service.mark_job(
+                        job_id,
+                        phase="remote_written",
+                        remote_written=True,
+                        prepared=prepared,
+                        projection_pending=True,
+                        projection_retry_count=retry_count,
+                        qt_phase="sync_failed",
+                        message_warning=projection_warning,
+                    )
+                    if not cls.state_store.requeue_runtime_queue_item(
+                        "qt_action",
+                        job_id,
+                        available_at=time.time()
+                        + min(60.0, float(2 ** min(retry_count, 5))),
+                        error=projection_warning,
+                    ):
+                        raise RuntimeError("进行中状态同步失败，且重试任务保存失败") from exc
+                    cls.action_queue_event.set()
+                    return
             message_delivery_uncertain = bool(
                 current_job.get("message_delivery_uncertain")
             )
@@ -9656,6 +10285,7 @@ class PortalRuntime:
                         existing_message_warning,
                         paired_warning,
                         projection_warning,
+                        projection_notice,
                     )
                     if item
                 )
@@ -9680,19 +10310,125 @@ class PortalRuntime:
                     else str(current_job.get("qt_phase") or "")
                 ),
                 qt_event_id=qt_event_id,
+                projection_pending=False,
+                projection_retry_count=0,
                 message_warning="；".join(result_warnings),
             )
-            cls.service.mark_action_upload_result(
-                job_id,
-                success=True,
-                message=(
-                    f"{result_message}；{'；'.join(result_warnings)}"
-                    if result_warnings
-                    else result_message
-                ),
-                record_id=resolved_remote_record_id,
-                active_item_id=str(prepared.get("active_item_id") or ""),
-            )
+            finalize_lock_key = ""
+            finalize_lock_owner = ""
+            try:
+                if action == "end":
+                    (
+                        finalize_lock_key,
+                        finalize_lock_owner,
+                        finalize_lock_error,
+                    ) = cls._acquire_event_operation_lock(
+                        prepared,
+                        action_type="end_finalize",
+                        target_record_id=resolved_remote_record_id,
+                        record_id=resolved_remote_record_id,
+                    )
+                    terminal_warning = ""
+                    source_fallback_active = False
+                    if finalize_lock_error:
+                        terminal_warning = (
+                            "结束后的本地状态核对遇到并发操作，已保留进行中显示。"
+                        )
+                    else:
+                        ok_latest, latest_result = query_record_by_id(
+                            resolved_remote_record_id,
+                            str(prepared.get("notice_type") or ""),
+                        )
+                        latest_fields = (
+                            latest_result.get("fields")
+                            if ok_latest and isinstance(latest_result, dict)
+                            else {}
+                        )
+                        lifecycle = (
+                            cls.service._target_record_lifecycle(
+                                work_type=str(
+                                    prepared.get("work_type")
+                                    or cls._notice_work_type_from_notice_type(
+                                        str(prepared.get("notice_type") or "")
+                                    )
+                                    or ""
+                                ),
+                                notice_type=str(
+                                    prepared.get("notice_type") or ""
+                                ),
+                                target_record={
+                                    "record_id": resolved_remote_record_id,
+                                    "display_fields": latest_fields,
+                                },
+                            )
+                            if isinstance(latest_fields, dict) and latest_fields
+                            else {}
+                        )
+                        target_missing = bool(
+                            not ok_latest
+                            and cls._remote_record_not_found(latest_result)
+                        )
+                        if lifecycle.get("finished") or target_missing:
+                            try:
+                                source_fallback_active = (
+                                    cls.service.has_ongoing_source_snapshot(prepared)
+                                )
+                            except Exception as exc:
+                                terminal_warning = (
+                                    "源表未结束状态核对失败，已保留进行中显示："
+                                    f"{exc}"
+                                )
+                        else:
+                            terminal_warning = (
+                                "结束写入已被后续更新覆盖或当前状态无法确认，"
+                                "已保留进行中显示。"
+                            )
+                    if terminal_warning:
+                        prepared["skip_local_terminal_projection"] = True
+                        prepared.pop(
+                            "preserve_ongoing_source_after_target_end", None
+                        )
+                        result_warnings.append(terminal_warning)
+                        cls.service.mark_job(
+                            job_id,
+                            prepared=prepared,
+                            message_warning="；".join(result_warnings),
+                        )
+                    elif source_fallback_active:
+                        prepared.pop("skip_local_terminal_projection", None)
+                        prepared[
+                            "preserve_ongoing_source_after_target_end"
+                        ] = True
+                        result_warnings.append(
+                            "目标通告已结束，但源表仍为未结束；"
+                            "已继续保留在未结束通告中。"
+                        )
+                        cls.service.mark_job(
+                            job_id,
+                            prepared=prepared,
+                            message_warning="；".join(result_warnings),
+                        )
+                    else:
+                        prepared.pop("skip_local_terminal_projection", None)
+                        prepared.pop(
+                            "preserve_ongoing_source_after_target_end", None
+                        )
+                cls.service.mark_action_upload_result(
+                    job_id,
+                    success=True,
+                    message=(
+                        f"{result_message}；{'；'.join(result_warnings)}"
+                        if result_warnings
+                        else result_message
+                    ),
+                    record_id=resolved_remote_record_id,
+                    active_item_id=str(prepared.get("active_item_id") or ""),
+                )
+            finally:
+                cls._release_event_operation_lock(
+                    finalize_lock_key,
+                    finalize_lock_owner,
+                )
             cls._mark_notice_remote_operation(
                 remote_operation_id,
                 status="completed",
@@ -9706,12 +10442,19 @@ class PortalRuntime:
                     "action": str(prepared.get("action") or ""),
                 },
             )
-            if action == "end":
+            if (
+                action == "end"
+                and not prepared.get("skip_local_terminal_projection")
+                and not prepared.get(
+                    "preserve_ongoing_source_after_target_end"
+                )
+            ):
                 try:
                     event_id = cls._enqueue_active_delete_for_ended_notice(
                         prepared,
                         remote_record_id=remote_record_id,
                         job_id=job_id,
+                        enqueue_if_missing=False,
                     )
                     cls.service.mark_job(
                         job_id,
@@ -9732,11 +10475,41 @@ class PortalRuntime:
             except Exception:
                 pass
         except Exception as exc:
-            cls.service.mark_job(job_id, phase="failed", error=str(exc))
+            operation = None
             try:
                 operation = cls._get_notice_remote_operation(
                     remote_operation_id
                 )
+            except Exception:
+                operation = None
+            if str((operation or {}).get("status") or "") == "remote_written":
+                retry_count = int(
+                    (cls.service.get_job(job_id) or {}).get(
+                        "projection_retry_count"
+                    )
+                    or 0
+                ) + 1
+                warning = f"远端已成功，本地状态收敛失败，稍后重试：{exc}"
+                cls.service.mark_job(
+                    job_id,
+                    phase="remote_written",
+                    remote_written=True,
+                    projection_pending=True,
+                    projection_retry_count=retry_count,
+                    message_warning=warning,
+                    error="",
+                )
+                if cls.state_store.requeue_runtime_queue_item(
+                    "qt_action",
+                    job_id,
+                    available_at=time.time()
+                    + min(60.0, float(2 ** min(retry_count, 5))),
+                    error=warning,
+                ):
+                    cls.action_queue_event.set()
+                    return
+            cls.service.mark_job(job_id, phase="failed", error=str(exc))
+            try:
                 if operation and str(operation.get("status") or "") not in {
                     "remote_written",
                     "completed",

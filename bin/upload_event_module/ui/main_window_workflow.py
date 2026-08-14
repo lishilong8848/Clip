@@ -2224,24 +2224,14 @@ class MainWindowWorkflowMixin:
 
         def _finish(success: bool, error: str = "", result: dict | None = None) -> None:
             if not success:
-                if (
-                    not local_only_remove
-                    and widget
-                    and hasattr(widget, "cancel_delete_visual")
-                ):
+                if widget and hasattr(widget, "cancel_delete_visual"):
                     try:
                         widget.cancel_delete_visual()
                     except Exception:
                         pass
-                if local_only_remove:
-                    self.show_message(
-                        f"本地已移除，网页同步失败：{error or '本机后端未响应。'}"
-                    )
-                else:
-                    self.show_message(error or "删除失败。")
+                self.show_message(error or "删除失败。")
                 return
-            if not local_only_remove:
-                _remove_from_qt()
+            _remove_from_qt()
             self._remember_delete_undo(data_dict, result or {})
             if bool((result or {}).get("remote_deleted")):
                 log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
@@ -2259,9 +2249,6 @@ class MainWindowWorkflowMixin:
             else:
                 QTimer.singleShot(0, lambda s=success, e=error, r=result: _finish(s, e, r))
 
-        if local_only_remove:
-            _remove_from_qt()
-            self.show_message("未上传通告已移除，网页正在同步。")
         threading.Thread(
             target=_worker,
             name="ClipFlowDeleteActiveItem",

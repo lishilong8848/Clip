@@ -5498,7 +5498,22 @@ class FastAPIPortalController:
                 )
                 delete_ok = bool((delete_result or {}).get("ok"))
                 remote_deleted = bool((delete_result or {}).get("remote_deleted"))
-                if not delete_ok and not remote_deleted:
+                cleanup_retry_warning = ""
+                if not delete_ok and remote_deleted and not bool(
+                    (delete_result or {}).get("local_cleanup_completed")
+                ):
+                    cleanup_retry_warning = str(
+                        (delete_result or {}).get("message") or "本地清理首次失败。"
+                    )
+                    delete_result = await asyncio.to_thread(
+                        PortalRuntime.execute_local_delete_active_item,
+                        {"data_dict": payload},
+                    )
+                    delete_ok = bool((delete_result or {}).get("ok"))
+                    remote_deleted = bool(
+                        (delete_result or {}).get("remote_deleted")
+                    )
+                if not delete_ok:
                     return JSONResponse(
                         {
                             "ok": False,
@@ -5541,7 +5556,9 @@ class FastAPIPortalController:
                     operation_id=str(payload.get("operation_id") or ""),
                     detail={"delete_ok": delete_ok},
                 )
-                cleanup_warnings: list[str] = []
+                cleanup_warnings: list[str] = (
+                    [cleanup_retry_warning] if cleanup_retry_warning else []
+                )
                 data: dict[str, Any] = {
                     "deleted": True,
                     "scope": scope,
@@ -5549,6 +5566,15 @@ class FastAPIPortalController:
                         cleanup_payload.get("active_item_id") or ""
                     ),
                 }
+                if cleanup_retry_warning:
+                    data["cleanup_recovered"] = True
+                for field_name in (
+                    "work_status_removed",
+                    "daily_summary_removed",
+                    "source_plan_reset",
+                ):
+                    if field_name in (delete_result or {}):
+                        data[field_name] = delete_result[field_name]
                 try:
                     data.update(
                         PortalRuntime.service.hide_ongoing_item(
@@ -5559,27 +5585,29 @@ class FastAPIPortalController:
                     )
                 except Exception as cleanup_exc:
                     cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
-                try:
-                    data.update(
-                        PortalRuntime.service.discard_deleted_ongoing_state(
-                            cleanup_payload,
-                            scope=scope,
-                            reset_source_plan=bool(
-                                (delete_result or {}).get("remote_deleted")
-                            ),
+                if not bool((delete_result or {}).get("local_cleanup_completed")):
+                    try:
+                        data.update(
+                            PortalRuntime.service.discard_deleted_ongoing_state(
+                                cleanup_payload,
+                                scope=scope,
+                                reset_source_plan=bool(
+                                    (delete_result or {}).get("remote_deleted")
+                                ),
+                            )
                         )
-                    )
-                except Exception as cleanup_exc:
-                    cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
                 try:
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     self._notify_qt_active_streams()
                 except Exception as cleanup_exc:
                     cleanup_warnings.append(f"刷新本地缓存失败：{cleanup_exc}")
-                event_id = ""
-                try:
-                    event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                event_id = (delete_result or {}).get("qt_event_id") or ""
+                if not bool((delete_result or {}).get("local_cleanup_completed")):
+                    try:
+                        event_id = PortalRuntime.state_store.enqueue_outbox_event(
                         "qt_action",
                         {
                             "kind": "active_delete",
@@ -5603,9 +5631,9 @@ class FastAPIPortalController:
                                 ),
                             },
                         },
-                    )
-                except Exception as cleanup_exc:
-                    cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
+                        )
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
                 data["qt_deleted"] = bool(delete_result.get("active_item_id") or delete_result.get("record_id"))
                 data["qt_event_id"] = event_id
                 data["remote_deleted"] = remote_deleted
@@ -5712,9 +5740,10 @@ class FastAPIPortalController:
                     self._notify_qt_active_streams()
                 except Exception as cleanup_exc:
                     cleanup_warnings.append(f"刷新本地缓存失败：{cleanup_exc}")
-                event_id = ""
-                try:
-                    event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                event_id = (remove_result or {}).get("qt_event_id") or ""
+                if not event_id:
+                    try:
+                        event_id = PortalRuntime.state_store.enqueue_outbox_event(
                         "qt_action",
                         {
                             "kind": "active_delete",
@@ -5736,9 +5765,9 @@ class FastAPIPortalController:
                                 ),
                             },
                         },
-                    )
-                except Exception as cleanup_exc:
-                    cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
+                        )
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
                 data["qt_deleted"] = bool(
                     remove_result.get("qt_removed")
                     or remove_result.get("already_absent")
@@ -6476,9 +6505,25 @@ class FastAPIPortalController:
                 info = extract_event_info(str(payload.get("text") or "")) or {}
                 payload_status = str(payload.get("status") or "").strip()
                 if payload_status == "结束" or str(info.get("status") or "").strip() == "结束":
-                    PortalRuntime.state_store.delete_qt_active_item(
-                        active_item_id=str(row.get("active_item_id") or ""),
-                        record_id=str(row.get("record_id") or ""),
+                    active_item_id = str(row.get("active_item_id") or "")
+                    record_id = str(row.get("record_id") or "")
+                    PortalRuntime.state_store.delete_qt_active_item_and_enqueue(
+                        active_item_id=active_item_id,
+                        record_id=record_id,
+                        channel="qt_action",
+                        payload={
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": active_item_id,
+                                "record_id": record_id,
+                                "target_record_id": record_id,
+                                "source_record_id": str(
+                                    payload.get("source_record_id") or ""
+                                ),
+                                "work_type": str(payload.get("work_type") or ""),
+                                "source": "qt_shell_bootstrap_finished",
+                            },
+                        },
                     )
                     continue
                 reconcile_item = dict(payload)
@@ -6748,7 +6793,20 @@ class FastAPIPortalController:
                         )
                     delete_ok = bool((data or {}).get("ok"))
                     remote_deleted = bool((data or {}).get("remote_deleted"))
-                    if not delete_ok and not remote_deleted:
+                    cleanup_retry_warning = ""
+                    if not delete_ok and remote_deleted and not bool(
+                        (data or {}).get("local_cleanup_completed")
+                    ):
+                        cleanup_retry_warning = str(
+                            (data or {}).get("message") or "本地清理首次失败。"
+                        )
+                        data = await asyncio.to_thread(
+                            PortalRuntime.execute_local_delete_active_item,
+                            command_payload,
+                        )
+                        delete_ok = bool((data or {}).get("ok"))
+                        remote_deleted = bool((data or {}).get("remote_deleted"))
+                    if not delete_ok:
                         return {"ok": True, "data": data}
                     for identity_field in ("source_record_id", "work_type"):
                         resolved_value = str(
@@ -6801,7 +6859,11 @@ class FastAPIPortalController:
                         ),
                         detail={"delete_ok": delete_ok},
                     )
-                    cleanup_warnings: list[str] = []
+                    cleanup_warnings: list[str] = (
+                        [cleanup_retry_warning] if cleanup_retry_warning else []
+                    )
+                    if cleanup_retry_warning:
+                        data["cleanup_recovered"] = True
                     try:
                         data.update(
                             PortalRuntime.service.hide_ongoing_item(
@@ -6812,37 +6874,28 @@ class FastAPIPortalController:
                         )
                     except Exception as cleanup_exc:
                         cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
-                    try:
-                        data.update(
-                            PortalRuntime.service.discard_deleted_ongoing_state(
-                                delete_payload,
-                                scope=scope,
-                                reset_source_plan=bool(
-                                    (data or {}).get("remote_deleted")
-                                ),
+                    if not bool((data or {}).get("local_cleanup_completed")):
+                        try:
+                            data.update(
+                                PortalRuntime.service.discard_deleted_ongoing_state(
+                                    delete_payload,
+                                    scope=scope,
+                                    reset_source_plan=bool(
+                                        (data or {}).get("remote_deleted")
+                                    ),
+                                )
                             )
-                        )
-                    except Exception as cleanup_exc:
-                        cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
-                    if remote_deleted and not delete_ok:
-                        cleanup_warnings.insert(
-                            0,
-                            str(
-                                data.get("message")
-                                or "目标多维已删除，本地状态已通过补偿链路清理。"
-                            ),
-                        )
-                    if remote_deleted and not delete_ok:
-                        data["ok"] = True
-                        data["cleanup_recovered"] = True
+                        except Exception as cleanup_exc:
+                            cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
                     try:
                         PortalRuntime.clear_payload_cache()
                         self._clear_read_cache()
                         self._notify_qt_active_streams()
                     except Exception as cleanup_exc:
                         cleanup_warnings.append(f"刷新本地缓存失败：{cleanup_exc}")
-                    try:
-                        PortalRuntime.state_store.enqueue_outbox_event(
+                    if not bool((data or {}).get("qt_event_id")):
+                        try:
+                            data["qt_event_id"] = PortalRuntime.state_store.enqueue_outbox_event(
                             "qt_action",
                             {
                                 "kind": "active_delete",
@@ -6868,9 +6921,9 @@ class FastAPIPortalController:
                                     ),
                                 },
                             },
-                        )
-                    except Exception as cleanup_exc:
-                        cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
+                            )
+                        except Exception as cleanup_exc:
+                            cleanup_warnings.append(f"Qt 删除事件入队失败：{cleanup_exc}")
                     if cleanup_warnings:
                         data["cleanup_warning"] = "；".join(
                             dict.fromkeys(cleanup_warnings)
@@ -7202,6 +7255,18 @@ class FastAPIPortalController:
                 upserts = []
             if not isinstance(deletes, list):
                 deletes = []
+            upsert_active_ids: set[str] = set()
+            upsert_record_ids: set[str] = set()
+            for entry in upserts:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data") if isinstance(entry.get("data"), dict) else entry
+                active_item_id = str(data.get("active_item_id") or "").strip()
+                record_id = canonical_target_record_id(data)
+                if active_item_id:
+                    upsert_active_ids.add(active_item_id)
+                if record_id:
+                    upsert_record_ids.add(record_id)
             upserted = 0
             deleted = 0
             for entry in upserts:
@@ -7228,6 +7293,8 @@ class FastAPIPortalController:
                 else:
                     active_item_id = str(entry or "").strip()
                     record_id = ""
+                if active_item_id in upsert_active_ids or record_id in upsert_record_ids:
+                    continue
                 if PortalRuntime.state_store.delete_qt_active_item(
                     active_item_id=active_item_id,
                     record_id=record_id,
@@ -7331,6 +7398,7 @@ class FastAPIPortalController:
             if projection.get("ok") and not projection.get("ignored"):
                 PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
+                self._notify_qt_active_streams()
             return {
                 "ok": True,
                 "data": {
@@ -7531,7 +7599,8 @@ class FastAPIPortalController:
                     "title": str(item.get("title") or ""),
                     "upload_state": str(item.get("upload_state") or ""),
                     "updated_at": str(
-                        item.get("updated_at")
+                        item.get("_qt_row_updated_at")
+                        or item.get("updated_at")
                         or item.get("last_updated_at")
                         or item.get("time")
                         or ""
@@ -7646,6 +7715,7 @@ class FastAPIPortalController:
             item.setdefault("active_item_id", str(row.get("active_item_id") or ""))
             item.setdefault("record_id", str(row.get("record_id") or ""))
             item.setdefault("target_record_id", str(row.get("record_id") or ""))
+            item["_qt_row_updated_at"] = row.get("updated_at") or 0
             payloads.append(item)
         return FastAPIPortalController._scoped_ongoing_signature(scope, payloads)
 
@@ -9277,7 +9347,14 @@ class FastAPIPortalController:
                 except Exception:
                     identity = None
                 if isinstance(identity, dict):
-                    target_record_id = str(identity.get("target_record_id") or "").strip()
+                    source_only_authoritative = bool(
+                        item.get("source_snapshot_authoritative")
+                    ) and not str(item.get("target_record_id") or "").strip()
+                    target_record_id = (
+                        ""
+                        if source_only_authoritative
+                        else str(identity.get("target_record_id") or "").strip()
+                    )
                     source_record_id = str(identity.get("source_record_id") or "").strip()
                     if target_record_id:
                         item["target_record_id"] = target_record_id

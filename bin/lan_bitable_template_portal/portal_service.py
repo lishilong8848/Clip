@@ -1081,6 +1081,7 @@ REPAIR_DATETIME_FIELDS = {
 }
 PLACEHOLDER_TEXT_VALUES = {"", "-", "--", "—", "——", "/", "无", "暂无"}
 SOURCE_CACHE_TTL_SECONDS = 30 * 60
+TARGET_SNAPSHOT_MISSING_GRACE_SECONDS = 60
 RECENT_MONTH_FILTER_LABEL = "本月+上月"
 STATE_NS_MEMORY = "notice_memory"
 STATE_NS_DAILY_SUMMARY = "notice_daily_summary"
@@ -4648,7 +4649,9 @@ class MaintenancePortalService:
                     source_app_token=self.app_token or DEFAULT_APP_TOKEN,
                     source_table_id=self.table_id or DEFAULT_TABLE_ID,
                 )
-                if self._source_record_matches_month_window(normalized):
+                if self._source_record_matches_month_window(
+                    normalized
+                ) or self._source_record_is_ongoing(normalized):
                     records.append(normalized)
             next_token = self._next_record_page_token(
                 data,
@@ -4687,7 +4690,9 @@ class MaintenancePortalService:
                     source_app_token=CHANGE_SOURCE_APP_TOKEN,
                     source_table_id=CHANGE_SOURCE_TABLE_ID,
                 )
-                if self._source_record_matches_month_window(normalized):
+                if self._source_record_matches_month_window(
+                    normalized
+                ) or self._source_record_is_ongoing(normalized):
                     records.append(normalized)
             next_token = self._next_record_page_token(
                 data,
@@ -4726,7 +4731,11 @@ class MaintenancePortalService:
                     source_app_token=ZHIHANG_CHANGE_APP_TOKEN,
                     source_table_id=ZHIHANG_CHANGE_TABLE_ID,
                 )
-                if self._source_record_matches_month_window(normalized):
+                if self._source_record_matches_month_window(
+                    normalized
+                ) or self._source_progress_is_ongoing(
+                    self._zhihang_change_progress(normalized)
+                ):
                     records.append(normalized)
             next_token = self._next_record_page_token(
                 data,
@@ -4767,7 +4776,9 @@ class MaintenancePortalService:
                     source_app_token=REPAIR_SOURCE_APP_TOKEN,
                     source_table_id=REPAIR_SOURCE_TABLE_ID,
                 )
-                if self._source_record_matches_month_window(normalized):
+                if self._source_record_matches_month_window(
+                    normalized
+                ) or self._source_record_is_ongoing(normalized):
                     records.append(normalized)
             next_token = self._next_record_page_token(
                 data,
@@ -16925,6 +16936,7 @@ class MaintenancePortalService:
             return False
         if not snapshot.get("exists"):
             return False
+        meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
         records = [
             dict(item)
             for item in (snapshot.get("records") or [])
@@ -16935,21 +16947,94 @@ class MaintenancePortalService:
             for item in (snapshot.get("zhihang_records") or [])
             if isinstance(item, dict)
         ]
-        self._records = [
-            item for item in records if self._record_work_type(item) == WORK_TYPE_MAINTENANCE
+        source_versions = snapshot.get("source_versions")
+        if not isinstance(source_versions, dict):
+            source_versions = meta.get("source_versions")
+        source_versions = source_versions if isinstance(source_versions, dict) else {}
+        per_source = str(meta.get("snapshot_mode") or "") == "per_source"
+        legacy_snapshot: dict[str, Any] = {}
+        if per_source and len(source_versions) < 4:
+            with suppress(Exception):
+                legacy_snapshot = self._state_store.get_source_scope_snapshot(
+                    "ALL", prefer_independent=False
+                )
+        legacy_records = [
+            dict(item)
+            for item in (legacy_snapshot.get("records") or [])
+            if isinstance(item, dict)
         ]
-        self._change_records = [
-            item for item in records if self._record_work_type(item) == WORK_TYPE_CHANGE
+        legacy_zhihang = [
+            dict(item)
+            for item in (legacy_snapshot.get("zhihang_records") or [])
+            if isinstance(item, dict)
         ]
-        self._repair_records = [
-            item for item in records if self._record_work_type(item) == WORK_TYPE_REPAIR
-        ]
-        self._zhihang_change_records = zhihang_records
-        self._maintenance_loaded_once = True
-        self._change_loaded_once = True
-        self._repair_loaded_once = True
-        self._zhihang_change_loaded_once = True
-        meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
+        legacy_exists = bool(legacy_snapshot.get("exists"))
+
+        def hydrate_source(
+            source_key: str,
+            current_records: list[dict[str, Any]],
+            legacy_source_records: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], bool]:
+            if not per_source or source_key in source_versions:
+                return current_records, True
+            if legacy_exists:
+                return legacy_source_records, True
+            return [], False
+
+        maintenance_records, maintenance_loaded = hydrate_source(
+            "maintenance",
+            [
+                item
+                for item in records
+                if self._record_work_type(item) == WORK_TYPE_MAINTENANCE
+            ],
+            [
+                item
+                for item in legacy_records
+                if self._record_work_type(item) == WORK_TYPE_MAINTENANCE
+            ],
+        )
+        change_records, change_loaded = hydrate_source(
+            "change",
+            [
+                item
+                for item in records
+                if self._record_work_type(item) == WORK_TYPE_CHANGE
+            ],
+            [
+                item
+                for item in legacy_records
+                if self._record_work_type(item) == WORK_TYPE_CHANGE
+            ],
+        )
+        repair_records, repair_loaded = hydrate_source(
+            "repair",
+            [
+                item
+                for item in records
+                if self._record_work_type(item) == WORK_TYPE_REPAIR
+            ],
+            [
+                item
+                for item in legacy_records
+                if self._record_work_type(item) == WORK_TYPE_REPAIR
+            ],
+        )
+        zhihang_change_records, zhihang_loaded = hydrate_source(
+            "zhihang_change", zhihang_records, legacy_zhihang
+        )
+        if maintenance_loaded:
+            self._records = maintenance_records
+            self._maintenance_loaded_once = True
+        if change_loaded:
+            self._change_records = change_records
+            self._change_loaded_once = True
+        if repair_loaded:
+            self._repair_records = repair_records
+            self._repair_loaded_once = True
+        if zhihang_loaded:
+            self._zhihang_change_records = zhihang_change_records
+            self._zhihang_change_loaded_once = True
         self._last_loaded_at = str(meta.get("last_loaded_at") or self._last_loaded_at or "")
         try:
             self._last_loaded_ts = float(snapshot.get("updated_at") or self._last_loaded_ts or 0)
@@ -17014,6 +17099,19 @@ class MaintenancePortalService:
                         )
                         if self._record_work_type(item) == expected_work_type
                     ]
+                    if source_key == "maintenance":
+                        known_ids = {
+                            str(item.get("record_id") or "").strip() for item in records
+                        }
+                        records.extend(
+                            item
+                            for item in self._records
+                            if str(item.get("record_id") or "").strip() not in known_ids
+                            and self._source_record_is_ongoing(item)
+                            and self._scope_matches_building(
+                                scope, (item.get("display_fields") or {}).get("楼栋")
+                            )
+                        )
                 snapshots[scope] = records
             source_meta = dict(meta)
             source_meta["source_key"] = source_key
@@ -17025,6 +17123,7 @@ class MaintenancePortalService:
                 snapshots,
                 meta=source_meta,
             )
+        self.reconcile_source_ongoing_items()
 
     def _source_snapshot_records(self, scope: str) -> list[dict[str, Any]] | None:
         try:
@@ -17648,10 +17747,8 @@ class MaintenancePortalService:
                     )
                     if target_warning not in warnings:
                         warnings.append(target_warning)
-            # The target table is the source of truth for ongoing notices. A
-            # source-plan refresh failure must not prevent target reconciliation,
-            # otherwise records already written to Feishu can never be restored
-            # to Qt/Web by the manual refresh action.
+            # Source and target unfinished rows form one union. A source refresh
+            # failure must not prevent the target half from being reconciled.
             if not refreshed_sources and not target_refreshed:
                 self._load_warnings = warnings
                 raise PortalError(
@@ -17878,6 +17975,7 @@ class MaintenancePortalService:
     def refresh_event_month_snapshot(self, month: str | None = None) -> dict[str, Any]:
         month = self._normalize_event_month(month)
         app_token, table_id, source_key = self._event_source_config()
+        target_snapshot_started_at = time.time()
         meta: dict[str, Any] = {
             "source_key": source_key,
             "source_app_token": app_token,
@@ -17930,6 +18028,7 @@ class MaintenancePortalService:
                 work_type=WORK_TYPE_EVENT,
                 notice_type=NOTICE_TYPE_EVENT,
                 records=all_records,
+                snapshot_started_at=target_snapshot_started_at,
             )
             self._touch_state_cache_version()
             return {
@@ -20759,14 +20858,20 @@ class MaintenancePortalService:
                 not self._maintenance_loaded_once
                 or (refresh_if_expired and self._source_cache_expired())
             ):
-                if (
+                hydrated = (
                     not refresh_if_expired
                     and not self._maintenance_loaded_once
                     and self._hydrate_source_records_from_sqlite()
+                )
+                if not hydrated or not self._maintenance_loaded_once:
+                    self.refresh()
+                    return
+                if (
+                    self._change_loaded_once
+                    and self._repair_loaded_once
+                    and self._zhihang_change_loaded_once
                 ):
                     return
-                self.refresh()
-                return
             warnings: list[str] = []
             attempted_optional_load = False
             if not self._change_loaded_once:
@@ -20775,7 +20880,6 @@ class MaintenancePortalService:
                     self._load_change_fields()
                     self._load_change_records()
                 except Exception as exc:
-                    self._change_loaded_once = True
                     warnings.append(self._source_sync_warning("变更源表", exc))
             if not self._zhihang_change_loaded_once:
                 attempted_optional_load = True
@@ -20783,7 +20887,6 @@ class MaintenancePortalService:
                     self._load_zhihang_change_fields()
                     self._load_zhihang_change_records()
                 except Exception as exc:
-                    self._zhihang_change_loaded_once = True
                     warnings.append(self._source_sync_warning("智航变更源表", exc))
             if not self._repair_loaded_once:
                 attempted_optional_load = True
@@ -20791,7 +20894,6 @@ class MaintenancePortalService:
                     self._load_repair_fields()
                     self._load_repair_records()
                 except Exception as exc:
-                    self._repair_loaded_once = True
                     warnings.append(self._source_sync_warning("检修源表", exc))
             if attempted_optional_load:
                 self._load_warnings = warnings
@@ -20808,7 +20910,6 @@ class MaintenancePortalService:
         try:
             acquired = self._refresh_lock.acquire(blocking=False)
             if not acquired:
-                self._hydrate_source_records_from_sqlite()
                 return
             if not (
                 self._maintenance_loaded_once
@@ -21684,6 +21785,24 @@ class MaintenancePortalService:
             for flag in ("未开始", "进行中", "未结束")
         )
 
+    @staticmethod
+    def _source_progress_is_ongoing(value: Any) -> bool:
+        progress = str(value or "").strip()
+        if not progress or any(flag in progress for flag in ("未开始", "待开始")):
+            return False
+        if "未结束" not in progress and "未完成" not in progress and any(
+            flag in progress
+            for flag in ("已结束", "正常结束", "延期结束", "延迟结束", "已完成", "闭环")
+        ):
+            return False
+        return any(
+            flag in progress
+            for flag in ("进行中", "未结束", "未完成", "处理中", "执行中", "维修中", "已开始", "开始")
+        )
+
+    def _source_record_is_ongoing(self, record: dict[str, Any]) -> bool:
+        return self._source_progress_is_ongoing(self._source_record_progress(record))
+
     def _maintenance_status_is_startable(self, record: dict[str, Any]) -> bool:
         return self._source_progress_allows_start(
             self._maintenance_status_value(record)
@@ -22475,6 +22594,8 @@ class MaintenancePortalService:
         items: list[dict[str, Any]],
         *,
         source_record_id: str = "",
+        target_record_id: str = "",
+        zhihang_record_id: str = "",
         active_item_id: str = "",
         key: str = "",
         fallback_key: str = "",
@@ -22482,6 +22603,8 @@ class MaintenancePortalService:
         work_type: str = "",
     ) -> dict[str, Any] | None:
         source_record_id = str(source_record_id or "").strip()
+        target_record_id = str(target_record_id or "").strip()
+        zhihang_record_id = str(zhihang_record_id or "").strip()
         active_item_id = str(active_item_id or "").strip()
         key = str(key or "").strip()
         fallback_key = str(fallback_key or "").strip()
@@ -22491,12 +22614,40 @@ class MaintenancePortalService:
         def _matches_work_type(item: dict[str, Any]) -> bool:
             return self._item_work_type(item) == work_type
 
+        def _has_strong_conflict(item: dict[str, Any]) -> bool:
+            for incoming_value, existing_value in (
+                (source_record_id, canonical_source_record_id(item)),
+                (target_record_id, canonical_target_record_id(item)),
+                (
+                    zhihang_record_id,
+                    str(item.get("zhihang_record_id") or "").strip(),
+                ),
+            ):
+                if incoming_value and existing_value and incoming_value != existing_value:
+                    return True
+            return False
+
         if source_record_id:
             for item in items:
                 if (
                     _matches_work_type(item)
                     and str(item.get("source_record_id") or "").strip()
                     == source_record_id
+                ):
+                    return item
+        if target_record_id:
+            for item in items:
+                if (
+                    _matches_work_type(item)
+                    and canonical_target_record_id(item) == target_record_id
+                ):
+                    return item
+        if zhihang_record_id:
+            for item in items:
+                if (
+                    _matches_work_type(item)
+                    and str(item.get("zhihang_record_id") or "").strip()
+                    == zhihang_record_id
                 ):
                     return item
         if active_item_id:
@@ -22509,13 +22660,18 @@ class MaintenancePortalService:
                     return item
         if key:
             for item in items:
-                if _matches_work_type(item) and str(item.get("key") or "").strip() == key:
+                if (
+                    _matches_work_type(item)
+                    and str(item.get("key") or "").strip() == key
+                    and not _has_strong_conflict(item)
+                ):
                     return item
         if fallback_key:
             for item in items:
                 if (
                     _matches_work_type(item)
                     and str(item.get("fallback_key") or "").strip() == fallback_key
+                    and not _has_strong_conflict(item)
                 ):
                     return item
         if work_fallback_key:
@@ -22524,6 +22680,7 @@ class MaintenancePortalService:
                     _matches_work_type(item)
                     and str(item.get("work_fallback_key") or "").strip()
                     == work_fallback_key
+                    and not _has_strong_conflict(item)
                 ):
                     return item
         return None
@@ -22567,6 +22724,8 @@ class MaintenancePortalService:
         item = self._find_work_status_item(
             items,
             source_record_id=source_record_id,
+            target_record_id=canonical_target_record_id(incoming),
+            zhihang_record_id=str(incoming.get("zhihang_record_id") or "").strip(),
             active_item_id=active_item_id,
             key=key,
             fallback_key=fallback_key,
@@ -22605,6 +22764,8 @@ class MaintenancePortalService:
             "specialty",
             "level",
             "source_progress",
+            "reset_after_delete",
+            "reset_at",
             "zhihang_involved",
             "zhihang_record_id",
             "zhihang_title",
@@ -22691,6 +22852,77 @@ class MaintenancePortalService:
             or job.get("target_record_id")
             or ""
         ).strip()
+        source_fallback_active = bool(
+            prepared.get("preserve_ongoing_source_after_target_end")
+            or prepared.get("projection_terminal_source_fallback")
+        )
+        patch_active_item_id = str(
+            active_item_id
+            or identity.get("active_item_id")
+            or job.get("active_item_id")
+            or ""
+        ).strip()
+        if source_fallback_active:
+            target_record_id = ""
+            source_record_id = canonical_source_record_id(identity)
+            zhihang_record_id = str(
+                prepared.get("zhihang_record_id") or ""
+            ).strip()
+            work_type = str(
+                prepared.get("work_type")
+                or request.get("work_type")
+                or WORK_TYPE_MAINTENANCE
+            ).strip()
+            if source_record_id:
+                patch_active_item_id = f"source-{work_type}-{source_record_id}"
+            elif zhihang_record_id:
+                patch_active_item_id = (
+                    f"source-{work_type}-zhihang-{zhihang_record_id}"
+                )
+            try:
+                source_row = next(
+                    (
+                        row
+                        for row in self._state_store.list_visible_qt_active_items()
+                        if not canonical_target_record_id(
+                            row.get("payload")
+                            if isinstance(row.get("payload"), dict)
+                            else {}
+                        )
+                        and self._item_work_type(
+                            row.get("payload")
+                            if isinstance(row.get("payload"), dict)
+                            else {}
+                        )
+                        == work_type
+                        and (
+                            source_record_id
+                            and canonical_source_record_id(
+                                row.get("payload")
+                                if isinstance(row.get("payload"), dict)
+                                else {}
+                            )
+                            == source_record_id
+                            or zhihang_record_id
+                            and str(
+                                (
+                                    row.get("payload")
+                                    if isinstance(row.get("payload"), dict)
+                                    else {}
+                                ).get("zhihang_record_id")
+                                or ""
+                            ).strip()
+                            == zhihang_record_id
+                        )
+                    ),
+                    None,
+                )
+                if source_row:
+                    patch_active_item_id = str(
+                        source_row.get("active_item_id") or ""
+                    ).strip()
+            except Exception:
+                pass
         patch = {
             "kind": "notice_action_result",
             "status": "success" if success else "failed",
@@ -22701,12 +22933,7 @@ class MaintenancePortalService:
                 or WORK_TYPE_MAINTENANCE
             ).strip(),
             "notice_type": str(prepared.get("notice_type") or request.get("notice_type") or "").strip(),
-            "active_item_id": str(
-                active_item_id
-                or identity.get("active_item_id")
-                or job.get("active_item_id")
-                or ""
-            ).strip(),
+            "active_item_id": patch_active_item_id,
             "source_record_id": canonical_source_record_id(identity),
             "target_record_id": target_record_id,
             "record_id": target_record_id,
@@ -22719,6 +22946,15 @@ class MaintenancePortalService:
                 or ""
             ).strip(),
             "status_text": str(prepared.get("status") or request.get("status") or "").strip(),
+            "terminal_projection_skipped": bool(
+                prepared.get("skip_local_terminal_projection")
+                or prepared.get("preserve_ongoing_source_after_target_end")
+                or prepared.get("projection_terminal_source_fallback")
+            ),
+            "source_fallback_active": source_fallback_active,
+            "projection_superseded_by_terminal": bool(
+                prepared.get("projection_superseded_by_terminal")
+            ),
             "site_photo_count": str(
                 prepared.get("site_photo_count")
                 or request.get("site_photo_count")
@@ -22953,6 +23189,10 @@ class MaintenancePortalService:
         action = str(prepared.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             return
+        if prepared.get("projection_superseded_by_terminal"):
+            return
+        if action == "end" and prepared.get("skip_local_terminal_projection"):
+            return
         prepared_identity = self._resolve_successful_action_identity(
             job,
             record_id=record_id,
@@ -22995,6 +23235,25 @@ class MaintenancePortalService:
             or prepared_identity.get("target_record_id")
             or ""
         ).strip()
+        if action == "end" and prepared.get(
+            "preserve_ongoing_source_after_target_end"
+        ):
+            fallback_payload = normalize_notice_identity_payload(
+                {**prepared, **prepared_identity}
+            )
+            fallback_payload["active_item_id"] = active_item_id
+            fallback_payload["target_record_id"] = target_record_id
+            fallback_payload["record_id"] = target_record_id
+            self._state_store.upsert_notice_identity(
+                {**fallback_payload, "status": "已结束", "action": "end"},
+                origin="action_end_source_fallback",
+            )
+            self._enqueue_target_snapshot_active_delete(
+                payload=fallback_payload,
+                reason="action_end_source_fallback",
+            )
+            self.reconcile_source_ongoing_items()
+            return
         with self._summary_lock:
             payload = self._load_day_summary_locked()
             items = payload.setdefault("items", [])
@@ -23126,9 +23385,22 @@ class MaintenancePortalService:
             self._upsert_work_status_item_locked(item, action=action, now=now)
             if action == "end":
                 try:
-                    self._state_store.delete_qt_active_item(
+                    self._state_store.delete_qt_active_item_and_enqueue(
                         active_item_id=active_item_id,
                         record_id=target_record_id,
+                        channel="qt_action",
+                        enqueue_if_missing=True,
+                        payload={
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": active_item_id,
+                                "record_id": target_record_id,
+                                "target_record_id": target_record_id,
+                                "source_record_id": source_record_id,
+                                "work_type": work_type,
+                                "source": "action_success",
+                            },
+                        },
                     )
                 except Exception:
                     pass
@@ -25070,17 +25342,24 @@ class MaintenancePortalService:
             return set()
         item = normalize_notice_identity_payload(item)
         work_type = self._item_work_type(item)
-        keys: set[str] = set()
+        strong_keys: set[str] = set()
         for kind, field_names in {
             "active": ("active_item_id",),
             "source": ("source_record_id",),
             "target": ("target_record_id",),
-            "key": ("key", "fallback_key", "work_fallback_key"),
+            "zhihang": ("zhihang_record_id",),
         }.items():
             for field_name in field_names:
                 value = str(item.get(field_name) or "").strip()
                 if value:
-                    keys.add(f"{work_type}:{kind}:{value}")
+                    strong_keys.add(f"{work_type}:{kind}:{value}")
+        if strong_keys:
+            return strong_keys
+        keys: set[str] = set()
+        for field_name in ("key", "fallback_key", "work_fallback_key"):
+            value = str(item.get(field_name) or "").strip()
+            if value:
+                keys.add(f"{work_type}:key:{value}")
         return keys
 
     @staticmethod
@@ -25413,9 +25692,15 @@ class MaintenancePortalService:
                         if ended_at:
                             break
                 item = candidate["item"]
-                removed = self._state_store.delete_qt_active_item(
-                    active_item_id=str(candidate["active_item_id"]),
-                    record_id=target_record_id,
+                delete_payload = {
+                    **item,
+                    "active_item_id": str(candidate["active_item_id"]),
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                }
+                removed = self._enqueue_target_snapshot_active_delete(
+                    payload=delete_payload,
+                    reason="target_status_reconcile",
                 )
                 if not removed:
                     continue
@@ -25430,21 +25715,6 @@ class MaintenancePortalService:
                     item,
                     ended_at=ended_at,
                 )
-                with suppress(Exception):
-                    self._state_store.enqueue_outbox_event(
-                        "qt_action",
-                        {
-                            "kind": "active_delete",
-                            "payload": {
-                                "active_item_id": str(candidate["active_item_id"]),
-                                "record_id": target_record_id,
-                                "target_record_id": target_record_id,
-                                "source_record_id": canonical_source_record_id(item),
-                                "work_type": str(candidate["work_type"]),
-                                "source": "target_status_reconcile",
-                            },
-                        },
-                    )
                 removed_items.append(
                     {
                         "active_item_id": str(candidate["active_item_id"]),
@@ -27164,11 +27434,18 @@ class MaintenancePortalService:
             token in text
             for token in (
                 "开始",
+                "已开始",
+                "新增",
                 "更新",
                 "进行中",
                 "处理中",
+                "执行中",
+                "实施中",
+                "维修中",
                 "未结束",
+                "未完成",
                 "待结束",
+                "待闭环",
                 "恢复",
             )
         )
@@ -27225,8 +27502,15 @@ class MaintenancePortalService:
         # Local "remove from display" markers may hide unbound/local drafts, but
         # they must never suppress a remote record that still exists and is not
         # ended in Feishu.
-        if bool(item.get("target_snapshot_authoritative")) and canonical_target_record_id(
-            item
+        if (
+            bool(item.get("target_snapshot_authoritative"))
+            and canonical_target_record_id(item)
+        ) or (
+            bool(item.get("source_snapshot_authoritative"))
+            and (
+                canonical_source_record_id(item)
+                or str(item.get("zhihang_record_id") or "").strip()
+            )
         ):
             return False
         keys = self._ongoing_hidden_keys(item)
@@ -27396,6 +27680,8 @@ class MaintenancePortalService:
                 source_plan_reset = True
             self._work_status_cache_signature = None
             self._work_status_cache_items = None
+        if source_plan_reset:
+            self.reconcile_source_ongoing_items()
         return {
             "work_status_removed": work_status_removed,
             "daily_summary_removed": daily_summary_removed,
@@ -28156,6 +28442,7 @@ class MaintenancePortalService:
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         restored_active = False
         removed_active = False
+        qt_event_id = 0
         restored_active_payload: dict[str, Any] = {}
         with self._summary_lock:
             daily_item = local.get("daily_item") if isinstance(local.get("daily_item"), dict) else None
@@ -28306,9 +28593,31 @@ class MaintenancePortalService:
                 allow_revive=True,
             )
         else:
-            removed_active = self._state_store.delete_qt_active_item(
-                active_item_id=str(undo.get("active_item_id") or ""),
-                record_id=str(target_record_id or undo.get("target_record_id") or ""),
+            undo_active_item_id = str(undo.get("active_item_id") or "")
+            undo_target_record_id = str(
+                target_record_id or undo.get("target_record_id") or ""
+            )
+            removed_active, qt_event_id = (
+                self._state_store.delete_qt_active_item_and_enqueue(
+                    active_item_id=undo_active_item_id,
+                    record_id=undo_target_record_id,
+                    channel="qt_action",
+                    enqueue_if_missing=True,
+                    payload={
+                        "kind": "active_delete",
+                        "payload": {
+                            "active_item_id": undo_active_item_id,
+                            "record_id": undo_target_record_id,
+                            "target_record_id": undo_target_record_id,
+                            "source_record_id": str(
+                                undo.get("source_record_id") or ""
+                            ),
+                            "work_type": str(undo.get("work_type") or ""),
+                            "notice_type": str(undo.get("notice_type") or ""),
+                            "source": "notice_undo",
+                        },
+                    },
+                )
             )
         if restored_active_payload:
             identity_keys.update(self._ongoing_hidden_keys(restored_active_payload))
@@ -28329,6 +28638,7 @@ class MaintenancePortalService:
             "restored_active": restored_active,
             "removed_active": removed_active,
             "active_payload": restored_active_payload,
+            "qt_event_id": qt_event_id,
         }
 
     def validate_ongoing_delete_item(
@@ -28886,6 +29196,560 @@ class MaintenancePortalService:
             "finished": finished,
         }
 
+    def _source_snapshot_active_payload(
+        self,
+        record: dict[str, Any],
+        *,
+        zhihang: bool = False,
+    ) -> dict[str, Any]:
+        fields = dict(record.get("display_fields") or {})
+        source_record_id = str(record.get("record_id") or "").strip()
+
+        def first(*names: str) -> str:
+            return next(
+                (
+                    self._clean_source_text(fields.get(name))
+                    for name in names
+                    if self._clean_source_text(fields.get(name))
+                ),
+                "",
+            )
+
+        if zhihang:
+            work_type = WORK_TYPE_CHANGE
+            title = self._zhihang_change_title(record)
+            source_progress = self._zhihang_change_progress(record)
+            building_codes = self._zhihang_change_building_codes(record)
+            start_time = first("计划开始时间", "开始时间", "计划开始")
+            end_time = first("计划结束时间", "结束时间", "计划结束")
+            specialty = first("专业", "所属专业")
+            active_item_id = f"source-{work_type}-zhihang-{source_record_id}"
+        else:
+            work_type = self._record_work_type(record)
+            source_progress = self._source_record_progress(record)
+            active_item_id = f"source-{work_type}-{source_record_id}"
+            if work_type == WORK_TYPE_CHANGE:
+                title = self._change_title(record)
+                building_codes = self._change_record_building_codes(record)
+                start_time, end_time, _ = self._change_time_range(record)
+                specialty = self._change_specialty(record)
+            elif work_type == WORK_TYPE_REPAIR:
+                title = self._repair_title(record)
+                building_codes = self._repair_record_building_codes(record)
+                start_time, end_time, _ = self._repair_time_range(record)
+                specialty = self._repair_specialty(record)
+            else:
+                title = self._maintenance_title(record)
+                building_codes = self._building_codes_from_value(fields.get("楼栋"))
+                start_time = first(
+                    "实际开始时间", "计划开始维护时间", "计划开始时间"
+                )
+                end_time = first(
+                    "计划结束维护时间", "计划结束时间"
+                )
+                specialty = first("专业类别", "专业")
+
+        start_time = self._format_source_datetime(start_time).strip()
+        end_time = self._format_source_datetime(end_time).strip()
+        building = self._building_label_from_codes(building_codes)
+        payload = {
+            "active_item_id": active_item_id,
+            "work_type": work_type,
+            "notice_type": self._notice_type_for_work_type(work_type),
+            "status": "更新",
+            "action": "update",
+            "title": title or source_record_id,
+            "building": building,
+            "building_codes": building_codes,
+            "building_code": (
+                "CAMPUS"
+                if len(building_codes) >= 2
+                else building_codes[0]
+                if building_codes
+                else ""
+            ),
+            "specialty": specialty,
+            "start_time": start_time,
+            "started_at": start_time,
+            "end_time": end_time,
+            "location": first("地点", "位置", "区域") or building,
+            "content": first("变更内容", "检修内容", "维修内容", "维护内容")
+            or title,
+            "reason": first("变更原因", "故障维修原因", "维修原因", "维护原因", "原因"),
+            "impact": first("变更影响", "影响"),
+            "progress": first("当前进展", "当前维修进度", "进展", "进度")
+            or source_progress,
+            "source_progress": source_progress,
+            "source_status": source_progress,
+            "source_snapshot_authoritative": True,
+            "origin": "source_snapshot_refresh",
+            "_is_placeholder_record": True,
+            "display_fields": fields,
+        }
+        if zhihang:
+            payload.update(
+                {
+                    "zhihang_record_id": source_record_id,
+                    "zhihang_title": title,
+                    "zhihang_progress": source_progress,
+                    "zhihang_source_app_token": ZHIHANG_CHANGE_APP_TOKEN,
+                    "zhihang_source_table_id": ZHIHANG_CHANGE_TABLE_ID,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "source_record_id": source_record_id,
+                    "source_work_type": self._record_source_work_type(record),
+                    "source_app_token": str(record.get("source_app_token") or ""),
+                    "source_table_id": str(record.get("source_table_id") or ""),
+                }
+            )
+        return self._synchronize_prepared_notice_text(
+            normalize_notice_identity_payload(payload)
+        )
+
+    def reconcile_source_ongoing_items(self) -> dict[str, Any]:
+        """Project unfinished source-table rows into the shared Qt/Web table."""
+        with self._refresh_lock:
+            return self._reconcile_source_ongoing_items_locked()
+
+    def _ongoing_source_snapshot_records_locked(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        self.ensure_snapshot_loaded()
+        with self._summary_lock:
+            reset_source_keys = {
+                (
+                    self._item_work_type(item),
+                    str(item.get("source_record_id") or "").strip(),
+                )
+                for item in self._load_work_status_items_locked("ALL")
+                if isinstance(item, dict)
+                and bool(item.get("reset_after_delete"))
+                and str(item.get("status") or "").strip()
+                == DEFAULT_MAINTENANCE_STATUS
+                and str(item.get("source_record_id") or "").strip()
+            }
+        source_records = self._apply_work_type_overrides(
+            list(self._records or [])
+            + list(self._change_records or [])
+            + list(self._repair_records or [])
+        )
+        source_records = [
+            record
+            for record in source_records
+            if isinstance(record, dict)
+            and str(record.get("record_id") or "").strip()
+            and self._source_record_is_ongoing(record)
+            and (
+                self._record_work_type(record),
+                str(record.get("record_id") or "").strip(),
+            )
+            not in reset_source_keys
+        ]
+        zhihang_records = [
+            record
+            for record in (self._zhihang_change_records or [])
+            if isinstance(record, dict)
+            and str(record.get("record_id") or "").strip()
+            and self._source_progress_is_ongoing(
+                self._zhihang_change_progress(record)
+            )
+        ]
+        return source_records, zhihang_records
+
+    def has_ongoing_source_snapshot(self, payload: dict[str, Any]) -> bool:
+        payload = normalize_notice_identity_payload(payload or {})
+        source_record_id = canonical_source_record_id(payload)
+        zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
+        work_type = self._item_work_type(payload)
+        if not source_record_id and not zhihang_record_id:
+            return False
+        with self._refresh_lock:
+            source_records, zhihang_records = (
+                self._ongoing_source_snapshot_records_locked()
+            )
+            if source_record_id and any(
+                str(record.get("record_id") or "").strip() == source_record_id
+                and self._record_work_type(record) == work_type
+                for record in source_records
+            ):
+                return True
+            return bool(
+                zhihang_record_id
+                and any(
+                    str(record.get("record_id") or "").strip()
+                    == zhihang_record_id
+                    for record in zhihang_records
+                )
+            )
+
+    def _reconcile_source_ongoing_items_locked(self) -> dict[str, Any]:
+        source_records, zhihang_records = (
+            self._ongoing_source_snapshot_records_locked()
+        )
+        rows = self._state_store.list_qt_active_items(include_deleted=False)
+        claimed_active_ids: set[str] = set()
+        changed_items: list[dict[str, Any]] = []
+        removed = 0
+
+        def row_payload(row: dict[str, Any]) -> dict[str, Any]:
+            payload = dict(row.get("payload") or {})
+            payload.setdefault("active_item_id", str(row.get("active_item_id") or ""))
+            row_record_id = str(row.get("record_id") or "").strip()
+            if row_record_id:
+                payload.setdefault("target_record_id", row_record_id)
+            return normalize_notice_identity_payload(payload)
+
+        def matching_row(
+            source_payload: dict[str, Any], *, zhihang: bool = False
+        ) -> dict[str, Any] | None:
+            source_work_type = self._item_work_type(source_payload)
+            source_record_id = canonical_source_record_id(source_payload)
+            zhihang_record_id = str(source_payload.get("zhihang_record_id") or "").strip()
+            direct_row: dict[str, Any] | None = None
+            for row in rows:
+                current = row_payload(row)
+                if self._item_work_type(current) != source_work_type:
+                    continue
+                if source_record_id and canonical_source_record_id(current) == source_record_id:
+                    if canonical_target_record_id(current):
+                        return row
+                    direct_row = row
+                if zhihang_record_id and str(current.get("zhihang_record_id") or "").strip() == zhihang_record_id:
+                    if canonical_target_record_id(current):
+                        return row
+                    direct_row = row
+
+            target_record_id = ""
+            if source_record_id:
+                target_record_id = (
+                    self._target_record_id_from_identity_map(
+                        work_type=self._item_work_type(source_payload),
+                        source_record_id=source_record_id,
+                    )
+                    or self._target_record_id_from_work_status(
+                        work_type=self._item_work_type(source_payload),
+                        source_record_id=source_record_id,
+                    )
+                )
+                if not target_record_id and self._item_work_type(source_payload) == WORK_TYPE_REPAIR:
+                    source_record = next(
+                        (
+                            item
+                            for item in source_records
+                            if self._record_work_type(item) == source_work_type
+                            and str(item.get("record_id") or "").strip()
+                            == source_record_id
+                        ),
+                        None,
+                    )
+                    if source_record:
+                        target_record_id = self._repair_target_record_id(source_record)
+            if target_record_id:
+                for row in rows:
+                    current = row_payload(row)
+                    if (
+                        self._item_work_type(current) == source_work_type
+                        and canonical_target_record_id(current) == target_record_id
+                    ):
+                        return row
+
+            source_title = str(source_payload.get("title") or "").strip()
+            source_codes = set(source_payload.get("building_codes") or [])
+            source_start_dates = self._date_keys_from_values(
+                source_payload.get("start_time")
+            )
+            source_end_dates = self._date_keys_from_values(
+                source_payload.get("end_time")
+            )
+            candidates: list[dict[str, Any]] = []
+            for row in rows:
+                current = row_payload(row)
+                active_item_id = str(current.get("active_item_id") or "").strip()
+                if not zhihang and active_item_id in claimed_active_ids:
+                    continue
+                current_source_id = canonical_source_record_id(current)
+                if source_record_id and current_source_id and current_source_id != source_record_id:
+                    continue
+                current_zhihang_id = str(
+                    current.get("zhihang_record_id") or ""
+                ).strip()
+                if (
+                    zhihang_record_id
+                    and current_zhihang_id
+                    and current_zhihang_id != zhihang_record_id
+                ):
+                    continue
+                if self._item_work_type(current) != self._item_work_type(source_payload):
+                    continue
+                if not self._source_candidate_title_matches(
+                    source_title,
+                    str(current.get("title") or current.get("content") or ""),
+                    self._item_work_type(source_payload),
+                ):
+                    continue
+                current_codes = set(
+                    current.get("building_codes")
+                    or self._building_codes_from_value(
+                        current.get("building") or current.get("title")
+                    )
+                )
+                if source_codes and current_codes and source_codes.isdisjoint(current_codes):
+                    continue
+                current_start_dates = self._date_keys_from_values(
+                    current.get("start_time")
+                )
+                if (
+                    not source_start_dates
+                    or not current_start_dates
+                    or source_start_dates.isdisjoint(current_start_dates)
+                ):
+                    continue
+                current_end_dates = self._date_keys_from_values(current.get("end_time"))
+                if (
+                    source_end_dates
+                    and current_end_dates
+                    and source_end_dates.isdisjoint(current_end_dates)
+                ):
+                    continue
+                candidates.append(row)
+            target_candidates = [
+                row
+                for row in candidates
+                if canonical_target_record_id(row_payload(row))
+            ]
+            if len(target_candidates) == 1:
+                return target_candidates[0]
+            if direct_row is not None:
+                return direct_row
+            return candidates[0] if len(candidates) == 1 else None
+
+        def upsert(source_payload: dict[str, Any], *, zhihang: bool = False) -> None:
+            row = matching_row(source_payload, zhihang=zhihang)
+            current = row_payload(row) if row else {}
+            if zhihang and canonical_source_record_id(current):
+                projected = copy.deepcopy(current)
+            elif canonical_target_record_id(current):
+                projected = self._merge_duplicate_ongoing_item(
+                    source_payload,
+                    current,
+                )
+            else:
+                projected = copy.deepcopy(current)
+                for key, value in source_payload.items():
+                    if value not in (None, "", [], {}) or key not in projected:
+                        projected[key] = copy.deepcopy(value)
+                if current.get("active_item_id"):
+                    projected["active_item_id"] = current["active_item_id"]
+            if zhihang:
+                for key in (
+                    "zhihang_record_id",
+                    "zhihang_title",
+                    "zhihang_progress",
+                    "zhihang_source_app_token",
+                    "zhihang_source_table_id",
+                ):
+                    projected[key] = source_payload.get(key)
+            else:
+                for key in (
+                    "source_record_id",
+                    "source_work_type",
+                    "source_app_token",
+                    "source_table_id",
+                    "source_progress",
+                    "source_status",
+                ):
+                    projected[key] = source_payload.get(key)
+            projected["source_snapshot_authoritative"] = True
+            projected["_is_placeholder_record"] = not bool(
+                canonical_target_record_id(projected)
+            )
+            projected = self._synchronize_prepared_notice_text(
+                normalize_notice_identity_payload(projected)
+            )
+            section = str((row or {}).get("section") or "other")
+            sort_order = int((row or {}).get("sort_order") or 0)
+            origin = str((row or {}).get("origin") or "source_snapshot_refresh")
+            if current and not self._target_snapshot_payload_changed(current, projected):
+                claimed_active_ids.add(str(projected.get("active_item_id") or ""))
+                return
+            if self._state_store.upsert_qt_active_item(
+                projected,
+                section=section,
+                sort_order=sort_order,
+                origin=origin,
+                allow_revive=True,
+            ):
+                event_row = {"section": section, "sort_order": sort_order}
+                with suppress(Exception):
+                    self._enqueue_target_snapshot_active_upsert(
+                        row=event_row,
+                        payload=projected,
+                        source="source_snapshot_refresh",
+                        origin=origin,
+                    )
+                changed_items.append(projected)
+                if row:
+                    row["payload"] = projected
+                else:
+                    rows.append(
+                        {
+                            "active_item_id": projected.get("active_item_id"),
+                            "record_id": canonical_target_record_id(projected),
+                            "section": section,
+                            "sort_order": sort_order,
+                            "origin": origin,
+                            "payload": projected,
+                        }
+                    )
+            claimed_active_ids.add(str(projected.get("active_item_id") or ""))
+
+        for record in source_records:
+            upsert(self._source_snapshot_active_payload(record))
+        for record in zhihang_records:
+            upsert(self._source_snapshot_active_payload(record, zhihang=True), zhihang=True)
+
+        target_source_ids = {
+            (
+                self._item_work_type(row_payload(row)),
+                canonical_source_record_id(row_payload(row)),
+            )
+            for row in rows
+            if canonical_target_record_id(row_payload(row))
+            and canonical_source_record_id(row_payload(row))
+        }
+        target_zhihang_ids = {
+            (
+                self._item_work_type(row_payload(row)),
+                str(row_payload(row).get("zhihang_record_id") or "").strip(),
+            )
+            for row in rows
+            if canonical_target_record_id(row_payload(row))
+            and str(row_payload(row).get("zhihang_record_id") or "").strip()
+        }
+        for row in rows:
+            payload = row_payload(row)
+            if canonical_target_record_id(payload):
+                continue
+            if not (
+                (
+                    self._item_work_type(payload),
+                    canonical_source_record_id(payload),
+                )
+                in target_source_ids
+                or (
+                    self._item_work_type(payload),
+                    str(payload.get("zhihang_record_id") or "").strip(),
+                )
+                in target_zhihang_ids
+            ):
+                continue
+            with suppress(Exception):
+                if self._enqueue_target_snapshot_active_delete(
+                        payload=payload,
+                        reason="source_snapshot_target_bound",
+                    ):
+                    removed += 1
+
+        source_only_groups: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            payload = row_payload(row)
+            if canonical_target_record_id(payload):
+                continue
+            source_record_id = canonical_source_record_id(payload)
+            zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
+            identity = (
+                f"{self._item_work_type(payload)}:source:{source_record_id}"
+                if source_record_id
+                else f"{self._item_work_type(payload)}:zhihang:{zhihang_record_id}"
+                if zhihang_record_id
+                else ""
+            )
+            if identity:
+                source_only_groups.setdefault(identity, []).append(row)
+        for duplicate_rows in source_only_groups.values():
+            if len(duplicate_rows) < 2:
+                continue
+            first_payload = row_payload(duplicate_rows[0])
+            source_record_id = canonical_source_record_id(first_payload)
+            expected_active_id = (
+                f"source-{self._item_work_type(first_payload)}-{source_record_id}"
+                if source_record_id
+                else str(first_payload.get("active_item_id") or "")
+            )
+            keep = next(
+                (
+                    row
+                    for row in duplicate_rows
+                    if str(row.get("active_item_id") or "") == expected_active_id
+                ),
+                duplicate_rows[0],
+            )
+            for row in duplicate_rows:
+                if row is keep:
+                    continue
+                payload = row_payload(row)
+                with suppress(Exception):
+                    if self._enqueue_target_snapshot_active_delete(
+                            payload=payload,
+                            reason="source_snapshot_duplicate",
+                        ):
+                        removed += 1
+
+        active_source_ids = {
+            (
+                self._record_work_type(record),
+                str(record.get("record_id") or "").strip(),
+            )
+            for record in source_records
+        }
+        active_zhihang_ids = {
+            (WORK_TYPE_CHANGE, str(record.get("record_id") or "").strip())
+            for record in zhihang_records
+        }
+        source_authority = {
+            WORK_TYPE_MAINTENANCE: bool(self._maintenance_loaded_once),
+            WORK_TYPE_CHANGE: bool(self._change_loaded_once),
+            WORK_TYPE_REPAIR: bool(self._repair_loaded_once),
+        }
+        for row in rows:
+            payload = row_payload(row)
+            if canonical_target_record_id(payload) or not (
+                bool(payload.get("source_snapshot_authoritative"))
+                or str(row.get("origin") or "") == "source_snapshot_refresh"
+            ):
+                continue
+            source_record_id = canonical_source_record_id(payload)
+            zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
+            work_type = self._item_work_type(payload)
+            if source_record_id and (
+                (work_type, source_record_id) in active_source_ids
+                or not source_authority.get(work_type, False)
+            ):
+                continue
+            if zhihang_record_id and (
+                (work_type, zhihang_record_id) in active_zhihang_ids
+                or not self._zhihang_change_loaded_once
+            ):
+                continue
+            with suppress(Exception):
+                if self._enqueue_target_snapshot_active_delete(
+                        payload=payload,
+                        reason="source_snapshot_finished",
+                    ):
+                    removed += 1
+
+        if changed_items or removed:
+            self._touch_state_cache_version()
+        return {
+            "source_active_count": len(source_records) + len(zhihang_records),
+            "upserted": len(changed_items),
+            "removed": removed,
+            "items": changed_items,
+        }
+
     @staticmethod
     def _target_snapshot_payload_changed(
         before: dict[str, Any],
@@ -28964,7 +29828,9 @@ class MaintenancePortalService:
                             section_names,
                         )
                     ).strip()
-        payload.update(projected_fields)
+        for field_name, value in projected_fields.items():
+            if value not in (None, "", [], {}) or field_name not in payload:
+                payload[field_name] = value
         projected_notice_type = str(payload.get("notice_type") or "").strip()
         if work_type != WORK_TYPE_POWER or projected_notice_type not in {
             NOTICE_TYPE_POWER_UP,
@@ -28993,10 +29859,12 @@ class MaintenancePortalService:
                 else "开始"
             )
         active_item_id = str(
-            payload.get("active_item_id")
-            or (identity or {}).get("active_item_id")
+            (current_payload or {}).get("active_item_id")
             or f"target-{work_type}-{target_record_id}"
         ).strip()
+        if is_local_record_id(active_item_id) or active_item_id.startswith("source-"):
+            active_item_id = f"target-{work_type}-{target_record_id}"
+        payload.pop("_target_snapshot_missing_since", None)
         payload.update(
             {
                 "active_item_id": active_item_id,
@@ -29039,6 +29907,8 @@ class MaintenancePortalService:
         *,
         row: dict[str, Any],
         payload: dict[str, Any],
+        source: str = "target_snapshot_refresh",
+        origin: str = "",
     ) -> None:
         self._state_store.enqueue_outbox_event(
             "qt_action",
@@ -29053,10 +29923,10 @@ class MaintenancePortalService:
                         "notice_type": str(payload.get("notice_type") or ""),
                         "section": str(row.get("section") or "other"),
                         "sort_order": int(row.get("sort_order") or 0),
-                        "origin": "target_snapshot_refresh",
+                        "origin": origin or source,
                         "payload": payload,
                     },
-                    "source": "target_snapshot_refresh",
+                    "source": source,
                 },
             },
         )
@@ -29066,10 +29936,12 @@ class MaintenancePortalService:
         *,
         payload: dict[str, Any],
         reason: str,
-    ) -> None:
-        self._state_store.enqueue_outbox_event(
-            "qt_action",
-            {
+    ) -> bool:
+        deleted, _event_id = self._state_store.delete_qt_active_item_and_enqueue(
+            active_item_id=str(payload.get("active_item_id") or ""),
+            record_id=canonical_target_record_id(payload),
+            channel="qt_action",
+            payload={
                 "kind": "active_delete",
                 "payload": {
                     "active_item_id": str(
@@ -29078,11 +29950,15 @@ class MaintenancePortalService:
                     "record_id": canonical_target_record_id(payload),
                     "target_record_id": canonical_target_record_id(payload),
                     "source_record_id": canonical_source_record_id(payload),
+                    "zhihang_record_id": str(
+                        payload.get("zhihang_record_id") or ""
+                    ).strip(),
                     "work_type": self._item_work_type(payload),
                     "source": reason,
                 },
             },
         )
+        return deleted
 
     def _reconcile_notice_target_snapshot(
         self,
@@ -29090,8 +29966,25 @@ class MaintenancePortalService:
         work_type: str,
         notice_type: str,
         records: list[dict[str, Any]],
+        snapshot_started_at: float = 0.0,
     ) -> dict[str, Any]:
         """Project one complete target-table snapshot into Qt/Web runtime state."""
+        with self._refresh_lock:
+            return self._reconcile_notice_target_snapshot_locked(
+                work_type=work_type,
+                notice_type=notice_type,
+                records=records,
+                snapshot_started_at=snapshot_started_at,
+            )
+
+    def _reconcile_notice_target_snapshot_locked(
+        self,
+        *,
+        work_type: str,
+        notice_type: str,
+        records: list[dict[str, Any]],
+        snapshot_started_at: float = 0.0,
+    ) -> dict[str, Any]:
         work_type = self._normalize_notice_work_type_alias(work_type)
         notice_type = str(
             notice_type or self._notice_type_for_work_type(work_type)
@@ -29102,11 +29995,31 @@ class MaintenancePortalService:
             if isinstance(record, dict)
             and str(record.get("record_id") or "").strip()
         }
-        rows = self._state_store.list_qt_active_items(include_deleted=False)
+        all_rows = self._state_store.list_qt_active_items(include_deleted=True)
+        rows = [row for row in all_rows if row.get("deleted_at") is None]
+        deleted_target_at: dict[str, float] = {}
+        for row in all_rows:
+            deleted_at = float(row.get("deleted_at") or 0)
+            if not deleted_at:
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if self._item_work_type(payload) != work_type:
+                continue
+            target_record_id = (
+                canonical_target_record_id(payload)
+                or str(row.get("record_id") or "").strip()
+            )
+            if target_record_id:
+                deleted_target_at[target_record_id] = max(
+                    deleted_at,
+                    deleted_target_at.get(target_record_id, 0.0),
+                )
         active_target_ids: set[str] = set()
         updated = 0
         finished_removed = 0
         missing_removed = 0
+        missing_deferred = 0
+        restore_deferred = 0
         restored = 0
         warnings: list[str] = []
 
@@ -29128,36 +30041,90 @@ class MaintenancePortalService:
             active_target_ids.add(target_record_id)
             target_record = remote_by_id.get(target_record_id)
             if target_record is None:
-                if self._state_store.delete_qt_active_item(
-                    active_item_id=str(
+                if snapshot_started_at and float(row.get("updated_at") or 0) > float(
+                    snapshot_started_at
+                ):
+                    missing_deferred += 1
+                    continue
+                missing_since = float(
+                    current.get("_target_snapshot_missing_since") or 0
+                )
+                if not missing_since:
+                    current["_target_snapshot_missing_since"] = time.time()
+                    self._state_store.upsert_qt_active_item(
+                        current,
+                        section=str(row.get("section") or "other"),
+                        sort_order=int(row.get("sort_order") or 0),
+                        origin=str(row.get("origin") or "target_snapshot_refresh"),
+                    )
+                    missing_deferred += 1
+                    continue
+                if time.time() - missing_since < TARGET_SNAPSHOT_MISSING_GRACE_SECONDS:
+                    missing_deferred += 1
+                    continue
+                app_token = str(config.app_token or "").strip()
+                table_id = str(config.get_table_id(notice_type) or "").strip()
+                try:
+                    if not app_token or not table_id:
+                        raise PortalError("目标多维配置不完整，无法确认记录已删除")
+                    _metas, meta_by_name = self._load_table_fields(
+                        app_token=app_token,
+                        table_id=table_id,
+                    )
+                    confirmed_records = self._load_table_records_by_ids(
+                        app_token=app_token,
+                        table_id=table_id,
+                        meta_by_name=meta_by_name,
+                        work_type=work_type,
+                        notice_type=notice_type,
+                        record_ids=[target_record_id],
+                    )
+                    target_record = confirmed_records[0] if confirmed_records else None
+                    if target_record is None:
+                        raise PortalError("目标记录单条读取结果为空")
+                except Exception as exc:
+                    if not self._repair_management_record_not_found_error(exc):
+                        warnings.append(
+                            f"{notice_type}目标漏读强校验失败，已保留进行中通告: "
+                            f"{target_record_id}: {exc}"
+                        )
+                        missing_deferred += 1
+                        continue
+                    target_record = None
+                if target_record is not None:
+                    current.pop("_target_snapshot_missing_since", None)
+                else:
+                    current["active_item_id"] = str(
                         current.get("active_item_id")
                         or row.get("active_item_id")
                         or ""
-                    ),
-                    record_id=target_record_id,
-                ):
-                    self._state_store.mark_notice_identity_deleted(
-                        work_type=work_type,
-                        active_item_id=str(
-                            current.get("active_item_id")
-                            or row.get("active_item_id")
-                            or ""
-                        ),
-                        source_record_id=canonical_source_record_id(current),
-                        target_record_id=target_record_id,
                     )
-                    with suppress(Exception):
-                        self._enqueue_target_snapshot_active_delete(
+                    try:
+                        deleted = self._enqueue_target_snapshot_active_delete(
                             payload=current,
                             reason="target_snapshot_remote_deleted",
                         )
-                    with suppress(Exception):
-                        self.discard_deleted_ongoing_state(
-                            current,
-                            scope="ALL",
-                            reset_source_plan=True,
+                    except Exception as exc:
+                        warnings.append(
+                            f"{notice_type}删除同步失败: {target_record_id}: {exc}"
                         )
-                    missing_removed += 1
+                        deleted = False
+                    if deleted:
+                        self._state_store.mark_notice_identity_deleted(
+                            work_type=work_type,
+                            active_item_id=str(current.get("active_item_id") or ""),
+                            source_record_id=canonical_source_record_id(current),
+                            target_record_id=target_record_id,
+                        )
+                        missing_removed += 1
+                    continue
+
+            if snapshot_started_at and float(row.get("updated_at") or 0) > float(
+                snapshot_started_at
+            ):
+                warnings.append(
+                    f"{notice_type}目标快照早于本地最新写入，已延后覆盖: {target_record_id}"
+                )
                 continue
 
             lifecycle = self._target_record_lifecycle(
@@ -29166,14 +30133,20 @@ class MaintenancePortalService:
                 target_record=target_record,
             )
             if lifecycle.get("finished"):
-                if self._state_store.delete_qt_active_item(
-                    active_item_id=str(
-                        current.get("active_item_id")
-                        or row.get("active_item_id")
-                        or ""
-                    ),
-                    record_id=target_record_id,
-                ):
+                current["active_item_id"] = str(
+                    current.get("active_item_id")
+                    or row.get("active_item_id")
+                    or ""
+                )
+                try:
+                    deleted = self._enqueue_target_snapshot_active_delete(
+                        payload=current,
+                        reason="target_snapshot_finished",
+                    )
+                except Exception as exc:
+                    warnings.append(f"{notice_type}结束同步失败: {target_record_id}: {exc}")
+                    deleted = False
+                if deleted:
                     finished_payload = {
                         **current,
                         "status": "已结束",
@@ -29190,11 +30163,6 @@ class MaintenancePortalService:
                         current,
                         ended_at=str(lifecycle.get("ended_at") or ""),
                     )
-                    with suppress(Exception):
-                        self._enqueue_target_snapshot_active_delete(
-                            payload=current,
-                            reason="target_snapshot_finished",
-                        )
                     finished_removed += 1
                 continue
 
@@ -29229,6 +30197,15 @@ class MaintenancePortalService:
                 target_record=target_record,
             )
             if not lifecycle.get("active"):
+                continue
+            if (
+                snapshot_started_at
+                and deleted_target_at.get(target_record_id, 0) > snapshot_started_at
+            ):
+                restore_deferred += 1
+                warnings.append(
+                    f"{notice_type}目标快照早于本地删除，已跳过恢复: {target_record_id}"
+                )
                 continue
             identity = self._state_store.resolve_notice_identity(
                 work_type=work_type,
@@ -29267,12 +30244,16 @@ class MaintenancePortalService:
 
         if updated or finished_removed or missing_removed or restored:
             self._touch_state_cache_version()
+        source_reconcile = self.reconcile_source_ongoing_items()
         return {
             "remote_count": len(remote_by_id),
             "updated": updated,
             "finished_removed": finished_removed,
             "missing_removed": missing_removed,
+            "missing_deferred": missing_deferred,
+            "restore_deferred": restore_deferred,
             "restored": restored,
+            "source_reconcile": source_reconcile,
             "warnings": warnings,
         }
 
@@ -29292,6 +30273,7 @@ class MaintenancePortalService:
             raise PortalError(
                 f"未配置{notice_type}目标多维 app_token/table_id。"
             )
+        snapshot_started_at = time.time()
         records = self._target_records_for_notice_type(
             notice_type,
             work_type,
@@ -29310,6 +30292,7 @@ class MaintenancePortalService:
             work_type=work_type,
             notice_type=notice_type,
             records=records,
+            snapshot_started_at=snapshot_started_at,
         )
 
     def validate_notice_identity_binding(
@@ -30465,6 +31448,27 @@ class MaintenancePortalService:
             and existing_notice_type != incoming_notice_type
         ):
             return True
+        shared_strong_identity = False
+        for existing_value, incoming_value in (
+            (
+                canonical_target_record_id(existing),
+                canonical_target_record_id(incoming),
+            ),
+            (
+                canonical_source_record_id(existing),
+                canonical_source_record_id(incoming),
+            ),
+            (
+                str(existing.get("zhihang_record_id") or "").strip(),
+                str(incoming.get("zhihang_record_id") or "").strip(),
+            ),
+        ):
+            if existing_value and incoming_value:
+                if existing_value != incoming_value:
+                    return True
+                shared_strong_identity = True
+        if shared_strong_identity:
+            return False
         existing_active = str(existing.get("active_item_id") or "").strip()
         incoming_active = str(incoming.get("active_item_id") or "").strip()
         if existing_active and incoming_active and existing_active == incoming_active:
@@ -30475,14 +31479,6 @@ class MaintenancePortalService:
             and existing_signature == self._ongoing_exact_duplicate_signature(incoming)
         ):
             return False
-        existing_target = canonical_target_record_id(existing)
-        incoming_target = canonical_target_record_id(incoming)
-        if existing_target and incoming_target:
-            return existing_target != incoming_target
-        existing_source = canonical_source_record_id(existing)
-        incoming_source = canonical_source_record_id(incoming)
-        if existing_source and incoming_source:
-            return existing_source != incoming_source
         if existing_active and incoming_active:
             return existing_active != incoming_active
         return False
@@ -30518,6 +31514,7 @@ class MaintenancePortalService:
             ("active", item.get("active_item_id")),
             ("source", canonical_source_record_id(item)),
             ("target", canonical_target_record_id(item)),
+            ("zhihang", item.get("zhihang_record_id")),
         ):
             value = str(value or "").strip()
             if value:
@@ -30624,7 +31621,13 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         existing = normalize_notice_identity_payload(copy.deepcopy(existing))
         incoming = normalize_notice_identity_payload(copy.deepcopy(incoming))
-        if self._ongoing_item_score(incoming) > self._ongoing_item_score(existing):
+        existing_has_target = bool(canonical_target_record_id(existing))
+        incoming_has_target = bool(canonical_target_record_id(incoming))
+        if incoming_has_target and not existing_has_target:
+            base, supplement = incoming, existing
+        elif existing_has_target and not incoming_has_target:
+            base, supplement = existing, incoming
+        elif self._ongoing_item_score(incoming) > self._ongoing_item_score(existing):
             base, supplement = incoming, existing
         else:
             base, supplement = existing, incoming
@@ -30937,6 +31940,7 @@ class MaintenancePortalService:
         ongoing_page_size: int | str = 0,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
+        self.reconcile_source_ongoing_items()
         scope = self._normalize_scope(scope)
         selected_month = str(month or self._current_month_label()).strip()
         requested_sections = {
@@ -30956,7 +31960,10 @@ class MaintenancePortalService:
             WORK_TYPE_ADJUST,
         }:
             requested_work_type = ""
-        merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
+        canonical_ongoing = self._state_store.list_visible_qt_active_items()
+        merged_ongoing = self._project_ongoing_items(
+            scope, [*canonical_ongoing, *(ongoing_items or [])]
+        )
         scoped_records = self._workbench_records(
             month=selected_month, specialty=specialty, scope=scope
         )
@@ -37534,6 +38541,8 @@ class MaintenancePortalService:
                         "qt_displaying",
                         "upload_waiting",
                         "uploading",
+                        "remote_intent",
+                        "remote_written",
                         "success",
                     }:
                         return str(existing.get("job_id") or ""), False
@@ -37560,6 +38569,12 @@ class MaintenancePortalService:
                         return str(existing.get("job_id") or ""), True
             target_key = str(job.get("target_key") or "")
             if target_key:
+                request_target_record_id = canonical_target_record_id(
+                    request_payload
+                )
+                request_work_type = str(
+                    request_payload.get("work_type") or ""
+                ).strip()
                 blocking_phase_order = {
                     "accepted": 1,
                     "queued": 2,
@@ -37570,6 +38585,8 @@ class MaintenancePortalService:
                     "qt_displaying": 7,
                     "upload_waiting": 8,
                     "uploading": 9,
+                    "remote_intent": 10,
+                    "remote_written": 11,
                 }
                 duplicate_start_phases = set(blocking_phase_order) | {"success"}
                 blocking_job_id = ""
@@ -37577,7 +38594,42 @@ class MaintenancePortalService:
                 blocking_rank = -1
                 blocking_epoch = 0.0
                 for existing in self._jobs.values():
-                    if str(existing.get("target_key") or "") != target_key:
+                    existing_prepared = (
+                        existing.get("prepared")
+                        if isinstance(existing.get("prepared"), dict)
+                        else {}
+                    )
+                    existing_request = (
+                        existing.get("request")
+                        if isinstance(existing.get("request"), dict)
+                        else {}
+                    )
+                    existing_target_record_id = str(
+                        existing.get("remote_record_id")
+                        or existing.get("target_record_id")
+                        or canonical_target_record_id(existing_prepared)
+                        or canonical_target_record_id(existing_request)
+                        or ""
+                    ).strip()
+                    existing_work_type = str(
+                        existing_prepared.get("work_type")
+                        or existing_request.get("work_type")
+                        or ""
+                    ).strip()
+                    same_resolved_target = bool(
+                        request_target_record_id
+                        and request_target_record_id
+                        == existing_target_record_id
+                        and (
+                            not request_work_type
+                            or not existing_work_type
+                            or request_work_type == existing_work_type
+                        )
+                    )
+                    if (
+                        str(existing.get("target_key") or "") != target_key
+                        and not same_resolved_target
+                    ):
                         continue
                     phase = str(existing.get("phase") or "")
                     if action == "start" and phase in duplicate_start_phases:

@@ -488,6 +488,61 @@ class MainWindowRuntimeMixin:
         self._qt_shell_dialog_sessions = filtered[:200]
         return {"ok": True, "session_id": session_id}
 
+    @staticmethod
+    def _backend_active_row_payload(row: dict) -> dict:
+        data = (
+            dict(row.get("payload"))
+            if isinstance(row.get("payload"), dict)
+            else {}
+        )
+        data.setdefault("active_item_id", row.get("active_item_id"))
+        data.setdefault("record_id", row.get("record_id"))
+        return data
+
+    def _backend_active_identity_matches(self, incoming: dict, candidate: dict) -> bool:
+        incoming_work_type = str(
+            incoming.get("work_type") or incoming.get("lan_work_type") or ""
+        ).strip()
+        candidate_work_type = str(
+            candidate.get("work_type") or candidate.get("lan_work_type") or ""
+        ).strip()
+        if (
+            incoming_work_type
+            and candidate_work_type
+            and incoming_work_type != candidate_work_type
+        ):
+            return False
+        incoming_notice_type = str(incoming.get("notice_type") or "").strip()
+        candidate_notice_type = str(candidate.get("notice_type") or "").strip()
+        if (
+            incoming_notice_type
+            and candidate_notice_type
+            and incoming_notice_type != candidate_notice_type
+        ):
+            return False
+        shared_strong_id = False
+        for incoming_value, candidate_value in (
+            (
+                incoming.get("target_record_id") or incoming.get("record_id"),
+                candidate.get("target_record_id") or candidate.get("record_id"),
+            ),
+            (incoming.get("source_record_id"), candidate.get("source_record_id")),
+            (incoming.get("zhihang_record_id"), candidate.get("zhihang_record_id")),
+        ):
+            incoming_id = str(incoming_value or "").strip()
+            candidate_id = str(candidate_value or "").strip()
+            if incoming_id and candidate_id:
+                if incoming_id != candidate_id:
+                    return False
+                shared_strong_id = True
+        incoming_active_id = str(incoming.get("active_item_id") or "").strip()
+        candidate_active_id = str(candidate.get("active_item_id") or "").strip()
+        return shared_strong_id or bool(
+            incoming_active_id
+            and candidate_active_id
+            and incoming_active_id == candidate_active_id
+        )
+
     def _canonical_backend_active_payload(
         self,
         data: dict,
@@ -502,17 +557,14 @@ class MainWindowRuntimeMixin:
             return dict(data)
         try:
             enriched = state_store._enrich_notice_payload_from_text(dict(data))
-            incoming_keys = state_store._identity_keys_for_item(enriched)
             canonical_rows = state_store.list_visible_qt_active_items()
             canonical_row = next(
                 (
                     row
                     for row in canonical_rows
-                    if incoming_keys
-                    & state_store._identity_keys_for_item(
-                        row.get("payload")
-                        if isinstance(row.get("payload"), dict)
-                        else {}
+                    if self._backend_active_identity_matches(
+                        enriched,
+                        self._backend_active_row_payload(row),
                     )
                 ),
                 None,
@@ -565,6 +617,37 @@ class MainWindowRuntimeMixin:
             data["_is_placeholder_record"] = False
             record_id = target_record_id
         data = self._ensure_active_item_identity(data)
+        event_origin = str(
+            item_payload.get("origin") or data.get("origin") or ""
+        ).strip()
+        canonical_supersedes = False
+        cache_store = getattr(self, "cache_store", None)
+        state_store = getattr(cache_store, "_state_store", None)
+        if state_store is not None:
+            try:
+                canonical_row = next(
+                    (
+                        row
+                        for row in state_store.list_visible_qt_active_items()
+                        if self._backend_active_identity_matches(
+                            data,
+                            self._backend_active_row_payload(row),
+                        )
+                    ),
+                    None,
+                )
+                if canonical_row is None:
+                    return {"ok": True, "stale": True, "created": False}
+                canonical_data = (
+                    dict(canonical_row.get("payload"))
+                    if isinstance(canonical_row.get("payload"), dict)
+                    else {}
+                )
+                data = canonical_data
+                canonical_supersedes = True
+            except Exception as exc:
+                log_warning(f"Qt 活动通告权威状态核对失败，已延后应用: {exc}")
+                return {"ok": False, "error": str(exc)}
         list_widget = None
         item = None
         visible_active_item_id = ""
@@ -579,12 +662,12 @@ class MainWindowRuntimeMixin:
                     existing_data.get("active_item_id") or ""
                 ).strip()
                 data = self._inherit_active_runtime_fields(data, existing_data)
-        event_origin = str(item_payload.get("origin") or data.get("origin") or "").strip()
-        data = self._canonical_backend_active_payload(
-            data,
-            prefer_incoming=event_origin != "target_snapshot_refresh",
-        )
-        if visible_active_item_id:
+        if not canonical_supersedes:
+            data = self._canonical_backend_active_payload(
+                data,
+                prefer_incoming=(event_origin != "target_snapshot_refresh"),
+            )
+        if visible_active_item_id and not canonical_supersedes:
             data["active_item_id"] = visible_active_item_id
         active_item_id = str(data.get("active_item_id") or "").strip()
         record_id = str(
@@ -611,6 +694,30 @@ class MainWindowRuntimeMixin:
         payload = payload if isinstance(payload, dict) else {}
         active_item_id = str(payload.get("active_item_id") or "").strip()
         record_id = str(payload.get("record_id") or "").strip()
+        source_record_id = str(payload.get("source_record_id") or "").strip()
+        zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
+        cache_store = getattr(self, "cache_store", None)
+        state_store = getattr(cache_store, "_state_store", None)
+        if state_store is not None:
+            try:
+                for canonical_row in state_store.list_visible_qt_active_items():
+                    canonical_data = self._backend_active_row_payload(canonical_row)
+                    if not self._backend_active_identity_matches(
+                        {
+                            **payload,
+                            "active_item_id": active_item_id,
+                            "record_id": record_id,
+                            "source_record_id": source_record_id,
+                            "zhihang_record_id": zhihang_record_id,
+                        },
+                        canonical_data,
+                    ):
+                        continue
+                    self._apply_backend_active_upsert({"item": canonical_row})
+                    return {"ok": True, "stale": True, "deleted": False}
+            except Exception as exc:
+                log_warning(f"Qt 删除事件权威状态核对失败，已延后删除: {exc}")
+                return {"ok": False, "error": str(exc), "deleted": False}
         list_widget = None
         item = None
         if active_item_id:
@@ -621,6 +728,29 @@ class MainWindowRuntimeMixin:
             self._remove_active_item_from_source(list_widget, item)
             return {"ok": True, "deleted": True}
         return {"ok": True, "missing": True}
+
+    def _enqueue_confirmed_active_mutation(self, tag: str, callback) -> dict:
+        enqueue = getattr(self, "_enqueue_ui_mutation", None)
+        if not callable(enqueue):
+            return callback()
+        completed = threading.Event()
+        result: dict = {}
+
+        def _run():
+            try:
+                applied = callback()
+                result.update(applied if isinstance(applied, dict) else {})
+            except Exception as exc:
+                result.update({"ok": False, "error": str(exc)})
+            finally:
+                completed.set()
+
+        accepted = enqueue(tag, _run)
+        if accepted is False:
+            return {"ok": False, "error": "Qt 实时更新队列已满，请稍后重试。"}
+        if not completed.wait(5.0):
+            return {"ok": False, "error": "Qt 实时更新执行超时，请稍后重试。"}
+        return result or {"ok": False, "error": "Qt 实时更新未返回执行结果。"}
 
     def _consume_qt_shell_bootstrap_state(self, payload: dict | None):
         payload = payload if isinstance(payload, dict) else {}
@@ -674,31 +804,17 @@ class MainWindowRuntimeMixin:
                     pass
             return {"ok": True}
         if kind == "active_upsert":
-            enqueue = getattr(self, "_enqueue_ui_mutation", None)
-            if callable(enqueue):
-                result_holder = {}
-
-                def _run():
-                    result_holder.update(self._apply_backend_active_upsert(payload))
-
-                source = str((payload or {}).get("source") or "").strip()
-                tag = "backend_active_sync" if source == "backend_active_sync" else "active_upsert"
-                accepted = enqueue(tag, _run)
-                if accepted is False:
-                    return {"ok": False, "error": "Qt 实时更新队列已满，请稍后重试。"}
-                return {"ok": True, "queued": True}
-            return self._apply_backend_active_upsert(payload)
+            source = str((payload or {}).get("source") or "").strip()
+            tag = "backend_active_sync" if source == "backend_active_sync" else "active_upsert"
+            return self._enqueue_confirmed_active_mutation(
+                tag,
+                lambda: self._apply_backend_active_upsert(payload),
+            )
         if kind == "active_delete":
-            enqueue = getattr(self, "_enqueue_ui_mutation", None)
-            if callable(enqueue):
-                accepted = enqueue(
-                    "active_delete",
-                    lambda p=dict(payload or {}): self._apply_backend_active_delete(p),
-                )
-                if accepted is False:
-                    return {"ok": False, "error": "Qt 实时更新队列已满，请稍后重试。"}
-                return {"ok": True, "queued": True}
-            return self._apply_backend_active_delete(payload)
+            return self._enqueue_confirmed_active_mutation(
+                "active_delete",
+                lambda p=dict(payload or {}): self._apply_backend_active_delete(p),
+            )
         if kind in {"history_append", "status_banner"}:
             return {"ok": True}
         return {"ok": True, "ignored": True}

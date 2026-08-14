@@ -3289,6 +3289,7 @@ def render_workbench_lite(
       overlay.classList.remove('open');
       overlay.setAttribute('aria-hidden', 'true');
       document.body.classList.remove('notice-drawer-open');
+      if (liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
       document.querySelectorAll('.notice-row.active,.ongoing-row.active').forEach(row => {{
         row.classList.remove('active');
         row.setAttribute('aria-current', 'false');
@@ -3418,6 +3419,10 @@ def render_workbench_lite(
     }}
     let liteQtActiveStream = null;
     let liteQtActiveStreamKey = '';
+    let liteQtActiveScopeSignature = '';
+    let liteQtActiveScopeSignatureKey = '';
+    let liteQtActiveRefreshTimer = null;
+    let liteQtActiveRefreshPending = false;
     function closeLiteQtActiveStream() {{
       if (liteQtActiveStream) {{
         try {{ liteQtActiveStream.close(); }} catch {{}}
@@ -3463,7 +3468,39 @@ def render_workbench_lite(
       }}
       return !hasIdentity;
     }}
+    function scheduleLiteQtActiveRefresh() {{
+      if (
+        document.hidden
+        || liteFormDirty
+        || noticeDrawerOverlay()?.classList.contains('open')
+        || document.getElementById('detail-panel')?.classList.contains('loading')
+      ) {{
+        liteQtActiveRefreshPending = true;
+        return;
+      }}
+      liteQtActiveRefreshPending = false;
+      if (liteQtActiveRefreshTimer !== null) window.clearTimeout(liteQtActiveRefreshTimer);
+      liteQtActiveRefreshTimer = window.setTimeout(async () => {{
+        liteQtActiveRefreshTimer = null;
+        try {{
+          await navigateLite(location.href, {{
+            push: false,
+            preserveWorkspaceScroll: true,
+            silent: true,
+          }});
+        }} catch {{
+          setLiteStatus('未结束通告同步失败，请点击刷新本页');
+        }}
+      }}, 120);
+    }}
     function applyQtActiveIdentitySnapshot(payload) {{
+      const signature = String(payload?.qt_scope_signature || '').trim();
+      if (signature) {{
+        if (liteQtActiveScopeSignature && signature !== liteQtActiveScopeSignature) {{
+          scheduleLiteQtActiveRefresh();
+        }}
+        liteQtActiveScopeSignature = signature;
+      }}
       const items = payload && Array.isArray(payload.active_identities)
         ? payload.active_identities
         : null;
@@ -3508,6 +3545,10 @@ def render_workbench_lite(
         return;
       }}
       closeLiteQtActiveStream();
+      if (liteQtActiveScopeSignatureKey !== key) {{
+        liteQtActiveScopeSignatureKey = key;
+        liteQtActiveScopeSignature = '';
+      }}
       const streamUrl = new URL('/api/qt-active-items/stream', location.origin);
       streamUrl.searchParams.set('scope', scope);
       if (month) streamUrl.searchParams.set('month', month);
@@ -3539,7 +3580,10 @@ def render_workbench_lite(
     }}
     document.addEventListener('visibilitychange', () => {{
       if (document.hidden) closeLiteQtActiveStream();
-      else ensureLiteQtActiveStream();
+      else {{
+        ensureLiteQtActiveStream();
+        if (liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
+      }}
     }});
     function applyLiteDocument(nextDoc, url, push, selectors) {{
       const replaceSelectors = selectors || ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'];
@@ -5636,12 +5680,13 @@ def render_workbench_lite(
     }}
     async function navigateLite(url, options = {{}}) {{
       const useWorkspaceSwitch = Boolean(options.workspaceSwitch);
+      const silent = Boolean(options.silent);
       const selectors = Array.isArray(options.selectors) ? options.selectors : [];
       const detailOnly = Boolean(options.detailOnly) || selectors.includes('#detail-panel');
       const generation = ++liteNavigationGeneration;
-      setPanelLoading(true);
+      if (!silent) setPanelLoading(true);
       if (useWorkspaceSwitch) setWorkspaceSwitching(true, options.loadingText || options.label || '正在加载通告');
-      setLiteStatus(options.label || '正在切换...');
+      if (!silent) setLiteStatus(options.label || '正在切换...');
       const scrollPositions = options.preserveWorkspaceScroll ? captureWorkspaceScroll() : null;
       try {{
         if (liteNavigateController) liteNavigateController.abort();
@@ -5667,8 +5712,9 @@ def render_workbench_lite(
         throw error;
       }} finally {{
         if (generation === liteNavigationGeneration) {{
-          setPanelLoading(false);
+          if (!silent) setPanelLoading(false);
           if (useWorkspaceSwitch) setWorkspaceSwitching(false);
+          if (!silent && liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
         }}
       }}
     }}
@@ -6709,12 +6755,21 @@ def render_workbench_lite(
       draft.source_record_id = patch.source_record_id || payload?.source_record_id || draft.source_record_id || '';
       draft.target_record_id = patch.target_record_id || payload?.target_record_id || draft.target_record_id || '';
       draft.record_id = patch.record_id || draft.target_record_id || payload?.record_id || draft.record_id || '';
-      if (ok && draft.action === 'end') {{
+      const terminalProjectionSkipped = Boolean(patch.terminal_projection_skipped);
+      const projectionSupersededByTerminal = Boolean(patch.projection_superseded_by_terminal);
+      if (ok && projectionSupersededByTerminal && !patch.source_fallback_active) {{
         markSourceRowCompleted(draft);
         removeOngoingRow(findOngoingRowByDraft(draft));
         clearCompletedCurrentNotice(draft);
         return;
       }}
+      if (ok && draft.action === 'end' && !terminalProjectionSkipped) {{
+        markSourceRowCompleted(draft);
+        removeOngoingRow(findOngoingRowByDraft(draft));
+        clearCompletedCurrentNotice(draft);
+        return;
+      }}
+      if (terminalProjectionSkipped) draft.action = 'update';
       let row = findOngoingRowByDraft(draft);
       if (!ok) {{
         if (!row) {{
@@ -6726,7 +6781,7 @@ def render_workbench_lite(
         setOngoingRowStatus(row, '发送失败', 'danger');
         return;
       }}
-      if (!row && draft.action === 'start') {{
+      if (!row && (draft.action === 'start' || terminalProjectionSkipped)) {{
         const {{ list }} = ongoingListElements();
         if (list) {{
           row = renderOngoingRow(document.createElement('a'), draft, 'update');
@@ -6782,7 +6837,10 @@ def render_workbench_lite(
       }};
       return map[String(phase || '')] || String(phase || '发送中');
     }}
-    function successfulNoticeActionText(action) {{
+    function successfulNoticeActionText(action, terminalProjectionSkipped, sourceFallbackActive, projectionSupersededByTerminal) {{
+      if (sourceFallbackActive) return '目标已结束，源表仍未结束，通告继续保留';
+      if (projectionSupersededByTerminal) return '目标已被后续操作结束，本次旧投影未恢复';
+      if (terminalProjectionSkipped) return '结束已被后续更新覆盖，通告仍在进行中';
       if (action === 'end') return '结束成功，已从进行中移除';
       if (action === 'update') return '更新成功，通告仍在进行中';
       return '发送成功，通告已进入进行中';
@@ -6802,7 +6860,12 @@ def render_workbench_lite(
           const phase = String(job.phase || '');
           if (phase === 'success') {{
             applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
-            setLiteStatus(successfulNoticeActionText(payload?.action));
+            setLiteStatus(successfulNoticeActionText(
+              payload?.action,
+              Boolean(job.frontend_patch?.terminal_projection_skipped),
+              Boolean(job.frontend_patch?.source_fallback_active),
+              Boolean(job.frontend_patch?.projection_superseded_by_terminal)
+            ));
             return true;
           }}
           if (phase === 'failed') {{

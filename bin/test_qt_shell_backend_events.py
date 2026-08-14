@@ -18,6 +18,7 @@ from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  #
 from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.core.parser import extract_notice_info  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
+from clipflow_backend.process_controller import BackendProcessPortalController  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
@@ -233,6 +234,46 @@ class _ActiveUpsertVisibilityHarness(MainWindowRuntimeMixin):
         return object(), None
 
 
+class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
+    def __init__(self, store: LanPortalStateStore, current: dict):
+        self.cache_store = type(
+            "CacheStore",
+            (),
+            {"_state_store": store},
+        )()
+        self.current = dict(current)
+        self.removed = []
+
+    def _find_active_item_by_active_item_id(self, active_item_id):
+        if str(self.current.get("active_item_id") or "") == str(active_item_id or ""):
+            return "other-list", "current-item"
+        return None, None
+
+    def _find_active_item_by_record_id(self, record_id):
+        current_record_id = str(
+            self.current.get("target_record_id")
+            or self.current.get("record_id")
+            or ""
+        )
+        if current_record_id == str(record_id or ""):
+            return "other-list", "current-item"
+        return None, None
+
+    @staticmethod
+    def _is_valid_list_item(item):
+        return item == "current-item"
+
+    def _remove_active_item_from_source(self, list_widget, item):
+        self.removed.append((list_widget, item))
+        self.current = {}
+
+    def _apply_backend_active_upsert(self, payload):
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+        data = item.get("payload") if isinstance(item.get("payload"), dict) else item
+        self.current = dict(data)
+        return {"ok": True, "updated": True}
+
+
 class QtShellBackendEventTests(unittest.TestCase):
     def test_qt_local_event_match_normalizes_iso_time_and_building_code(self):
         harness = _RecordsHarness()
@@ -319,6 +360,69 @@ class QtShellBackendEventTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("队列已满", result["error"])
 
+    def test_queued_active_apply_failure_is_nacked_after_ui_mutation_runs(self):
+        for kind in ("active_upsert", "active_delete"):
+            with self.subTest(kind=kind):
+                harness = _PriorityMutationHarness()
+                queued = threading.Event()
+                apply_calls = []
+                payload = {
+                    "active_item_id": f"active-{kind}-apply-failure",
+                    "record_id": f"rec-{kind}-apply-failure",
+                    "text": "【变更通告】状态：更新\n【名称】应用失败重试",
+                }
+
+                def fail_apply(actual_payload, *, _kind=kind):
+                    apply_calls.append((_kind, dict(actual_payload or {})))
+                    return {"ok": False, "error": "sqlite busy"}
+
+                if kind == "active_upsert":
+                    harness._apply_backend_active_upsert = fail_apply
+                else:
+                    harness._apply_backend_active_delete = fail_apply
+
+                enqueue = harness._enqueue_ui_mutation
+
+                def signal_enqueue(name, callback):
+                    accepted = enqueue(name, callback)
+                    if accepted:
+                        queued.set()
+                    return accepted
+
+                harness._enqueue_ui_mutation = signal_enqueue
+                controller = BackendProcessPortalController()
+                controller.shell_event_callback = harness.handle_qt_shell_event
+                acknowledgements = []
+                controller._ack_event = lambda event_id, *, ok, error="": (
+                    acknowledgements.append(
+                        {"event_id": event_id, "ok": ok, "error": error}
+                    )
+                )
+                event_id = 701 if kind == "active_upsert" else 702
+                dispatch = threading.Thread(
+                    target=lambda: controller._dispatch_event(
+                        {
+                            "id": event_id,
+                            "payload": {"kind": kind, "payload": payload},
+                        }
+                    ),
+                    daemon=True,
+                )
+                dispatch.start()
+                self.assertTrue(queued.wait(1.0))
+                harness._drain_ui_mutations()
+                dispatch.join(1.0)
+
+                self.assertFalse(dispatch.is_alive())
+                self.assertEqual(apply_calls, [(kind, payload)])
+                self.assertEqual(len(acknowledgements), 1)
+                self.assertEqual(acknowledgements[0]["event_id"], event_id)
+                self.assertFalse(
+                    acknowledgements[0]["ok"],
+                    "UI 实际 apply 失败时不得把 outbox 确认为 done",
+                )
+                self.assertIn("sqlite busy", acknowledgements[0]["error"])
+
     def test_scoped_qt_active_identities_drop_deleted_local_event(self):
         previous_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,7 +500,7 @@ class QtShellBackendEventTests(unittest.TestCase):
         self.assertIn('"active_identities": active_identities', backend_text)
         self.assertIn("self._notify_qt_active_streams()", backend_text)
 
-    def test_local_only_delete_removes_qt_cache_before_backend_finishes(self):
+    def test_local_only_delete_waits_for_backend_before_removing_qt_cache(self):
         harness = _ImmediateDeleteHarness(remote_deleted=False)
         payload = {
             "active_item_id": "active-local-delete",
@@ -409,11 +513,12 @@ class QtShellBackendEventTests(unittest.TestCase):
         harness._delete_active_item(payload)
 
         self.assertTrue(harness.backend_started.wait(1.0))
-        self.assertEqual(harness.cache_delete_count, 1)
-        self.assertIn("未上传通告已移除", harness.messages[0])
+        self.assertEqual(harness.cache_delete_count, 0)
+        self.assertEqual(harness.messages, [])
         harness.backend_release.set()
         self.assertTrue(harness.backend_finished.wait(1.0))
         self.assertEqual(harness.cache_delete_count, 1)
+        self.assertEqual(harness.messages, [])
 
     def test_remote_delete_waits_for_backend_before_removing_qt_cache(self):
         harness = _ImmediateDeleteHarness(remote_deleted=True)
@@ -487,6 +592,331 @@ class QtShellBackendEventTests(unittest.TestCase):
             harness.added[0]["active_item_id"],
             "active-old-runtime",
         )
+
+    def test_stale_active_delete_keeps_live_canonical_target(self):
+        target_record_id = "rec-canonical-after-stale-delete"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            canonical = {
+                "active_item_id": "active-current-canonical",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "notice_type": "变更通告",
+                "work_type": "change",
+                "text": "【变更通告】状态：更新\n【名称】当前权威通告",
+            }
+            store.upsert_qt_active_item(
+                canonical,
+                section="other",
+                origin="target_snapshot_refresh",
+            )
+            harness = _CanonicalActiveDeleteHarness(
+                store,
+                {
+                    **canonical,
+                    "active_item_id": "active-visible-before-migration",
+                },
+            )
+
+            result = harness._apply_backend_active_delete(
+                {
+                    "active_item_id": "active-visible-before-migration",
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                }
+            )
+
+            self.assertFalse(result.get("deleted", False))
+            self.assertEqual(harness.removed, [])
+            self.assertEqual(
+                harness.current.get("target_record_id"),
+                target_record_id,
+            )
+
+    def test_active_delete_fails_closed_when_canonical_state_read_fails(self):
+        target_record_id = "rec-delete-canonical-read-failure"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            canonical = {
+                "active_item_id": "active-delete-canonical-read-failure",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "notice_type": "变更通告",
+                "work_type": "change",
+                "text": "【变更通告】状态：更新\n【名称】权威仍进行",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    canonical,
+                    section="other",
+                    origin="portal",
+                )
+            )
+            harness = _CanonicalActiveDeleteHarness(store, canonical)
+
+            with patch.object(
+                store,
+                "list_visible_qt_active_items",
+                side_effect=RuntimeError("sqlite busy"),
+            ):
+                result = harness._apply_backend_active_delete(
+                    {
+                        "active_item_id": canonical["active_item_id"],
+                        "record_id": target_record_id,
+                        "target_record_id": target_record_id,
+                    }
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(harness.removed, [])
+            self.assertEqual(harness.current, canonical)
+            self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+
+    def test_stale_active_upsert_does_not_revive_soft_deleted_canonical_item(self):
+        target_record_id = "rec-canonical-before-stale-upsert"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            stale = {
+                "active_item_id": "active-stale-upsert",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "notice_type": "变更通告",
+                "work_type": "change",
+                "text": "【变更通告】状态：更新\n【名称】陈旧投影",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    stale,
+                    section="other",
+                    origin="portal",
+                )
+            )
+            deleted, _event_id = store.delete_qt_active_item_and_enqueue(
+                active_item_id=stale["active_item_id"],
+                record_id=target_record_id,
+                channel="qt_action",
+                payload={"kind": "active_delete", "payload": stale},
+            )
+            self.assertTrue(deleted)
+            self.assertEqual(store.list_visible_qt_active_items(), [])
+
+            harness = _ActiveUpsertVisibilityHarness()
+            harness.cache_store = type(
+                "CacheStore",
+                (),
+                {"_state_store": store},
+            )()
+            result = harness._apply_backend_active_upsert(
+                {
+                    "item": {
+                        "active_item_id": stale["active_item_id"],
+                        "record_id": target_record_id,
+                        "origin": "portal",
+                        "payload": stale,
+                    }
+                }
+            )
+
+            self.assertFalse(result.get("created", False))
+            self.assertEqual(
+                harness.added,
+                [],
+                "权威 qta 已软删除时，Qt 不得重放旧 active_upsert 复活",
+            )
+
+    def test_stale_active_upsert_does_not_overwrite_newer_canonical_fields(self):
+        target_record_id = "rec-canonical-newer-fields"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            canonical = {
+                "active_item_id": "active-canonical-newer-fields",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "source_record_id": "source-canonical-newer-fields",
+                "notice_type": "变更通告",
+                "work_type": "change",
+                "progress": "NEW",
+                "text": "【变更通告】状态：更新\n【名称】同身份\n【进度】NEW",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    canonical,
+                    section="other",
+                    origin="portal",
+                    allow_revive=True,
+                )
+            )
+            stale = {
+                **canonical,
+                "progress": "OLD",
+                "text": "【变更通告】状态：更新\n【名称】同身份\n【进度】OLD",
+            }
+            harness = _ActiveUpsertVisibilityHarness()
+            harness.cache_store = type(
+                "CacheStore",
+                (),
+                {"_state_store": store},
+            )()
+
+            result = harness._apply_backend_active_upsert(
+                {
+                    "item": {
+                        "active_item_id": canonical["active_item_id"],
+                        "record_id": target_record_id,
+                        "origin": "portal",
+                        "payload": stale,
+                    }
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(harness.added), 1)
+            self.assertEqual(harness.added[0]["progress"], "NEW")
+            self.assertIn("【进度】NEW", harness.added[0]["text"])
+
+    def test_canonical_active_guard_prioritizes_work_type_and_strong_ids(self):
+        shared_target_id = "rec-cross-work-type"
+        change = {
+            "active_item_id": "active-change-canonical",
+            "record_id": shared_target_id,
+            "target_record_id": shared_target_id,
+            "source_record_id": "source-change-canonical",
+            "notice_type": "变更通告",
+            "work_type": "change",
+            "progress": "CHANGE",
+            "text": "【变更通告】状态：更新\n【进度】CHANGE",
+        }
+        maintenance = {
+            "active_item_id": "active-maintenance-collision",
+            "record_id": shared_target_id,
+            "target_record_id": shared_target_id,
+            "source_record_id": "source-maintenance-collision",
+            "notice_type": "维保通告",
+            "work_type": "maintenance",
+            "progress": "MAINTENANCE",
+            "text": "【维保通告】状态：更新\n【进度】MAINTENANCE",
+        }
+        strong_a = {
+            "active_item_id": "active-strong-a",
+            "record_id": "rec-strong-a",
+            "target_record_id": "rec-strong-a",
+            "source_record_id": "source-strong-a",
+            "zhihang_record_id": "zhihang-shared-collision",
+            "notice_type": "变更通告",
+            "work_type": "change",
+            "progress": "A",
+            "text": "【变更通告】状态：更新\n【进度】A",
+        }
+        strong_b = {
+            "active_item_id": "active-strong-b",
+            "record_id": "rec-strong-b",
+            "target_record_id": "rec-strong-b",
+            "source_record_id": "source-strong-b",
+            "zhihang_record_id": "zhihang-shared-collision",
+            "notice_type": "变更通告",
+            "work_type": "change",
+            "progress": "B",
+            "text": "【变更通告】状态：更新\n【进度】B",
+        }
+        cases = (
+            ("cross_work_type", change, [maintenance, change]),
+            ("conflicting_strong_ids", strong_a, [strong_b, strong_a]),
+        )
+
+        for label, incoming, canonical_payloads in cases:
+            with self.subTest(case=label):
+                rows = [
+                    {
+                        "active_item_id": item["active_item_id"],
+                        "record_id": item["target_record_id"],
+                        "origin": "portal",
+                        "payload": dict(item),
+                    }
+                    for item in canonical_payloads
+                ]
+                state_store = type(
+                    "StateStore",
+                    (),
+                    {"list_visible_qt_active_items": lambda _self: rows},
+                )()
+                harness = _ActiveUpsertVisibilityHarness()
+                harness.cache_store = type(
+                    "CacheStore",
+                    (),
+                    {"_state_store": state_store},
+                )()
+                harness._canonical_backend_active_payload = (
+                    lambda data, **_kwargs: dict(data)
+                )
+
+                result = harness._apply_backend_active_upsert(
+                    {
+                        "item": {
+                            "active_item_id": incoming["active_item_id"],
+                            "record_id": incoming["target_record_id"],
+                            "origin": "qt_event",
+                            "payload": dict(incoming),
+                        }
+                    }
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(len(harness.added), 1)
+                applied = harness.added[0]
+                self.assertEqual(applied["work_type"], incoming["work_type"])
+                self.assertEqual(
+                    applied["active_item_id"], incoming["active_item_id"]
+                )
+                self.assertEqual(
+                    applied["target_record_id"], incoming["target_record_id"]
+                )
+                self.assertEqual(
+                    applied["source_record_id"], incoming["source_record_id"]
+                )
+                self.assertEqual(applied["progress"], incoming["progress"])
+
+    def test_target_delete_migrates_qt_to_live_source_fallback_without_removal(self):
+        source_record_id = "source-live-after-target-end"
+        target_record_id = "target-ended-with-live-source"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            source_only = {
+                "active_item_id": f"source-change-{source_record_id}",
+                "source_record_id": source_record_id,
+                "notice_type": "变更通告",
+                "work_type": "change",
+                "source_snapshot_authoritative": True,
+                "text": "【变更通告】状态：更新\n【名称】源表仍进行中",
+            }
+            store.upsert_qt_active_item(
+                source_only,
+                section="other",
+                origin="source_snapshot_refresh",
+            )
+            harness = _CanonicalActiveDeleteHarness(
+                store,
+                {
+                    **source_only,
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                },
+            )
+
+            result = harness._apply_backend_active_delete(
+                {
+                    "active_item_id": target_record_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                }
+            )
+
+            self.assertFalse(result.get("deleted", False))
+            self.assertEqual(harness.removed, [])
+            self.assertEqual(harness.current["source_record_id"], source_record_id)
+            self.assertFalse(harness.current.get("target_record_id"))
+
 
     def test_event_parser_accepts_long_source_and_level_labels(self):
         text = (
