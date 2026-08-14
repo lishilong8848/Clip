@@ -910,6 +910,21 @@ class CriticalGuardStateStoreTests(unittest.TestCase):
             operator_open_id="operator-open-id",
             operator_name="管理员",
         )
+        self.store.put_critical_guard_weather_task(
+            weather_key="scope-upload-weather",
+            warning_id="scope-upload-warning",
+            warning_title="楼栋上传生成测试",
+            warning_type="暴雨",
+            warning_color="blue",
+            guard_level="三级戒备",
+            sheet_types=["物资检查清单"],
+            task_id=task["task_id"],
+            source_payload={},
+        )
+        queued_weather_keys: list[str] = []
+        service._queue_critical_guard_weather_reconcile = lambda item: (
+            queued_weather_keys.append(str(item.get("weather_key") or ""))
+        )
         response = task["responses"][0]
         source_bytes = critical_guard_template_path().read_bytes()
 
@@ -955,6 +970,7 @@ class CriticalGuardStateStoreTests(unittest.TestCase):
             self.assertEqual(generated["status"], "submitted")
             self.assertTrue(generated["has_image"])
             self.assertTrue(generated["has_workbook"])
+            self.assertEqual(queued_weather_keys, ["scope-upload-weather"])
             workbook_bytes, workbook_name = service.get_critical_guard_workbook_bytes(
                 response["response_id"],
                 scope="A",

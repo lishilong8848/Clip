@@ -294,6 +294,13 @@ class CriticalGuardWeatherParserTests(unittest.TestCase):
                         "scope": "A",
                         "status": "submitted",
                         "cells": {
+                            "template_items": [
+                                {
+                                    "key": "1",
+                                    "category": "环境",
+                                    "content": "检查漏水",
+                                }
+                            ],
                             "checks": {
                                 "1": {"status": "abnormal", "note": "渗水"}
                             }
@@ -307,6 +314,10 @@ class CriticalGuardWeatherParserTests(unittest.TestCase):
         self.assertEqual(progress["registered_scopes"], 1)
         self.assertEqual(progress["completed_scopes"], 1)
         self.assertEqual(progress["abnormal"], 1)
+        self.assertEqual(
+            progress["scopes"][0]["abnormal_items"],
+            ["检查项 · 检查漏水：渗水"],
+        )
         self.assertFalse(progress["complete"])
 
 
@@ -610,6 +621,8 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
     def _weather_service(self) -> MaintenancePortalService:
         service = MaintenancePortalService.__new__(MaintenancePortalService)
         service._state_store = self.store
+        service._critical_guard_response_locks_guard = threading.RLock()
+        service._critical_guard_response_locks = {}
         service._critical_guard_weather_job_lock = threading.RLock()
         service._critical_guard_weather_running_job_id = ""
         return service
@@ -646,7 +659,13 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             "abnormal": 0,
             "complete": False,
             "scopes": [
-                {"scope": "A", "submitted": 2, "total": 2, "complete": True},
+                {
+                    "scope": "A",
+                    "submitted": 2,
+                    "total": 2,
+                    "complete": True,
+                    "abnormal_items": ["设备安全 · 水泵状态：渗水"],
+                },
                 {"scope": "B", "submitted": 0, "total": 2, "complete": False},
             ],
         }
@@ -664,6 +683,7 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         )
         scope_content = scope_card["elements"][0]["text"]["content"]
         self.assertIn("A楼已完成本次 2/2 项检查", scope_content)
+        self.assertIn("　异常：设备安全 · 水泵状态：渗水", scope_content)
         self.assertFalse(
             any(item.get("tag") == "action" for item in scope_card["elements"])
         )
@@ -688,6 +708,8 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         )
         all_content = all_card["elements"][0]["text"]["content"]
         self.assertIn("全部 5 个楼栋已完成本次重保检查", all_content)
+        self.assertIn("戒备要求 · 5项", all_content)
+        self.assertIn("5. 应急储备物资清点", all_content)
         self.assertNotEqual(scope_content, all_content)
 
     def test_h_observer_receives_one_persisted_message_per_weather_task(self) -> None:
@@ -775,7 +797,11 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             source_payload={},
         )
         scope_state = {
-            scope: {"initial_sent_at": 1, "completed_notified_at": 1}
+            scope: {
+                "initial_sent_at": 1,
+                "completed_notified_at": 1,
+                "group_completion_ready_at": 1,
+            }
             for scope in CRITICAL_GUARD_WEATHER_SCOPES
         }
         scope_state["_h_observer"] = {"sent_at": 1}
@@ -861,6 +887,76 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         )
         self.assertEqual(first["notifications_sent"], 6)
         self.assertEqual(second["notifications_sent"], 0)
+
+    def test_restart_does_not_send_historical_completion_without_pending_marker(self) -> None:
+        service = self._weather_service()
+        weather_task = self.store.put_critical_guard_weather_task(
+            weather_key="historical-completion-key",
+            warning_id="historical-warning",
+            warning_title="历史已完成任务",
+            warning_type="暴雨",
+            warning_color="blue",
+            guard_level="三级戒备",
+            sheet_types=["设备安全"],
+            task_id="historical-completion-task",
+            source_payload={},
+        )
+        scope_state = {
+            scope: {"initial_sent_at": 1, "completed_notified_at": 1}
+            for scope in CRITICAL_GUARD_WEATHER_SCOPES
+        }
+        scope_state["_h_observer"] = {"sent_at": 1}
+        weather_task = self.store.update_critical_guard_weather_task(
+            "historical-completion-key",
+            scope_state=scope_state,
+        )
+        service._state_store.get_critical_guard_task = lambda *_args, **_kwargs: {
+            "task_id": "historical-completion-task",
+            "responses": [],
+        }
+        service._archive_critical_guard_weather_task = (
+            lambda *_args, **_kwargs: {"status": "archived", "reused": True}
+        )
+        complete_progress = {
+            "registered_scopes": 5,
+            "completed_scopes": 5,
+            "scope_count": 5,
+            "submitted": 5,
+            "total": 5,
+            "abnormal": 0,
+            "scopes": [
+                {
+                    "scope": scope,
+                    "submitted": 1,
+                    "total": 1,
+                    "complete": True,
+                    "registered": True,
+                }
+                for scope in CRITICAL_GUARD_WEATHER_SCOPES
+            ],
+            "complete": True,
+        }
+        cards: list[dict[str, object]] = []
+        with (
+            patch(
+                "lan_bitable_template_portal.portal_service.critical_guard_weather_progress",
+                return_value=complete_progress,
+            ),
+            patch(
+                "lan_bitable_template_portal.portal_service.send_interactive_to_chat_id",
+                side_effect=lambda card, chat_id: (
+                    cards.append({"card": card, "chat_id": chat_id}) or True,
+                    "ok",
+                ),
+            ),
+        ):
+            result = service._reconcile_critical_guard_weather_task(
+                weather_task,
+                now=100,
+            )
+
+        self.assertEqual(cards, [])
+        self.assertEqual(result["notifications_sent"], 0)
 
     def test_manual_trigger_reuses_running_scheduled_job(self) -> None:
         service = self._weather_service()

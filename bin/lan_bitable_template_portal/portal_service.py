@@ -41022,6 +41022,10 @@ class MaintenancePortalService:
                 scope_state[scope] = state
                 continue
             state[f"last_{kind}_attempt_at"] = now
+            if kind == "completed":
+                state["group_completion_ready_at"] = float(
+                    state.get("group_completion_ready_at") or now
+                )
             try:
                 ok, message = self._send_critical_guard_weather_scope_card(
                     weather_task=weather_task,
@@ -41058,7 +41062,9 @@ class MaintenancePortalService:
             state = scope_state.get(scope)
             if not isinstance(state, dict):
                 state = {}
-            if float(state.get("group_completed_notified_at") or 0):
+            if not float(state.get("group_completion_ready_at") or 0) or float(
+                state.get("group_completed_notified_at") or 0
+            ):
                 continue
             state["last_group_completed_attempt_at"] = now
             try:
@@ -41077,6 +41083,24 @@ class MaintenancePortalService:
                 failed += 1
                 state["group_last_error"] = message or f"{scope}楼完成群通知发送失败"
             scope_state[scope] = state
+            weather_task = self._state_store.update_critical_guard_weather_task(
+                weather_key,
+                scope_state=scope_state,
+            )
+
+        completion_group_key = "_archive_completion_group"
+        completion_group_state = scope_state.get(completion_group_key)
+        if not isinstance(completion_group_state, dict):
+            completion_group_state = {}
+        all_scope_completions_ready = all(
+            float((scope_state.get(scope) or {}).get("group_completion_ready_at") or 0)
+            for scope in CRITICAL_GUARD_WEATHER_SCOPES
+        )
+        if progress.get("complete") and all_scope_completions_ready:
+            completion_group_state["ready_at"] = float(
+                completion_group_state.get("ready_at") or now
+            )
+            scope_state[completion_group_key] = completion_group_state
             weather_task = self._state_store.update_critical_guard_weather_task(
                 weather_key,
                 scope_state=scope_state,
@@ -41134,12 +41158,13 @@ class MaintenancePortalService:
                 weather_task,
                 task,
             )
-        completion_group_key = "_archive_completion_group"
         completion_group_state = scope_state.get(completion_group_key)
         if not isinstance(completion_group_state, dict):
             completion_group_state = {}
-        if archive_result.get("status") == "archived" and not float(
-            completion_group_state.get("sent_at") or 0
+        if (
+            archive_result.get("status") == "archived"
+            and float(completion_group_state.get("ready_at") or 0)
+            and not float(completion_group_state.get("sent_at") or 0)
         ):
             completion_group_state["last_attempt_at"] = now
             try:
@@ -41170,6 +41195,46 @@ class MaintenancePortalService:
             "notifications_failed": failed,
             "archive": archive_result,
         }
+
+    def _reconcile_critical_guard_weather_task_serialized(
+        self,
+        weather_task: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, Any]:
+        weather_key = str(weather_task.get("weather_key") or "").strip()
+        lock = self._critical_guard_response_lock(f"weather-reconcile:{weather_key}")
+        with lock:
+            latest = (
+                self._state_store.get_critical_guard_weather_task(
+                    weather_key=weather_key
+                )
+                if weather_key
+                else None
+            )
+            return self._reconcile_critical_guard_weather_task(
+                latest or weather_task,
+                now=now,
+            )
+
+    def _queue_critical_guard_weather_reconcile(
+        self,
+        weather_task: dict[str, Any],
+    ) -> None:
+        def run() -> None:
+            try:
+                self._reconcile_critical_guard_weather_task_serialized(
+                    weather_task,
+                    now=time.time(),
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("重保完成通知后台处理失败")
+
+        threading.Thread(
+            target=run,
+            name="CriticalGuardCompletion",
+            daemon=True,
+        ).start()
 
     @staticmethod
     def _critical_guard_sheet_abnormal_notes(
@@ -41641,7 +41706,7 @@ class MaintenancePortalService:
                 status="active"
             ):
                 try:
-                    item = self._reconcile_critical_guard_weather_task(
+                    item = self._reconcile_critical_guard_weather_task_serialized(
                         weather_task,
                         now=now,
                     )
@@ -42810,6 +42875,22 @@ class MaintenancePortalService:
             for stale_path in updated.pop("_stale_artifact_paths", []) or []:
                 with suppress(OSError):
                     Path(str(stale_path)).unlink()
+            if updated.get("status") == "submitted":
+                scoped_task = self._state_store.get_critical_guard_task(
+                    str(updated.get("task_id") or ""),
+                    scope=scope_code,
+                )
+                weather_task = self._state_store.get_critical_guard_weather_task(
+                    task_id=str(updated.get("task_id") or "")
+                )
+                scoped_responses = (
+                    list(scoped_task.get("responses") or []) if scoped_task else []
+                )
+                scope_complete = bool(scoped_responses) and all(
+                    item.get("status") == "submitted" for item in scoped_responses
+                )
+                if weather_task and scope_complete:
+                    self._queue_critical_guard_weather_reconcile(weather_task)
             return self._critical_guard_public_response(
                 updated,
                 operator_open_id=operator_open_id,

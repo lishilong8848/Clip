@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from lan_bitable_template_portal.identity_utils import canonical_target_record_id
 
 from ..logger import log_info, log_error, log_warning
+from ..config import SPECIALTY_FIRE
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
 from .styles import get_stylesheet
@@ -1023,6 +1024,11 @@ class MainWindowWorkflowMixin:
         robot_group_choice: str = "auto",
     ):
         choice = str(robot_group_choice or "auto").strip().lower() or "auto"
+        if (
+            notice_type == "事件通告"
+            and str(payload.specialty or "").strip() == SPECIALTY_FIRE
+        ):
+            return "skip"
         if notice_type == "变更通告":
             if choice == "i3":
                 return "i3"

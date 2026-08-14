@@ -44,6 +44,7 @@ from .state_store import LanPortalStateStore
 from upload_event_module.config import (
     CHANGE_NOTICE_FIELDS,
     EVENT_NOTICE_FIELDS,
+    SPECIALTY_FIRE,
     get_field_config,
 )
 from upload_event_module.services.handlers import NoticePayload, get_notice_handler
@@ -5508,6 +5509,47 @@ class PortalRuntime:
         return patch
 
     @classmethod
+    def _apply_event_group_robot_policy(
+        cls,
+        data: dict,
+        *,
+        action_type: str,
+        remote_fields: dict | None = None,
+    ) -> bool:
+        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
+            return False
+        suppressed = bool((data or {}).get("event_group_robot_suppressed"))
+        identity_payload: dict[str, Any] = {}
+        try:
+            identity = cls.state_store.resolve_notice_identity(
+                work_type="event",
+                active_item_id=str((data or {}).get("active_item_id") or "").strip(),
+                source_record_id=str((data or {}).get("source_record_id") or "").strip(),
+                target_record_id=str((data or {}).get("target_record_id") or "").strip(),
+            )
+            if isinstance(identity, dict) and isinstance(identity.get("payload"), dict):
+                identity_payload = identity["payload"]
+        except Exception:
+            identity_payload = {}
+        suppressed = suppressed or bool(
+            identity_payload.get("event_group_robot_suppressed")
+        )
+        suppressed = suppressed or (
+            str((data or {}).get("specialty") or "").strip() == SPECIALTY_FIRE
+        )
+        suppressed = suppressed or (
+            str(identity_payload.get("specialty") or "").strip() == SPECIALTY_FIRE
+        )
+        suppressed = suppressed or (
+            str((remote_fields or {}).get(EVENT_NOTICE_FIELDS["specialty"]) or "").strip()
+            == SPECIALTY_FIRE
+        )
+        if suppressed:
+            data["event_group_robot_suppressed"] = True
+            data["robot_group_choice"] = "skip"
+        return suppressed
+
+    @classmethod
     def _remote_event_time_key_from_fields(cls, fields: dict | None) -> str:
         if not isinstance(fields, dict):
             return ""
@@ -7738,6 +7780,17 @@ class PortalRuntime:
                 prequery_fields,
             )
 
+        event_group_robot_suppressed = cls._apply_event_group_robot_policy(
+            data,
+            action_type=action_type,
+            remote_fields=(
+                prequery_result.get("fields")
+                if isinstance(prequery_result, dict)
+                and isinstance(prequery_result.get("fields"), dict)
+                else {}
+            ),
+        )
+
         notice_payload = cls._prepared_to_notice_payload(data)
         notice_payload.file_tokens = file_tokens or None
         notice_payload.extra_file_tokens = extra_file_tokens or None
@@ -7746,6 +7799,8 @@ class PortalRuntime:
         notice_payload.robot_group_choice = (
             str(payload.get("robot_group_choice") or "auto").strip() or "auto"
         )
+        if event_group_robot_suppressed:
+            notice_payload.robot_group_choice = "skip"
         notice_payload.transfer_to_overhaul = data.get("transfer_to_overhaul")
         notice_payload.occurrence_date = str(data.get("time_str") or "").strip() or None
 

@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from ..config import config
+from ..config import SPECIALTY_FIRE, config
 from ..logger import log_error, log_info, log_warning
 from .feishu_token_manager import (
     TOKEN_REFRESH_MARGIN_SECONDS,
@@ -561,6 +561,10 @@ def _send_robot_message(handler, payload: NoticePayload):
     try:
         title, content, notice_type, level = handler.build_robot_message(payload)
         if not title and not content:
+            _set_robot_result(skipped=True)
+            return
+        if notice_type == "事件通告" and str(payload.specialty or "").strip() == SPECIALTY_FIRE:
+            log_info("群机器人发送: 消防专业事件通告按规则跳过")
             _set_robot_result(skipped=True)
             return
         choice = str(getattr(payload, "robot_group_choice", "") or "").strip().lower()

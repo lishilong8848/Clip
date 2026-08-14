@@ -17,10 +17,21 @@ WEATHER_SHEET_NAME_PARTS = (
 )
 SUPPORTED_WEATHER_SCHEMA_MAJOR = "2"
 MIN_WEATHER_POLL_SECONDS = 10 * 60
+DEFAULT_WEATHER_GUARD_ACTIONS = (
+    "相关人员7*24 On call，通知相关设备供应商7*24 On call；",
+    "现场团队进行内部预警通报；",
+    "明确戒备期间相关人员，填写《重保戒备检查表-重保联络清单》，启动重保戒备检查，填写《重保戒备检查表》中对应检查页，并排查问题清零；",
+    "明确戒备期间现场 7*24 岗值班人员排班信息，无特殊情况不得随意调换班/请假；",
+    "应急储备物资清点，填写《重保戒备检查表-物资检查清单》，应急物资可用性检查、物资排查问题清零；",
+)
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _inline_text(value: Any, *, limit: int = 180) -> str:
+    return " ".join(_text(value).split())[:limit]
 
 
 def _list(value: Any) -> list[Any]:
@@ -271,13 +282,28 @@ def progress_summary(task: dict[str, Any], scopes: tuple[str, ...]) -> dict[str,
         complete = bool(items) and completed == len(items)
         if complete:
             completed_scopes += 1
+        scope_abnormal_items: list[str] = []
         for item in items:
             cells = item.get("cells") if isinstance(item.get("cells"), dict) else {}
             checks = cells.get("checks") if isinstance(cells.get("checks"), dict) else {}
-            abnormal += sum(
-                isinstance(check, dict) and _text(check.get("status")) == "abnormal"
-                for check in checks.values()
-            )
+            template_items = {
+                _text(row.get("key")): row
+                for row in cells.get("template_items") or []
+                if isinstance(row, dict) and _text(row.get("key"))
+            }
+            sheet_type = _inline_text(item.get("sheet_type")) or "检查项"
+            for check_key, check in checks.items():
+                if not isinstance(check, dict) or _text(check.get("status")) != "abnormal":
+                    continue
+                abnormal += 1
+                template_item = template_items.get(_text(check_key)) or {}
+                check_content = _inline_text(
+                    template_item.get("content") or template_item.get("category") or check_key
+                )
+                note = _inline_text(check.get("note")) or "存在异常项"
+                scope_abnormal_items.append(
+                    f"{sheet_type} · {check_content}：{note}"
+                )
         scope_rows.append(
             {
                 "scope": scope,
@@ -285,6 +311,8 @@ def progress_summary(task: dict[str, Any], scopes: tuple[str, ...]) -> dict[str,
                 "total": len(items),
                 "complete": complete,
                 "registered": completed > 0,
+                "abnormal_count": len(scope_abnormal_items),
+                "abnormal_items": list(dict.fromkeys(scope_abnormal_items)),
             }
         )
     return {
@@ -335,6 +363,11 @@ def build_weather_guard_card(
         scope_lines.append(
             f"{item.get('scope')}楼 {item.get('submitted', 0)}/{item.get('total', 0)} · {state}"
         )
+        scope_lines.extend(
+            f"　异常：{_inline_text(detail)}"
+            for detail in item.get("abnormal_items") or []
+            if _inline_text(detail)
+        )
     weather_lines = []
     if weather.get("temperature") not in (None, ""):
         weather_lines.append(f"温度 {weather.get('temperature')}℃")
@@ -348,6 +381,8 @@ def build_weather_guard_card(
     if wind:
         weather_lines.append(f"风力 {wind}")
     actions = [_text(item) for item in source.get("actions") or [] if _text(item)]
+    if not actions:
+        actions = list(DEFAULT_WEATHER_GUARD_ACTIONS)
     if scope_completed:
         scope_row = next(
             (

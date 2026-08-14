@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -20,11 +21,89 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
 )
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
+from upload_event_module.config import SPECIALTY_FIRE  # noqa: E402
+from upload_event_module.services.feishu_service import _send_robot_message  # noqa: E402
+from upload_event_module.services.handlers import NoticePayload  # noqa: E402
 
 
 class NoticeTemplateTests(unittest.TestCase):
     def _assert_lines(self, text: str, expected: list[str]) -> None:
         self.assertEqual(text.splitlines(), expected)
+
+    def test_only_fire_event_notices_skip_group_robot(self):
+        handler = Mock()
+        handler.send_group_robot_message.return_value = (True, "ok")
+
+        fire_event = NoticePayload(text="event", specialty=SPECIALTY_FIRE)
+        handler.build_robot_message.return_value = (
+            "C楼 新增",
+            "event",
+            "事件通告",
+            "I1",
+        )
+        _send_robot_message(handler, fire_event)
+        handler.send_group_robot_message.assert_not_called()
+        self.assertTrue(getattr(fire_event, "_clipflow_robot_skipped", False))
+
+        handler.reset_mock()
+        electric_event = NoticePayload(text="event", specialty="电气")
+        _send_robot_message(handler, electric_event)
+        handler.send_group_robot_message.assert_called_once()
+
+        handler.reset_mock()
+        handler.build_robot_message.return_value = (
+            "C楼 开始",
+            "maintenance",
+            "维保通告",
+            "",
+        )
+        fire_maintenance = NoticePayload(text="maintenance", specialty=SPECIALTY_FIRE)
+        _send_robot_message(handler, fire_maintenance)
+        handler.send_group_robot_message.assert_called_once()
+
+    def test_fire_event_robot_suppression_is_sticky_after_first_upload(self):
+        start = {"notice_type": "事件通告", "specialty": SPECIALTY_FIRE}
+        with patch.object(
+            PortalRuntime.state_store,
+            "resolve_notice_identity",
+            return_value=None,
+        ):
+            self.assertTrue(
+                PortalRuntime._apply_event_group_robot_policy(
+                    start,
+                    action_type="upload",
+                )
+            )
+        self.assertTrue(start["event_group_robot_suppressed"])
+        self.assertEqual(start["robot_group_choice"], "skip")
+
+        fire_update = {"notice_type": "事件通告", "specialty": SPECIALTY_FIRE}
+        with patch.object(
+            PortalRuntime.state_store,
+            "resolve_notice_identity",
+            return_value=None,
+        ):
+            self.assertTrue(
+                PortalRuntime._apply_event_group_robot_policy(
+                    fire_update,
+                    action_type="update",
+                )
+            )
+        self.assertEqual(fire_update["robot_group_choice"], "skip")
+
+        update = {"notice_type": "事件通告", "specialty": "电气"}
+        with patch.object(
+            PortalRuntime.state_store,
+            "resolve_notice_identity",
+            return_value={"payload": {"event_group_robot_suppressed": True}},
+        ):
+            self.assertTrue(
+                PortalRuntime._apply_event_group_robot_policy(
+                    update,
+                    action_type="update",
+                )
+            )
+        self.assertEqual(update["robot_group_choice"], "skip")
 
     def test_maintenance_notice_text_contract(self):
         text = MaintenancePortalService.build_notice_text(
