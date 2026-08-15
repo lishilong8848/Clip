@@ -7195,6 +7195,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
+    def test_qt_shell_bootstrap_route_runs_outside_the_async_event_loop(self):
+        source = (BIN_DIR / "clipflow_backend" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        route = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "qt_shell_bootstrap"
+        )
+
+        self.assertIsInstance(route, ast.FunctionDef)
+
     def test_qt_shell_bootstrap_removes_ended_active_item(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_state_store = PortalRuntime.state_store
@@ -7222,11 +7235,57 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["data"]["active_items"], [])
+            deadline = time.monotonic() + 2
+            while (
+                PortalRuntime.state_store.list_qt_active_items()
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
             self.assertEqual(PortalRuntime.state_store.list_qt_active_items(), [])
             deleted = PortalRuntime.state_store.list_qt_active_items(include_deleted=True)
             self.assertEqual(len(deleted), 1)
             self.assertIsNotNone(deleted[0].get("deleted_at"))
         finally:
+            PortalRuntime.state_store = original_state_store
+            temp_dir.cleanup()
+
+    def test_qt_bootstrap_and_web_ongoing_do_not_wait_for_active_repair(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_state_store = PortalRuntime.state_store
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalRuntime.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        repair_started = threading.Event()
+        release_repair = threading.Event()
+        repair_finished = threading.Event()
+
+        def blocked_repair():
+            repair_started.set()
+            release_repair.wait(2)
+            repair_finished.set()
+            return {"restored": 0, "items": []}
+
+        client = TestClient(controller._build_app())
+        try:
+            with patch.object(
+                PortalRuntime,
+                "restore_live_portal_active_items",
+                side_effect=blocked_repair,
+            ):
+                started = time.perf_counter()
+                response = client.get("/api/qt/shell/bootstrap")
+                bootstrap_elapsed = time.perf_counter() - started
+                self.assertEqual(response.status_code, 200)
+                self.assertLess(bootstrap_elapsed, 1)
+                self.assertTrue(repair_started.wait(1))
+
+                started = time.perf_counter()
+                self.assertEqual(controller._get_ongoing("ALL"), [])
+                self.assertLess(time.perf_counter() - started, 1)
+        finally:
+            release_repair.set()
+            repair_finished.wait(1)
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
@@ -12748,6 +12807,36 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "zhihang-standalone-ongoing",
             )
 
+    def test_query_records_does_not_reconcile_sources_on_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            with patch.object(
+                service,
+                "reconcile_source_ongoing_items",
+                side_effect=AssertionError("read path must not reconcile"),
+            ) as reconcile:
+                service.query_records(
+                    scope="ALL",
+                    ongoing_items=[],
+                    sections={"ongoing"},
+                )
+
+            reconcile.assert_not_called()
+
+    def test_restore_live_active_items_reconciles_sources(self):
+        with patch.object(
+            PortalRuntime.service,
+            "reconcile_source_ongoing_items",
+            return_value={},
+        ) as reconcile, patch.object(
+            PortalRuntime.state_store,
+            "restore_live_portal_qt_active_items",
+            return_value={"restored": 0, "items": []},
+        ):
+            PortalRuntime.restore_live_portal_active_items()
+
+        reconcile.assert_called_once_with()
+
     def test_matching_change_sources_reconcile_idempotently(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -15088,6 +15177,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             with patch.object(service, "_target_records_for_notice_type", return_value=[]):
                 merged = service._merge_ongoing_items("C", [])
+                service.reconcile_source_ongoing_items()
 
             self.assertEqual(merged, [])
             result = service.query_records(scope="C", ongoing_items=[])
@@ -17399,6 +17489,74 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("/", qt_options)
 
         self.assertEqual(list(PORTAL_MAINTENANCE_CYCLE_OPTIONS), qt_options)
+
+    def test_refactored_main_loads_qt_shell_bootstrap_off_ui_thread(self):
+        source = (BIN_DIR / "refactored_main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        attach = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_attach_portal_controller"
+        )
+        loader = next(
+            node
+            for node in ast.walk(attach)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_load_qt_shell_bootstrap"
+        )
+
+        class DirectBootstrapCallFinder(ast.NodeVisitor):
+            def __init__(self):
+                self.calls = []
+
+            def visit_FunctionDef(self, node):
+                return
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get_qt_shell_bootstrap"
+                ):
+                    self.calls.append(node)
+                self.generic_visit(node)
+
+        direct_calls = DirectBootstrapCallFinder()
+        for statement in attach.body:
+            direct_calls.visit(statement)
+        self.assertEqual(direct_calls.calls, [])
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get_qt_shell_bootstrap"
+                for node in ast.walk(loader)
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "Thread"
+                and any(
+                    keyword.arg == "target"
+                    and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id == loader.name
+                    for keyword in node.keywords
+                )
+                and any(
+                    keyword.arg == "name"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value == "ClipFlowQtShellBootstrap"
+                    for keyword in node.keywords
+                )
+                for node in ast.walk(attach)
+            )
+        )
+        self.assertIn("for attempt in range(2):", source)
+        self.assertIn("initial_sync=False", source)
 
     def test_qt_screenshot_confirm_enables_when_specialty_is_selected_last(self):
         from PyQt6.QtWidgets import QApplication
@@ -21818,6 +21976,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(payloads[0]["payload"]["notice_callback"])
         self.assertTrue(payloads[0]["payload"]["maintenance_action_callback"])
 
+    def test_shell_callback_registration_does_not_block_on_heartbeat_or_resync(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
+
+        class AliveThread:
+            @staticmethod
+            def is_alive():
+                return True
+
+        controller._event_thread = AliveThread()
+        controller._snapshot_thread = AliveThread()
+        with patch.object(controller, "_post_bridge_heartbeat") as heartbeat, patch(
+            "clipflow_backend.process_controller.threading.Thread"
+        ) as thread:
+            controller.set_shell_event_callback(lambda *_args: None, initial_sync=False)
+
+        heartbeat.assert_not_called()
+        thread.assert_not_called()
+
     def test_backend_process_controller_starts_and_stops_in_mock_external_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             port = _free_tcp_port()
@@ -26225,6 +26401,121 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "事件应急措施": "隔离故障设备并启用备用设备",
                 }
             ],
+        )
+
+    def test_repair_relation_sync_skips_historical_event_write_without_retry(self):
+        service = _TestMaintenancePortalService()
+        reason_meta = FieldMeta(
+            "fld_reason",
+            "故障维修原因",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        project = {
+            "record_id": "rec_summary",
+            "raw_fields": {"关联事件单": "rec_archived_event"},
+            "display_fields": {},
+        }
+        project_patches: list[dict[str, Any]] = []
+        event_patches: list[dict[str, Any]] = []
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: project
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [reason_meta],
+                {reason_meta.field_name: reason_meta},
+                [project],
+            )
+        )
+        service._event_snapshot_record_for_repair = (  # type: ignore[method-assign]
+            lambda **_kwargs: {
+                "record_id": "rec_archived_event",
+                "raw_fields": {},
+                "display_fields": {},
+                "historical_fallback": True,
+                "resolution_warning": (
+                    "关联事件已不在当前事件表中，"
+                    "已使用维修单中保存的事件字段。"
+                ),
+            }
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: project_patches.append(dict(kwargs["fields"])) or {}
+        )
+        service._patch_record_fields_exact = (  # type: ignore[method-assign]
+            lambda **kwargs: event_patches.append(dict(kwargs["fields"])) or {}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+
+        result = service._sync_repair_relation_business_fields(
+            summary_record_id="rec_summary",
+            event_record_id="rec_archived_event",
+            scope="E",
+            project_overrides={"故障维修原因": "历史事件故障原因"},
+            include_target_fields=False,
+        )
+
+        self.assertEqual(project_patches, [{"故障维修原因": "历史事件故障原因"}])
+        self.assertEqual(event_patches, [])
+        self.assertIn("关联事件已不在当前事件表中", result["warnings"][0])
+        self.assertFalse(
+            service._repair_sync_warnings_require_retry(result["warnings"])
+        )
+
+        event_reason_meta = FieldMeta(
+            "fld_event_reason",
+            "事件发生原因",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._event_snapshot_record_for_repair = (  # type: ignore[method-assign]
+            lambda **_kwargs: {
+                "record_id": "rec_archived_event",
+                "raw_fields": {},
+                "display_fields": {},
+            }
+        )
+        service._load_repair_management_event_records = (  # type: ignore[method-assign]
+            lambda: (
+                [event_reason_meta],
+                {event_reason_meta.field_name: event_reason_meta},
+                [],
+            )
+        )
+        service._event_source_config = (  # type: ignore[method-assign]
+            lambda: ("event_app", "event_table", "repair_events")
+        )
+
+        def record_not_found(**_kwargs):
+            raise PortalError(
+                "飞书记录更新失败: code=1254043, msg=RecordIdNotFound"
+            )
+
+        service._patch_record_fields_exact = record_not_found  # type: ignore[method-assign]
+
+        raced_result = service._sync_repair_relation_business_fields(
+            summary_record_id="rec_summary",
+            event_record_id="rec_archived_event",
+            scope="E",
+            project_overrides={"故障维修原因": "历史事件故障原因"},
+            include_target_fields=False,
+        )
+
+        self.assertEqual(raced_result["event_fields"], {})
+        self.assertIn("已跳过事件字段回写", raced_result["warnings"][0])
+        self.assertFalse(
+            service._repair_sync_warnings_require_retry(raced_result["warnings"])
         )
 
     def test_repair_target_summary_id_sync_writes_missing_and_preserves_conflict(self):

@@ -715,7 +715,6 @@ class BackendProcessPortalController:
                 daemon=True,
             )
             self._snapshot_thread.start()
-        self._post_bridge_heartbeat(force=True)
 
     def _sync_backend_active_items_once(self, *, force: bool = False) -> None:
         callback = self.shell_event_callback
@@ -1071,9 +1070,11 @@ class BackendProcessPortalController:
         )
         self._ensure_bridge_threads()
 
-    def set_shell_event_callback(self, callback) -> None:
+    def set_shell_event_callback(self, callback, *, initial_sync: bool = True) -> None:
         self.shell_event_callback = callback
         self._ensure_bridge_threads()
+        if not initial_sync:
+            return
         try:
             threading.Thread(
                 target=lambda: self._sync_backend_active_items_once(force=True),

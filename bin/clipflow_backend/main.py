@@ -648,7 +648,7 @@ class FastAPIPortalController:
                     "yes",
                     "on",
                 }
-                ongoing = self._get_ongoing(scope)
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 sections = (
                     ("records", "ongoing", "stats", "zhihang")
@@ -857,7 +857,10 @@ class FastAPIPortalController:
                     parsed_work_type = str(work_type or "maintenance")
                 if parsed_work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     parsed_work_type = "maintenance"
-                ongoing = self._get_ongoing(checked_scope)
+                ongoing = await asyncio.to_thread(
+                    self._get_ongoing,
+                    checked_scope,
+                )
                 self._reconcile_orphan_started_items(checked_scope, ongoing)
                 payload = await asyncio.to_thread(
                     PortalRuntime.service.query_records,
@@ -1795,7 +1798,7 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                ongoing = self._get_ongoing(scope)
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 data = await asyncio.to_thread(
@@ -1821,7 +1824,7 @@ class FastAPIPortalController:
                 return self._auth_required_response()
             try:
                 self._ensure_source_snapshot_background()
-                ongoing = self._get_ongoing("ALL")
+                ongoing = await asyncio.to_thread(self._get_ongoing, "ALL")
                 self._reconcile_orphan_started_items("ALL", ongoing)
                 allowed_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS, session
@@ -1880,7 +1883,7 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                ongoing = self._get_ongoing(scope)
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 month = str(request.query_params.get("month") or "")
                 specialty = str(request.query_params.get("specialty") or "")
@@ -2004,7 +2007,7 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                ongoing = self._get_ongoing(scope)
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 payload = await asyncio.to_thread(
                     PortalRuntime.service.get_workbench_closed_items,
                     scope=scope,
@@ -2075,7 +2078,7 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                ongoing = self._get_ongoing(scope)
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 data = await asyncio.to_thread(
                     PortalRuntime.service.engineer_mop_bootstrap,
                     scope=scope,
@@ -2949,7 +2952,7 @@ class FastAPIPortalController:
                 refresh_result = PortalRuntime.request_source_refresh(force=True)
                 self._clear_read_cache()
                 refreshed = bool(refresh_result.get("refreshed", False))
-                ongoing = self._get_ongoing(scope)
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 self._reconcile_orphan_started_items(scope, ongoing, force=True)
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_bootstrap,
@@ -5241,11 +5244,12 @@ class FastAPIPortalController:
                     user.get("name") or user.get("en_name") or ""
                 )
                 if str(payload.get("command_format") or "") == "notice_command":
+                    ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                     payload = await asyncio.to_thread(
                         PortalRuntime.service.expand_workbench_action_command,
                         payload,
                         scope=scope,
-                        ongoing_items=self._get_ongoing(scope),
+                        ongoing_items=ongoing,
                     )
                     payload["scope"] = scope
                     payload["_auth_open_id"] = str(user.get("open_id") or "")
@@ -5347,13 +5351,14 @@ class FastAPIPortalController:
                     request.query_params.get("month")
                     or _current_month_label()
                 ).strip()
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 items = await asyncio.to_thread(
                     PortalRuntime.service.list_bindable_source_items,
                     scope=scope,
                     work_type=work_type,
                     month=month,
                     search=search,
-                    ongoing_items=self._get_ongoing(scope),
+                    ongoing_items=ongoing,
                     limit=200,
                 )
                 return self._json_ok(request, session, {"items": items})
@@ -6493,18 +6498,79 @@ class FastAPIPortalController:
             )
 
         @app.get("/api/qt/shell/bootstrap")
-        async def qt_shell_bootstrap(request: Request):
+        def qt_shell_bootstrap(request: Request):
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            PortalRuntime.restore_live_portal_active_items()
-            reconcile_items: list[dict] = []
-            visible_candidate_rows = 0
-            for row in PortalRuntime.state_store.list_qt_active_items():
-                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+
+            def _active_payload(item: dict) -> dict:
+                payload = item.get("payload")
+                return payload if isinstance(payload, dict) else item
+
+            def _is_ended(item: dict) -> bool:
+                payload = _active_payload(item)
                 info = extract_event_info(str(payload.get("text") or "")) or {}
-                payload_status = str(payload.get("status") or "").strip()
-                if payload_status == "结束" or str(info.get("status") or "").strip() == "结束":
+                return (
+                    str(payload.get("status") or "").strip() == "结束"
+                    or str(info.get("status") or "").strip() == "结束"
+                )
+
+            reconcile_items: list[dict] = []
+            ended_rows: list[dict] = []
+            visible_candidate_rows = 0
+            rows = PortalRuntime.state_store.list_qt_active_items()
+            for row in rows:
+                payload = _active_payload(row)
+                if _is_ended(row):
+                    ended_rows.append(row)
+                    continue
+                reconcile_item = dict(payload)
+                reconcile_item.setdefault(
+                    "active_item_id",
+                    str(row.get("active_item_id") or ""),
+                )
+                reconcile_item.setdefault(
+                    "target_record_id",
+                    str(row.get("record_id") or ""),
+                )
+                reconcile_item.setdefault(
+                    "record_id",
+                    str(row.get("record_id") or ""),
+                )
+                reconcile_item.setdefault("notice_type", row.get("notice_type"))
+                reconcile_items.append(reconcile_item)
+                visible_candidate_rows += 1
+            active_items = [
+                item
+                for item in PortalRuntime.state_store.list_visible_qt_active_items()
+                if not _is_ended(item)
+            ]
+            hidden_duplicate_rows = max(
+                0,
+                visible_candidate_rows - len(active_items),
+            )
+            self._reconcile_orphan_started_items(
+                "ALL",
+                reconcile_items,
+                force=True,
+            )
+            clipboard_candidates = PortalRuntime.state_store.list_clipboard_candidates(
+                status="pending",
+                limit=100,
+            )
+            dialog_sessions = PortalRuntime.state_store.list_dialog_sessions(
+                status="pending",
+                limit=50,
+            )
+            qt_active_items = PortalRuntime.state_store.qt_active_items_stats()
+            qt_bridge = PortalRuntime.state_store.get_backend_runtime("qt_bridge")
+            runtime_limits = PortalRuntime.runtime_limits()
+            runtime_pressure = PortalRuntime.runtime_pressure()
+
+            def _repair_active_items() -> None:
+                PortalRuntime.restore_live_portal_active_items()
+                for row in ended_rows:
+                    payload = _active_payload(row)
                     active_item_id = str(row.get("active_item_id") or "")
                     record_id = str(row.get("record_id") or "")
                     PortalRuntime.state_store.delete_qt_active_item_and_enqueue(
@@ -6525,42 +6591,10 @@ class FastAPIPortalController:
                             },
                         },
                     )
-                    continue
-                reconcile_item = dict(payload)
-                reconcile_item.setdefault(
-                    "active_item_id",
-                    str(row.get("active_item_id") or ""),
-                )
-                reconcile_item.setdefault(
-                    "target_record_id",
-                    str(row.get("record_id") or ""),
-                )
-                reconcile_item.setdefault(
-                    "record_id",
-                    str(row.get("record_id") or ""),
-                )
-                reconcile_item.setdefault("notice_type", row.get("notice_type"))
-                reconcile_items.append(reconcile_item)
-                visible_candidate_rows += 1
-            active_items = (
-                PortalRuntime.state_store.list_visible_qt_active_items()
-            )
-            hidden_duplicate_rows = max(
-                0,
-                visible_candidate_rows - len(active_items),
-            )
-            self._reconcile_orphan_started_items(
-                "ALL",
-                reconcile_items,
-                force=True,
-            )
-            clipboard_candidates = PortalRuntime.state_store.list_clipboard_candidates(
-                status="pending",
-                limit=100,
-            )
-            dialog_sessions = PortalRuntime.state_store.list_dialog_sessions(
-                status="pending",
-                limit=50,
+
+            self._submit_background(
+                "QtShellBootstrapActiveRepair",
+                _repair_active_items,
             )
             return {
                 "ok": True,
@@ -6569,16 +6603,16 @@ class FastAPIPortalController:
                     "history_items": [],
                     "clipboard_candidates": clipboard_candidates,
                     "dialog_sessions": dialog_sessions,
-                    "runtime_limits": PortalRuntime.runtime_limits(),
-                    "runtime_pressure": PortalRuntime.runtime_pressure(),
-                    "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
+                    "runtime_limits": runtime_limits,
+                    "runtime_pressure": runtime_pressure,
+                    "qt_active_items": qt_active_items,
                     "active_visibility": {
                         "month": current_local_month_key(),
                         "hidden_outside_month": 0,
                         "hidden_duplicates": hidden_duplicate_rows,
                         "mode": "all_active",
                     },
-                    "qt_bridge": PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {},
+                    "qt_bridge": qt_bridge or {},
                 },
             }
 
@@ -9207,7 +9241,6 @@ class FastAPIPortalController:
 
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
-        PortalRuntime.restore_live_portal_active_items()
         active_rows: list[dict] = []
         active_rows_loaded = False
         active_qt_identity_keys: set[str] = set()
@@ -11009,6 +11042,10 @@ class FastAPIPortalController:
         self._thread.start()
         if not _wait_until_listening(self.host, bound_port):
             log_warning(f"FastAPI门户端口监听确认超时: {self.get_url()}")
+        self._submit_background(
+            "StartupPortalActiveRepair",
+            PortalRuntime.restore_live_portal_active_items,
+        )
         self._start_scheduler()
         log_info(f"FastAPI门户已启动: public={self.get_url()}")
         return self.get_url()

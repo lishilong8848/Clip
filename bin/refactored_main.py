@@ -2,6 +2,7 @@ import sys
 import os
 import faulthandler
 import threading
+import time
 from pathlib import Path
 
 from upload_event_module.hot_reload.state_store import get_user_data_dir
@@ -42,6 +43,7 @@ _CRASH_TRACE_FP = None
 
 class _PortalStartupBridge(QObject):
     finished = pyqtSignal(object, str)
+    bootstrap_finished = pyqtSignal(object, str)
 
 
 def _init_crash_trace():
@@ -226,6 +228,27 @@ def main():
 
     app.aboutToQuit.connect(_stop_portal_if_started)
 
+    def _finish_qt_shell_bootstrap(payload, error: str = ""):
+        controller = portal_holder.get("controller")
+        if controller is None:
+            return
+        if error:
+            print(f"[ClipFlow] Qt shell bootstrap 加载失败: {error}")
+        else:
+            try:
+                window.apply_qt_shell_bootstrap(payload)
+            except Exception as exc:
+                print(f"[ClipFlow] Qt shell bootstrap 应用失败: {exc}")
+        if hasattr(controller, "set_shell_event_callback") and hasattr(
+            window, "handle_qt_shell_event"
+        ):
+            controller.set_shell_event_callback(
+                window.handle_qt_shell_event,
+                initial_sync=False,
+            )
+
+    portal_bridge.bootstrap_finished.connect(_finish_qt_shell_bootstrap)
+
     def _attach_portal_controller(controller, error: str = ""):
         if controller is None:
             print(f"[ClipFlow] 局域网模板门户启动失败: {error}")
@@ -251,18 +274,33 @@ def main():
             controller.set_maintenance_action_callback(
                 window.enqueue_lan_maintenance_action
             )
-            if hasattr(controller, "set_shell_event_callback") and hasattr(
-                window, "handle_qt_shell_event"
-            ):
-                controller.set_shell_event_callback(window.handle_qt_shell_event)
             if hasattr(controller, "get_qt_shell_bootstrap") and hasattr(
                 window, "apply_qt_shell_bootstrap"
             ):
-                try:
-                    bootstrap_payload = controller.get_qt_shell_bootstrap()
-                    window.apply_qt_shell_bootstrap(bootstrap_payload)
-                except Exception as exc:
-                    print(f"[ClipFlow] Qt shell bootstrap 加载失败: {exc}")
+                def _load_qt_shell_bootstrap():
+                    last_error = ""
+                    for attempt in range(2):
+                        try:
+                            payload = controller.get_qt_shell_bootstrap()
+                            portal_bridge.bootstrap_finished.emit(payload, "")
+                            return
+                        except Exception as exc:
+                            last_error = str(exc)
+                            if attempt == 0:
+                                time.sleep(0.5)
+                    portal_bridge.bootstrap_finished.emit({}, last_error)
+
+                bootstrap_thread = threading.Thread(
+                    target=_load_qt_shell_bootstrap,
+                    name="ClipFlowQtShellBootstrap",
+                    daemon=True,
+                )
+                window._qt_shell_bootstrap_thread = bootstrap_thread
+                bootstrap_thread.start()
+            elif hasattr(controller, "set_shell_event_callback") and hasattr(
+                window, "handle_qt_shell_event"
+            ):
+                controller.set_shell_event_callback(window.handle_qt_shell_event)
             if hasattr(window, "refresh_clipboard_backend_url"):
                 try:
                     window.refresh_clipboard_backend_url()

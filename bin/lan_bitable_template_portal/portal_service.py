@@ -13363,6 +13363,7 @@ class MaintenancePortalService:
             target_fields = {**target_raw, **target_display}
 
         event_fields: dict[str, Any] = {}
+        historical_event_warning = ""
         if event_id.startswith("rec"):
             event_item = self._event_snapshot_record_for_repair(
                 scope=scope,
@@ -13380,6 +13381,11 @@ class MaintenancePortalService:
                 else {}
             )
             event_fields = {**event_raw, **event_display}
+            if bool(event_item.get("historical_fallback")):
+                historical_event_warning = str(
+                    event_item.get("resolution_warning")
+                    or "关联事件已归档，已跳过事件字段回写。"
+                ).strip()
 
         project_fields: dict[str, Any] = {}
         target_reason = self._repair_management_plain_text(
@@ -13461,7 +13467,9 @@ class MaintenancePortalService:
         desired_event_fields.update(dict(event_overrides or {}))
 
         prepared_event_fields: dict[str, Any] = {}
-        if event_id.startswith("rec") and desired_event_fields:
+        if historical_event_warning:
+            warnings.append(historical_event_warning)
+        elif event_id.startswith("rec") and desired_event_fields:
             _event_metas, event_meta_by_name, _event_records = (
                 self._load_repair_management_event_records()
             )
@@ -13475,18 +13483,27 @@ class MaintenancePortalService:
                 event_app_token, event_table_id, _source_key = (
                     self._event_source_config()
                 )
-                self._patch_record_fields_exact(
-                    app_token=event_app_token,
-                    table_id=event_table_id,
-                    record_id=event_id,
-                    fields=prepared_event_fields,
-                )
-                self._upsert_repair_snapshot_fields(
-                    source_key=REPAIR_SNAPSHOT_SOURCE_EVENTS,
-                    record_id=event_id,
-                    fields=prepared_event_fields,
-                )
-                self._invalidate_repair_management_event_cache()
+                try:
+                    self._patch_record_fields_exact(
+                        app_token=event_app_token,
+                        table_id=event_table_id,
+                        record_id=event_id,
+                        fields=prepared_event_fields,
+                    )
+                except PortalError as exc:
+                    if not self._repair_management_record_not_found_error(exc):
+                        raise
+                    prepared_event_fields = {}
+                    warnings.append(
+                        "关联事件已不在当前事件表中，已跳过事件字段回写。"
+                    )
+                else:
+                    self._upsert_repair_snapshot_fields(
+                        source_key=REPAIR_SNAPSHOT_SOURCE_EVENTS,
+                        record_id=event_id,
+                        fields=prepared_event_fields,
+                    )
+                    self._invalidate_repair_management_event_cache()
 
         return {
             "synced": bool(prepared_project_fields or prepared_event_fields),
@@ -31940,7 +31957,6 @@ class MaintenancePortalService:
         ongoing_page_size: int | str = 0,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
-        self.reconcile_source_ongoing_items()
         scope = self._normalize_scope(scope)
         selected_month = str(month or self._current_month_label()).strip()
         requested_sections = {

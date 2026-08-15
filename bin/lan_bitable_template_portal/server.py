@@ -3372,8 +3372,6 @@ class PortalRuntime:
         return self._send_json(404, {"ok": False, "error": "Not Found"})
 
     def _get_ongoing(self, scope: str) -> list[dict]:
-        PortalRuntime.restore_live_portal_active_items()
-
         def _is_ended(item: dict) -> bool:
             status = str(item.get("status") or "").strip()
             if status == "结束":
