@@ -12571,6 +12571,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service._repair_records = [
                 _build_repair_record("r1", building="D楼", title="D楼UPS检修")
             ]
+            service._state_store.replace_event_month_snapshot(
+                current_month,
+                [
+                    {
+                        "source_record_id": "event-d-processing",
+                        "building_codes": ["D"],
+                        "status": "处理中",
+                    },
+                    {
+                        "source_record_id": "event-d-ended",
+                        "building_codes": ["D"],
+                        "status": "已结束",
+                    },
+                    {
+                        "source_record_id": "event-d-e-recovered",
+                        "building_codes": ["D", "E"],
+                        "status": "已恢复待闭环",
+                    },
+                ],
+            )
 
             with patch.object(
                 service, "_target_records_for_notice_type", return_value=[]
@@ -12594,6 +12614,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(result["scopes"]["D"]["maintenance_ongoing"], 1)
             self.assertEqual(result["scopes"]["CAMPUS"]["change_pending"], 1)
             self.assertEqual(result["scopes"]["B"]["change_ongoing"], 0)
+            self.assertEqual(result["scopes"]["D"]["event_total"], 3)
+            self.assertEqual(result["scopes"]["D"]["event_processing"], 2)
+            self.assertEqual(result["scopes"]["E"]["event_total"], 1)
+            self.assertEqual(result["scopes"]["E"]["event_processing"], 1)
+            self.assertEqual(result["scopes"]["CAMPUS"]["event_total"], 1)
+            self.assertEqual(result["scopes"]["ALL"]["event_total"], 3)
+            self.assertEqual(result["scopes"]["ALL"]["event_processing"], 2)
 
     def test_scope_overview_only_counts_startable_source_records_as_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -20818,12 +20845,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "command": "delete_active_item",
                         "payload": {
                             "data_dict": {
-                                "scope": "A",
+                                "scope": "CAMPUS",
                                 "notice_type": "维保通告",
                                 "work_type": "maintenance",
                                 "active_item_id": "active-qt-cleanup-failure",
                                 "source_record_id": "source-qt-cleanup-failure",
                                 "target_record_id": "target-qt-cleanup-failure",
+                                "title": "EA118机房C楼柴油发电机组带载测试维护",
+                                "building": "C楼",
+                                "building_codes": ["C"],
                                 "operation_id": "qt-delete-cleanup-failure",
                             }
                         },
@@ -20838,6 +20868,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("隐藏本地通告失败", data["cleanup_warning"])
             self.assertEqual(call_order, ["hide", "discard"])
             record_audit.assert_called_once()
+            self.assertEqual(record_audit.call_args.kwargs["scope"], "C")
         finally:
             PortalRuntime.service = original_service
             PortalRuntime.state_store = original_state_store

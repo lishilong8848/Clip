@@ -1136,6 +1136,140 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_deleted_clipboard_event_can_be_recreated_from_changed_copy(self):
+        first_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房C楼I3级事件通报\n"
+            "【来源】BMS发现\n"
+            "【时间】2026-08-15 10:00\n"
+            "【概述】C楼空调间漏水告警\n"
+            "【进展】首次内容"
+        )
+        update_text = first_text.replace("状态：新增", "状态：更新")
+        changed_text = update_text.replace("首次内容", "重新复制后的新内容")
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                first_entry = FastAPIPortalController._clipboard_entry_from_content(
+                    first_text
+                )
+                update_entry = FastAPIPortalController._clipboard_entry_from_content(
+                    update_text
+                )
+                changed_entry = FastAPIPortalController._clipboard_entry_from_content(
+                    changed_text
+                )
+                self.assertEqual(update_entry["entry_id"], changed_entry["entry_id"])
+
+                first = FastAPIPortalController._project_clipboard_entry_to_active(
+                    first_entry
+                )
+                updated = FastAPIPortalController._project_clipboard_entry_to_active(
+                    update_entry
+                )
+                self.assertEqual(updated["active_item_id"], first["active_item_id"])
+                legacy_base = {**updated["item"]["payload"]}
+                legacy_base.pop("event_identity_key", None)
+                legacy_base.pop("event_match_fields", None)
+                store.upsert_qt_active_item(
+                    legacy_base,
+                    section="event",
+                    origin="clipboard",
+                )
+                removed = PortalRuntime.execute_local_remove_active_item(
+                    {
+                        "active_item_id": updated["active_item_id"],
+                        "record_id": updated["record_id"],
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                    }
+                )
+                self.assertTrue(removed["ok"])
+                legacy_payload = {
+                    **legacy_base,
+                    "active_item_id": "legacy-event-alias",
+                    "record_id": "local_legacy-event-alias",
+                    "target_record_id": "",
+                    "_is_placeholder_record": True,
+                }
+                store.upsert_qt_active_item(
+                    legacy_payload,
+                    section="event",
+                    origin="clipboard",
+                )
+                self.assertTrue(
+                    PortalRuntime.execute_local_remove_active_item(legacy_payload)["ok"]
+                )
+                replayed = FastAPIPortalController._project_clipboard_entry_to_active(
+                    update_entry
+                )
+                self.assertTrue(replayed.get("ignored"))
+                self.assertEqual(store.list_visible_qt_active_items(), [])
+
+                recreated = FastAPIPortalController._project_clipboard_entry_to_active(
+                    changed_entry
+                )
+
+                self.assertTrue(recreated["ok"])
+                visible = store.list_visible_qt_active_items()
+                self.assertEqual(len(visible), 1)
+                self.assertEqual(visible[0]["active_item_id"], "legacy-event-alias")
+                self.assertIn("重新复制后的新内容", visible[0]["payload"]["text"])
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_deleted_clipboard_event_identical_replay_is_not_reported_success(self):
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房D楼I3级事件通报\n"
+            "【来源】BMS发现\n"
+            "【时间】2026-08-15 10:30\n"
+            "【概述】D楼空调告警\n"
+            "【进展】值班工程师已前往现场"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                first = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+                removed = PortalRuntime.execute_local_remove_active_item(
+                    {
+                        "active_item_id": first["active_item_id"],
+                        "record_id": first["record_id"],
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                    }
+                )
+
+                replayed = FastAPIPortalController._project_clipboard_entry_to_active(
+                    entry
+                )
+
+                self.assertTrue(removed["ok"])
+                self.assertTrue(replayed.get("ignored"))
+                self.assertIn("未写入共享列表", replayed.get("reason", ""))
+                self.assertEqual(store.list_visible_qt_active_items(), [])
+
+                manual_entry = FastAPIPortalController._clipboard_entry_from_content(
+                    text,
+                    source="manual_clipboard",
+                )
+                manually_replayed = (
+                    FastAPIPortalController._project_clipboard_entry_to_active(
+                        manual_entry
+                    )
+                )
+
+                self.assertTrue(manually_replayed["ok"])
+                self.assertFalse(manually_replayed.get("ignored", False))
+                self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+            finally:
+                PortalRuntime.state_store = original_store
+
     def test_event_clipboard_projection_reuses_existing_target_record_by_event_identity(self):
         current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (
@@ -1848,6 +1982,25 @@ class QtShellBackendEventTests(unittest.TestCase):
             harness.applied_projection_payloads[0]["item"]["active_item_id"],
             "active-1",
         )
+
+    def test_manual_clipboard_submission_reports_qt_queue_rejection(self):
+        class Harness(MainWindowRuntimeMixin):
+            def __init__(self):
+                self.lan_template_portal_controller = _Controller()
+
+            def _enqueue_ui_mutation(self, _name, _callback):
+                return False
+
+        result = Harness()._submit_notice_text_to_backend_projection(
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房C楼I3级事件通报\n"
+            "【来源】BMS发现\n"
+            "【时间】2026-08-15 11:00\n"
+            "【概述】C楼空调告警"
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("队列已满", result["error"])
 
     def test_sqlite_clipboard_fallback_events_are_projected_once(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -24893,6 +24893,12 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         default_month = self._current_month_label()
+        event_snapshot = self._state_store.get_event_month_snapshot(default_month)
+        event_records = [
+            dict(item)
+            for item in event_snapshot.get("records", [])
+            if isinstance(item, dict)
+        ]
         overview: dict[str, dict[str, Any]] = {}
         prepared_workbenches: dict[str, dict[str, Any]] = {}
         has_scope_filter = scopes is not None
@@ -24915,6 +24921,9 @@ class MaintenancePortalService:
                 merged_ongoing,
             )
             ongoing_counts = self._work_type_counts(merged_ongoing)
+            event_stats = self._event_stats_for_records(
+                [item for item in event_records if self._scope_matches_item(scope, item)]
+            )
             ongoing_titles: list[dict[str, str]] = []
             for index, item in enumerate(merged_ongoing[:30]):
                 fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
@@ -24952,6 +24961,8 @@ class MaintenancePortalService:
                 "power_ongoing": ongoing_counts[WORK_TYPE_POWER],
                 "polling_ongoing": ongoing_counts[WORK_TYPE_POLLING],
                 "adjust_ongoing": ongoing_counts[WORK_TYPE_ADJUST],
+                "event_total": int(event_stats.get("total") or 0),
+                "event_processing": int(event_stats.get("processing") or 0),
                 "ongoing_title_count": len(merged_ongoing),
                 "ongoing_titles": ongoing_titles,
                 "closed_today": int(stats.get("ended") or 0),

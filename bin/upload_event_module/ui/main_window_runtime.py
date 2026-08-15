@@ -387,7 +387,12 @@ class MainWindowRuntimeMixin:
                     ),
                 }
             try:
-                self._apply_clipboard_projection_result(result)
+                applied = self._apply_clipboard_projection_result(result)
+                if isinstance(applied, dict) and not applied.get("ok", True):
+                    return {
+                        "ok": False,
+                        "error": str(applied.get("error") or "Qt 事件列表更新失败。"),
+                    }
             except Exception as exc:
                 log_warning(f"剪贴板投影即时回填 Qt 失败，将等待事件流兜底: {exc}")
             return {"ok": True, "data": result, "source": source}

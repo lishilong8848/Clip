@@ -525,9 +525,13 @@ function refreshButtonTitle(key: keyof typeof refreshCooldown): string {
 }
 
 function updateLocationRefs(): void {
+  const wasHome = routePath.value === "/" && !routeParams.value.get("mode");
   routePath.value = normalizedPath();
   routeParams.value = new URLSearchParams(window.location.search);
   currentScope.value = normalizeScopeValue(routeParams.value.get("scope") || currentScope.value || "");
+  if (!wasHome && routePath.value === "/" && !routeParams.value.get("mode") && auth.loggedIn) {
+    void loadOverview();
+  }
 }
 
 function prefetchWorkbench(scope: string, workType = "maintenance"): Promise<void> {

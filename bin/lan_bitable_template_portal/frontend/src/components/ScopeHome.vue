@@ -476,11 +476,15 @@ const homeBroadcastStats = computed(() => {
     }
   }
 
+  const allEventStats = props.overview.ALL || {};
+  const hasAllEventStats = Object.prototype.hasOwnProperty.call(allEventStats, "event_total");
   return {
     ongoing,
     pending,
-    events,
-    processingEvents,
+    events: hasAllEventStats ? Number(allEventStats.event_total || 0) : events,
+    processingEvents: hasAllEventStats
+      ? Number(allEventStats.event_processing || 0)
+      : processingEvents,
     items: ongoing > 0 ? ongoingItems : fallbackItems,
   };
 });

@@ -422,6 +422,32 @@ class FastAPIPortalController:
             "event": "事件通告",
         }.get(work_type, work_type or "通告")
 
+    @staticmethod
+    def _deletion_scope(
+        payload: dict[str, Any] | None,
+        fallback: str = "",
+    ) -> str:
+        payload = payload if isinstance(payload, dict) else {}
+        codes = MaintenancePortalService._clean_building_codes(
+            payload.get("building_codes")
+        )
+        if not codes:
+            for key in (
+                "building",
+                "target_building",
+                "building_code",
+                "title",
+                "text",
+            ):
+                codes = MaintenancePortalService._building_codes_from_value(
+                    payload.get(key)
+                )
+                if codes:
+                    break
+        if codes:
+            return codes[0] if len(codes) == 1 else "CAMPUS"
+        return str(fallback or payload.get("scope") or "ALL").strip().upper() or "ALL"
+
     def _record_deletion_audit(
         self,
         *,
@@ -5542,7 +5568,7 @@ class FastAPIPortalController:
                     source="网页",
                     deletion_type="删除通告",
                     business_type=self._deletion_business_type(cleanup_payload),
-                    scope=scope,
+                    scope=self._deletion_scope(cleanup_payload, scope),
                     record_name=self._deletion_record_name(cleanup_payload),
                     actor_name=payload["_auth_user_name"],
                     actor_open_id=payload["_auth_open_id"],
@@ -5695,7 +5721,7 @@ class FastAPIPortalController:
                     source="网页",
                     deletion_type="移除显示",
                     business_type=self._deletion_business_type(payload),
-                    scope=scope,
+                    scope=self._deletion_scope(payload, scope),
                     record_name=self._deletion_record_name(payload),
                     actor_name=payload["_auth_user_name"],
                     actor_open_id=payload["_auth_open_id"],
@@ -6859,7 +6885,7 @@ class FastAPIPortalController:
                         business_type=self._deletion_business_type(
                             delete_payload
                         ),
-                        scope=scope,
+                        scope=self._deletion_scope(delete_payload, scope),
                         record_name=self._deletion_record_name(delete_payload),
                         actor_name=str(
                             delete_payload.get("_auth_user_name")
@@ -9567,7 +9593,9 @@ class FastAPIPortalController:
         return entry
 
     @classmethod
-    def _find_qt_active_item_for_clipboard_entry(cls, entry: dict) -> dict | None:
+    def _find_qt_active_item_for_clipboard_entry(
+        cls, entry: dict, *, include_deleted_local: bool = False
+    ) -> dict | None:
         notice_type = str(entry.get("notice_type") or "").strip()
         unique_key = str(entry.get("unique_key") or "").strip()
         title = str(entry.get("title") or "").strip()
@@ -9594,7 +9622,23 @@ class FastAPIPortalController:
                 )
             except Exception:
                 incoming_event_identity_key = ""
-        for item in PortalRuntime.state_store.list_qt_active_items():
+        stored_items = PortalRuntime.state_store.list_qt_active_items(
+            include_deleted=include_deleted_local
+        )
+        if include_deleted_local:
+            stored_items = [
+                item
+                for item in stored_items
+                if item.get("deleted_at") is not None
+                and not canonical_target_record_id(
+                    item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                )
+                and (
+                    not str(item.get("record_id") or "").strip()
+                    or is_local_record_id(str(item.get("record_id") or "").strip())
+                )
+            ]
+        for item in stored_items:
             payload = item.get("payload") if isinstance(item, dict) else {}
             payload = payload if isinstance(payload, dict) else {}
             if str(payload.get("notice_type") or item.get("notice_type") or "").strip() != notice_type:
@@ -9661,17 +9705,35 @@ class FastAPIPortalController:
                     unique.setdefault(key, item)
             return list(unique.values())
 
+        def _preferred_deleted_local_match(items: list[dict]) -> dict:
+            entry_id = str(entry.get("entry_id") or "").strip()
+            same_id_match = next(
+                (
+                    item
+                    for item in items
+                    if str(item.get("active_item_id") or "").strip() == entry_id
+                ),
+                None,
+            )
+            if same_id_match is not None:
+                return same_id_match
+            return max(items, key=lambda item: float(item.get("updated_at") or 0))
+
         if notice_type == "事件通告":
             exact_matches = _unique_event_matches(event_exact_matches)
             if len(exact_matches) == 1:
                 return exact_matches[0]
             if len(exact_matches) > 1:
+                if include_deleted_local:
+                    return _preferred_deleted_local_match(exact_matches)
                 log_warning("事件剪贴板严格身份匹配到多条活动记录，已阻止自动绑定。")
                 return None
             partial_matches = _unique_event_matches(event_partial_matches)
             if len(partial_matches) == 1:
                 return partial_matches[0]
             if len(partial_matches) > 1:
+                if include_deleted_local:
+                    return _preferred_deleted_local_match(partial_matches)
                 log_warning(
                     "事件剪贴板更新匹配到多条活动记录，已阻止自动绑定: "
                     f"fields={PortalRuntime._resolved_event_match_fields(incoming_event_data)}"
@@ -9940,6 +10002,32 @@ class FastAPIPortalController:
                         "reason": "目标记录已绑定其他通告类型，已忽略本次剪贴板投影。",
                     }
         existing = cls._find_qt_active_item_for_clipboard_entry(entry)
+        revive_deleted_local_event = False
+        if (
+            existing is None
+            and notice_type == "事件通告"
+            and (projected_action in {"start", "update"} or not status)
+        ):
+            deleted_match = cls._find_qt_active_item_for_clipboard_entry(
+                entry, include_deleted_local=True
+            )
+            deleted_payload = (
+                deleted_match.get("payload")
+                if isinstance(deleted_match, dict)
+                and isinstance(deleted_match.get("payload"), dict)
+                else {}
+            )
+            if (
+                deleted_match
+                and deleted_match.get("deleted_at") is not None
+                and not canonical_target_record_id(deleted_payload)
+                and (
+                    str(deleted_payload.get("text") or "").strip() != content
+                    or str(entry.get("origin") or "").strip() == "manual_clipboard"
+                )
+            ):
+                existing = deleted_match
+                revive_deleted_local_event = True
         active_item_id = ""
         if existing and isinstance(existing.get("payload"), dict):
             data = dict(existing.get("payload") or {})
@@ -10114,12 +10202,22 @@ class FastAPIPortalController:
             "origin": "clipboard",
             "payload": data,
         }
-        PortalRuntime.state_store.upsert_qt_active_item(
+        persisted = PortalRuntime.state_store.upsert_qt_active_item(
             data,
             section=section,
             sort_order=0,
             origin="clipboard",
+            allow_revive=revive_deleted_local_event,
         )
+        if not persisted and not any(
+            str(item.get("active_item_id") or "").strip() == active_item_id
+            for item in PortalRuntime.state_store.list_qt_active_items()
+        ):
+            return {
+                "ok": True,
+                "ignored": True,
+                "reason": "活动通告未写入共享列表；若刚删除该事件，请确认剪贴板内容确有变化后重试。",
+            }
         event_id = PortalRuntime.state_store.enqueue_outbox_event(
             "qt_action",
             {
