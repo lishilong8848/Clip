@@ -26,6 +26,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.portal_service import PortalNotFoundError  # noqa: E402
 from lan_bitable_template_portal.portal_service import NOTICE_TEXT_TEMPLATES  # noqa: E402
 from lan_bitable_template_portal.portal_service import RECENT_MONTH_FILTER_LABEL  # noqa: E402
 from lan_bitable_template_portal.portal_service import FieldMeta  # noqa: E402
@@ -1625,6 +1626,703 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {"file_token": "new_site_token"},
             ],
         )
+
+    def test_change_handler_maps_ali_confirmation_snapshot_and_resets_h_confirmation(self):
+        fields = ChangeNoticeHandler("变更通告").build_create_fields(
+            NoticePayload(
+                text=(
+                    "【变更通告】状态：开始\n"
+                    "【名称】测试变更\n"
+                    "【等级】低风险\n"
+                    "【时间】2026-06-12 09:30~2026-06-12 18:30"
+                ),
+                ali_confirmation_file_tokens=["ali-token"],
+            )
+        )
+
+        self.assertEqual(
+            fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]],
+            [{"file_token": "ali-token"}],
+        )
+        self.assertIs(fields[CHANGE_NOTICE_FIELDS["h_confirmation"]], False)
+
+    def test_backend_change_start_uploads_ali_confirmation_with_single_remote_create(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = store
+            attachment = store.put_notice_upload_attachment(
+                open_id="operator",
+                file_name="ali.png",
+                mime_type="image/png",
+                content=b"image",
+            )
+            created_payloads = []
+            prepared = {
+                "action": "start",
+                "work_type": "change",
+                "notice_type": "变更通告",
+                "title": "测试变更",
+                "building": "D楼",
+                "text": (
+                    "【变更通告】状态：开始\n"
+                    "【名称】测试变更\n"
+                    "【等级】低风险\n"
+                    "【时间】2026-06-12 09:30~2026-06-12 18:30"
+                ),
+                "ali_confirmation_images": [
+                    {
+                        "upload_id": attachment["upload_id"],
+                        "file_name": "ali.png",
+                    }
+                ],
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "external_real_write_guard",
+                    return_value={
+                        "mock_external": False,
+                        "real_write_allowed": True,
+                        "reason": "",
+                    },
+                ), patch.object(
+                    portal_server_module,
+                    "upload_media_to_feishu",
+                    return_value=(True, "ali-token"),
+                ), patch.object(
+                    portal_server_module,
+                    "create_bitable_record_by_payload",
+                    side_effect=lambda _notice_type, payload: (
+                        created_payloads.append(payload) or (True, "target-change-start")
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, {"fields": {}, "record_version": "v1"}),
+                ):
+                    ok, _message, record_id = PortalRuntime._execute_backend_prepared_upload(
+                        prepared
+                    )
+                self.assertTrue(ok)
+                self.assertEqual(record_id, "target-change-start")
+                self.assertEqual(len(created_payloads), 1)
+                self.assertEqual(
+                    created_payloads[0].ali_confirmation_file_tokens,
+                    ["ali-token"],
+                )
+                self.assertEqual(prepared["ali_confirmation_file_tokens"], ["ali-token"])
+                self.assertIsNotNone(
+                    store.get_notice_upload_attachment(attachment["upload_id"])["used_at"]
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_change_confirmation_reminds_buildings_then_notifies_h_once(self):
+        self.assertEqual(portal_server_module.CHANGE_CONFIRMATION_REMINDER_SECONDS, 10 * 60)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            service = _TestMaintenancePortalService()
+            PortalRuntime.state_store = store
+            PortalRuntime.service = service
+            try:
+                missing_record = {
+                    "record_id": "target-change-1",
+                    "fields": {
+                        "名称": "跨楼栋测试变更",
+                        "楼栋": ["B楼", "C楼"],
+                        "变更状态": "开始",
+                        "阿里确认截图": [],
+                        "H楼确认": False,
+                    },
+                }
+                task = PortalRuntime._change_confirmation_task_from_record(
+                    "target-change-1",
+                    missing_record,
+                    now=1000,
+                )
+                sent_to = []
+                sent_texts = []
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, missing_record),
+                ), patch.object(
+                    portal_server_module,
+                    "_send_text_to_open_ids_guarded",
+                    side_effect=lambda text, recipients: (
+                        sent_texts.append(text)
+                        or sent_to.append(list(recipients))
+                        or (True, "ok", [])
+                    ),
+                ):
+                    before_due = PortalRuntime._process_change_confirmation_task(
+                        task,
+                        now=1599,
+                    )
+                    after_due = PortalRuntime._process_change_confirmation_task(
+                        before_due,
+                        now=1600,
+                    )
+                self.assertEqual(sent_to, [
+                    [portal_server_module.BUILDING_OPEN_ID_MAP["B"]],
+                    [portal_server_module.BUILDING_OPEN_ID_MAP["C"]],
+                ])
+                self.assertIn("scope=B", sent_texts[0])
+                self.assertIn("scope=C", sent_texts[1])
+                self.assertEqual(after_due["reminder_count"], 1)
+
+                screenshot_record = copy.deepcopy(missing_record)
+                screenshot_record["fields"]["阿里确认截图"] = [
+                    {"file_token": "ali-token"}
+                ]
+                h_messages = []
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, screenshot_record),
+                ), patch.object(
+                    portal_server_module,
+                    "_send_text_to_open_ids_guarded",
+                    side_effect=lambda _text, recipients: (
+                        h_messages.append(list(recipients)) or (True, "ok", [])
+                    ),
+                ):
+                    notified = PortalRuntime._process_change_confirmation_task(
+                        after_due,
+                        now=1700,
+                    )
+                    PortalRuntime._process_change_confirmation_task(
+                        notified,
+                        now=1900,
+                    )
+                self.assertEqual(
+                    h_messages,
+                    [[portal_server_module.BUILDING_OPEN_ID_MAP["H"]]],
+                )
+                self.assertEqual(notified["state"], "awaiting_confirmation")
+                ended_record = copy.deepcopy(screenshot_record)
+                ended_record["fields"]["变更状态"] = "结束"
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, ended_record),
+                ):
+                    stopped = PortalRuntime._process_change_confirmation_task(
+                        notified,
+                        now=2000,
+                    )
+                self.assertEqual(stopped["state"], "stopped")
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_change_confirmation_upload_replaces_screenshot_and_confirm_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _TestMaintenancePortalService()
+            attachment = store.put_notice_upload_attachment(
+                open_id="operator",
+                file_name="ali.png",
+                mime_type="image/png",
+                content=b"image",
+            )
+            base_fields = {
+                "名称": "测试变更",
+                "楼栋": "D楼",
+                "变更状态": "开始",
+                "阿里确认截图": [],
+                "H楼确认": False,
+            }
+            screenshot_fields = {
+                **base_fields,
+                "阿里确认截图": [
+                    {
+                        "file_token": "new-token",
+                        "name": "ali.png",
+                        "url": "https://example.test/ali.png",
+                    }
+                ],
+            }
+            patches = []
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "target-change-2",
+                    "target_record_id": "target-change-2",
+                    "record_id": "target-change-2",
+                    "work_type": "change",
+                    "notice_type": "变更通告",
+                    "status": "开始",
+                    "title": "测试变更",
+                },
+                section="change",
+                origin="portal",
+            )
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    side_effect=[
+                        (True, {"fields": base_fields}),
+                        (True, {"fields": screenshot_fields}),
+                        (True, {"fields": screenshot_fields}),
+                    ],
+                ), patch.object(
+                    portal_server_module,
+                    "upload_media_to_feishu",
+                    return_value=(True, "new-token"),
+                ), patch.object(
+                    portal_server_module,
+                    "update_bitable_record_fields",
+                    side_effect=lambda _record_id, _notice_type, fields: (
+                        patches.append(copy.deepcopy(fields)) or (True, "target-change-2")
+                    ),
+                ), patch.object(
+                    portal_server_module,
+                    "_send_text_to_open_ids_guarded",
+                    return_value=(True, "ok", []),
+                ):
+                    uploaded = PortalRuntime.upload_change_confirmation_screenshot(
+                        "target-change-2",
+                        upload_id=attachment["upload_id"],
+                        actor_open_id="operator",
+                        actor_name="操作人",
+                        allowed_scopes=["D"],
+                        privileged=False,
+                    )
+                self.assertEqual(uploaded["state"], "awaiting_confirmation")
+                self.assertEqual(patches[0]["阿里确认截图"], [{"file_token": "new-token"}])
+                self.assertIs(patches[0]["H楼确认"], False)
+                projected = store.list_qt_active_items()[0]["payload"]
+                self.assertEqual(
+                    projected["ali_confirmation_images"][0]["url"],
+                    "https://example.test/ali.png",
+                )
+
+                confirm_calls = []
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    side_effect=[
+                        (True, {"fields": screenshot_fields}),
+                        (True, {"fields": {**screenshot_fields, "H楼确认": True}}),
+                        (True, {"fields": {**screenshot_fields, "H楼确认": True}}),
+                    ],
+                ), patch.object(
+                    portal_server_module,
+                    "update_bitable_record_fields",
+                    side_effect=lambda _record_id, _notice_type, fields: (
+                        confirm_calls.append(copy.deepcopy(fields)) or (True, "target-change-2")
+                    ),
+                ):
+                    confirmed = PortalRuntime.confirm_change_confirmation(
+                        "target-change-2",
+                        actor_open_id="admin",
+                        actor_name="管理员",
+                    )
+                    confirmed_again = PortalRuntime.confirm_change_confirmation(
+                        "target-change-2",
+                        actor_open_id="admin",
+                        actor_name="管理员",
+                    )
+                self.assertEqual(confirm_calls, [{"H楼确认": True}])
+                self.assertEqual(confirmed["state"], "confirmed")
+                self.assertEqual(confirmed_again["state"], "confirmed")
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_change_confirmation_delete_clears_screenshot_and_h_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _TestMaintenancePortalService()
+            active_fields = {
+                "名称": "测试变更",
+                "楼栋": "D楼",
+                "变更状态": "开始",
+                "阿里确认截图": [{"file_token": "ali-token", "url": "https://example.test/ali.png"}],
+                "H楼确认": True,
+            }
+            cleared_fields = {**active_fields, "阿里确认截图": [], "H楼确认": False}
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "target-change-delete",
+                    "target_record_id": "target-change-delete",
+                    "record_id": "target-change-delete",
+                    "work_type": "change",
+                    "notice_type": "变更通告",
+                    "status": "开始",
+                    "title": "测试变更",
+                    "ali_confirmation_screenshot_count": 1,
+                    "ali_confirmation_images": active_fields["阿里确认截图"],
+                    "h_building_confirmed": True,
+                },
+                section="change",
+                origin="portal",
+            )
+            patches = []
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    side_effect=[
+                        (True, {"fields": active_fields}),
+                        (True, {"fields": cleared_fields}),
+                    ],
+                ), patch.object(
+                    portal_server_module,
+                    "update_bitable_record_fields",
+                    side_effect=lambda _record_id, _notice_type, fields: (
+                        patches.append(copy.deepcopy(fields)) or (True, "target-change-delete")
+                    ),
+                ):
+                    deleted = PortalRuntime.delete_change_confirmation_screenshot(
+                        "target-change-delete",
+                        actor_open_id="operator",
+                        actor_name="操作人",
+                        allowed_scopes=["D"],
+                        privileged=False,
+                    )
+
+                self.assertEqual(patches, [{"阿里确认截图": [], "H楼确认": False}])
+                self.assertEqual(deleted["state"], "missing_screenshot")
+                self.assertGreater(deleted["next_reminder_at"], deleted["updated_at"])
+                projected = store.list_qt_active_items()[0]["payload"]
+                self.assertEqual(projected["ali_confirmation_screenshot_count"], 0)
+                self.assertEqual(projected["ali_confirmation_images"], [])
+                self.assertFalse(projected["h_building_confirmed"])
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_change_confirmation_preview_requires_current_attachment_and_scope(self):
+        previous_service = PortalRuntime.service
+        service = _TestMaintenancePortalService()
+        PortalRuntime.service = service
+        fields = {
+            "名称": "测试变更",
+            "楼栋": "D楼",
+            "变更状态": "开始",
+            "阿里确认截图": [
+                {"file_token": "ali-token", "name": "ali.png", "url": "https://open.feishu.test/media"}
+            ],
+        }
+        try:
+            with patch.object(
+                portal_server_module,
+                "query_record_by_id",
+                return_value=(True, {"fields": fields}),
+            ), patch.object(
+                service,
+                "_download_mop_attachment",
+                return_value=(b"png-bytes", "image/png"),
+            ) as download:
+                content, content_type, file_name = PortalRuntime.get_change_confirmation_screenshot_bytes(
+                    "target-change-preview",
+                    file_token="ali-token",
+                    allowed_scopes=["D"],
+                    privileged=False,
+                )
+                self.assertEqual((content, content_type, file_name), (b"png-bytes", "image/png", "ali.png"))
+                self.assertEqual(download.call_args.args[0]["file_token"], "ali-token")
+                with self.assertRaisesRegex(PortalNotFoundError, "不存在或已被替换"):
+                    PortalRuntime.get_change_confirmation_screenshot_bytes(
+                        "target-change-preview",
+                        file_token="other-token",
+                        allowed_scopes=["D"],
+                        privileged=False,
+                    )
+        finally:
+            PortalRuntime.service = previous_service
+
+    def test_change_confirmation_list_seeds_only_unfinished_targets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            service = _TestMaintenancePortalService()
+            PortalRuntime.state_store = store
+            PortalRuntime.service = service
+            records = [
+                {
+                    "record_id": "active-change",
+                    "display_fields": {
+                        "名称": "进行中变更",
+                        "楼栋": "A楼",
+                        "变更状态": "开始",
+                    },
+                },
+                {
+                    "record_id": "ended-change",
+                    "display_fields": {
+                        "名称": "已结束变更",
+                        "楼栋": "A楼",
+                        "变更状态": "结束",
+                    },
+                },
+            ]
+            try:
+                with patch.object(
+                    service,
+                    "_target_records_for_notice_type",
+                    return_value=records,
+                ):
+                    result = PortalRuntime.list_change_confirmations()
+                self.assertEqual(
+                    [item["target_record_id"] for item in result["items"]],
+                    ["active-change"],
+                )
+                self.assertEqual(result["counts"]["missing_screenshot"], 1)
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_change_confirmation_seed_failure_keeps_persisted_tasks_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _TestMaintenancePortalService()
+            record = {
+                "record_id": "persisted-change",
+                "fields": {
+                    "名称": "已持久化变更",
+                    "楼栋": "D楼",
+                    "变更状态": "开始",
+                    "阿里确认截图": [],
+                    "H楼确认": False,
+                },
+            }
+            task = PortalRuntime._change_confirmation_task_from_record(
+                "persisted-change",
+                record,
+                now=time.time(),
+            )
+            task["first_reminder_at"] = time.time() + 3600
+            PortalRuntime._put_change_confirmation_task(task)
+            try:
+                with patch.object(
+                    PortalRuntime,
+                    "_seed_change_confirmation_tasks",
+                    side_effect=RuntimeError("snapshot unavailable"),
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, record),
+                ):
+                    result = PortalRuntime.process_change_confirmation_tasks()
+                    listing = PortalRuntime.list_change_confirmations()
+                self.assertEqual(result["processed"], 1)
+                self.assertEqual(result["failed"], 0)
+                self.assertEqual(result["seed_error"], "snapshot unavailable")
+                self.assertEqual(listing["warning"], "snapshot unavailable")
+                self.assertEqual(
+                    [item["target_record_id"] for item in listing["items"]],
+                    ["persisted-change"],
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_workbench_change_confirmation_controls_follow_permissions_and_target_state(self):
+        from lan_bitable_template_portal.workbench_lite import _attachment_items, render_workbench_lite
+
+        base_kwargs = {
+            "payload": {"records": [], "ongoing": [], "stats": {}},
+            "scope": "ALL",
+            "work_type": "change",
+        }
+        admin_html = render_workbench_lite(
+            **base_kwargs,
+            session={"role": "admin", "can_manage_change_confirmations": True},
+        )
+        building_html = render_workbench_lite(
+            **base_kwargs,
+            session={"role": "building", "can_manage_change_confirmations": False},
+        )
+
+        self.assertIn('id="lite-change-confirmation-open"', admin_html)
+        self.assertIn('id="lite-change-confirmations"', admin_html)
+        self.assertNotIn('id="lite-change-confirmation-open"', building_html)
+        self.assertIn("阿里确认截图", admin_html)
+        self.assertIn("ali_confirmation_images", admin_html)
+        self.assertIn("result.last_error", admin_html)
+        self.assertIn("H楼通知等待重试", admin_html)
+        self.assertIn("liteActiveImagePanel", admin_html)
+        self.assertIn("site-photo-thumb", admin_html)
+        self.assertIn("点击 / Ctrl+V 粘贴阿里确认截图", admin_html)
+        self.assertIn("已暂存，将随开始通告上传", admin_html)
+        self.assertIn("data-ali-confirmation-remove", admin_html)
+        self.assertIn("method: 'DELETE'", admin_html)
+        self.assertIn('id="lite-ali-confirmation-upload-now" type="button" disabled>上传</button>', admin_html)
+        ali_handler = admin_html.split("async function handleAliConfirmationFile", 1)[1].split(
+            "async function uploadAliConfirmationNow", 1
+        )[0]
+        self.assertNotIn("setLiteFormDirty", ali_handler)
+        ali_items = _attachment_items(
+            {
+                "target_record_id": "target change/preview",
+                "ali_confirmation_images": [
+                    {"file_token": "token/with space", "url": "https://open.feishu.test/not-browser-readable"}
+                ],
+            },
+            "ali_confirmation_images",
+            "阿里确认截图",
+        )
+        self.assertEqual(
+            ali_items[0]["preview_url"],
+            "/api/change-confirmations/target%20change%2Fpreview/screenshot/preview?file_token=token%2Fwith%20space",
+        )
+
+    def test_change_confirmation_api_permissions(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        previous_sessions = dict(PortalRuntime.auth_manager._sessions)
+        now = time.time() + 3600
+        sessions = {
+            "admin-session": {
+                "session_id": "admin-session",
+                "user": {
+                    "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+                    "name": "管理员",
+                },
+                "role": "admin",
+                "allowed_scopes": ["ALL"],
+                "expires_at": now,
+            },
+            "h-session": {
+                "session_id": "h-session",
+                "user": {
+                    "open_id": portal_server_module.BUILDING_OPEN_ID_MAP["H"],
+                    "name": "H楼",
+                },
+                "role": "building",
+                "allowed_scopes": ["ALL"],
+                "expires_at": now,
+            },
+            "d-session": {
+                "session_id": "d-session",
+                "user": {
+                    "open_id": portal_server_module.BUILDING_OPEN_ID_MAP["D"],
+                    "name": "D楼",
+                },
+                "role": "building",
+                "allowed_scopes": ["D"],
+                "expires_at": now,
+            },
+        }
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions = sessions
+        client = TestClient(controller._build_app())
+        try:
+            with patch.object(
+                PortalRuntime,
+                "list_change_confirmations",
+                return_value={"counts": {}, "items": []},
+            ):
+                self.assertEqual(
+                    client.get(
+                        "/api/change-confirmations",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=admin-session"},
+                    ).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    client.get(
+                        "/api/change-confirmations",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=h-session"},
+                    ).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    client.get(
+                        "/api/change-confirmations",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=d-session"},
+                    ).status_code,
+                    403,
+                )
+            with patch.object(
+                PortalRuntime,
+                "upload_change_confirmation_screenshot",
+                return_value={"target_record_id": "target-change"},
+            ) as upload:
+                response = client.post(
+                    "/api/change-confirmations/target-change/screenshot",
+                    json={"upload_id": "upload-id"},
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=d-session"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(upload.call_args.kwargs["allowed_scopes"], ["D"])
+                self.assertFalse(upload.call_args.kwargs["privileged"])
+            with patch.object(
+                PortalRuntime,
+                "upload_change_confirmation_screenshot",
+                side_effect=portal_server_module.PortalExternalError("飞书写入失败"),
+            ):
+                response = client.post(
+                    "/api/change-confirmations/target-change/screenshot",
+                    json={"upload_id": "upload-id"},
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=admin-session"},
+                )
+                self.assertEqual(response.status_code, 502, response.text)
+            with patch.object(
+                PortalRuntime,
+                "delete_change_confirmation_screenshot",
+                return_value={"target_record_id": "target-change", "state": "missing_screenshot"},
+            ) as delete_screenshot:
+                response = client.delete(
+                    "/api/change-confirmations/target-change/screenshot",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=d-session"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(delete_screenshot.call_args.kwargs["allowed_scopes"], ["D"])
+                self.assertFalse(delete_screenshot.call_args.kwargs["privileged"])
+            with patch.object(
+                PortalRuntime,
+                "get_change_confirmation_screenshot_bytes",
+                return_value=(b"image-bytes", "image/png", "ali.png"),
+            ) as preview:
+                response = client.get(
+                    "/api/change-confirmations/target-change/screenshot/preview?file_token=ali-token",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=d-session"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.content, b"image-bytes")
+                self.assertEqual(response.headers["content-type"], "image/png")
+                self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+                self.assertEqual(preview.call_args.kwargs["allowed_scopes"], ["D"])
+            with patch.object(
+                PortalRuntime,
+                "confirm_change_confirmation",
+                return_value={"target_record_id": "target-change", "state": "confirmed"},
+            ):
+                self.assertEqual(
+                    client.post(
+                        "/api/change-confirmations/target-change/confirm",
+                        json={},
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=d-session"},
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.post(
+                        "/api/change-confirmations/target-change/confirm",
+                        json={},
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=admin-session"},
+                    ).status_code,
+                    200,
+                )
+        finally:
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = previous_sessions
 
     def test_change_handler_writes_single_select_specialty_on_create_and_update(self):
         handler = ChangeNoticeHandler("变更通告")
@@ -23282,6 +23980,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("该事项已结束，只保留查看状态，不可再次发起。", html)
         self.assertNotIn("该事项已在“未结束通告”中", html)
 
+    def test_workbench_target_bound_repair_start_disables_matching_source_row(self):
+        from lan_bitable_template_portal.workbench_lite import _record_rows
+
+        source_record_id = "recvsHLaQbATXv"
+        target_record_id = "recvsHMvQPfk55"
+        source = _build_repair_record(
+            source_record_id,
+            title="EA118_C01机房E楼6#柴发摇臂室盖轻微渗油检修",
+            building="E楼",
+        )
+        target = {
+            "active_item_id": target_record_id,
+            "record_id": target_record_id,
+            "target_record_id": target_record_id,
+            "source_record_id": source_record_id,
+            "work_type": WORK_TYPE_REPAIR,
+            "notice_type": "设备检修",
+            "status": "开始",
+            "title": source["display_fields"]["检修通告名称"],
+            "building": "E楼",
+        }
+
+        html = _record_rows(
+            [source],
+            ongoing_items=[target],
+            scope="E",
+            work_type=WORK_TYPE_REPAIR,
+            search="",
+            specialty="",
+            selected_id="",
+        )
+
+        self.assertIn('class="notice-row is-disabled"', html)
+        self.assertIn('aria-disabled="true"', html)
+        self.assertIn('data-action="update"', html)
+        self.assertIn("进行中", html)
+        self.assertIn("该事项已在“未结束通告”中", html)
+
     def test_workbench_source_terminal_status_beats_stale_processing_summary(self):
         record = {
             "source_progress": "已结束",
@@ -33009,6 +33745,34 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【时间】2026-08-11 11:05", projected["text"])
             self.assertIn("【概述】巡检发现A楼空调压差过大", projected["text"])
             self.assertNotIn("rec_event_remote_text", projected["text"])
+
+    def test_change_target_snapshot_keeps_uploaded_image_previews(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            projected = service._target_snapshot_active_payload(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type="变更通告",
+                target_record={
+                    "record_id": "rec_change_images",
+                    "display_fields": {
+                        "变更状态": "开始",
+                        "名称": "A楼图片回显变更",
+                        "楼栋": "A楼",
+                        "过程现场图片": [
+                            {"file_token": "site-token", "name": "site.png", "url": "https://example.test/site.png"}
+                        ],
+                        "阿里确认截图": [
+                            {"file_token": "ali-token", "name": "ali.png", "url": "https://example.test/ali.png"}
+                        ],
+                    },
+                    "raw_fields": {},
+                },
+            )
+
+            self.assertEqual(projected["site_photo_count"], 1)
+            self.assertEqual(projected["site_photos"][0]["url"], "https://example.test/site.png")
+            self.assertEqual(projected["ali_confirmation_screenshot_count"], 1)
+            self.assertEqual(projected["ali_confirmation_images"][0]["url"], "https://example.test/ali.png")
 
     def test_target_replica_missing_config_never_clears_active_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

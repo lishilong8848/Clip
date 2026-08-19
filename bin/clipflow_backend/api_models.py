@@ -37,6 +37,19 @@ class WorkbenchActionRequest(APIModel):
     manual_binding_choice: str = ""
     manual_binding_required: bool = False
     operation_id: str = ""
+    ali_confirmation_images: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
+
+
+class ChangeConfirmationScreenshotRequest(APIModel):
+    upload_id: str = Field(min_length=1, max_length=128)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class ChangeConfirmationConfirmRequest(APIModel):
+    class Config(APIModel.Config):
+        extra = "forbid"
 
 
 class OngoingDeleteRequest(APIModel):

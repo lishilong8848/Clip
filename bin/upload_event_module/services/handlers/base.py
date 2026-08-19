@@ -20,6 +20,7 @@ class NoticePayload:
     event_source: Optional[str] = None
     file_tokens: Optional[List[str]] = None
     extra_file_tokens: Optional[List[str]] = None
+    ali_confirmation_file_tokens: Optional[List[str]] = None
     response_time: Optional[str] = None
     occurrence_date: Optional[str] = None
     existing_file_tokens: Optional[List[str]] = None

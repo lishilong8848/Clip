@@ -1197,6 +1197,14 @@ class PortalConflictError(PortalError):
     status_code = 409
 
 
+class PortalNotFoundError(PortalError):
+    status_code = 404
+
+
+class PortalExternalError(PortalError):
+    status_code = 502
+
+
 class PortalConfirmationRequiredError(PortalConflictError):
     error_code = "confirmation_required"
 
@@ -29973,6 +29981,32 @@ class MaintenancePortalService:
                 "_is_placeholder_record": False,
             }
         )
+        target_fields = (
+            target_record.get("display_fields")
+            if isinstance(target_record.get("display_fields"), dict)
+            else target_record.get("fields")
+        )
+        target_fields = target_fields if isinstance(target_fields, dict) else {}
+        site_photos = target_fields.get("过程现场图片")
+        payload["site_photos"] = copy.deepcopy(site_photos) if isinstance(site_photos, list) else []
+        payload["site_photo_count"] = len(payload["site_photos"])
+        if work_type == WORK_TYPE_CHANGE:
+            ali_screenshot = target_fields.get("阿里确认截图")
+            payload["ali_confirmation_images"] = (
+                copy.deepcopy(ali_screenshot) if isinstance(ali_screenshot, list) else []
+            )
+            payload["ali_confirmation_screenshot_count"] = (
+                len([item for item in ali_screenshot if item])
+                if isinstance(ali_screenshot, list)
+                else 1 if ali_screenshot else 0
+            )
+            h_confirmation = target_fields.get("H楼确认")
+            payload["h_building_confirmed"] = (
+                h_confirmation
+                if isinstance(h_confirmation, bool)
+                else str(h_confirmation or "").strip().lower()
+                in {"1", "true", "yes", "是", "已确认"}
+            )
         if lifecycle.get("started_at"):
             payload["started_at"] = lifecycle["started_at"]
         building_codes = self._building_codes_from_value(

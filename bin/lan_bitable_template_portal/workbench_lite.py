@@ -8,7 +8,7 @@ import re
 import uuid
 from contextlib import suppress
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from lan_bitable_template_portal.identity_utils import is_local_record_id
 from upload_event_module.building_normalizer import extract_building_codes
@@ -729,6 +729,42 @@ def _attachment_count(value: Any) -> int:
     return 1 if str(value or "").strip() else 0
 
 
+def _attachment_items(record: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+    target_record_id = _remote_target_record_id(record)
+    use_change_confirmation_preview = any(
+        key in {"ali_confirmation_images", "阿里确认截图"} for key in keys
+    )
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in keys:
+        value = record.get(key)
+        if value in (None, "", [], {}):
+            value = fields.get(key)
+        items = value if isinstance(value, (list, tuple)) else [value] if value else []
+        for raw in items:
+            item = raw if isinstance(raw, dict) else {"name": str(raw or "")}
+            normalized = {
+                "file_token": str(item.get("file_token") or item.get("token") or "").strip(),
+                "upload_id": str(item.get("upload_id") or "").strip(),
+                "file_name": str(item.get("file_name") or item.get("name") or "图片").strip(),
+                "mime_type": str(item.get("mime_type") or item.get("content_type") or "image/png").strip(),
+                "size": _to_int(item.get("size"), 0),
+                "preview_url": str(item.get("preview_url") or item.get("url") or item.get("tmp_url") or "").strip(),
+            }
+            if use_change_confirmation_preview and target_record_id and normalized["file_token"]:
+                normalized["preview_url"] = (
+                    f"/api/change-confirmations/{quote(target_record_id, safe='')}/screenshot/preview"
+                    f"?file_token={quote(normalized['file_token'], safe='')}"
+                )
+            identity = normalized["file_token"] or normalized["upload_id"] or normalized["preview_url"] or normalized["file_name"]
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            result.append(normalized)
+    return result
+
+
 def _site_photo_count(record: dict[str, Any]) -> int:
     for key in ("site_photo_count", "site_photos_count", "extra_image_count"):
         count = _to_int(record.get(key), -1)
@@ -752,7 +788,11 @@ def _site_photo_chip(record: dict[str, Any], work_type: str) -> str:
     return _meta_chip("现场图未传", tone="warn")
 
 
-def _site_photo_uploader(work_type: str, existing_count: int) -> str:
+def _site_photo_uploader(
+    work_type: str,
+    existing_count: int,
+    existing_images: list[dict[str, Any]] | None = None,
+) -> str:
     work = _work_type(work_type)
     if work not in SITE_PHOTO_REQUIRED_WORK_TYPES:
         return ""
@@ -763,7 +803,8 @@ def _site_photo_uploader(work_type: str, existing_count: int) -> str:
         else "开始、更新、结束任意一次上传 1 张现场照片后，即可满足结束要求。"
     )
     return f"""
-        <section class="site-photo-panel" data-site-photo-panel data-existing-count="{_e(count)}">
+        <section class="site-photo-panel" data-site-photo-panel data-existing-count="{_e(count)}"
+          data-existing-images="{_e(_json_dumps(existing_images or []))}">
           <input type="hidden" name="site_photos_json" value="[]">
           <header class="site-photo-head">
             <div>
@@ -781,6 +822,48 @@ def _site_photo_uploader(work_type: str, existing_count: int) -> str:
             <div class="site-photo-side">
               <span id="lite-site-photo-status">{_e(status_text)}</span>
               <div id="lite-site-photo-list" class="site-photo-list" aria-live="polite"></div>
+            </div>
+          </div>
+        </section>
+    """
+
+
+def _change_confirmation_uploader(
+    work_type: str,
+    *,
+    target_record_id: str,
+    existing_count: int,
+    confirmed: bool,
+    existing_images: list[dict[str, Any]] | None = None,
+) -> str:
+    if _work_type(work_type) != "change":
+        return ""
+    count = max(0, _to_int(existing_count, 0))
+    status = "H楼已确认" if confirmed else "待H楼确认" if count else "待上传"
+    upload_now = '<button class="btn primary" id="lite-ali-confirmation-upload-now" type="button" disabled>上传</button>'
+    return f"""
+        <section class="site-photo-panel ali-confirmation-panel" data-ali-confirmation-panel
+          data-target-record-id="{_e(target_record_id)}" data-existing-count="{_e(count)}"
+          data-confirmed="{_e('1' if confirmed else '0')}"
+          data-existing-images="{_e(_json_dumps(existing_images or []))}">
+          <input type="hidden" name="ali_confirmation_images_json" value="[]">
+          <header class="site-photo-head">
+            <div>
+              <strong>阿里确认截图</strong>
+              <span>{_e('上传后将通知H楼确认。' if target_record_id else '点击上传暂存，发送开始时写入目标表。')}</span>
+            </div>
+            <b id="lite-ali-confirmation-badge">{_e(status)}</b>
+          </header>
+          <div class="site-photo-upload">
+            <label class="site-photo-drop" for="lite-ali-confirmation-input" tabindex="0">
+              <input id="lite-ali-confirmation-input" type="file" accept="image/*">
+              <span>点击 / Ctrl+V 粘贴阿里确认截图</span>
+              <small>单张图片，不超过 8MB；重新上传会重置H楼确认</small>
+            </label>
+            <div class="site-photo-side">
+              <span id="lite-ali-confirmation-status">{_e(status)}</span>
+              <div id="lite-ali-confirmation-file" class="site-photo-list" aria-live="polite"></div>
+              {upload_now}
             </div>
           </div>
         </section>
@@ -1482,6 +1565,14 @@ def _record_rows(
             linked_ongoing=bool(linked_ongoing),
         )
         site_photo_count = _site_photo_count(row_source)
+        site_photo_images = _attachment_items(
+            row_source, "extra_images", "site_photos", "process_site_images", "过程现场图片", "现场图片"
+        )
+        ali_confirmation_images = _attachment_items(row_source, "ali_confirmation_images", "阿里确认截图")
+        ali_confirmation_count = max(
+            _to_int(row_source.get("ali_confirmation_screenshot_count"), 0),
+            len(ali_confirmation_images),
+        )
         mop_status = _mop_status_text(row_source, row_work_type)
         extra_chips = _record_extra_chips(
             row_source,
@@ -1522,6 +1613,10 @@ def _record_rows(
         f" data-active-item-id=\"{_e(linked_active_item_id)}\""
         f" data-target-record-id=\"{_e(linked_target_record_id)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
+        f" data-site-photo-images=\"{_e(_json_dumps(site_photo_images))}\""
+        f" data-ali-confirmation-count=\"{_e(ali_confirmation_count)}\""
+        f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
+        f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(row_source.get('h_building_confirmed')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"{_e(action)}\""
         f" data-disabled-reason=\"{_e(disabled_reason)}\""
@@ -1586,6 +1681,14 @@ def _ongoing_rows(
         )
         status = _ongoing_display_status(item)
         site_photo_count = _site_photo_count(item)
+        site_photo_images = _attachment_items(
+            item, "extra_images", "site_photos", "process_site_images", "过程现场图片", "现场图片"
+        )
+        ali_confirmation_images = _attachment_items(item, "ali_confirmation_images", "阿里确认截图")
+        ali_confirmation_count = max(
+            _to_int(item.get("ali_confirmation_screenshot_count"), 0),
+            len(ali_confirmation_images),
+        )
         mop_status = _mop_status_text(item, row_work_type)
         needs_site_class = " needs-site-photo" if row_work_type in SITE_PHOTO_REQUIRED_WORK_TYPES and site_photo_count <= 0 else ""
         needs_mop_class = " needs-mop" if row_work_type == "maintenance" and ("未" in mop_status or not mop_status) else ""
@@ -1603,6 +1706,10 @@ def _ongoing_rows(
         f" data-source-event-id=\"{_e(source_event_id)}\""
         f" data-source-event-title=\"{_e(source_event_title)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
+        f" data-site-photo-images=\"{_e(_json_dumps(site_photo_images))}\""
+        f" data-ali-confirmation-count=\"{_e(ali_confirmation_count)}\""
+        f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
+        f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(item.get('h_building_confirmed')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"update\""
             f" data-title=\"{_e(title)}\""
@@ -1732,7 +1839,7 @@ def _linked_ongoing_for_source(
     candidate_record_id = str(candidate.get("record_id") or "").strip()
     if not target_record_id and candidate_record_id != source_record_id:
         target_record_id = candidate_record_id
-    if not (active_item_id or target_record_id):
+    if not target_record_id:
         return None
 
     linked = dict(record)
@@ -1744,7 +1851,7 @@ def _linked_ongoing_for_source(
     if target_record_id:
         linked["target_record_id"] = target_record_id
         linked["record_id"] = target_record_id
-    linked["source_progress"] = str(candidate.get("status") or "进行中").strip()
+    linked["source_progress"] = _ongoing_display_status(candidate)
     linked["source_status"] = linked["source_progress"]
     return linked
 
@@ -2108,6 +2215,24 @@ def _detail_form(
         else ""
     )
     site_photo_count = _site_photo_count(source)
+    site_photo_images = _attachment_items(
+        source,
+        "extra_images",
+        "site_photos",
+        "process_site_images",
+        "过程现场图片",
+        "现场图片",
+    )
+    ali_confirmation_images = _attachment_items(
+        source,
+        "ali_confirmation_images",
+        "阿里确认截图",
+    )
+    ali_confirmation_count = max(
+        _to_int(source.get("ali_confirmation_screenshot_count"), 0),
+        len(ali_confirmation_images),
+    )
+    h_building_confirmed = bool(source.get("h_building_confirmed"))
     mop_status = _mop_status_text(source, work)
     require_manual_binding = bool(
         effective_manual and not parsed_draft and not prefill_draft
@@ -2266,7 +2391,8 @@ def _detail_form(
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
-        {_site_photo_uploader(work, site_photo_count)}
+        {_site_photo_uploader(work, site_photo_count, site_photo_images)}
+        {_change_confirmation_uploader(work, target_record_id=target_record_id, existing_count=ali_confirmation_count, confirmed=h_building_confirmed, existing_images=ali_confirmation_images)}
         <section class="notice-preview" aria-live="polite">
           <div class="preview-head">
             <span>发送预览</span>
@@ -2489,6 +2615,15 @@ def render_workbench_lite(
     ).strip()
     user = session.get("user") if isinstance(session.get("user"), dict) else {}
     is_admin_session = bool(session.get("is_admin")) or str(session.get("role") or "").strip().lower() == "admin"
+    can_manage_change_confirmations = bool(
+        session.get("can_manage_change_confirmations")
+    )
+    change_confirmation_button = (
+        '<button class="top-link" id="lite-change-confirmation-open" type="button" '
+        'aria-haspopup="dialog" aria-controls="lite-change-confirmations">变更确认</button>'
+        if can_manage_change_confirmations
+        else ""
+    )
     scope_options = scope_options or []
     scope_select = "".join(
         f"<option value=\"{_e(option.get('value'))}\"{' selected' if str(option.get('value')) == scope else ''}>{_e(option.get('label') or option.get('value'))}</option>"
@@ -2757,6 +2892,8 @@ def render_workbench_lite(
     .site-photo-list {{ display:flex; flex-wrap:wrap; gap:6px; min-height:24px; }}
     .site-photo-item {{ max-width:180px; min-width:0; display:inline-flex; align-items:center; gap:6px; border:1px solid #d8e5f7; border-radius:999px; padding:4px 8px; color:#0c244d; background:#fff; font-size:11px; font-weight:900; }}
     .site-photo-item span {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .site-photo-thumb {{ width:58px; height:44px; flex:0 0 auto; border:1px solid #d8e5f7; border-radius:9px; object-fit:cover; background:#eef4ff; }}
+    .site-photo-item.has-preview {{ max-width:220px; border-radius:12px; padding:5px; }}
     .site-photo-remove {{ border:0; border-radius:999px; width:18px; height:18px; display:grid; place-items:center; color:#64748b; background:#eef2f7; cursor:pointer; font-size:12px; line-height:1; }}
     .site-photo-remove:hover {{ color:#b42318; background:#fff1f0; }}
     .site-photo-panel.uploading .site-photo-drop {{ pointer-events:none; opacity:.68; }}
@@ -2853,6 +2990,22 @@ def render_workbench_lite(
     .end-check-list b {{ display:block; color:#0c244d; font-size:14px; }}
     .end-check-list small {{ display:block; margin-top:3px; color:#64748b; line-height:1.45; }}
     .end-check-actions {{ display:flex; justify-content:flex-end; gap:10px; padding:12px 18px 15px; border-top:1px solid #e5edf8; background:#fbfdff; }}
+    .change-confirmation-dialog {{ width:min(1040px,100%); max-height:min(820px,90vh); display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; }}
+    .change-confirmation-summary {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; padding:12px 18px; border-bottom:1px solid #e5edf8; background:#fbfdff; }}
+    .change-confirmation-summary button {{ min-height:48px; border:1px solid #d8e5f7; border-radius:14px; padding:7px 10px; color:#53677f; background:#fff; cursor:pointer; text-align:left; font-weight:900; }}
+    .change-confirmation-summary button.active {{ color:#0a57d8; border-color:#8bbcff; background:#eef6ff; box-shadow:0 0 0 2px rgba(31,99,255,.1); }}
+    .change-confirmation-summary b {{ display:block; margin-top:2px; color:#0a57d8; font-size:19px; }}
+    .change-confirmation-list {{ display:grid; gap:9px; overflow:auto; padding:14px 18px; background:#f7faff; }}
+    .change-confirmation-row {{ display:grid; grid-template-columns:minmax(0,1fr) minmax(210px,auto); gap:12px; align-items:center; border:1px solid #d8e5f7; border-radius:16px; padding:11px 12px; background:#fff; box-shadow:0 6px 16px rgba(15,73,153,.05); }}
+    .change-confirmation-row strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.35; }}
+    .change-confirmation-meta {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }}
+    .change-confirmation-meta span {{ border-radius:999px; padding:3px 8px; color:#53677f; background:#f1f5fa; font-size:11px; font-weight:850; }}
+    .change-confirmation-meta .warn {{ color:#9a5b00; background:#fff5db; }}
+    .change-confirmation-meta .success {{ color:#087443; background:#e8fff3; }}
+    .change-confirmation-error {{ margin-top:6px; color:#b42318; font-size:11px; font-weight:800; }}
+    .change-confirmation-actions {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; }}
+    .change-confirmation-file {{ max-width:190px; font-size:11px; }}
+    @media (max-width:760px) {{ .change-confirmation-summary {{ grid-template-columns:1fr; }} .change-confirmation-row {{ grid-template-columns:1fr; }} .change-confirmation-actions {{ justify-content:flex-start; }} }}
     .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
     .repair-event-candidate-dialog {{ width:min(980px,100%); }}
     .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
@@ -2911,6 +3064,7 @@ def render_workbench_lite(
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
       <a class="top-link" href="/" aria-label="返回">返回</a>
       <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
+      {change_confirmation_button}
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
     </nav>
   </header>
@@ -3007,6 +3161,24 @@ def render_workbench_lite(
       </div><!--LITE_FRAGMENT:detail:END-->
     </section><!--LITE_FRAGMENT:workspace:END-->
   </main>
+  <div class="end-check-backdrop" id="lite-change-confirmations" hidden>
+    <section class="end-check-dialog change-confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-change-confirmation-title">
+      <header class="end-check-head">
+        <span>变更确认</span>
+        <strong id="lite-change-confirmation-title">阿里截图与H楼确认</strong>
+      </header>
+      <div class="change-confirmation-summary">
+        <button type="button" data-change-confirmation-filter="missing_screenshot"><span>待上传截图</span><b id="lite-change-missing-count">-</b></button>
+        <button type="button" data-change-confirmation-filter="awaiting_confirmation"><span>待H楼确认</span><b id="lite-change-awaiting-count">-</b></button>
+        <button type="button" data-change-confirmation-filter="all"><span>全部未结束</span><b id="lite-change-all-count">-</b></button>
+      </div>
+      <div class="change-confirmation-list" id="lite-change-confirmation-list" aria-live="polite"><div class="empty compact">正在加载...</div></div>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-change-confirmation-refresh">刷新</button>
+        <button class="btn primary" type="button" id="lite-change-confirmation-close">关闭</button>
+      </footer>
+    </section>
+  </div>
   <div class="end-check-backdrop" id="lite-end-check" hidden>
     <section class="end-check-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-end-check-title">
       <header class="end-check-head">
@@ -3772,6 +3944,7 @@ def render_workbench_lite(
       'symptom', 'solution', 'spare_parts', 'fault_time', 'expected_time',
       'cabinet', 'quantity', 'device',
       'status', 'site_photo_count', 'site_photos', 'extra_images',
+      'ali_confirmation_images',
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
     const noticeFormValueKeys = [
@@ -4102,7 +4275,56 @@ def render_workbench_lite(
       restoreWorkspaceScroll(scrollPositions);
     }}
     let liteSitePhotos = [];
+    let liteExistingSitePhotos = [];
     let liteSitePhotoSignature = '';
+    let liteActiveImagePanel = 'site';
+    function parsePanelImages(panel) {{
+      try {{
+        const parsed = JSON.parse(panel?.dataset.existingImages || '[]');
+        return Array.isArray(parsed) ? parsed.filter(item => item && typeof item === 'object') : [];
+      }} catch {{
+        return [];
+      }}
+    }}
+    function syncImagePanelsFromRow(form, row) {{
+      if (!form || !row) return;
+      const sitePanel = form.querySelector('[data-site-photo-panel]');
+      if (sitePanel) sitePanel.dataset.existingImages = row.getAttribute('data-site-photo-images') || '[]';
+      const aliPanel = form.querySelector('[data-ali-confirmation-panel]');
+      if (aliPanel) {{
+        aliPanel.dataset.existingCount = row.getAttribute('data-ali-confirmation-count') || '0';
+        aliPanel.dataset.existingImages = row.getAttribute('data-ali-confirmation-images') || '[]';
+        aliPanel.dataset.confirmed = row.getAttribute('data-ali-confirmation-confirmed') || '0';
+        aliPanel.dataset.targetRecordId = row.getAttribute('data-target-record-id') || '';
+      }}
+    }}
+    function appendImagePreview(chip, item, alt) {{
+      const previewUrl = String(item?.preview_url || item?.url || '');
+      if (!previewUrl) return;
+      const image = document.createElement('img');
+      image.className = 'site-photo-thumb';
+      image.src = previewUrl;
+      image.alt = alt;
+      chip.classList.add('has-preview');
+      chip.append(image);
+    }}
+    function imageItemsWithLocalPreviews(items, localItems) {{
+      return (Array.isArray(items) ? items : []).map(item => {{
+        const uploadId = String(item?.upload_id || '');
+        const local = (localItems || []).find(candidate => String(candidate?.upload_id || '') === uploadId);
+        return local?.preview_url ? {{ ...item, preview_url: local.preview_url }} : item;
+      }});
+    }}
+    function persistAliImageOnRows(targetRecordId, item) {{
+      if (!targetRecordId) return;
+      const serialized = JSON.stringify(item ? [item] : []);
+      document.querySelectorAll('.ongoing-row').forEach(row => {{
+        if (String(row.getAttribute('data-target-record-id') || '') !== targetRecordId) return;
+        row.setAttribute('data-ali-confirmation-count', item ? '1' : '0');
+        row.setAttribute('data-ali-confirmation-images', serialized);
+        row.setAttribute('data-ali-confirmation-confirmed', '0');
+      }});
+    }}
     function sitePhotoSignature(form) {{
       if (!form) return '';
       return [
@@ -4131,12 +4353,14 @@ def render_workbench_lite(
       const hiddenJson = form.querySelector('[name="site_photos_json"]');
       if (!panel || !hiddenJson) {{
         liteSitePhotos = [];
+        liteExistingSitePhotos = [];
         liteSitePhotoSignature = '';
         return;
       }}
       const countField = form.querySelector('[name="site_photo_count"]');
       const count = Math.max(0, Number(existingCount ?? countField?.value ?? panel.dataset.existingCount ?? 0) || 0);
       panel.dataset.existingCount = String(count);
+      liteExistingSitePhotos = parsePanelImages(panel);
       liteSitePhotos = parseSitePhotosFromForm(form);
       liteSitePhotoSignature = sitePhotoSignature(form);
       updateSitePhotoUi(form);
@@ -4166,9 +4390,19 @@ def render_workbench_lite(
       }}
       const list = document.getElementById('lite-site-photo-list');
       if (list) {{
+        const existingItems = liteExistingSitePhotos.map((item, index) => {{
+          const chip = document.createElement('span');
+          chip.className = 'site-photo-item';
+          appendImagePreview(chip, item, `已上传现场照片${{index + 1}}`);
+          const label = document.createElement('span');
+          label.textContent = item.file_name || `已上传现场照片${{index + 1}}`;
+          chip.append(label);
+          return chip;
+        }});
         const items = liteSitePhotos.map((item, index) => {{
           const chip = document.createElement('span');
           chip.className = 'site-photo-item';
+          appendImagePreview(chip, item, `现场照片${{index + 1}}`);
           const label = document.createElement('span');
           label.textContent = item.file_name || `现场照片${{index + 1}}`;
           const remove = document.createElement('button');
@@ -4180,7 +4414,7 @@ def render_workbench_lite(
           chip.append(label, remove);
           return chip;
         }});
-        list.replaceChildren(...items);
+        list.replaceChildren(...existingItems, ...items);
       }}
       updateActionAvailability(form);
     }}
@@ -4229,7 +4463,7 @@ def render_workbench_lite(
       try {{
         for (const file of fileItems) {{
           const item = await uploadSitePhotoFile(file, form);
-          if (item) uploaded.push(item);
+          if (item) uploaded.push({{ ...item, preview_url: URL.createObjectURL(file) }});
         }}
         liteSitePhotos = liteSitePhotos.concat(uploaded);
         setLiteFormDirty(true);
@@ -4244,9 +4478,218 @@ def render_workbench_lite(
         if (input) input.value = '';
       }}
     }}
+    let liteAliConfirmationImage = null;
+    function resetAliConfirmationState(form) {{
+      const panel = form?.querySelector('[data-ali-confirmation-panel]');
+      const hidden = form?.querySelector('[name="ali_confirmation_images_json"]');
+      if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
+        URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
+      }}
+      if (!panel || !hidden) {{
+        liteAliConfirmationImage = null;
+        return;
+      }}
+      try {{
+        const parsed = JSON.parse(hidden.value || '[]');
+        liteAliConfirmationImage = Array.isArray(parsed) && parsed[0] ? parsed[0] : null;
+      }} catch {{
+        liteAliConfirmationImage = null;
+      }}
+      updateAliConfirmationUi(form);
+    }}
+    function aliConfirmationPayload(form) {{
+      const panel = form?.querySelector('[data-ali-confirmation-panel]');
+      if (!panel || !liteAliConfirmationImage || liteAliConfirmationImage.remote_uploaded) return [];
+      return [{{
+        upload_id: String(liteAliConfirmationImage.upload_id || ''),
+        file_name: String(liteAliConfirmationImage.file_name || 'ali_confirmation.png'),
+        mime_type: String(liteAliConfirmationImage.mime_type || 'image/png'),
+        size: Number(liteAliConfirmationImage.size || 0),
+      }}].filter(item => item.upload_id);
+    }}
+    function updateAliConfirmationUi(form) {{
+      const panel = form?.querySelector('[data-ali-confirmation-panel]');
+      const hidden = form?.querySelector('[name="ali_confirmation_images_json"]');
+      if (!panel || !hidden) return;
+      hidden.value = JSON.stringify(aliConfirmationPayload(form));
+      const existing = Number(panel.dataset.existingCount || 0) || 0;
+      const existingImage = parsePanelImages(panel)[0] || null;
+      const confirmed = panel.dataset.confirmed === '1';
+      const selected = Boolean(liteAliConfirmationImage);
+      const badge = document.getElementById('lite-ali-confirmation-badge');
+      if (badge) badge.textContent = confirmed && !selected ? 'H楼已确认' : (existing || liteAliConfirmationImage?.remote_uploaded ? '待H楼确认' : '待上传');
+      const status = document.getElementById('lite-ali-confirmation-status');
+      if (status) status.textContent = liteAliConfirmationImage?.remote_uploaded
+        ? '截图已上传，等待H楼确认'
+        : liteAliConfirmationImage?.staged
+        ? '已暂存，将随开始通告上传'
+        : selected
+        ? `已选择：${{liteAliConfirmationImage.file_name || '阿里确认截图'}}，点击“上传”继续`
+        : (confirmed ? 'H楼已确认' : (existing ? '截图已上传，等待H楼确认' : '尚未上传'));
+      const list = document.getElementById('lite-ali-confirmation-file');
+      if (list) {{
+        const visibleImage = liteAliConfirmationImage || existingImage;
+        if (!visibleImage) list.replaceChildren();
+        else {{
+          const chip = document.createElement('span');
+          chip.className = 'site-photo-item';
+          appendImagePreview(chip, visibleImage, '阿里确认截图');
+          const label = document.createElement('span');
+          label.textContent = visibleImage.file_name || '阿里确认截图';
+          const remove = document.createElement('button');
+          remove.className = 'site-photo-remove';
+          remove.type = 'button';
+          remove.setAttribute('data-ali-confirmation-remove', '1');
+          remove.setAttribute('aria-label', '删除阿里确认截图');
+          remove.textContent = '×';
+          remove.disabled = panel.classList.contains('uploading');
+          chip.append(label, remove);
+          list.replaceChildren(chip);
+        }}
+      }}
+      const uploadNow = document.getElementById('lite-ali-confirmation-upload-now');
+      if (uploadNow) uploadNow.disabled = panel.classList.contains('uploading') || !selected || Boolean(liteAliConfirmationImage?.staged || liteAliConfirmationImage?.remote_uploaded);
+    }}
+    async function handleAliConfirmationFile(file, form) {{
+      if (!file || !form) return;
+      const panel = form.querySelector('[data-ali-confirmation-panel]');
+      if (!panel) return;
+      const status = document.getElementById('lite-ali-confirmation-status');
+      try {{
+        if (!String(file.type || '').startsWith('image/')) throw new Error('只能上传图片作为阿里确认截图。');
+        if (file.size > 8 * 1024 * 1024) throw new Error('阿里确认截图不能超过 8MB。');
+        if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
+          URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
+        }}
+        liteAliConfirmationImage = {{
+          file,
+          file_name: file.name || 'ali_confirmation.png',
+          mime_type: file.type || 'image/png',
+          size: file.size || 0,
+          preview_url: URL.createObjectURL(file),
+          upload_id: '',
+          staged: false,
+          remote_uploaded: false,
+        }};
+        updateAliConfirmationUi(form);
+      }} catch (error) {{
+        const message = error && error.message ? error.message : '阿里确认截图上传失败';
+        if (status) status.textContent = message;
+        showLiteError(message);
+      }} finally {{
+        const input = form.querySelector('#lite-ali-confirmation-input');
+        if (input) input.value = '';
+      }}
+    }}
+    async function uploadAliConfirmationNow(button) {{
+      const form = button?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+      const panel = form?.querySelector('[data-ali-confirmation-panel]');
+      const targetRecordId = String(panel?.dataset.targetRecordId || '').trim();
+      if (!liteAliConfirmationImage) {{
+        showLiteError('请先选择阿里确认截图。');
+        return;
+      }}
+      setButtonBusy(button, true);
+      panel.classList.add('uploading');
+      updateAliConfirmationUi(form);
+      try {{
+        if (!liteAliConfirmationImage.upload_id) {{
+          const uploaded = await uploadSitePhotoFile(liteAliConfirmationImage.file, form);
+          if (!uploaded?.upload_id) throw new Error('阿里确认截图上传失败');
+          liteAliConfirmationImage = {{ ...liteAliConfirmationImage, ...uploaded }};
+        }}
+        if (!targetRecordId) {{
+          liteAliConfirmationImage.staged = true;
+          updateAliConfirmationUi(form);
+          setLiteStatus('阿里确认截图已暂存，将随开始通告上传');
+          return;
+        }}
+        const item = aliConfirmationPayload(form)[0];
+        if (!item?.upload_id) throw new Error('阿里确认截图缺少 upload_id');
+        const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot`, {{
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ upload_id: item.upload_id }}),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图写入失败');
+        const result = data.data || data;
+        panel.dataset.existingCount = '1';
+        panel.dataset.confirmed = '0';
+        liteAliConfirmationImage = {{ ...liteAliConfirmationImage, remote_uploaded: true, staged: false, file: null }};
+        panel.dataset.existingImages = JSON.stringify([liteAliConfirmationImage]);
+        persistAliImageOnRows(targetRecordId, liteAliConfirmationImage);
+        updateAliConfirmationUi(form);
+        setLiteStatus(result.last_error
+          ? `阿里确认截图已上传，H楼通知等待重试：${{result.last_error}}`
+          : '阿里确认截图已上传，已通知H楼确认');
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '阿里确认截图写入失败');
+      }} finally {{
+        panel.classList.remove('uploading');
+        setButtonBusy(button, false);
+        updateAliConfirmationUi(form);
+      }}
+    }}
+    async function removeAliConfirmationImage(button) {{
+      const form = button?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+      const panel = form?.querySelector('[data-ali-confirmation-panel]');
+      if (!panel) return;
+      const targetRecordId = String(panel.dataset.targetRecordId || '').trim();
+      const existing = Number(panel.dataset.existingCount || 0) > 0;
+      if (liteAliConfirmationImage && !liteAliConfirmationImage.remote_uploaded) {{
+        if (String(liteAliConfirmationImage.preview_url || '').startsWith('blob:')) {{
+          URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
+        }}
+        liteAliConfirmationImage = null;
+        updateAliConfirmationUi(form);
+        setLiteStatus(existing ? '已取消更换，保留原阿里确认截图' : '已移除阿里确认截图');
+        return;
+      }}
+      const remoteImage = existing || Boolean(liteAliConfirmationImage?.remote_uploaded);
+      if (!remoteImage || !targetRecordId) {{
+        if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
+          URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
+        }}
+        liteAliConfirmationImage = null;
+        updateAliConfirmationUi(form);
+        setLiteStatus('已移除阿里确认截图');
+        return;
+      }}
+      setButtonBusy(button, true);
+      panel.classList.add('uploading');
+      updateAliConfirmationUi(form);
+      try {{
+        const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot`, {{
+          method: 'DELETE',
+          credentials: 'same-origin',
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图删除失败');
+        if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
+          URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
+        }}
+        liteAliConfirmationImage = null;
+        panel.dataset.existingCount = '0';
+        panel.dataset.existingImages = '[]';
+        panel.dataset.confirmed = '0';
+        persistAliImageOnRows(targetRecordId, null);
+        updateAliConfirmationUi(form);
+        setLiteStatus('阿里确认截图已删除，H楼确认已重置');
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '阿里确认截图删除失败');
+      }} finally {{
+        panel.classList.remove('uploading');
+        setButtonBusy(button, false);
+        updateAliConfirmationUi(form);
+      }}
+    }}
     function isTextEditingTarget(target) {{
       if (!(target instanceof Element)) return false;
-      if (target.closest('[data-site-photo-panel]')) return false;
+      if (target.closest('[data-site-photo-panel], [data-ali-confirmation-panel]')) return false;
       return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
     }}
     function clipboardImageFiles(event) {{
@@ -4282,6 +4725,20 @@ def render_workbench_lite(
     async function handleSitePhotoPaste(event) {{
       const target = event.target instanceof Element ? event.target : null;
       if (isTextEditingTarget(target)) return;
+      const aliPanel = target?.closest('[data-ali-confirmation-panel]')
+        || (liteActiveImagePanel === 'ali' ? document.querySelector('#lite-notice-form [data-ali-confirmation-panel]') : null);
+      if (aliPanel) {{
+        const files = clipboardImageFiles(event);
+        if (!files.length) {{
+          const status = document.getElementById('lite-ali-confirmation-status');
+          if (status) status.textContent = '剪贴板里没有图片。请复制截图/图片文件后再粘贴。';
+          return;
+        }}
+        event.preventDefault();
+        const form = aliPanel.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+        await handleAliConfirmationFile(files[0], form);
+        return;
+      }}
       const panel = sitePhotoPanelFromTarget(target);
       if (!panel) return;
       const files = clipboardImageFiles(event);
@@ -5472,6 +5929,7 @@ def render_workbench_lite(
     function hydrateLitePreview() {{
       const form = document.getElementById('lite-notice-form');
       resetSitePhotoState(form);
+      resetAliConfirmationState(form);
       resetActualActionTime(form);
       updateNoticePreview(form);
       syncNoticeDrawerState();
@@ -5613,7 +6071,9 @@ def render_workbench_lite(
       setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       setDetailModeNote('');
+      syncImagePanelsFromRow(form, link);
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
+      resetAliConfirmationState(form);
       if (linkedOngoing) setOngoingSubmitButtons(form);
       else setSubmitButtons(form, action);
       updateNoticePreview(form);
@@ -5675,7 +6135,9 @@ def render_workbench_lite(
         ? '未上传'
         : (sourceId && targetId ? '' : (targetId ? '' : '需绑定目标'))
       );
+      syncImagePanelsFromRow(form, link);
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
+      resetAliConfirmationState(form);
       setOngoingSubmitButtons(form);
       updateNoticePreview(form);
       setLiteStatus(localOnly
@@ -5845,9 +6307,194 @@ def render_workbench_lite(
         setButtonBusy(button, false);
       }}
     }}
+    let liteChangeConfirmationItems = [];
+    let liteChangeConfirmationFilter = 'pending';
+    function changeConfirmationModal() {{ return document.getElementById('lite-change-confirmations'); }}
+    function closeChangeConfirmations() {{
+      const modal = changeConfirmationModal();
+      if (modal) modal.hidden = true;
+    }}
+    function changeConfirmationStateLabel(state) {{
+      if (state === 'missing_screenshot') return '待上传截图';
+      if (state === 'awaiting_confirmation') return '待H楼确认';
+      if (state === 'confirmed') return '已确认';
+      return state || '待处理';
+    }}
+    function renderChangeConfirmations() {{
+      const list = document.getElementById('lite-change-confirmation-list');
+      if (!list) return;
+      const visible = liteChangeConfirmationItems.filter(item => {{
+        if (liteChangeConfirmationFilter === 'all') return true;
+        if (liteChangeConfirmationFilter === 'pending') return item.state !== 'confirmed';
+        return item.state === liteChangeConfirmationFilter;
+      }});
+      if (!visible.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'empty compact';
+        empty.textContent = liteChangeConfirmationFilter === 'all' ? '当前没有未结束变更' : '当前没有待处理变更';
+        list.replaceChildren(empty);
+        return;
+      }}
+      const rows = visible.map(item => {{
+        const row = document.createElement('article');
+        row.className = 'change-confirmation-row';
+        row.dataset.changeConfirmationRecordId = String(item.target_record_id || '');
+        const body = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = item.title || item.target_record_id || '未命名变更';
+        const meta = document.createElement('div');
+        meta.className = 'change-confirmation-meta';
+        for (const [text, tone] of [
+          [item.building || '楼栋未识别', ''],
+          [item.target_status || '进行中', ''],
+          [changeConfirmationStateLabel(item.state), item.state === 'confirmed' ? 'success' : 'warn'],
+          [item.last_reminder_at ? `已提醒 ${{item.reminder_count || 1}} 次` : '尚未提醒', ''],
+        ]) {{
+          const chip = document.createElement('span');
+          chip.className = tone;
+          chip.textContent = text;
+          meta.append(chip);
+        }}
+        body.append(title, meta);
+        if (item.last_error) {{
+          const error = document.createElement('div');
+          error.className = 'change-confirmation-error';
+          error.textContent = item.last_error;
+          body.append(error);
+        }}
+        const actions = document.createElement('div');
+        actions.className = 'change-confirmation-actions';
+        if (item.state === 'missing_screenshot') {{
+          const input = document.createElement('input');
+          input.className = 'change-confirmation-file';
+          input.type = 'file';
+          input.accept = 'image/*';
+          input.setAttribute('data-change-confirmation-file', String(item.target_record_id || ''));
+          actions.append(input);
+        }}
+        const confirm = document.createElement('button');
+        confirm.className = item.state === 'confirmed' ? 'btn ghost' : 'btn primary';
+        confirm.type = 'button';
+        confirm.textContent = item.state === 'confirmed' ? '已确认' : '点击确认';
+        confirm.disabled = item.state !== 'awaiting_confirmation';
+        confirm.setAttribute('data-change-confirmation-confirm', String(item.target_record_id || ''));
+        actions.append(confirm);
+        row.append(body, actions);
+        return row;
+      }});
+      list.replaceChildren(...rows);
+      const focusId = new URLSearchParams(location.search).get('change_confirmation');
+      if (focusId) list.querySelector(`[data-change-confirmation-record-id="${{CSS.escape(focusId)}}"]`)?.scrollIntoView({{ block: 'nearest' }});
+    }}
+    async function loadChangeConfirmations() {{
+      const list = document.getElementById('lite-change-confirmation-list');
+      if (list) {{
+        const loading = document.createElement('div');
+        loading.className = 'empty compact';
+        loading.textContent = '正在加载...';
+        list.replaceChildren(loading);
+      }}
+      try {{
+        const response = await fetch('/api/change-confirmations', {{ credentials: 'same-origin' }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) throw new Error(data.error || '变更确认列表加载失败');
+        const payload = data.data || data;
+        const counts = payload.counts || {{}};
+        liteChangeConfirmationItems = Array.isArray(payload.items) ? payload.items : [];
+        const missing = document.getElementById('lite-change-missing-count');
+        const awaiting = document.getElementById('lite-change-awaiting-count');
+        const all = document.getElementById('lite-change-all-count');
+        if (missing) missing.textContent = String(counts.missing_screenshot || 0);
+        if (awaiting) awaiting.textContent = String(counts.awaiting_confirmation || 0);
+        if (all) all.textContent = String(liteChangeConfirmationItems.length);
+        renderChangeConfirmations();
+        if (payload.warning) setLiteStatus(`变更确认列表使用本地状态：${{payload.warning}}`);
+      }} catch (error) {{
+        if (list) {{
+          const failure = document.createElement('div');
+          failure.className = 'change-confirmation-error';
+          failure.textContent = error && error.message ? error.message : '变更确认列表加载失败';
+          list.replaceChildren(failure);
+        }}
+      }}
+    }}
+    async function openChangeConfirmations() {{
+      const modal = changeConfirmationModal();
+      if (!modal) return;
+      modal.hidden = false;
+      liteChangeConfirmationFilter = new URLSearchParams(location.search).get('change_confirmation') ? 'all' : 'pending';
+      document.querySelectorAll('[data-change-confirmation-filter]').forEach(button => button.classList.remove('active'));
+      await loadChangeConfirmations();
+    }}
+    async function uploadChangeConfirmationFromDashboard(input) {{
+      const recordId = String(input?.getAttribute('data-change-confirmation-file') || '').trim();
+      const file = input?.files && input.files[0];
+      if (!recordId || !file) return;
+      input.disabled = true;
+      try {{
+        const uploaded = await uploadSitePhotoFile(file, document.body);
+        const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(recordId)}}/screenshot`, {{
+          method: 'POST', credentials: 'same-origin', headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ upload_id: uploaded.upload_id }}),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图写入失败');
+        const result = data.data || data;
+        setLiteStatus(result.last_error
+          ? `阿里确认截图已上传，H楼通知等待重试：${{result.last_error}}`
+          : '阿里确认截图已上传，已通知H楼确认');
+        await loadChangeConfirmations();
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '阿里确认截图写入失败');
+      }} finally {{
+        input.disabled = false;
+        input.value = '';
+      }}
+    }}
+    async function confirmChangeConfirmation(button) {{
+      const recordId = String(button?.getAttribute('data-change-confirmation-confirm') || '').trim();
+      if (!recordId) return;
+      setButtonBusy(button, true);
+      try {{
+        const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(recordId)}}/confirm`, {{
+          method: 'POST', credentials: 'same-origin', headers: {{ 'Content-Type': 'application/json' }}, body: '{{}}',
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) throw new Error(data.error || 'H楼确认失败');
+        setLiteStatus('变更截图已确认');
+        await loadChangeConfirmations();
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : 'H楼确认失败');
+      }} finally {{
+        setButtonBusy(button, false);
+      }}
+    }}
     document.addEventListener('click', async (event) => {{
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      if (target.closest('[data-ali-confirmation-panel]')) liteActiveImagePanel = 'ali';
+      else if (target.closest('[data-site-photo-panel]')) liteActiveImagePanel = 'site';
+      const changeConfirmationOpen = target.closest('#lite-change-confirmation-open');
+      if (changeConfirmationOpen) {{ event.preventDefault(); await openChangeConfirmations(); return; }}
+      const changeConfirmationClose = target.closest('#lite-change-confirmation-close');
+      if (changeConfirmationClose) {{ event.preventDefault(); closeChangeConfirmations(); return; }}
+      const changeConfirmationBackdrop = target.closest('#lite-change-confirmations');
+      if (changeConfirmationBackdrop && target === changeConfirmationBackdrop) {{ event.preventDefault(); closeChangeConfirmations(); return; }}
+      const changeConfirmationRefresh = target.closest('#lite-change-confirmation-refresh');
+      if (changeConfirmationRefresh) {{ event.preventDefault(); await loadChangeConfirmations(); return; }}
+      const changeConfirmationFilter = target.closest('[data-change-confirmation-filter]');
+      if (changeConfirmationFilter) {{
+        event.preventDefault();
+        liteChangeConfirmationFilter = String(changeConfirmationFilter.getAttribute('data-change-confirmation-filter') || 'pending');
+        document.querySelectorAll('[data-change-confirmation-filter]').forEach(button => button.classList.toggle('active', button === changeConfirmationFilter));
+        renderChangeConfirmations();
+        return;
+      }}
+      const changeConfirmationConfirm = target.closest('[data-change-confirmation-confirm]');
+      if (changeConfirmationConfirm) {{ event.preventDefault(); await confirmChangeConfirmation(changeConfirmationConfirm); return; }}
       const noticeDrawerClose = target.closest('#lite-notice-drawer-close');
       if (noticeDrawerClose) {{
         event.preventDefault();
@@ -5890,10 +6537,24 @@ def render_workbench_lite(
         ensureSitePhotoState(form);
         const index = Number(photoRemove.getAttribute('data-site-photo-remove'));
         if (Number.isInteger(index) && index >= 0) {{
+          const removed = liteSitePhotos[index];
+          if (String(removed?.preview_url || '').startsWith('blob:')) URL.revokeObjectURL(removed.preview_url);
           liteSitePhotos.splice(index, 1);
           setLiteFormDirty(true);
           updateSitePhotoUi(form);
         }}
+        return;
+      }}
+      const aliUploadNow = target.closest('#lite-ali-confirmation-upload-now');
+      if (aliUploadNow) {{
+        event.preventDefault();
+        await uploadAliConfirmationNow(aliUploadNow);
+        return;
+      }}
+      const aliRemove = target.closest('[data-ali-confirmation-remove]');
+      if (aliRemove) {{
+        event.preventDefault();
+        await removeAliConfirmationImage(aliRemove);
         return;
       }}
       const targetSearch = target.closest('#lite-target-search');
@@ -6258,6 +6919,16 @@ def render_workbench_lite(
         await handleSitePhotoFiles(event.target.files, form);
         return;
       }}
+      if (event.target && event.target.id === 'lite-ali-confirmation-input') {{
+        event.preventDefault();
+        const form = event.target.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+        await handleAliConfirmationFile(event.target.files && event.target.files[0], form);
+        return;
+      }}
+      if (event.target && event.target.matches('[data-change-confirmation-file]')) {{
+        await uploadChangeConfirmationFromDashboard(event.target);
+        return;
+      }}
       if (event.target && event.target.name === 'source_record_id' && event.target.closest('#lite-notice-form')) {{
         const form = event.target.closest('#lite-notice-form');
         const sourceId = event.target.value || '';
@@ -6275,6 +6946,11 @@ def render_workbench_lite(
         setLiteFormDirty(true);
         updateNoticePreview(event.target.closest('#lite-notice-form'));
       }}
+    }});
+    document.addEventListener('focusin', (event) => {{
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('[data-ali-confirmation-panel]')) liteActiveImagePanel = 'ali';
+      else if (target?.closest('[data-site-photo-panel]')) liteActiveImagePanel = 'site';
     }});
     document.addEventListener('dragover', (event) => {{
       const target = event.target instanceof Element ? event.target : null;
@@ -6314,6 +6990,7 @@ def render_workbench_lite(
         closeManualSourceCandidates();
         closeRepairEventCandidates();
         closeUndoConfirm();
+        closeChangeConfirmations();
         if (!hadOpenDialog) requestCloseNoticeDrawer().catch(() => null);
       }}
     }});
@@ -6336,6 +7013,7 @@ def render_workbench_lite(
       patch.building_codes = buildingCodes;
       patch.building = buildingCodes.map(buildingLabelFromCode).join('、');
       const photos = sitePhotoPayload(form);
+      const aliConfirmationImages = aliConfirmationPayload(form);
       const sourceRecordId = String(patch.source_record_id || '').trim();
       const repairManagementRecordId = String(
         patch.repair_management_record_id
@@ -6379,6 +7057,9 @@ def render_workbench_lite(
       if (photos.length) {{
         patch.site_photos = photos;
         patch.extra_images = photos;
+      }}
+      if (action === 'start' && patch.work_type === 'change' && aliConfirmationImages.length) {{
+        patch.ali_confirmation_images = aliConfirmationImages;
       }}
       const commandPatch = compactCommandPatch(patch);
       return {{
@@ -6546,6 +7227,18 @@ def render_workbench_lite(
       row.setAttribute('data-target-record-id', optimisticTargetId);
       row.setAttribute('data-source-record-id', draft.source_record_id || '');
       row.setAttribute('data-site-photo-count', draft.site_photo_count || '0');
+      const siteImages = liteExistingSitePhotos.concat(imageItemsWithLocalPreviews(
+        Array.isArray(draft.site_photos) ? draft.site_photos : draft.extra_images,
+        liteSitePhotos,
+      ));
+      const aliImages = imageItemsWithLocalPreviews(
+        draft.ali_confirmation_images,
+        liteAliConfirmationImage ? [liteAliConfirmationImage] : [],
+      );
+      row.setAttribute('data-site-photo-images', JSON.stringify(siteImages));
+      row.setAttribute('data-ali-confirmation-count', aliImages.length ? '1' : '0');
+      row.setAttribute('data-ali-confirmation-images', JSON.stringify(aliImages));
+      row.setAttribute('data-ali-confirmation-confirmed', '0');
       row.setAttribute('data-mop-status', draft.mop_status || '');
       row.setAttribute('data-action', 'update');
       row.setAttribute('data-title', title);
@@ -6615,6 +7308,14 @@ def render_workbench_lite(
       const row = findOngoingRowByDraft(draft);
       if (row) {{
         row.classList.add('optimistic');
+        const siteImages = liteExistingSitePhotos.concat(imageItemsWithLocalPreviews(
+          Array.isArray(draft.site_photos) ? draft.site_photos : draft.extra_images,
+          liteSitePhotos,
+        ));
+        if (siteImages.length) {{
+          row.setAttribute('data-site-photo-count', draft.site_photo_count || String(siteImages.length));
+          row.setAttribute('data-site-photo-images', JSON.stringify(siteImages));
+        }}
         setOngoingRowStatus(row, action === 'end' ? '结束发送中' : '发送中', 'working');
       }} else if (action === 'start') {{
         const {{ list }} = ongoingListElements();
@@ -7046,6 +7747,7 @@ def render_workbench_lite(
         }}, 260);
         return;
       }}
+      if (event.target && event.target.closest('[data-ali-confirmation-panel]')) return;
       if (event.target && event.target.closest('#lite-notice-form')) {{
         if (event.target.name === 'building_codes') {{
           syncBuildingSelection(event.target.closest('#lite-notice-form'));
@@ -7059,6 +7761,9 @@ def render_workbench_lite(
     }});
     hydrateLitePreview();
     ensureLiteQtActiveStream();
+    if (new URLSearchParams(location.search).get('change_confirmation') && document.getElementById('lite-change-confirmation-open')) {{
+      openChangeConfirmations().catch(() => null);
+    }}
   </script>
 </body>
 </html>"""

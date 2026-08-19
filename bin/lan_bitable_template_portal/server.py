@@ -23,13 +23,19 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
 from .portal_service import (
+    BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
+    NOTICE_TYPE_CHANGE,
+    PortalConflictError,
     PortalError,
+    PortalExternalError,
+    PortalNotFoundError,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
+    WORK_TYPE_CHANGE,
     WORK_TYPE_MAINTENANCE,
     WORK_TYPE_REPAIR,
     engineer_mop_fill_kwargs_from_payload,
@@ -69,6 +75,8 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 MAX_JSON_BODY_BYTES = 512 * 1024
+CHANGE_CONFIRMATION_NAMESPACE = "change_confirmation"
+CHANGE_CONFIRMATION_REMINDER_SECONDS = 10 * 60
 
 
 def portal_frontend_dist_enabled() -> bool:
@@ -226,6 +234,890 @@ class PortalRuntime:
     event_refresh_reuse_window_s = 10.0
     qt_action_interval_ms = 250
     source_refresh_defer_when_busy = True
+
+    @staticmethod
+    def _change_confirmation_fields(record: dict) -> dict:
+        if not isinstance(record, dict):
+            return {}
+        fields = record.get("fields")
+        if not isinstance(fields, dict):
+            fields = record.get("display_fields")
+        return dict(fields) if isinstance(fields, dict) else {}
+
+    @staticmethod
+    def _change_confirmation_attachment_count(value: object) -> int:
+        if isinstance(value, list):
+            return len([item for item in value if item])
+        if isinstance(value, dict):
+            return 1 if value else 0
+        return 1 if str(value or "").strip() else 0
+
+    @staticmethod
+    def _change_confirmation_checked(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "是", "已确认"}
+
+    @classmethod
+    def _change_confirmation_active_item_id(cls, target_record_id: str) -> str:
+        for row in cls.state_store.list_qt_active_items(include_deleted=False):
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if canonical_target_record_id(payload) == target_record_id:
+                return str(row.get("active_item_id") or payload.get("active_item_id") or "").strip()
+        return target_record_id
+
+    @classmethod
+    def _change_confirmation_task_from_record(
+        cls,
+        target_record_id: str,
+        record: dict,
+        *,
+        existing: dict | None = None,
+        now: float | None = None,
+    ) -> dict:
+        now = float(now or time.time())
+        existing = dict(existing or {})
+        fields = cls._change_confirmation_fields(record)
+        lifecycle = cls.service._target_record_lifecycle(
+            work_type=WORK_TYPE_CHANGE,
+            notice_type=NOTICE_TYPE_CHANGE,
+            target_record={
+                "record_id": target_record_id,
+                "display_fields": fields,
+            },
+        )
+        screenshot = fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+        screenshot_count = cls._change_confirmation_attachment_count(screenshot)
+        screenshot_fingerprint = (
+            hashlib.sha256(
+                json.dumps(
+                    screenshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            if screenshot_count
+            else ""
+        )
+        previous_fingerprint = str(existing.get("screenshot_fingerprint") or "")
+        if previous_fingerprint != screenshot_fingerprint:
+            existing["h_notification_fingerprint"] = ""
+            existing["h_notification_sent_at"] = 0
+            existing["h_notification_next_at"] = now
+        building = fields.get("楼栋") or existing.get("building") or ""
+        building_codes = cls.service._building_codes_from_value(building)
+        confirmed = cls._change_confirmation_checked(
+            fields.get(CHANGE_NOTICE_FIELDS["h_confirmation"])
+        )
+        active = bool(lifecycle.get("active") and not lifecycle.get("finished"))
+        state = (
+            "stopped"
+            if not active
+            else "missing_screenshot"
+            if not screenshot_count
+            else "confirmed"
+            if confirmed
+            else "awaiting_confirmation"
+        )
+        created_at = float(existing.get("created_at") or now)
+        return {
+            **existing,
+            "target_record_id": target_record_id,
+            "active_item_id": str(
+                existing.get("active_item_id")
+                or cls._change_confirmation_active_item_id(target_record_id)
+            ).strip(),
+            "title": str(
+                fields.get("名称")
+                or record.get("title")
+                or existing.get("title")
+                or target_record_id
+            ).strip(),
+            "building": (
+                cls.service._building_label_from_codes(building_codes)
+                or (
+                    "、".join(str(item or "").strip() for item in building if str(item or "").strip())
+                    if isinstance(building, (list, tuple, set))
+                    else str(building or "").strip()
+                )
+            ),
+            "building_codes": building_codes,
+            "target_status": str(lifecycle.get("status") or "").strip(),
+            "screenshot_count": screenshot_count,
+            "screenshot_fingerprint": screenshot_fingerprint,
+            "h_confirmed": confirmed,
+            "state": state,
+            "created_at": created_at,
+            "first_reminder_at": max(
+                float(existing.get("first_reminder_at") or 0),
+                created_at + CHANGE_CONFIRMATION_REMINDER_SECONDS,
+            ),
+            "updated_at": now,
+        }
+
+    @classmethod
+    def _put_change_confirmation_task(cls, task: dict) -> dict:
+        target_record_id = str(task.get("target_record_id") or "").strip()
+        if not target_record_id:
+            return {}
+        cls.state_store.put_document(
+            CHANGE_CONFIRMATION_NAMESPACE,
+            target_record_id,
+            task,
+        )
+        return task
+
+    @classmethod
+    def _track_change_confirmation_payload(cls, payload: dict) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        if str(payload.get("work_type") or "").strip() != WORK_TYPE_CHANGE:
+            return {}
+        target_record_id = canonical_target_record_id(payload)
+        if not target_record_id:
+            return {}
+        existing = cls.state_store.get_document(
+            CHANGE_CONFIRMATION_NAMESPACE,
+            target_record_id,
+        ) or {}
+        if existing and "ali_confirmation_file_tokens" not in payload:
+            existing.update(
+                {
+                    "active_item_id": str(payload.get("active_item_id") or existing.get("active_item_id") or ""),
+                    "title": str(payload.get("title") or payload.get("name") or existing.get("title") or target_record_id),
+                    "building": str(payload.get("building") or existing.get("building") or ""),
+                    "building_codes": cls.service._building_codes_from_value(
+                        payload.get("building_codes") or payload.get("building") or existing.get("building_codes") or []
+                    ),
+                    "updated_at": time.time(),
+                }
+            )
+            return cls._put_change_confirmation_task(existing)
+        ali_tokens = [
+            str(token or "").strip()
+            for token in payload.get("ali_confirmation_file_tokens") or []
+            if str(token or "").strip()
+        ]
+        record = {
+            "record_id": target_record_id,
+            "display_fields": {
+                "名称": payload.get("title") or payload.get("name") or "",
+                "楼栋": payload.get("building") or payload.get("building_codes") or [],
+                "变更状态": "更新" if str(payload.get("status") or "") == "更新" else "开始",
+                CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]: [
+                    {"file_token": token} for token in ali_tokens
+                ],
+                CHANGE_NOTICE_FIELDS["h_confirmation"]: False,
+            },
+        }
+        task = cls._change_confirmation_task_from_record(
+            target_record_id,
+            record,
+            existing=existing,
+        )
+        task["active_item_id"] = str(payload.get("active_item_id") or task.get("active_item_id") or "")
+        return cls._put_change_confirmation_task(task)
+
+    @classmethod
+    def stop_change_confirmation(cls, target_record_id: str, *, reason: str = "") -> None:
+        target_record_id = str(target_record_id or "").strip()
+        if not target_record_id:
+            return
+        task = cls.state_store.get_document(
+            CHANGE_CONFIRMATION_NAMESPACE,
+            target_record_id,
+        ) or {}
+        if not task:
+            return
+        task.update(
+            {
+                "state": "stopped",
+                "stopped_at": time.time(),
+                "stop_reason": str(reason or "target_terminal"),
+                "updated_at": time.time(),
+            }
+        )
+        cls._put_change_confirmation_task(task)
+
+    @classmethod
+    def _seed_change_confirmation_tasks(cls) -> None:
+        records = cls.service._target_records_for_notice_type(
+            NOTICE_TYPE_CHANGE,
+            WORK_TYPE_CHANGE,
+        )
+        for record in records:
+            target_record_id = str(record.get("record_id") or "").strip()
+            if not target_record_id:
+                continue
+            lifecycle = cls.service._target_record_lifecycle(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type=NOTICE_TYPE_CHANGE,
+                target_record=record,
+            )
+            existing = cls.state_store.get_document(
+                CHANGE_CONFIRMATION_NAMESPACE,
+                target_record_id,
+            ) or {}
+            if (
+                lifecycle.get("active")
+                and not lifecycle.get("finished")
+                and not existing
+            ):
+                cls._put_change_confirmation_task(
+                    cls._change_confirmation_task_from_record(
+                        target_record_id,
+                        record,
+                        existing=existing,
+                    )
+                )
+
+    @classmethod
+    def list_change_confirmations(cls) -> dict:
+        seed_error = ""
+        try:
+            cls._seed_change_confirmation_tasks()
+        except Exception as exc:
+            seed_error = str(exc or "变更目标快照读取失败")
+        items = [
+            dict(document.get("payload") or {})
+            for document in cls.state_store.list_documents(
+                CHANGE_CONFIRMATION_NAMESPACE
+            )
+            if isinstance(document.get("payload"), dict)
+            and str((document.get("payload") or {}).get("state") or "")
+            != "stopped"
+        ]
+        order = {"missing_screenshot": 0, "awaiting_confirmation": 1, "confirmed": 2}
+        items.sort(
+            key=lambda item: (
+                order.get(str(item.get("state") or ""), 9),
+                str(item.get("building") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        return {
+            "counts": {
+                "missing_screenshot": sum(
+                    str(item.get("state") or "") == "missing_screenshot"
+                    for item in items
+                ),
+                "awaiting_confirmation": sum(
+                    str(item.get("state") or "") == "awaiting_confirmation"
+                    for item in items
+                ),
+                "confirmed": sum(
+                    str(item.get("state") or "") == "confirmed"
+                    for item in items
+                ),
+            },
+            "items": items,
+            "warning": seed_error,
+        }
+
+    @classmethod
+    def _change_confirmation_url(
+        cls,
+        task: dict,
+        *,
+        confirmation: bool,
+        scope: str = "",
+    ) -> str:
+        base_url = cls.service._critical_guard_public_base_url()
+        if not base_url:
+            return ""
+        target_record_id = str(task.get("target_record_id") or "").strip()
+        scope = str(scope or (task.get("building_codes") or ["ALL"])[0] or "ALL")
+        query = {
+            "scope": "ALL" if confirmation else scope,
+            "work_type": WORK_TYPE_CHANGE,
+        }
+        if confirmation:
+            query["change_confirmation"] = target_record_id
+        else:
+            query["active_item_id"] = str(
+                task.get("active_item_id") or target_record_id
+            )
+        return f"{base_url}/workbench-lite?{urlencode(query)}"
+
+    @classmethod
+    def _process_change_confirmation_task(
+        cls,
+        task: dict,
+        *,
+        now: float | None = None,
+        point_read: bool = True,
+    ) -> dict:
+        now = float(now or time.time())
+        target_record_id = str(task.get("target_record_id") or "").strip()
+        if not target_record_id or str(task.get("state") or "") == "stopped":
+            return task
+        lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
+            {
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": NOTICE_TYPE_CHANGE,
+                "target_record_id": target_record_id,
+            },
+            action_type="change_confirmation_reconcile",
+            target_record_id=target_record_id,
+        )
+        if lock_error:
+            task["last_error"] = lock_error
+            return cls._put_change_confirmation_task(task)
+        try:
+            if point_read:
+                ok, result = query_record_by_id(target_record_id, NOTICE_TYPE_CHANGE)
+                if not ok:
+                    if cls._remote_record_not_found(result):
+                        cls.stop_change_confirmation(
+                            target_record_id,
+                            reason="target_not_found",
+                        )
+                        return cls.state_store.get_document(
+                            CHANGE_CONFIRMATION_NAMESPACE,
+                            target_record_id,
+                        ) or task
+                    task["last_error"] = str(result or "目标变更读取失败")
+                    task["updated_at"] = now
+                    return cls._put_change_confirmation_task(task)
+                task = cls._change_confirmation_task_from_record(
+                    target_record_id,
+                    result if isinstance(result, dict) else {},
+                    existing=task,
+                    now=now,
+                )
+                cls._patch_change_confirmation_projection(
+                    target_record_id,
+                    screenshot_count=int(task.get("screenshot_count") or 0),
+                    h_confirmed=bool(task.get("h_confirmed")),
+                )
+            if task.get("state") == "stopped":
+                task["stopped_at"] = now
+                task["stop_reason"] = "target_terminal"
+                return cls._put_change_confirmation_task(task)
+            if task.get("state") == "confirmed":
+                task["last_error"] = ""
+                return cls._put_change_confirmation_task(task)
+            if task.get("state") == "missing_screenshot":
+                due_at = max(
+                    float(task.get("first_reminder_at") or 0),
+                    float(task.get("next_reminder_at") or 0),
+                    float(task.get("created_at") or 0) + CHANGE_CONFIRMATION_REMINDER_SECONDS,
+                    float(task.get("last_reminder_at") or 0) + CHANGE_CONFIRMATION_REMINDER_SECONDS,
+                )
+                if now < due_at:
+                    return cls._put_change_confirmation_task(task)
+                recipients = list(
+                    dict.fromkeys(
+                        (
+                            str(code or "").strip(),
+                            str(BUILDING_OPEN_ID_MAP.get(code) or "").strip(),
+                        )
+                        for code in task.get("building_codes") or []
+                        if str(BUILDING_OPEN_ID_MAP.get(code) or "").strip()
+                    )
+                )
+                if not recipients:
+                    task["last_error"] = "未配置对应楼栋的飞书收件人。"
+                else:
+                    failures: list[str] = []
+                    sent = 0
+                    for code, open_id in recipients:
+                        link = cls._change_confirmation_url(
+                            task,
+                            confirmation=False,
+                            scope=code,
+                        )
+                        if not link:
+                            failures.append(f"{code}楼：未配置可访问门户地址")
+                            continue
+                        text = "\n".join(
+                            (
+                                "【变更阿里确认截图待上传】",
+                                f"名称：{task.get('title') or target_record_id}",
+                                f"楼栋：{task.get('building') or '未识别'}",
+                                "请上传阿里确认截图。",
+                                link,
+                            )
+                        ).strip()
+                        ok_send, message, _results = _send_text_to_open_ids_guarded(
+                            text,
+                            [open_id],
+                        )
+                        if ok_send:
+                            sent += 1
+                        else:
+                            failures.append(f"{code}楼：{message or '提醒发送失败'}")
+                    task["last_error"] = "；".join(failures)
+                    if sent:
+                        task["last_reminder_at"] = now
+                        task["reminder_count"] = int(task.get("reminder_count") or 0) + 1
+                task["next_reminder_at"] = now + CHANGE_CONFIRMATION_REMINDER_SECONDS
+                return cls._put_change_confirmation_task(task)
+            fingerprint = str(task.get("screenshot_fingerprint") or "")
+            if fingerprint and task.get("h_notification_fingerprint") != fingerprint:
+                if now < float(task.get("h_notification_next_at") or 0):
+                    return cls._put_change_confirmation_task(task)
+                h_open_id = str(BUILDING_OPEN_ID_MAP.get("H") or "").strip()
+                link = cls._change_confirmation_url(task, confirmation=True)
+                if not link:
+                    task["last_error"] = "未配置可供H楼访问的门户地址。"
+                    task["h_notification_next_at"] = now + CHANGE_CONFIRMATION_REMINDER_SECONDS
+                    return cls._put_change_confirmation_task(task)
+                text = "\n".join(
+                    (
+                        "【变更阿里确认截图待确认】",
+                        f"名称：{task.get('title') or target_record_id}",
+                        f"楼栋：{task.get('building') or '未识别'}",
+                        "截图已上传，请在变更确认面板点击确认。",
+                        link,
+                    )
+                ).strip()
+                ok_send, message, _results = _send_text_to_open_ids_guarded(
+                    text,
+                    [h_open_id] if h_open_id else [],
+                )
+                if ok_send:
+                    task["h_notification_fingerprint"] = fingerprint
+                    task["h_notification_sent_at"] = now
+                    task["last_error"] = ""
+                else:
+                    task["last_error"] = str(message or "H楼确认通知发送失败")
+                    task["h_notification_next_at"] = (
+                        now + CHANGE_CONFIRMATION_REMINDER_SECONDS
+                    )
+            return cls._put_change_confirmation_task(task)
+        finally:
+            cls._release_event_operation_lock(lock_key, lock_owner)
+
+    @classmethod
+    def process_change_confirmation_tasks(cls) -> dict:
+        seed_error = ""
+        try:
+            cls._seed_change_confirmation_tasks()
+        except Exception as exc:
+            seed_error = str(exc or "变更目标快照读取失败")
+        processed = 0
+        failed = 0
+        for document in cls.state_store.list_documents(
+            CHANGE_CONFIRMATION_NAMESPACE
+        ):
+            task = document.get("payload") if isinstance(document.get("payload"), dict) else {}
+            if not task or str(task.get("state") or "") == "stopped":
+                continue
+            try:
+                cls._process_change_confirmation_task(task)
+                processed += 1
+            except Exception as exc:
+                failed += 1
+                task["last_error"] = str(exc or "变更确认任务处理失败")
+                task["updated_at"] = time.time()
+                cls._put_change_confirmation_task(task)
+        return {
+            "processed": processed,
+            "failed": failed,
+            "seed_error": seed_error,
+        }
+
+    @classmethod
+    def _query_active_change_confirmation_record(
+        cls,
+        target_record_id: str,
+    ) -> tuple[dict, dict]:
+        ok, result = query_record_by_id(target_record_id, NOTICE_TYPE_CHANGE)
+        if not ok:
+            if cls._remote_record_not_found(result):
+                cls.stop_change_confirmation(target_record_id, reason="target_not_found")
+                raise PortalNotFoundError("变更目标记录不存在。")
+            raise PortalExternalError(f"读取变更目标记录失败：{result}")
+        record = result if isinstance(result, dict) else {}
+        fields = cls._change_confirmation_fields(record)
+        lifecycle = cls.service._target_record_lifecycle(
+            work_type=WORK_TYPE_CHANGE,
+            notice_type=NOTICE_TYPE_CHANGE,
+            target_record={"record_id": target_record_id, "display_fields": fields},
+        )
+        if lifecycle.get("finished") or not lifecycle.get("active"):
+            cls.stop_change_confirmation(target_record_id, reason="target_terminal")
+            raise PortalConflictError("该变更已经结束，确认流程已停止。")
+        return record, fields
+
+    @classmethod
+    def _authorize_change_confirmation_record(
+        cls,
+        fields: dict,
+        *,
+        allowed_scopes: list[str] | tuple[str, ...] | None,
+        privileged: bool,
+    ) -> list[str]:
+        building_codes = cls.service._building_codes_from_value(fields.get("楼栋"))
+        normalized_scopes = {
+            cls.service._normalize_scope(scope)
+            for scope in (allowed_scopes or [])
+            if str(scope or "").strip()
+        }
+        if privileged or "ALL" in normalized_scopes or "CAMPUS" in normalized_scopes:
+            return building_codes
+        if building_codes and normalized_scopes.intersection(building_codes):
+            return building_codes
+        raise PortalError("当前账号无权操作该楼栋的变更确认截图。")
+
+    @classmethod
+    def _patch_change_confirmation_projection(
+        cls,
+        target_record_id: str,
+        *,
+        screenshot_count: int,
+        h_confirmed: bool,
+        screenshot_items: list[dict] | None = None,
+    ) -> None:
+        for row in cls.state_store.list_qt_active_items(include_deleted=False):
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if canonical_target_record_id(payload) != target_record_id:
+                continue
+            normalized_count = max(0, int(screenshot_count or 0))
+            if (
+                screenshot_items is None
+                and int(payload.get("ali_confirmation_screenshot_count") or 0)
+                == normalized_count
+                and bool(payload.get("h_building_confirmed")) == bool(h_confirmed)
+            ):
+                continue
+            patched = dict(payload)
+            patched["ali_confirmation_screenshot_count"] = normalized_count
+            patched["h_building_confirmed"] = bool(h_confirmed)
+            if screenshot_items is not None:
+                patched["ali_confirmation_images"] = copy.deepcopy(screenshot_items)
+            section = str(row.get("section") or "other")
+            sort_order = int(row.get("sort_order") or 0)
+            cls.state_store.upsert_qt_active_item(
+                patched,
+                section=section,
+                sort_order=sort_order,
+                origin=str(row.get("origin") or "change_confirmation"),
+                allow_revive=True,
+            )
+            cls.state_store.enqueue_outbox_event(
+                "qt_action",
+                {
+                    "kind": "active_upsert",
+                    "payload": {
+                        "item": {
+                            "active_item_id": str(row.get("active_item_id") or patched.get("active_item_id") or ""),
+                            "record_id": target_record_id,
+                            "notice_type": NOTICE_TYPE_CHANGE,
+                            "section": section,
+                            "sort_order": sort_order,
+                            "origin": "change_confirmation",
+                            "payload": patched,
+                        },
+                        "source": "change_confirmation",
+                    },
+                },
+            )
+
+    @classmethod
+    def upload_change_confirmation_screenshot(
+        cls,
+        target_record_id: str,
+        *,
+        upload_id: str,
+        actor_open_id: str,
+        actor_name: str,
+        allowed_scopes: list[str] | tuple[str, ...] | None,
+        privileged: bool,
+    ) -> dict:
+        target_record_id = str(target_record_id or "").strip()
+        upload_id = str(upload_id or "").strip()
+        if not target_record_id or is_local_record_id(target_record_id):
+            raise PortalError("缺少有效的变更目标记录ID。")
+        if not upload_id:
+            raise PortalError("请选择要上传的阿里确认截图。")
+        lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
+            {"work_type": WORK_TYPE_CHANGE, "notice_type": NOTICE_TYPE_CHANGE, "target_record_id": target_record_id},
+            action_type="change_confirmation_upload",
+            target_record_id=target_record_id,
+        )
+        if lock_error:
+            raise PortalConflictError(lock_error)
+        task: dict = {}
+        try:
+            _record, fields = cls._query_active_change_confirmation_record(target_record_id)
+            cls._authorize_change_confirmation_record(
+                fields,
+                allowed_scopes=allowed_scopes,
+                privileged=privileged,
+            )
+            attachment = cls.state_store.get_notice_upload_attachment(upload_id)
+            if not attachment:
+                raise PortalError("截图已过期或不存在，请重新选择。")
+            attachment_owner = str(attachment.get("open_id") or "").strip()
+            if not privileged and attachment_owner and attachment_owner != str(actor_open_id or "").strip():
+                raise PortalError("不能使用其他账号上传的截图。")
+            content = bytes(attachment.get("content") or b"")
+            if not content:
+                raise PortalError("截图内容为空，请重新选择。")
+            ok_upload, file_token = upload_media_to_feishu(
+                content,
+                file_name=str(attachment.get("file_name") or "ali_confirmation.png").strip(),
+            )
+            if not ok_upload or not str(file_token or "").strip():
+                raise PortalExternalError(str(file_token or "阿里确认截图上传失败。"))
+            ok_patch, patch_result = update_bitable_record_fields(
+                target_record_id,
+                NOTICE_TYPE_CHANGE,
+                {
+                    CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]: [{"file_token": str(file_token).strip()}],
+                    CHANGE_NOTICE_FIELDS["h_confirmation"]: False,
+                },
+            )
+            if not ok_patch:
+                raise PortalExternalError(str(patch_result or "阿里确认截图写入失败。"))
+            verified_record: dict = {}
+            verified_fields: dict = {}
+            for attempt in range(3):
+                ok_verify, verify_result = query_record_by_id(target_record_id, NOTICE_TYPE_CHANGE)
+                if ok_verify and isinstance(verify_result, dict):
+                    candidate_fields = cls._change_confirmation_fields(verify_result)
+                    if cls._change_confirmation_attachment_count(candidate_fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])):
+                        verified_record = verify_result
+                        verified_fields = candidate_fields
+                        break
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+            if not verified_record:
+                raise PortalExternalError("截图已提交，但目标表尚未确认写入，请稍后重试。")
+            cls.state_store.mark_notice_upload_attachment_used(upload_id)
+            existing = cls.state_store.get_document(CHANGE_CONFIRMATION_NAMESPACE, target_record_id) or {}
+            task = cls._change_confirmation_task_from_record(
+                target_record_id,
+                verified_record,
+                existing=existing,
+            )
+            task.update(
+                {
+                    "screenshot_uploaded_at": time.time(),
+                    "screenshot_uploaded_by_open_id": str(actor_open_id or ""),
+                    "screenshot_uploaded_by_name": str(actor_name or ""),
+                    "last_error": "",
+                }
+            )
+            cls._put_change_confirmation_task(task)
+            cls._patch_change_confirmation_projection(
+                target_record_id,
+                screenshot_count=cls._change_confirmation_attachment_count(verified_fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])),
+                h_confirmed=False,
+                screenshot_items=verified_fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+                if isinstance(verified_fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]), list)
+                else [],
+            )
+        finally:
+            cls._release_event_operation_lock(lock_key, lock_owner)
+        return (
+            cls._process_change_confirmation_task(task, point_read=False)
+            if task
+            else task
+        )
+
+    @classmethod
+    def get_change_confirmation_screenshot_bytes(
+        cls,
+        target_record_id: str,
+        *,
+        file_token: str,
+        allowed_scopes: list[str] | tuple[str, ...] | None,
+        privileged: bool,
+    ) -> tuple[bytes, str, str]:
+        target_record_id = str(target_record_id or "").strip()
+        file_token = str(file_token or "").strip()
+        if not target_record_id or is_local_record_id(target_record_id) or not file_token:
+            raise PortalNotFoundError("阿里确认截图不存在。")
+        _record, fields = cls._query_active_change_confirmation_record(target_record_id)
+        cls._authorize_change_confirmation_record(
+            fields,
+            allowed_scopes=allowed_scopes,
+            privileged=privileged,
+        )
+        attachments = fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+        if not isinstance(attachments, list):
+            attachments = [attachments] if isinstance(attachments, dict) else []
+        attachment = next(
+            (
+                item
+                for item in attachments
+                if isinstance(item, dict)
+                and str(item.get("file_token") or item.get("token") or "").strip() == file_token
+            ),
+            None,
+        )
+        if not attachment:
+            raise PortalNotFoundError("阿里确认截图不存在或已被替换。")
+        content, content_type = cls.service._download_mop_attachment(attachment)
+        file_name = str(attachment.get("name") or attachment.get("file_name") or "ali_confirmation.png").strip()
+        resolved_type = str(content_type or attachment.get("type") or attachment.get("mime_type") or "").split(";", 1)[0].strip()
+        if not resolved_type.startswith("image/"):
+            guessed_type = mimetypes.guess_type(file_name)[0] or ""
+            resolved_type = guessed_type if guessed_type.startswith("image/") else "image/png"
+        return content, resolved_type, file_name
+
+    @classmethod
+    def delete_change_confirmation_screenshot(
+        cls,
+        target_record_id: str,
+        *,
+        actor_open_id: str,
+        actor_name: str,
+        allowed_scopes: list[str] | tuple[str, ...] | None,
+        privileged: bool,
+    ) -> dict:
+        target_record_id = str(target_record_id or "").strip()
+        if not target_record_id or is_local_record_id(target_record_id):
+            raise PortalError("缺少有效的变更目标记录ID。")
+        lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
+            {"work_type": WORK_TYPE_CHANGE, "notice_type": NOTICE_TYPE_CHANGE, "target_record_id": target_record_id},
+            action_type="change_confirmation_delete",
+            target_record_id=target_record_id,
+        )
+        if lock_error:
+            raise PortalConflictError(lock_error)
+        try:
+            record, fields = cls._query_active_change_confirmation_record(target_record_id)
+            cls._authorize_change_confirmation_record(
+                fields,
+                allowed_scopes=allowed_scopes,
+                privileged=privileged,
+            )
+            screenshot_field = CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]
+            confirmation_field = CHANGE_NOTICE_FIELDS["h_confirmation"]
+            if cls._change_confirmation_attachment_count(fields.get(screenshot_field)) or cls._change_confirmation_checked(fields.get(confirmation_field)):
+                ok_patch, patch_result = update_bitable_record_fields(
+                    target_record_id,
+                    NOTICE_TYPE_CHANGE,
+                    {screenshot_field: [], confirmation_field: False},
+                )
+                if not ok_patch:
+                    raise PortalExternalError(str(patch_result or "阿里确认截图删除失败。"))
+                verified = False
+                for attempt in range(3):
+                    ok_verify, verify_result = query_record_by_id(target_record_id, NOTICE_TYPE_CHANGE)
+                    verify_fields = (
+                        cls._change_confirmation_fields(verify_result)
+                        if ok_verify and isinstance(verify_result, dict)
+                        else {}
+                    )
+                    if ok_verify and not cls._change_confirmation_attachment_count(verify_fields.get(screenshot_field)):
+                        fields = verify_fields
+                        record = verify_result
+                        verified = True
+                        break
+                    if attempt < 2:
+                        time.sleep(0.2 * (attempt + 1))
+                if not verified:
+                    raise PortalExternalError("截图删除已提交，但目标表尚未确认，请稍后重试。")
+            existing = cls.state_store.get_document(CHANGE_CONFIRMATION_NAMESPACE, target_record_id) or {}
+            now = time.time()
+            task = cls._change_confirmation_task_from_record(
+                target_record_id,
+                record,
+                existing=existing,
+                now=now,
+            )
+            task.update(
+                {
+                    "screenshot_deleted_at": now,
+                    "screenshot_deleted_by_open_id": str(actor_open_id or ""),
+                    "screenshot_deleted_by_name": str(actor_name or ""),
+                    "next_reminder_at": now + CHANGE_CONFIRMATION_REMINDER_SECONDS,
+                    "last_error": "",
+                }
+            )
+            cls._put_change_confirmation_task(task)
+            cls._patch_change_confirmation_projection(
+                target_record_id,
+                screenshot_count=0,
+                h_confirmed=False,
+                screenshot_items=[],
+            )
+            return task
+        finally:
+            cls._release_event_operation_lock(lock_key, lock_owner)
+
+    @classmethod
+    def confirm_change_confirmation(
+        cls,
+        target_record_id: str,
+        *,
+        actor_open_id: str,
+        actor_name: str,
+    ) -> dict:
+        target_record_id = str(target_record_id or "").strip()
+        if not target_record_id or is_local_record_id(target_record_id):
+            raise PortalError("缺少有效的变更目标记录ID。")
+        lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
+            {"work_type": WORK_TYPE_CHANGE, "notice_type": NOTICE_TYPE_CHANGE, "target_record_id": target_record_id},
+            action_type="change_confirmation_confirm",
+            target_record_id=target_record_id,
+        )
+        if lock_error:
+            raise PortalConflictError(lock_error)
+        try:
+            record, fields = cls._query_active_change_confirmation_record(target_record_id)
+            screenshot_count = cls._change_confirmation_attachment_count(fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]))
+            if not screenshot_count:
+                raise PortalConflictError("尚未上传阿里确认截图，不能确认。")
+            if not cls._change_confirmation_checked(fields.get(CHANGE_NOTICE_FIELDS["h_confirmation"])):
+                ok_patch, patch_result = update_bitable_record_fields(
+                    target_record_id,
+                    NOTICE_TYPE_CHANGE,
+                    {CHANGE_NOTICE_FIELDS["h_confirmation"]: True},
+                )
+                if not ok_patch:
+                    raise PortalExternalError(str(patch_result or "H楼确认写入失败。"))
+                verified = False
+                for attempt in range(3):
+                    ok_verify, verify_result = query_record_by_id(
+                        target_record_id,
+                        NOTICE_TYPE_CHANGE,
+                    )
+                    verify_fields = (
+                        cls._change_confirmation_fields(verify_result)
+                        if ok_verify and isinstance(verify_result, dict)
+                        else {}
+                    )
+                    if cls._change_confirmation_checked(
+                        verify_fields.get(CHANGE_NOTICE_FIELDS["h_confirmation"])
+                    ):
+                        fields = verify_fields
+                        record = verify_result
+                        verified = True
+                        break
+                    if attempt < 2:
+                        time.sleep(0.2 * (attempt + 1))
+                if not verified:
+                    raise PortalExternalError("H楼确认已提交，但目标表尚未确认写入，请稍后重试。")
+            existing = cls.state_store.get_document(CHANGE_CONFIRMATION_NAMESPACE, target_record_id) or {}
+            task = cls._change_confirmation_task_from_record(
+                target_record_id,
+                record,
+                existing=existing,
+            )
+            task.update(
+                {
+                    "confirmed_at": float(existing.get("confirmed_at") or time.time()),
+                    "confirmed_by_open_id": str(existing.get("confirmed_by_open_id") or actor_open_id or ""),
+                    "confirmed_by_name": str(existing.get("confirmed_by_name") or actor_name or ""),
+                    "last_error": "",
+                }
+            )
+            cls._put_change_confirmation_task(task)
+            cls._patch_change_confirmation_projection(
+                target_record_id,
+                screenshot_count=screenshot_count,
+                h_confirmed=True,
+            )
+            return task
+        finally:
+            cls._release_event_operation_lock(lock_key, lock_owner)
+
 
     @staticmethod
     def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
@@ -4576,6 +5468,7 @@ class PortalRuntime:
         *,
         file_tokens: list[str] | None = None,
         extra_file_tokens: list[str] | None = None,
+        ali_confirmation_file_tokens: list[str] | None = None,
         existing_file_tokens: list[str] | None = None,
         existing_extra_file_tokens: list[str] | None = None,
         existing_response_time: str | None = None,
@@ -4621,6 +5514,7 @@ class PortalRuntime:
             occurrence_date=str(prepared.get("time_str") or "").strip() or None,
             file_tokens=list(file_tokens or []) or None,
             extra_file_tokens=list(extra_file_tokens or []) or None,
+            ali_confirmation_file_tokens=list(ali_confirmation_file_tokens or []) or None,
             existing_file_tokens=list(existing_file_tokens or []) or None,
             existing_extra_file_tokens=list(existing_extra_file_tokens or []) or None,
             existing_response_time=existing_response_time or None,
@@ -4779,6 +5673,37 @@ class PortalRuntime:
         if cls._notice_supports_site_image_field(notice_type):
             return True, "", [], uploaded_tokens
         return True, "", uploaded_tokens, []
+
+    @classmethod
+    def _upload_change_confirmation_images(
+        cls,
+        payload: dict,
+    ) -> tuple[bool, str, list[str], list[str]]:
+        entries = payload.get("ali_confirmation_images") if isinstance(payload, dict) else []
+        if not isinstance(entries, list) or not entries:
+            return True, "", [], []
+        entry = entries[0] if isinstance(entries[0], dict) else {}
+        existing_token = str(entry.get("file_token") or entry.get("token") or "").strip()
+        if existing_token:
+            return True, "", [existing_token], []
+        upload_id = str(entry.get("upload_id") or "").strip()
+        attachment = cls.state_store.get_notice_upload_attachment(upload_id)
+        if not attachment:
+            return False, "阿里确认截图已过期或不存在，请重新添加。", [], []
+        content = bytes(attachment.get("content") or b"")
+        if not content:
+            return False, "阿里确认截图内容为空，请重新添加。", [], []
+        ok, result = upload_media_to_feishu(
+            content,
+            file_name=str(
+                entry.get("file_name")
+                or attachment.get("file_name")
+                or "ali_confirmation.png"
+            ).strip(),
+        )
+        if not ok or not str(result or "").strip():
+            return False, str(result or "阿里确认截图上传失败。"), [], []
+        return True, "", [str(result).strip()], [upload_id]
 
     @staticmethod
     def _remote_record_not_found(message: object) -> bool:
@@ -6008,6 +6933,13 @@ class PortalRuntime:
         except Exception as exc:
             log_warning(f"Qt 上传目标 ID 回写 active item 失败: {exc}")
             raise
+        if str(payload.get("work_type") or "").strip() == WORK_TYPE_CHANGE:
+            try:
+                task = cls._track_change_confirmation_payload(payload)
+                if task:
+                    cls._process_change_confirmation_task(task, point_read=False)
+            except Exception as exc:
+                log_warning(f"Qt 变更确认任务登记失败: {exc}")
         return record_version
 
     @classmethod
@@ -6922,22 +7854,52 @@ class PortalRuntime:
                 notice_type,
             )
             if existing_target:
+                ali_ok, ali_error, ali_tokens, ali_upload_ids = (
+                    cls._upload_change_confirmation_images(prepared)
+                )
+                if not ali_ok:
+                    return False, ali_error or "阿里确认截图上传失败。", existing_target
+                if ali_tokens:
+                    ok_patch, patch_result = update_bitable_record_fields(
+                        existing_target,
+                        notice_type,
+                        {
+                            CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]: [
+                                {"file_token": token} for token in ali_tokens
+                            ],
+                            CHANGE_NOTICE_FIELDS["h_confirmation"]: False,
+                        },
+                    )
+                    if not ok_patch:
+                        return False, str(patch_result or "阿里确认截图写入失败。"), existing_target
+                    prepared["ali_confirmation_file_tokens"] = list(ali_tokens)
+                    for upload_id in ali_upload_ids:
+                        cls.state_store.mark_notice_upload_attachment_used(upload_id)
                 return True, existing_target, existing_target
             images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
                 cls._upload_extra_images_for_notice(prepared, notice_type)
             )
             if not images_ok:
                 return False, images_error or "现场照片上传失败。", ""
+            ali_ok, ali_error, ali_tokens, ali_upload_ids = (
+                cls._upload_change_confirmation_images(prepared)
+            )
+            if not ali_ok:
+                return False, ali_error or "阿里确认截图上传失败。", ""
             payload = cls._prepared_to_notice_payload(
                 prepared,
                 file_tokens=image_file_tokens,
                 extra_file_tokens=image_extra_file_tokens,
+                ali_confirmation_file_tokens=ali_tokens,
             )
             ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
             if ok and not record_id:
                 return False, "多维创建未返回 record_id，已阻止标记上传成功。", ""
             if ok and record_id:
+                prepared["ali_confirmation_file_tokens"] = list(ali_tokens)
+                for upload_id in ali_upload_ids:
+                    cls.state_store.mark_notice_upload_attachment_used(upload_id)
                 ok_created, created_result = query_record_by_id(record_id, notice_type)
                 if ok_created and isinstance(created_result, dict):
                     prepared["record_version"] = str(
@@ -7010,15 +7972,25 @@ class PortalRuntime:
         )
         if not images_ok:
             return False, images_error or "现场照片上传失败。", record_id
+        ali_ok, ali_error, ali_tokens, ali_upload_ids = (
+            cls._upload_change_confirmation_images(prepared)
+        )
+        if not ali_ok:
+            return False, ali_error or "阿里确认截图上传失败。", record_id
         payload = cls._prepared_to_notice_payload(
             prepared,
             file_tokens=image_file_tokens,
             extra_file_tokens=image_extra_file_tokens,
+            ali_confirmation_file_tokens=ali_tokens,
             existing_file_tokens=existing_tokens,
             existing_extra_file_tokens=existing_extra_tokens,
             existing_response_time=existing_response_time if action == "update" else "",
         )
         ok, result = update_bitable_record_by_payload(record_id, notice_type, payload)
+        if ok and ali_tokens:
+            prepared["ali_confirmation_file_tokens"] = list(ali_tokens)
+            for upload_id in ali_upload_ids:
+                cls.state_store.mark_notice_upload_attachment_used(upload_id)
         if not ok and checkpoint_id:
             cls.state_store.mark_notice_undo_action(
                 checkpoint_id,
@@ -7614,6 +8586,20 @@ class PortalRuntime:
                     "Qt 旧 active 身份清理通知投递失败: "
                     f"active_item_id={old_active_item_id}, error={exc}"
                 )
+        if work_type == WORK_TYPE_CHANGE and target_record_id:
+            try:
+                task_payload = dict(event_payload)
+                if "ali_confirmation_file_tokens" in prepared:
+                    task_payload["ali_confirmation_file_tokens"] = list(
+                        prepared.get("ali_confirmation_file_tokens") or []
+                    )
+                task = cls._track_change_confirmation_payload(
+                    task_payload
+                )
+                if task:
+                    cls._process_change_confirmation_task(task, point_read=False)
+            except Exception as exc:
+                log_warning(f"网页变更确认任务登记失败: {exc}")
         return event_id
 
     @classmethod
@@ -7660,6 +8646,14 @@ class PortalRuntime:
             },
             enqueue_if_missing=enqueue_if_missing,
         )
+        if (
+            str(prepared.get("work_type") or "").strip() == WORK_TYPE_CHANGE
+            or str(prepared.get("notice_type") or "").strip() == NOTICE_TYPE_CHANGE
+        ):
+            cls.stop_change_confirmation(
+                target_record_id,
+                reason="target_terminal",
+            )
         return event_id
 
     @classmethod
@@ -8829,6 +9823,11 @@ class PortalRuntime:
                     },
                 },
             )
+            if work_type == WORK_TYPE_CHANGE:
+                cls.stop_change_confirmation(
+                    target_record_id,
+                    reason="target_deleted",
+                )
         except Exception as exc:
             message = (
                 "目标多维记录已删除，但本地显示清理失败；"

@@ -43,6 +43,8 @@ from clipflow_backend.api_models import (
     APIModel,
     AuthPermissionRemoveRequest,
     AuthPermissionsSaveRequest,
+    ChangeConfirmationConfirmRequest,
+    ChangeConfirmationScreenshotRequest,
     ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
     CriticalGuardResponseRequest,
@@ -141,6 +143,7 @@ from lan_bitable_template_portal.operation_audit import (
     finish_business_audit,
 )
 from lan_bitable_template_portal.portal_service import (
+    BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
     CHANGE_SOURCE_APP_TOKEN,
     CHANGE_SOURCE_TABLE_ID,
@@ -744,9 +747,14 @@ class FastAPIPortalController:
                     SCOPE_OPTIONS,
                     session,
                 )
+                render_session = dict(session)
+                render_session["can_manage_change_confirmations"] = bool(
+                    PortalRuntime.auth_manager.is_admin(session)
+                    or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+                )
                 html_body = render_workbench_lite(
                     payload=payload if isinstance(payload, dict) else {},
-                    session=session,
+                    session=render_session,
                     scope=scope,
                     work_type=work_type,
                     month=month,
@@ -5500,6 +5508,151 @@ class FastAPIPortalController:
                         "expires_at": attachment.get("expires_at"),
                     },
                 }
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/change-confirmations")
+        async def change_confirmations(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            user = session.get("user") if isinstance(session.get("user"), dict) else {}
+            open_id = str(user.get("open_id") or "").strip()
+            if not (
+                PortalRuntime.auth_manager.is_admin(session)
+                or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+            ):
+                return JSONResponse(
+                    {"ok": False, "error": "只有管理员或H楼账号可以查看变更确认。"},
+                    status_code=403,
+                )
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.list_change_confirmations
+                )
+                data["can_confirm"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/change-confirmations/{record_id}/screenshot")
+        async def change_confirmation_screenshot(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        ChangeConfirmationScreenshotRequest,
+                    )
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                open_id = str(user.get("open_id") or "").strip()
+                privileged = bool(
+                    PortalRuntime.auth_manager.is_admin(session)
+                    or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+                )
+                item = await asyncio.to_thread(
+                    PortalRuntime.upload_change_confirmation_screenshot,
+                    record_id,
+                    upload_id=str(payload.get("upload_id") or ""),
+                    actor_open_id=open_id,
+                    actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
+                    privileged=privileged,
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/change-confirmations/{record_id}/screenshot/preview")
+        async def change_confirmation_screenshot_preview(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                open_id = str(user.get("open_id") or "").strip()
+                content, content_type, file_name = await asyncio.to_thread(
+                    PortalRuntime.get_change_confirmation_screenshot_bytes,
+                    record_id,
+                    file_token=str(request.query_params.get("file_token") or ""),
+                    allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
+                    privileged=bool(
+                        PortalRuntime.auth_manager.is_admin(session)
+                        or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+                    ),
+                )
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "private, max-age=300",
+                        "Content-Disposition": f"inline; filename*=UTF-8''{quote(file_name, safe='')}",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.delete("/api/change-confirmations/{record_id}/screenshot")
+        async def change_confirmation_screenshot_delete(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                open_id = str(user.get("open_id") or "").strip()
+                privileged = bool(
+                    PortalRuntime.auth_manager.is_admin(session)
+                    or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+                )
+                item = await asyncio.to_thread(
+                    PortalRuntime.delete_change_confirmation_screenshot,
+                    record_id,
+                    actor_open_id=open_id,
+                    actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
+                    privileged=privileged,
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/change-confirmations/{record_id}/confirm")
+        async def change_confirmation_confirm(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            user = session.get("user") if isinstance(session.get("user"), dict) else {}
+            open_id = str(user.get("open_id") or "").strip()
+            if not (
+                PortalRuntime.auth_manager.is_admin(session)
+                or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+            ):
+                return JSONResponse(
+                    {"ok": False, "error": "只有管理员或H楼账号可以确认。"},
+                    status_code=403,
+                )
+            try:
+                await self._read_model_request(
+                    request,
+                    ChangeConfirmationConfirmRequest,
+                )
+                item = await asyncio.to_thread(
+                    PortalRuntime.confirm_change_confirmation,
+                    record_id,
+                    actor_open_id=open_id,
+                    actor_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, item)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
@@ -10428,6 +10581,22 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"删除审计日志重试失败: {exc}")
 
+    def _run_scheduled_change_confirmations(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            result = PortalRuntime.process_change_confirmation_tasks()
+            if int((result or {}).get("failed") or 0) or str(
+                (result or {}).get("seed_error") or ""
+            ).strip():
+                log_warning(
+                    "变更确认任务仍有失败项，将继续重试: "
+                    f"failed={result.get('failed')}, "
+                    f"seed_error={result.get('seed_error') or ''}"
+                )
+        except Exception as exc:
+            log_warning(f"变更确认任务处理失败: {exc}")
+
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
             pressure = PortalRuntime.runtime_pressure()
@@ -10666,6 +10835,15 @@ class FastAPIPortalController:
             coalesce=True,
         )
         scheduler.add_job(
+            self._run_scheduled_change_confirmations,
+            "interval",
+            minutes=1,
+            id="change_confirmations",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
@@ -10703,6 +10881,14 @@ class FastAPIPortalController:
                 "date",
                 run_date=dt.datetime.now() + dt.timedelta(seconds=15),
                 id="deletion_audit_flush_startup",
+                replace_existing=True,
+                max_instances=1,
+            )
+            scheduler.add_job(
+                self._run_scheduled_change_confirmations,
+                "date",
+                run_date=dt.datetime.now() + dt.timedelta(seconds=20),
+                id="change_confirmations_startup",
                 replace_existing=True,
                 max_instances=1,
             )

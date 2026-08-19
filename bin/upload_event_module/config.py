@@ -990,6 +990,8 @@ CHANGE_NOTICE_FIELDS = {
     "building": "楼栋",
     "today_in_progress": "今日是否进行",
     "site_images": "过程现场图片",
+    "ali_confirmation_snapshot": "阿里确认截图",
+    "h_confirmation": "H楼确认",
 }
 
 MAINTENANCE_NOTICE_FIELDS = {

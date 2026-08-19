@@ -131,6 +131,12 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["site_images"]] = [
                 {"file_token": token} for token in payload.extra_file_tokens
             ]
+        if payload.ali_confirmation_file_tokens:
+            fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]] = [
+                {"file_token": token}
+                for token in payload.ali_confirmation_file_tokens
+            ]
+            fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
 
         return fields
 
@@ -217,6 +223,13 @@ class ChangeNoticeHandler(BaseNoticeHandler):
                     {"file_token": token} for token in extra_tokens
                 ]
             return fields
+
+        if payload.ali_confirmation_file_tokens:
+            fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]] = [
+                {"file_token": token}
+                for token in payload.ali_confirmation_file_tokens
+            ]
+            fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
 
         fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
             "是" if "准备工作已完成" in progress else "否"
