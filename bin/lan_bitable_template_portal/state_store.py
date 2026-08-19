@@ -3661,14 +3661,28 @@ class LanPortalStateStore:
             return set()
         building_key = self._business_merge_text_key(item.get("building"))
         reason_key = self._business_merge_text_key(item.get("reason"))
+        item_fields = (
+            item.get("display_fields")
+            if isinstance(item.get("display_fields"), dict)
+            else item.get("fields")
+            if isinstance(item.get("fields"), dict)
+            else {}
+        )
+        cycle_key = (
+            self._business_merge_text_key(
+                item.get("maintenance_cycle") or item_fields.get("维护周期")
+            )
+            if work_type == "maintenance"
+            else ""
+        )
         time_key = self._business_merge_time_key(item)
         keys: set[str] = set()
         if building_key and reason_key:
-            keys.add(f"{work_type}:business:title-building-reason:{building_key}:{title_key}:{reason_key}")
+            keys.add(f"{work_type}:business:title-building-reason:{building_key}:{title_key}:{cycle_key}:{reason_key}")
         if building_key and time_key and reason_key:
-            keys.add(f"{work_type}:business:title-time-reason:{building_key}:{title_key}:{time_key}:{reason_key}")
+            keys.add(f"{work_type}:business:title-time-reason:{building_key}:{title_key}:{cycle_key}:{time_key}:{reason_key}")
         elif building_key and time_key:
-            keys.add(f"{work_type}:business:title-time:{building_key}:{title_key}:{time_key}")
+            keys.add(f"{work_type}:business:title-time:{building_key}:{title_key}:{cycle_key}:{time_key}")
         return keys
 
     @staticmethod
@@ -3689,6 +3703,17 @@ class LanPortalStateStore:
         ]
         digits = re.findall(r"\d+", "".join(parts))
         return "".join(chunk.zfill(2) if len(chunk) <= 2 else chunk for chunk in digits)
+
+    @staticmethod
+    def _business_merge_month_key(item: dict[str, Any]) -> str:
+        match = re.search(
+            r"(\d{4})[-/年](\d{1,2})",
+            " ".join(
+                str(item.get(key) or "")
+                for key in ("start_time", "time_str", "time", "end_time")
+            ),
+        )
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}" if match else ""
 
     @staticmethod
     def _notice_sections_from_text(text: Any) -> dict[str, str]:
@@ -8557,7 +8582,55 @@ class LanPortalStateStore:
             )
             candidates.append(dict(row))
             payloads.append(payload)
-            identity_keys.append(self._identity_keys_for_item(payload))
+            identity_keys.append(
+                self._identity_keys_for_item(payload)
+                | self._business_merge_keys_for_item(payload)
+            )
+
+        maintenance_bridges: dict[
+            tuple[str, str, str, str], dict[str, list[int]]
+        ] = {}
+        for index, payload in enumerate(payloads):
+            if self._text(payload.get("work_type")) != "maintenance":
+                continue
+            source_record_id = canonical_source_record_id(payload)
+            target_record_id = canonical_target_record_id(payload)
+            if bool(source_record_id) == bool(target_record_id):
+                continue
+            fields = (
+                payload.get("display_fields")
+                if isinstance(payload.get("display_fields"), dict)
+                else payload.get("fields")
+                if isinstance(payload.get("fields"), dict)
+                else {}
+            )
+            profile = (
+                self._business_merge_text_key(
+                    payload.get("title") or payload.get("content")
+                ),
+                self._business_merge_text_key(
+                    payload.get("building")
+                    or "".join(payload.get("building_codes") or [])
+                ),
+                self._business_merge_text_key(
+                    payload.get("maintenance_cycle") or fields.get("维护周期")
+                ),
+                self._business_merge_month_key(payload),
+            )
+            if not all(profile):
+                continue
+            role = "source" if source_record_id else "target"
+            maintenance_bridges.setdefault(
+                profile, {"source": [], "target": []}
+            )[role].append(index)
+        for profile, roles in maintenance_bridges.items():
+            if len(roles["source"]) != 1 or len(roles["target"]) != 1:
+                continue
+            bridge_key = "maintenance:source-target:" + hashlib.sha1(
+                json.dumps(profile, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            identity_keys[roles["source"][0]].add(bridge_key)
+            identity_keys[roles["target"][0]].add(bridge_key)
 
         count = len(candidates)
         if count <= 1:

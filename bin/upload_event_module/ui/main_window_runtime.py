@@ -678,6 +678,11 @@ class MainWindowRuntimeMixin:
         record_id = str(
             data.get("target_record_id") or data.get("record_id") or ""
         ).strip()
+        if (
+            (not item or not self._is_valid_list_item(item))
+            and str(data.get("source_record_id") or "").strip()
+        ):
+            list_widget, item = self._find_lan_ongoing_item_for_payload(data)
         if not item or not self._is_valid_list_item(item):
             list_widget = None
             item = None
@@ -690,6 +695,21 @@ class MainWindowRuntimeMixin:
         if item and self._is_valid_list_item(item):
             self._set_active_item_data(list_widget, item, data)
             self._upsert_active_notice_model_item(list_widget, item, data)
+            source_record_id = str(data.get("source_record_id") or "").strip()
+            if source_record_id and str(data.get("target_record_id") or "").strip():
+                try:
+                    for old_list, old_item, old_data in self._active_notice_store().candidates_by_source_record_id(
+                        source_record_id
+                    ):
+                        if (
+                            old_item == item
+                            or not self._is_valid_list_item(old_item)
+                            or str(old_data.get("target_record_id") or "").strip()
+                        ):
+                            continue
+                        self._remove_active_item_from_source(old_list, old_item)
+                except Exception as exc:
+                    log_warning(f"Qt 源目标重复行清理失败，等待下次同步: {exc}")
             self._maybe_update_detail_dialog(data, record_id)
             return {"ok": True, "updated": True}
         added_item, _ = self.add_active_item(data, insert_top=True, skip_cache=True)

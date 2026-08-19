@@ -774,6 +774,139 @@ class QtShellBackendEventTests(unittest.TestCase):
             self.assertEqual(harness.added[0]["progress"], "NEW")
             self.assertIn("【进度】NEW", harness.added[0]["text"])
 
+    def test_target_upsert_converges_source_and_target_qt_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            source_record_id = "rec-source-maintenance-e"
+            target_record_id = "rec-target-maintenance-e"
+            common = {
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "EA118机房E楼定压补水系统月度维护",
+                "building": "E楼",
+                "maintenance_cycle": "每月",
+                "start_time": "2026-08-15 00:00",
+                "end_time": "2026-08-21 00:00",
+            }
+            source = {
+                **common,
+                "active_item_id": f"source-maintenance-{source_record_id}",
+                "source_record_id": source_record_id,
+                "source_snapshot_authoritative": True,
+                "status": "更新",
+                "maintenance_cycle": "",
+                "display_fields": {"维护周期": "每月"},
+                "location": "E楼",
+                "content": common["title"],
+                "text": "【维保通告】状态：更新\n【名称】EA118机房E楼定压补水系统月度维护",
+            }
+            target = {
+                **common,
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "status": "开始",
+                "start_time": "2026-08-17 14:00",
+                "location": "E楼冷站",
+                "content": "补水装置检查、泵及管道检查",
+                "text": "【维保通告】状态：开始\n【名称】EA118机房E楼定压补水系统月度维护",
+            }
+            store.upsert_qt_active_item(
+                source,
+                section="other",
+                origin="source_snapshot_refresh",
+            )
+            store.upsert_qt_active_item(target, section="other", origin="portal")
+
+            class Harness(MainWindowRuntimeMixin):
+                def __init__(self, include_target: bool):
+                    self.cache_store = type("CacheStore", (), {"_state_store": store})()
+                    self.rows = {"source-item": dict(source)}
+                    if include_target:
+                        self.rows["target-item"] = dict(target)
+                    self.added = []
+
+                def _find(self, value, *keys):
+                    for item, data in self.rows.items():
+                        if str(value or "") in {
+                            str(data.get(key) or "") for key in keys
+                        }:
+                            return "other-list", item
+                    return None, None
+
+                def _find_active_item_by_active_item_id(self, value):
+                    return self._find(value, "active_item_id")
+
+                def _find_active_item_by_record_id(self, value):
+                    return self._find(value, "target_record_id", "record_id")
+
+                @staticmethod
+                def _ensure_active_item_identity(data):
+                    return dict(data)
+
+                def _is_valid_list_item(self, item):
+                    return item in self.rows
+
+                def _active_notice_store(self):
+                    harness = self
+
+                    class ActiveStore:
+                        @staticmethod
+                        def candidates_by_source_record_id(value):
+                            return [
+                                ("other-list", item, data)
+                                for item, data in harness.rows.items()
+                                if data.get("source_record_id") == value
+                            ]
+
+                        @staticmethod
+                        def entries():
+                            return [
+                                ("other-list", item, data)
+                                for item, data in harness.rows.items()
+                            ]
+
+                    return ActiveStore()
+
+                def _active_item_data(self, item):
+                    return dict(self.rows[item])
+
+                @staticmethod
+                def _inherit_active_runtime_fields(data, _existing):
+                    return dict(data)
+
+                def _set_active_item_data(self, _list_widget, item, data):
+                    self.rows[item] = dict(data)
+
+                def _upsert_active_notice_model_item(self, *_args):
+                    return None
+
+                def _maybe_update_detail_dialog(self, *_args):
+                    return None
+
+                def _remove_active_item_from_source(self, _list_widget, item):
+                    self.rows.pop(item, None)
+
+                def add_active_item(self, data, **_kwargs):
+                    self.added.append(dict(data))
+                    self.rows["added-item"] = dict(data)
+                    return object(), None
+
+            for include_target in (False, True):
+                with self.subTest(preexisting_target=include_target):
+                    harness = Harness(include_target)
+                    result = harness._apply_backend_active_upsert(
+                        {"item": {"active_item_id": target_record_id, "payload": target}}
+                    )
+
+                    self.assertTrue(result.get("updated"))
+                    self.assertEqual(harness.added, [])
+                    self.assertEqual(len(harness.rows), 1)
+                    current = next(iter(harness.rows.values()))
+                    self.assertEqual(current.get("active_item_id"), target_record_id)
+                    self.assertEqual(current.get("source_record_id"), source_record_id)
+                    self.assertEqual(current.get("target_record_id"), target_record_id)
+
     def test_canonical_active_guard_prioritizes_work_type_and_strong_ids(self):
         shared_target_id = "rec-cross-work-type"
         change = {

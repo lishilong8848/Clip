@@ -2100,6 +2100,8 @@ def _detail_form(
         if prefill_draft
         else (_remote_target_record_id(source) if ongoing_item else "")
     )
+    if ongoing_item and not target_record_id:
+        action = "start"
     active_item_id = (
         str(source.get("active_item_id") or target_record_id or source_record_id or "")
         if ongoing_item
@@ -2170,7 +2172,7 @@ def _detail_form(
         if work == "repair"
         else ""
     )
-    if ongoing_item:
+    if ongoing_item and target_record_id:
         admin_remove_button = (
             "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"local\">移除显示</button>"
             if is_admin
@@ -2181,6 +2183,11 @@ def _detail_form(
             "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
             "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"remote\">删除通告</button>"
             f"{admin_remove_button}"
+        )
+    elif ongoing_item:
+        action_buttons = (
+            '<button class="btn primary" type="submit" '
+            'name="submit_action" value="start">发送开始</button>'
         )
     else:
         convert_change_button = (
@@ -6676,6 +6683,22 @@ def render_workbench_lite(
         list.replaceChildren(empty);
       }}
     }}
+    function removeSupersededSourceOngoingRows(draft, keepRow) {{
+      const sourceRecordId = String(draft?.source_record_id || '').trim();
+      const targetRecordId = String(
+        draft?.target_record_id || draft?.record_id || ''
+      ).trim();
+      if (!sourceRecordId || isMissingTargetRecordId(targetRecordId)) return;
+      document.querySelectorAll('.ongoing-row').forEach(candidate => {{
+        if (
+          candidate === keepRow
+          || String(candidate.getAttribute('data-source-record-id') || '').trim()
+            !== sourceRecordId
+          || String(candidate.getAttribute('data-target-record-id') || '').trim()
+        ) return;
+        removeOngoingRow(candidate);
+      }});
+    }}
     function promoteSubmittedStartToOngoing(draft) {{
       if (!draft || draft.action !== 'start') return;
       const form = document.getElementById('lite-notice-form');
@@ -6800,6 +6823,7 @@ def render_workbench_lite(
       row.setAttribute('data-source-record-id', draft.source_record_id || '');
       row.setAttribute('data-site-photo-count', draft.site_photo_count || row.getAttribute('data-site-photo-count') || '0');
       row.setAttribute('data-operation-id', draft.operation_id || row.getAttribute('data-operation-id') || '');
+      removeSupersededSourceOngoingRows(draft, row);
       if (draft.title) {{
         const displayTitle = ongoingDisplayTitle(draft);
         row.setAttribute('data-title', displayTitle);

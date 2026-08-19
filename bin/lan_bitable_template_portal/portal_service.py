@@ -21835,6 +21835,37 @@ class MaintenancePortalService:
             return False
         return any(token in status for token in ("已完成", "已结束", "正常结束", "延期结束", "延迟结束", "闭环"))
 
+    def mark_maintenance_source_ended_locally(
+        self, payload: dict[str, Any]
+    ) -> bool:
+        payload = normalize_notice_identity_payload(payload or {})
+        if (
+            self._item_work_type(payload) != WORK_TYPE_MAINTENANCE
+            or self._truthy_flag(payload.get("manual"))
+        ):
+            return False
+        source_record_id = canonical_source_record_id(payload)
+        if not source_record_id or is_local_record_id(source_record_id):
+            return False
+        local_fields = {"维护实施状态": "已结束"}
+        with self._refresh_lock:
+            for record in self._records:
+                if str(record.get("record_id") or "").strip() != source_record_id:
+                    continue
+                fields = record.get("display_fields")
+                if not isinstance(fields, dict):
+                    fields = {}
+                    record["display_fields"] = fields
+                fields.update(local_fields)
+                break
+            self._state_store.patch_active_source_record_fields(
+                source_record_id=source_record_id,
+                work_type=WORK_TYPE_MAINTENANCE,
+                fields=local_fields,
+            )
+        self._touch_state_cache_version()
+        return True
+
     def _change_record_building_codes(self, record: dict[str, Any]) -> list[str]:
         fields = record.get("display_fields") or {}
         raw_building = (
@@ -29347,16 +29378,25 @@ class MaintenancePortalService:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         self.ensure_snapshot_loaded()
         with self._summary_lock:
+            work_status_items = self._load_work_status_items_locked("ALL")
             reset_source_keys = {
                 (
                     self._item_work_type(item),
                     str(item.get("source_record_id") or "").strip(),
                 )
-                for item in self._load_work_status_items_locked("ALL")
+                for item in work_status_items
                 if isinstance(item, dict)
                 and bool(item.get("reset_after_delete"))
                 and str(item.get("status") or "").strip()
                 == DEFAULT_MAINTENANCE_STATUS
+                and str(item.get("source_record_id") or "").strip()
+            }
+            completed_maintenance_source_ids = {
+                str(item.get("source_record_id") or "").strip()
+                for item in work_status_items
+                if isinstance(item, dict)
+                and self._item_work_type(item) == WORK_TYPE_MAINTENANCE
+                and str(item.get("status") or "").strip() == "已结束"
                 and str(item.get("source_record_id") or "").strip()
             }
         source_records = self._apply_work_type_overrides(
@@ -29375,6 +29415,11 @@ class MaintenancePortalService:
                 str(record.get("record_id") or "").strip(),
             )
             not in reset_source_keys
+            and not (
+                self._record_work_type(record) == WORK_TYPE_MAINTENANCE
+                and str(record.get("record_id") or "").strip()
+                in completed_maintenance_source_ids
+            )
         ]
         zhihang_records = [
             record
@@ -29392,6 +29437,8 @@ class MaintenancePortalService:
         source_record_id = canonical_source_record_id(payload)
         zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
         work_type = self._item_work_type(payload)
+        if work_type == WORK_TYPE_REPAIR:
+            return False
         if not source_record_id and not zhihang_record_id:
             return False
         with self._refresh_lock:
@@ -29554,9 +29601,16 @@ class MaintenancePortalService:
                 return direct_row
             return candidates[0] if len(candidates) == 1 else None
 
-        def upsert(source_payload: dict[str, Any], *, zhihang: bool = False) -> None:
+        def upsert(
+            source_payload: dict[str, Any],
+            *,
+            zhihang: bool = False,
+            require_target: bool = False,
+        ) -> None:
             row = matching_row(source_payload, zhihang=zhihang)
             current = row_payload(row) if row else {}
+            if require_target and not canonical_target_record_id(current):
+                return
             if zhihang and canonical_source_record_id(current):
                 projected = copy.deepcopy(current)
             elif canonical_target_record_id(current):
@@ -29635,7 +29689,10 @@ class MaintenancePortalService:
             claimed_active_ids.add(str(projected.get("active_item_id") or ""))
 
         for record in source_records:
-            upsert(self._source_snapshot_active_payload(record))
+            upsert(
+                self._source_snapshot_active_payload(record),
+                require_target=self._record_work_type(record) == WORK_TYPE_REPAIR,
+            )
         for record in zhihang_records:
             upsert(self._source_snapshot_active_payload(record, zhihang=True), zhihang=True)
 
@@ -29732,6 +29789,7 @@ class MaintenancePortalService:
                 str(record.get("record_id") or "").strip(),
             )
             for record in source_records
+            if self._record_work_type(record) != WORK_TYPE_REPAIR
         }
         active_zhihang_ids = {
             (WORK_TYPE_CHANGE, str(record.get("record_id") or "").strip())
@@ -37929,6 +37987,11 @@ class MaintenancePortalService:
         title = re.sub(r"\s+", "", cls._manual_payload_title_text(payload))
         if not title:
             return None
+        if any(
+            re.search(pattern, title)
+            for pattern in NOTICE_TYPE_KEYWORD_RULES.get(expected_type, ())
+        ):
+            return None
         for work_type, patterns in NOTICE_TYPE_KEYWORD_RULES.items():
             if work_type == expected_type:
                 continue
@@ -40072,7 +40135,22 @@ class MaintenancePortalService:
                 default_start = ""
                 default_end = ""
             else:
-                record = self._find_record_by_id(record_id, WORK_TYPE_CHANGE)
+                try:
+                    record = self._find_record_by_id(record_id, WORK_TYPE_CHANGE)
+                except PortalError:
+                    if not self._change_field_meta_by_name:
+                        self._load_change_fields()
+                    record = self._load_table_records_by_ids(
+                        app_token=CHANGE_SOURCE_APP_TOKEN,
+                        table_id=CHANGE_SOURCE_TABLE_ID,
+                        meta_by_name=self._change_field_meta_by_name,
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type=NOTICE_TYPE_CHANGE,
+                        record_ids=[record_id],
+                    )[0]
+                    self._change_records.append(record)
+                    self._change_loaded_once = True
+                    self._touch_state_cache_version()
                 source_record_id = record_id
                 fields = record.get("display_fields") or {}
                 source_progress = self._change_progress_value(record)

@@ -30,6 +30,7 @@ from .portal_service import (
     PortalError,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
+    WORK_TYPE_MAINTENANCE,
     WORK_TYPE_REPAIR,
     engineer_mop_fill_kwargs_from_payload,
     engineer_mop_upload_signed_kwargs_from_payload,
@@ -8643,6 +8644,22 @@ class PortalRuntime:
                         )
                         if lifecycle.get("finished"):
                             target_end_confirmed = True
+                            if work_type == WORK_TYPE_MAINTENANCE:
+                                try:
+                                    cls.service.mark_maintenance_source_ended_locally(
+                                        data
+                                    )
+                                except Exception:
+                                    cls._mark_notice_remote_operation(
+                                        operation_id,
+                                        status="remote_written",
+                                        target_record_id=target_record_id,
+                                        result={
+                                            "record_id": target_record_id,
+                                            "message": str(result or ""),
+                                        },
+                                    )
+                                    raise
                             cls._enqueue_active_delete_for_ended_notice(
                                 data,
                                 remote_record_id=target_record_id,
@@ -10367,6 +10384,10 @@ class PortalRuntime:
                             and cls._remote_record_not_found(latest_result)
                         )
                         if lifecycle.get("finished") or target_missing:
+                            if lifecycle.get("finished"):
+                                cls.service.mark_maintenance_source_ended_locally(
+                                    prepared
+                                )
                             try:
                                 source_fallback_active = (
                                     cls.service.has_ongoing_source_snapshot(prepared)
