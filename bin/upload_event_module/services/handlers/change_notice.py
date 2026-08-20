@@ -24,6 +24,16 @@ from ...time_parser import parse_time_range, parse_single_datetime, parse_time_o
 from .base import BaseNoticeHandler, NoticePayload
 
 
+def change_today_in_progress_value(action: str, progress: str = "") -> str:
+    action = str(action or "").strip().lower()
+    return (
+        "是"
+        if action in {"start", "upload"}
+        or (action == "update" and "准备工作已完成" in str(progress or ""))
+        else "否"
+    )
+
+
 class ChangeNoticeHandler(BaseNoticeHandler):
     """变更通告处理"""
 
@@ -100,6 +110,8 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         specialty = self._normalize_specialty_single(payload.specialty)
         if specialty:
             fields[CHANGE_NOTICE_FIELDS["specialty"]] = specialty
+        if payload.execution_party:
+            fields[CHANGE_NOTICE_FIELDS["executor"]] = payload.execution_party
 
         location = self._extract_section(payload.text, "位置")
         if location:
@@ -121,7 +133,9 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         if progress:
             fields[CHANGE_NOTICE_FIELDS["progress"]] = progress
 
-        fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = "是"
+        fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
+            change_today_in_progress_value("start", progress)
+        )
 
         if payload.file_tokens:
             fields[CHANGE_NOTICE_FIELDS["start_snapshot"]] = [
@@ -181,6 +195,8 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         specialty = self._normalize_specialty_single(payload.specialty)
         if specialty:
             fields[CHANGE_NOTICE_FIELDS["specialty"]] = specialty
+        if payload.execution_party:
+            fields[CHANGE_NOTICE_FIELDS["executor"]] = payload.execution_party
 
         location = self._extract_section(payload.text, "位置")
         if location:
@@ -203,7 +219,9 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["progress"]] = progress
 
         if is_end:
-            fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = "否"
+            fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
+                change_today_in_progress_value("end", progress)
+            )
             response_dt = self._parse_response_datetime(
                 payload.response_time, end_dt or start_dt
             )
@@ -232,7 +250,7 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
 
         fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
-            "是" if "准备工作已完成" in progress else "否"
+            change_today_in_progress_value("update", progress)
         )
 
         response_dt = self._parse_response_datetime(payload.response_time, start_dt)

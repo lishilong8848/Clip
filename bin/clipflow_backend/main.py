@@ -69,7 +69,6 @@ from clipflow_backend.api_models import (
     NoticeIdentityBindRequest,
     NoticeTargetLookupRequest,
     NoticeUndoApplyRequest,
-    NoticeWorkTypeOverrideRequest,
     OngoingDeleteRequest,
     PermissionDirectoryGrantRequest,
     PermissionRequestBulkReviewRequest,
@@ -2068,37 +2067,6 @@ class FastAPIPortalController:
                     work_type=str(request.query_params.get("work_type") or "all"),
                 )
                 return self._json_ok(request, session, payload)
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=403)
-
-        @app.post("/api/notice-work-type-override")
-        async def notice_work_type_override(request: Request):
-            session = self._current_session(request)
-            if session is None:
-                return self._auth_required_response()
-            try:
-                payload = (
-                    await self._read_model_request(
-                        request, NoticeWorkTypeOverrideRequest
-                    )
-                ).to_payload()
-                scope = self._authorized_scope_or_error(
-                    session, payload.get("scope") or "ALL"
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                result = await asyncio.to_thread(
-                    PortalRuntime.service.set_notice_work_type_override,
-                    record_id=str(payload.get("record_id") or ""),
-                    source_work_type=str(
-                        payload.get("source_work_type") or "maintenance"
-                    ),
-                    target_work_type=str(payload.get("target_work_type") or "change"),
-                    scope=scope,
-                    updated_by=str(user.get("open_id") or ""),
-                )
-                PortalRuntime.clear_payload_cache()
-                self._clear_read_cache()
-                return self._json_ok(request, session, result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -5277,6 +5245,7 @@ class FastAPIPortalController:
                 payload["_auth_user_name"] = str(
                     user.get("name") or user.get("en_name") or ""
                 )
+                payload["_web_action_request"] = True
                 if str(payload.get("command_format") or "") == "notice_command":
                     ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                     payload = await asyncio.to_thread(
@@ -5290,6 +5259,7 @@ class FastAPIPortalController:
                     payload["_auth_user_name"] = str(
                         user.get("name") or user.get("en_name") or ""
                     )
+                    payload["_web_action_request"] = True
                 job_id, should_start = PortalRuntime.service.create_action_job(payload)
                 job = PortalRuntime.service.get_job(job_id) or {}
                 audit_id = str(job.get("business_audit_id") or "").strip()
@@ -5840,9 +5810,9 @@ class FastAPIPortalController:
 
         @app.post("/api/ongoing-items/remove-local")
         async def ongoing_items_remove_local(request: Request):
-            admin_response, session = self._require_admin_response(request)
-            if admin_response is not None:
-                return admin_response
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
             try:
                 payload = (
                     await self._read_model_request(request, OngoingDeleteRequest)
@@ -5900,24 +5870,32 @@ class FastAPIPortalController:
                     "scope": scope,
                     "active_item_id": str(payload.get("active_item_id") or ""),
                 }
-                try:
-                    data.update(
-                        PortalRuntime.service.hide_ongoing_item(
-                            payload,
-                            scope=scope,
-                            deleted_by=payload["_auth_open_id"],
+                if not bool((remove_result or {}).get("local_cleanup_completed")):
+                    try:
+                        data.update(
+                            PortalRuntime.service.hide_ongoing_item(
+                                payload,
+                                scope=scope,
+                                deleted_by=payload["_auth_open_id"],
+                            )
                         )
-                    )
-                except Exception as cleanup_exc:
-                    cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
-                try:
-                    data.update(
-                        PortalRuntime.service.discard_deleted_ongoing_state(
-                            payload, scope=scope
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
+                    try:
+                        data.update(
+                            PortalRuntime.service.discard_deleted_ongoing_state(
+                                payload, scope=scope
+                            )
                         )
-                    )
-                except Exception as cleanup_exc:
-                    cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
+                    except Exception as cleanup_exc:
+                        cleanup_warnings.append(f"清理本地状态失败：{cleanup_exc}")
+                for field_name in (
+                    "work_status_removed",
+                    "daily_summary_removed",
+                    "source_plan_reset",
+                ):
+                    if field_name in (remove_result or {}):
+                        data[field_name] = remove_result[field_name]
                 try:
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()

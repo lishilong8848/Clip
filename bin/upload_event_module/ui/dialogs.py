@@ -235,6 +235,7 @@ MAINTENANCE_CYCLE_OPTIONS = (
     "冬季保温每日",
     "非计划性",
 )
+EXECUTION_PARTY_OPTIONS = ("厂维", "自维")
 
 
 class AddDialog(QDialog):
@@ -2280,6 +2281,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.enable_maintenance_cycle_select = False
 
+        self.enable_execution_party_select = False
+
         self.enable_change_level_select = False
 
         self.enable_building_multi_select = True
@@ -2295,6 +2298,8 @@ class ScreenshotConfirmDialog(QDialog):
         self.selected_specialty = ""
 
         self.selected_maintenance_cycle = ""
+
+        self.selected_execution_party = ""
 
         self.selected_change_level = ""
 
@@ -3049,6 +3054,30 @@ class ScreenshotConfirmDialog(QDialog):
 
         maintenance_cycle_layout.addStretch()
 
+        self.execution_party_container = QWidget()
+        execution_party_layout = QHBoxLayout(self.execution_party_container)
+        execution_party_layout.setContentsMargins(0, 0, 0, 0)
+        execution_party_layout.setSpacing(6)
+        execution_party_label = QLabel("执行方:")
+        execution_party_label.setStyleSheet("color: #F59E0B; font-size: 12px;")
+        self.execution_party_combo = QComboBox()
+        self.execution_party_combo.setMaximumWidth(160)
+        self.execution_party_combo.setStyleSheet(self.change_level_combo.styleSheet())
+        self.execution_party_combo.addItem("请选择执行方...")
+        for option in EXECUTION_PARTY_OPTIONS:
+            self.execution_party_combo.addItem(option)
+        self.execution_party_combo.activated.connect(
+            self._on_execution_party_selected
+        )
+        self.execution_party_selected_label = QLabel("未选择")
+        self.execution_party_selected_label.setStyleSheet(
+            "color: #EF4444; font-size: 11px;"
+        )
+        execution_party_layout.addWidget(execution_party_label)
+        execution_party_layout.addWidget(self.execution_party_combo)
+        execution_party_layout.addWidget(self.execution_party_selected_label)
+        execution_party_layout.addStretch()
+
 
 
         # 专业单选（设备调整专用）
@@ -3165,6 +3194,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         inner_layout.addWidget(self.maintenance_cycle_container)
 
+        inner_layout.addWidget(self.execution_party_container)
+
         inner_layout.addWidget(self.specialty_container)
 
         inner_layout.addLayout(btn_layout)
@@ -3241,6 +3272,7 @@ class ScreenshotConfirmDialog(QDialog):
                     "buildings",
                     "specialty",
                     "maintenance_cycle",
+                    "execution_party",
                     "level",
                     "level_locked",
                     "event_source",
@@ -3334,6 +3366,11 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.enable_maintenance_cycle_select = self.notice_type == "维保通告"
 
+        self.enable_execution_party_select = self.notice_type in (
+            "维保通告",
+            "变更通告",
+        )
+
         self.enable_change_level_select = self.notice_type == "变更通告"
 
         self.enable_event_level_select = self.notice_type == "事件通告"
@@ -3358,6 +3395,7 @@ class ScreenshotConfirmDialog(QDialog):
         self.extra_images = []
         self.selected_specialty = ""
         self.selected_maintenance_cycle = ""
+        self.selected_execution_party = ""
         self.selected_change_level = ""
         self.selected_event_level = ""
         self.preview_label.setPixmap(QPixmap())
@@ -3386,6 +3424,10 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.maintenance_cycle_container.setVisible(
             self.enable_maintenance_cycle_select
+        )
+
+        self.execution_party_container.setVisible(
+            self.enable_execution_party_select
         )
 
         self.change_level_container.setVisible(self.enable_change_level_select)
@@ -3702,6 +3744,36 @@ class ScreenshotConfirmDialog(QDialog):
             self.maintenance_cycle_selected_label.setStyleSheet(
                 "color: #EF4444; font-size: 11px;"
             )
+
+        if self.enable_execution_party_select:
+            selected_execution_party = str(
+                (self.data_dict or {}).get("execution_party")
+                or cache_state.get("execution_party")
+                or ""
+            ).strip()
+            if selected_execution_party not in EXECUTION_PARTY_OPTIONS:
+                selected_execution_party = ""
+            self.selected_execution_party = selected_execution_party
+            index = self.execution_party_combo.findText(selected_execution_party)
+            self.execution_party_combo.setCurrentIndex(index if index > 0 else 0)
+            self.execution_party_selected_label.setText(
+                selected_execution_party or "未选择"
+            )
+            self.execution_party_selected_label.setStyleSheet(
+                "color: #10B981; font-size: 11px;"
+                if selected_execution_party
+                else "color: #EF4444; font-size: 11px;"
+            )
+            if selected_execution_party:
+                self._update_data_dict_field(
+                    "execution_party",
+                    selected_execution_party,
+                    remove_when_empty=True,
+                )
+        else:
+            self.selected_execution_party = ""
+            self.execution_party_combo.setCurrentIndex(0)
+            self.execution_party_selected_label.setText("未选择")
 
 
         self.selected_buildings.clear()
@@ -6066,6 +6138,9 @@ class ScreenshotConfirmDialog(QDialog):
         cycle_valid = (not self.enable_maintenance_cycle_select) or bool(
             self.selected_maintenance_cycle
         )
+        execution_party_valid = (not self.enable_execution_party_select) or bool(
+            self.selected_execution_party
+        )
         specialty_valid = (not self.enable_specialty_select) or bool(
             self.selected_specialty
         )
@@ -6081,6 +6156,8 @@ class ScreenshotConfirmDialog(QDialog):
             missing_fields.append("事件来源")
         if not cycle_valid:
             missing_fields.append("维保周期")
+        if not execution_party_valid:
+            missing_fields.append("执行方")
         if not specialty_valid:
             missing_fields.append("专业")
 
@@ -6090,6 +6167,7 @@ class ScreenshotConfirmDialog(QDialog):
             and level_valid
             and source_valid
             and cycle_valid
+            and execution_party_valid
             and specialty_valid
         )
 
@@ -8222,6 +8300,29 @@ class ScreenshotConfirmDialog(QDialog):
         self._refresh_submit_state()
         self._notify_state_changed()
 
+    def _on_execution_party_selected(self, index):
+        self.selected_execution_party = (
+            self.execution_party_combo.itemText(index) if index > 0 else ""
+        )
+        self.execution_party_selected_label.setText(
+            self.selected_execution_party or "未选择"
+        )
+        self.execution_party_selected_label.setStyleSheet(
+            "color: #10B981; font-size: 11px;"
+            if self.selected_execution_party
+            else "color: #EF4444; font-size: 11px;"
+        )
+        self._update_data_dict_field(
+            "execution_party",
+            self.selected_execution_party,
+            remove_when_empty=True,
+        )
+        self._patch_cache_fields(
+            {"execution_party": self.selected_execution_party or None}
+        )
+        self._refresh_submit_state()
+        self._notify_state_changed()
+
 
     def _show_preview(self, pil_image):
 
@@ -8480,6 +8581,13 @@ class ScreenshotConfirmDialog(QDialog):
                 )
                 patch["maintenance_cycle"] = None
 
+        if self.enable_execution_party_select:
+            self._update_data_dict_field(
+                "execution_party",
+                self.selected_execution_party,
+                remove_when_empty=True,
+            )
+            patch["execution_party"] = self.selected_execution_party or None
 
 
         selected_level = ""

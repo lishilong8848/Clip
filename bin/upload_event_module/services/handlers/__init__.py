@@ -1,6 +1,6 @@
 from .base import BaseNoticeHandler, NoticePayload
 from .event_notice import EventNoticeHandler
-from .change_notice import ChangeNoticeHandler
+from .change_notice import ChangeNoticeHandler, change_today_in_progress_value
 from .maintenance_notice import MaintenanceNoticeHandler
 from .power_notice import PowerNoticeHandler
 from .polling_notice import PollingNoticeHandler
@@ -12,6 +12,7 @@ __all__ = [
     "NoticePayload",
     "BaseNoticeHandler",
     "get_notice_handler",
+    "change_today_in_progress_value",
 ]
 
 

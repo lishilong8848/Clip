@@ -37,6 +37,7 @@ class WorkbenchActionRequest(APIModel):
     manual_binding_choice: str = ""
     manual_binding_required: bool = False
     operation_id: str = ""
+    execution_party: str = ""
     ali_confirmation_images: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
 
 
@@ -70,13 +71,6 @@ class OngoingDeleteRequest(APIModel):
 
 class NoticeUndoApplyRequest(APIModel):
     scope: str = "ALL"
-
-
-class NoticeWorkTypeOverrideRequest(APIModel):
-    scope: str = "ALL"
-    record_id: str = ""
-    source_work_type: str = "maintenance"
-    target_work_type: str = "change"
 
 
 class RepairManagementRecordRequest(APIModel):

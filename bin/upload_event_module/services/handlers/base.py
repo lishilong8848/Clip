@@ -30,6 +30,7 @@ class NoticePayload:
     recover: Optional[bool] = None
     robot_group_choice: Optional[str] = None
     maintenance_cycle: Optional[str] = None
+    execution_party: Optional[str] = None
 
 
 class BaseNoticeHandler:

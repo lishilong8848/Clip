@@ -25,6 +25,7 @@ from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
 from .portal_service import (
     BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
+    CHANGE_CONFIRMATION_NAMESPACE,
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
@@ -55,7 +56,11 @@ from upload_event_module.config import (
     SPECIALTY_FIRE,
     get_field_config,
 )
-from upload_event_module.services.handlers import NoticePayload, get_notice_handler
+from upload_event_module.services.handlers import (
+    NoticePayload,
+    change_today_in_progress_value,
+    get_notice_handler,
+)
 from upload_event_module.services.service_registry import (
     create_bitable_record_fields,
     create_bitable_record_by_payload,
@@ -75,7 +80,6 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 MAX_JSON_BODY_BYTES = 512 * 1024
-CHANGE_CONFIRMATION_NAMESPACE = "change_confirmation"
 CHANGE_CONFIRMATION_REMINDER_SECONDS = 10 * 60
 
 
@@ -253,6 +257,31 @@ class PortalRuntime:
         return 1 if str(value or "").strip() else 0
 
     @staticmethod
+    def _change_confirmation_attachment_tokens(value: object) -> list[str]:
+        items = value if isinstance(value, list) else [value]
+        return sorted(
+            {
+                str(item.get("file_token") or item.get("token") or "").strip()
+                for item in items
+                if isinstance(item, dict)
+                and str(
+                    item.get("file_token") or item.get("token") or ""
+                ).strip()
+            }
+        )
+
+    @classmethod
+    def _change_confirmation_fingerprint(cls, value: object) -> str:
+        tokens = cls._change_confirmation_attachment_tokens(value)
+        return (
+            hashlib.sha256(
+                json.dumps(tokens, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if tokens
+            else ""
+        )
+
+    @staticmethod
     def _change_confirmation_checked(value: object) -> bool:
         if isinstance(value, bool):
             return value
@@ -288,19 +317,17 @@ class PortalRuntime:
         )
         screenshot = fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
         screenshot_count = cls._change_confirmation_attachment_count(screenshot)
-        screenshot_fingerprint = (
-            hashlib.sha256(
-                json.dumps(
-                    screenshot,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    default=str,
-                ).encode("utf-8")
-            ).hexdigest()
-            if screenshot_count
-            else ""
-        )
+        screenshot_tokens = cls._change_confirmation_attachment_tokens(screenshot)
+        screenshot_fingerprint = cls._change_confirmation_fingerprint(screenshot)
         previous_fingerprint = str(existing.get("screenshot_fingerprint") or "")
+        if (
+            screenshot_fingerprint
+            and previous_fingerprint
+            and not existing.get("screenshot_tokens")
+            and existing.get("h_notification_fingerprint") == previous_fingerprint
+        ):
+            existing["h_notification_fingerprint"] = screenshot_fingerprint
+            previous_fingerprint = screenshot_fingerprint
         if previous_fingerprint != screenshot_fingerprint:
             existing["h_notification_fingerprint"] = ""
             existing["h_notification_sent_at"] = 0
@@ -345,6 +372,7 @@ class PortalRuntime:
             "building_codes": building_codes,
             "target_status": str(lifecycle.get("status") or "").strip(),
             "screenshot_count": screenshot_count,
+            "screenshot_tokens": screenshot_tokens,
             "screenshot_fingerprint": screenshot_fingerprint,
             "h_confirmed": confirmed,
             "state": state,
@@ -415,8 +443,63 @@ class PortalRuntime:
             record,
             existing=existing,
         )
+        if ali_tokens:
+            task["screenshot_uploaded_at"] = time.time()
         task["active_item_id"] = str(payload.get("active_item_id") or task.get("active_item_id") or "")
         return cls._put_change_confirmation_task(task)
+
+    @classmethod
+    def _consume_change_confirmation_today_screenshot(
+        cls,
+        prepared: dict,
+        *,
+        target_record_id: str,
+    ) -> None:
+        if not bool((prepared or {}).get("web_today_screenshot_required")):
+            return
+        task = cls.state_store.get_document(
+            CHANGE_CONFIRMATION_NAMESPACE,
+            target_record_id,
+        ) or {}
+        fingerprint = str(task.get("screenshot_fingerprint") or "").strip()
+        expected_fingerprint = str(
+            prepared.get("ali_confirmation_screenshot_fingerprint") or ""
+        ).strip()
+        if not expected_fingerprint and prepared.get(
+            "ali_confirmation_file_tokens"
+        ):
+            expected_fingerprint = cls._change_confirmation_fingerprint(
+                [
+                    {"file_token": token}
+                    for token in prepared.get("ali_confirmation_file_tokens") or []
+                ]
+            )
+        if expected_fingerprint and fingerprint != expected_fingerprint:
+            raise RuntimeError("本次阿里确认截图状态校验失败。")
+        if not fingerprint:
+            raise RuntimeError("本次阿里确认截图未写入确认任务。")
+        operation_id = str(
+            prepared.get("operation_id") or prepared.get("job_id") or ""
+        ).strip()
+        previous_operation_id = str(
+            task.get("last_today_yes_operation_id") or ""
+        ).strip()
+        if previous_operation_id == operation_id and operation_id:
+            return
+        if (
+            str(task.get("last_today_yes_screenshot_fingerprint") or "").strip()
+            == fingerprint
+        ):
+            raise RuntimeError("本次阿里确认截图已被上一次进行中动作使用。")
+        task.update(
+            {
+                "last_today_yes_screenshot_fingerprint": fingerprint,
+                "last_today_yes_operation_id": operation_id,
+                "last_today_yes_at": time.time(),
+                "updated_at": time.time(),
+            }
+        )
+        cls._put_change_confirmation_task(task)
 
     @classmethod
     def stop_change_confirmation(cls, target_record_id: str, *, reason: str = "") -> None:
@@ -878,7 +961,11 @@ class PortalRuntime:
                 ok_verify, verify_result = query_record_by_id(target_record_id, NOTICE_TYPE_CHANGE)
                 if ok_verify and isinstance(verify_result, dict):
                     candidate_fields = cls._change_confirmation_fields(verify_result)
-                    if cls._change_confirmation_attachment_count(candidate_fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])):
+                    if str(file_token).strip() in cls._change_confirmation_attachment_tokens(
+                        candidate_fields.get(
+                            CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]
+                        )
+                    ):
                         verified_record = verify_result
                         verified_fields = candidate_fields
                         break
@@ -3936,8 +4023,7 @@ class PortalRuntime:
         if parsed.path == "/api/ongoing-items/remove-local":
             try:
                 payload = self._read_json_body()
-                if not self._require_admin_json(session):
-                    return
+                payload = normalize_notice_identity_payload(payload)
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -3957,14 +4043,25 @@ class PortalRuntime:
                         409,
                         {"ok": False, "error": str((result or {}).get("message") or "本地移除失败。")},
                     )
-                data = self.service.hide_ongoing_item(
-                    payload,
-                    scope=scope,
-                    deleted_by=payload["_auth_open_id"],
-                )
-                data.update(
-                    self.service.discard_deleted_ongoing_state(payload, scope=scope)
-                )
+                data: dict[str, Any] = {"deleted": True, "scope": scope}
+                if not bool((result or {}).get("local_cleanup_completed")):
+                    data.update(
+                        self.service.hide_ongoing_item(
+                            payload,
+                            scope=scope,
+                            deleted_by=payload["_auth_open_id"],
+                        )
+                    )
+                    data.update(
+                        self.service.discard_deleted_ongoing_state(payload, scope=scope)
+                    )
+                for field_name in (
+                    "work_status_removed",
+                    "daily_summary_removed",
+                    "source_plan_reset",
+                ):
+                    if field_name in (result or {}):
+                        data[field_name] = result[field_name]
                 PortalRuntime.clear_payload_cache()
                 event_id = (result or {}).get("qt_event_id") or ""
                 if not event_id:
@@ -5524,6 +5621,7 @@ class PortalRuntime:
                 str(prepared.get("robot_group_choice") or "auto").strip() or "auto"
             ),
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
+            execution_party=str(prepared.get("execution_party") or "").strip() or None,
         )
 
     @staticmethod
@@ -7872,6 +7970,36 @@ class PortalRuntime:
                     )
                     if not ok_patch:
                         return False, str(patch_result or "阿里确认截图写入失败。"), existing_target
+                    verified = False
+                    for attempt in range(3):
+                        ok_verify, verify_result = query_record_by_id(
+                            existing_target,
+                            notice_type,
+                        )
+                        verify_fields = (
+                            cls._change_confirmation_fields(verify_result)
+                            if ok_verify and isinstance(verify_result, dict)
+                            else {}
+                        )
+                        if set(ali_tokens).issubset(
+                            cls._change_confirmation_attachment_tokens(
+                                verify_fields.get(
+                                    CHANGE_NOTICE_FIELDS[
+                                        "ali_confirmation_snapshot"
+                                    ]
+                                )
+                            )
+                        ):
+                            verified = True
+                            break
+                        if attempt < 2:
+                            time.sleep(0.2 * (attempt + 1))
+                    if not verified:
+                        return (
+                            False,
+                            "阿里确认截图已提交，但目标表尚未确认写入，请稍后重试。",
+                            existing_target,
+                        )
                     prepared["ali_confirmation_file_tokens"] = list(ali_tokens)
                     for upload_id in ali_upload_ids:
                         cls.state_store.mark_notice_upload_attachment_used(upload_id)
@@ -7954,6 +8082,22 @@ class PortalRuntime:
             current_record_version or expected_record_version,
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+        if (
+            prepared.get("web_today_screenshot_required")
+            and prepared.get("ali_confirmation_source") == "standalone"
+        ):
+            expected_fingerprint = str(
+                prepared.get("ali_confirmation_screenshot_fingerprint") or ""
+            ).strip()
+            actual_fingerprint = cls._change_confirmation_fingerprint(
+                fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+            )
+            if not expected_fingerprint or actual_fingerprint != expected_fingerprint:
+                return (
+                    False,
+                    "本次阿里确认截图已被替换或删除，请重新上传后再发送。",
+                    record_id,
+                )
         checkpoint_id = cls._create_backend_undo_checkpoint(
             "end" if action == "end" else "update",
             {
@@ -8424,11 +8568,7 @@ class PortalRuntime:
                 progress = progress_match.group(1).strip()
         state = (
             "yes"
-            if normalized_action in {"start", "upload"}
-            or (
-                normalized_action == "update"
-                and "准备工作已完成" in progress
-            )
+            if change_today_in_progress_value(normalized_action, progress) == "是"
             else "no"
         )
         payload["today_in_progress_state"] = state
@@ -9969,11 +10109,22 @@ class PortalRuntime:
             or is_local_record_id(target_record_id)
             or bool(payload.get("_is_placeholder_record"))
         ):
+            if notice_type:
+                local_result = cls.execute_local_remove_active_item(
+                    {"data_dict": payload}
+                )
+                if bool(local_result.get("ok")):
+                    return {
+                        **local_result,
+                        "message": "",
+                        "local_only_removed": True,
+                        "local_cleanup_completed": True,
+                    }
+                return local_result
             return {
                 "ok": False,
                 "message": (
-                    "当前通告没有可核验的目标多维记录，已保留本地显示。"
-                    "如只需清理页面，请由管理员使用“移除显示，不删除多维”。"
+                    "当前通告缺少通告类型，不能安全执行删除。"
                 ),
                 "record_id": target_record_id,
                 "active_item_id": active_item_id,
@@ -10343,63 +10494,42 @@ class PortalRuntime:
                 active_item_id = str(identity.get("active_item_id") or "").strip()
         if not active_item_id and not target_record_id and not source_record_id:
             return {"ok": False, "message": "缺少本地移除所需的通告标识。"}
-        authoritative = bool(
-            payload.get("source_snapshot_authoritative")
-            or payload.get("target_snapshot_authoritative")
-            or (target_record_id and not is_local_record_id(target_record_id))
-        )
-        if not authoritative:
+        cleanup_result: dict[str, Any] = {}
+        local_cleanup_completed = True
+        if source_record_id:
             try:
-                for row in cls.state_store.list_qt_active_items():
-                    row_payload = (
-                        row.get("payload")
-                        if isinstance(row.get("payload"), dict)
-                        else {}
-                    )
-                    row_work_type = str(row_payload.get("work_type") or "").strip()
-                    if work_type and row_work_type and row_work_type != work_type:
-                        continue
-                    if not (
-                        (
-                            active_item_id
-                            and str(row.get("active_item_id") or "").strip()
-                            == active_item_id
-                        )
-                        or (
-                            target_record_id
-                            and str(
-                                canonical_target_record_id(row_payload)
-                                or row.get("record_id")
-                                or ""
-                            ).strip()
-                            == target_record_id
-                        )
-                        or (
-                            source_record_id
-                            and canonical_source_record_id(row_payload)
-                            == source_record_id
-                        )
-                    ):
-                        continue
-                    authoritative = bool(
-                        row_payload.get("source_snapshot_authoritative")
-                        or row_payload.get("target_snapshot_authoritative")
-                    )
-                    if authoritative:
-                        break
-            except Exception:
-                authoritative = False
-        if authoritative:
+                cleanup_result = cls.service.discard_deleted_ongoing_state(
+                    payload,
+                    scope=str(payload.get("scope") or "ALL"),
+                    reset_source_plan=True,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"恢复源表事项可点击状态失败: {exc}",
+                    "record_id": "",
+                    "active_item_id": active_item_id,
+                    "remote_deleted": False,
+                }
+        hidden_result: dict[str, Any] = {}
+        try:
+            hidden_result = cls.service.hide_ongoing_item(
+                payload,
+                scope=str(payload.get("scope") or "ALL"),
+                deleted_by=str(payload.get("_auth_open_id") or ""),
+                force_authoritative=True,
+            )
+        except Exception as exc:
+            with suppress(Exception):
+                cls.service._remove_hidden_ongoing_keys(
+                    set(hidden_result.get("keys") or [])
+                )
             return {
                 "ok": False,
-                "message": (
-                    "当前通告仍由源表或目标表标记为未结束，"
-                    "不能仅移除显示。请先结束通告或更新源状态。"
-                ),
+                "message": f"保存本地移除状态失败: {exc}",
                 "record_id": target_record_id,
                 "active_item_id": active_item_id,
                 "remote_deleted": False,
-                "authoritative": True,
             }
         try:
             qt_removed, qt_event_id = cls.state_store.delete_qt_active_item_and_enqueue(
@@ -10419,6 +10549,10 @@ class PortalRuntime:
                 },
             )
         except Exception as exc:
+            with suppress(Exception):
+                cls.service._remove_hidden_ongoing_keys(
+                    set(hidden_result.get("keys") or [])
+                )
             return {
                 "ok": False,
                 "message": f"本地活动通告移除失败: {exc}",
@@ -10456,6 +10590,10 @@ class PortalRuntime:
                     ):
                         matching_rows.append(row)
                 if matching_rows:
+                    with suppress(Exception):
+                        cls.service._remove_hidden_ongoing_keys(
+                            set(hidden_result.get("keys") or [])
+                        )
                     return {
                         "ok": False,
                         "message": "本地活动通告仍然存在，未执行移除显示。",
@@ -10465,6 +10603,10 @@ class PortalRuntime:
                     }
                 already_absent = True
             except Exception as exc:
+                with suppress(Exception):
+                    cls.service._remove_hidden_ongoing_keys(
+                        set(hidden_result.get("keys") or [])
+                    )
                 return {
                     "ok": False,
                     "message": f"本地活动通告移除结果校验失败: {exc}",
@@ -10492,6 +10634,8 @@ class PortalRuntime:
             "identity_removed": bool(identity_removed),
             "remote_deleted": False,
             "qt_event_id": qt_event_id,
+            "local_cleanup_completed": local_cleanup_completed,
+            **cleanup_result,
         }
 
     @classmethod
@@ -11175,6 +11319,10 @@ class PortalRuntime:
                                 projection_payload,
                                 remote_record_id=resolved_remote_record_id,
                                 job_id=job_id,
+                            )
+                            cls._consume_change_confirmation_today_screenshot(
+                                projection_payload,
+                                target_record_id=resolved_remote_record_id,
                             )
                     finally:
                         cls._release_event_operation_lock(

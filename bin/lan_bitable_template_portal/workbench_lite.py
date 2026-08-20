@@ -56,6 +56,7 @@ ITEM_WORK_TYPE_LABELS: dict[str, str] = {**WORK_TYPE_LABELS, "event": "事件"}
 POWER_NOTICE_TYPES = ("上电通告", "下电通告")
 SPECIALTY_OPTIONS = ("电气", "暖通", "消防", "弱电")
 MAINTENANCE_CYCLE_OPTIONS = ("/", "每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "非计划性")
+EXECUTION_PARTY_OPTIONS = ("", "厂维", "自维")
 SITE_PHOTO_REQUIRED_WORK_TYPES = {"maintenance", "change", "repair"}
 BINDABLE_TARGET_WORK_TYPES = {"maintenance", "change", "repair", "power", "polling", "adjust"}
 BUILDING_SCOPE_CODES = ("110", "A", "B", "C", "D", "E", "H")
@@ -95,8 +96,8 @@ def extract_workbench_lite_fragments(html_text: str) -> dict[str, str]:
         fragments[name] = source[content_start:end_index].strip()
     return fragments
 REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE: dict[str, set[str]] = {
-    "maintenance": {"title", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty", "maintenance_cycle"},
-    "change": {"title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty"},
+    "maintenance": {"title", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty", "maintenance_cycle", "execution_party"},
+    "change": {"title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty", "execution_party"},
     "repair": {
         "title",
         "location",
@@ -146,6 +147,7 @@ _DRAFT_DOM_KEYS = {
     "buildings",
     "specialty",
     "maintenance_cycle",
+    "execution_party",
     "level",
     "start_time",
     "end_time",
@@ -1298,6 +1300,7 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
         ),
         "specialty": _record_specialty(record),
         "maintenance_cycle": _first(record.get("maintenance_cycle"), _field(record, "维护周期")),
+        "execution_party": _first(record.get("execution_party"), _field(record, "执行方")),
         "level": _first(record.get("level"), _field(record, "变更等级（阿里）", "紧急程度"), "I3" if work == "change" else ""),
         "start_time": _datetime_local(_first(record.get("start_time"), _field(record, "计划开始时间", "计划开始", "变更开始日期（阿里）"))),
         "end_time": _datetime_local(_first(record.get("end_time"), _field(record, "计划结束时间", "计划结束", "变更结束日期（阿里）"))),
@@ -1483,6 +1486,16 @@ def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
         primary_fields.insert(0, _select("notice_type", "通告类型", draft.get("notice_type"), POWER_NOTICE_TYPES))
     if work_type == "maintenance":
         primary_fields.append(field("maintenance_cycle", "维保周期", draft.get("maintenance_cycle"), datalist="maintenance-cycle-options"))
+    if work_type in {"maintenance", "change"}:
+        primary_fields.append(
+            _select(
+                "execution_party",
+                "执行方",
+                draft.get("execution_party"),
+                EXECUTION_PARTY_OPTIONS,
+                required=True,
+            )
+        )
     if work_type in {"change", "repair"}:
         primary_fields.append(field("level", "等级" if work_type == "change" else "紧急程度", draft.get("level")))
     notice_fields: list[str] = []
@@ -1711,7 +1724,7 @@ def _ongoing_rows(
         f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
         f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(item.get('h_building_confirmed')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
-        f" data-action=\"update\""
+        f" data-action=\"{'update' if target_record_id else 'start'}\""
             f" data-title=\"{_e(title)}\""
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(status)}</span>"
@@ -2092,8 +2105,6 @@ def _local_event_ongoing_detail(
     remove_action = (
         '<button class="btn danger-ghost" type="button" '
         'data-ongoing-delete-mode="local">移除显示</button>'
-        if is_admin
-        else '<span class="action-reason">请在 Qt 中移除该未上传通告</span>'
     )
     notice_text_html = (
         f'<pre class="local-event-text">{_e(notice_text)}</pre>'
@@ -2298,40 +2309,24 @@ def _detail_form(
         else ""
     )
     if ongoing_item and target_record_id:
-        admin_remove_button = (
-            "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"local\">移除显示</button>"
-            if is_admin
-            else ""
-        )
         action_buttons = (
             "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
             "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
             "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"remote\">删除通告</button>"
-            f"{admin_remove_button}"
+            "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"local\">移除显示</button>"
         )
     elif ongoing_item:
         action_buttons = (
             '<button class="btn primary" type="submit" '
             'name="submit_action" value="start">发送开始</button>'
+            '<button class="btn danger-ghost" type="button" '
+            'data-ongoing-delete-mode="remote">删除通告</button>'
+            '<button class="btn danger-ghost" type="button" '
+            'data-ongoing-delete-mode="local">移除显示</button>'
         )
     else:
-        convert_change_button = (
-            "<button class=\"btn ghost\" type=\"button\" data-convert-to-change=\"1\">转为变更通告</button>"
-            if work == "maintenance" and record_id and not effective_manual
-            else ""
-        )
-        revert_maintenance_button = (
-            "<button class=\"btn ghost\" type=\"button\" data-revert-to-maintenance=\"1\">转回维保</button>"
-            if work == "change"
-            and record_id
-            and not effective_manual
-            and str(draft.get("converted_from_work_type") or draft.get("source_work_type") or "") == "maintenance"
-            else ""
-        )
         action_buttons = (
             f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
-            f"{convert_change_button}"
-            f"{revert_maintenance_button}"
         )
     datalists = (
         f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
@@ -3867,7 +3862,7 @@ def render_workbench_lite(
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'repair_management_record_id',
       'manual_id', 'scope', 'source_month', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
-      'maintenance_cycle', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
+      'maintenance_cycle', 'execution_party', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
       'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
       'paired_maintenance_target_record_id', 'paired_maintenance_original_title', 'paired_maintenance_actual_start_time',
       'actual_action_time',
@@ -3937,7 +3932,7 @@ def render_workbench_lite(
       'paired_maintenance_target_record_id', 'paired_maintenance_original_title',
       'paired_maintenance_actual_start_time',
       'building', 'buildings', 'building_code', 'building_codes', 'title', 'name',
-      'specialty', 'maintenance_cycle', 'level', 'start_time', 'end_time',
+      'specialty', 'maintenance_cycle', 'execution_party', 'level', 'start_time', 'end_time',
       'actual_action_time', 'response_time',
       'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
@@ -3948,7 +3943,7 @@ def render_workbench_lite(
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
     const noticeFormValueKeys = [
-      'notice_type', 'title', 'building', 'specialty', 'maintenance_cycle', 'level',
+      'notice_type', 'title', 'building', 'specialty', 'maintenance_cycle', 'execution_party', 'level',
       'start_time', 'end_time', 'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
       'symptom', 'solution', 'spare_parts', 'cabinet', 'quantity', 'device',
@@ -4841,12 +4836,12 @@ def render_workbench_lite(
       maintenance: [
         ['title', '名称'], ['start_time', '开始时间'], ['end_time', '结束时间'],
         ['location', '位置'], ['content', '内容'], ['reason', '原因'], ['impact', '影响'],
-        ['progress', '进度'], ['specialty', '专业'], ['maintenance_cycle', '维保周期']
+        ['progress', '进度'], ['specialty', '专业'], ['maintenance_cycle', '维保周期'], ['execution_party', '执行方']
       ],
       change: [
         ['title', '名称'], ['level', '等级'], ['start_time', '开始时间'], ['end_time', '结束时间'],
         ['location', '位置'], ['content', '内容'], ['reason', '原因'], ['impact', '影响'],
-        ['progress', '进度'], ['specialty', '专业']
+        ['progress', '进度'], ['specialty', '专业'], ['execution_party', '执行方']
       ],
       repair: [
         ['title', '标题'], ['location', '地点'], ['level', '紧急程度'], ['specialty', '专业'],
@@ -5937,7 +5932,7 @@ def render_workbench_lite(
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change],button[data-revert-to-maintenance]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       const button = document.createElement('button');
       button.className = 'btn primary';
       button.type = 'submit';
@@ -5945,50 +5940,21 @@ def render_workbench_lite(
       button.value = action === 'update' ? 'update' : 'start';
       button.textContent = action === 'update' ? '发送更新' : '发送开始';
       actions.appendChild(button);
-      if (
-        (previewValue(form, 'work_type') || form.dataset.workType) === 'maintenance' &&
-        form.dataset.detailMode === 'source' &&
-        previewValue(form, 'source_record_id')
-      ) {{
-        const convertButton = document.createElement('button');
-        convertButton.className = 'btn ghost';
-        convertButton.type = 'button';
-        convertButton.setAttribute('data-convert-to-change', '1');
-        convertButton.textContent = '转为变更通告';
-        actions.appendChild(convertButton);
-      }}
-      if (
-        (previewValue(form, 'work_type') || form.dataset.workType) === 'change' &&
-        form.dataset.detailMode === 'source' &&
-        previewValue(form, 'source_record_id') &&
-        (previewValue(form, 'source_work_type') === 'maintenance' || previewValue(form, 'converted_from_work_type') === 'maintenance')
-      ) {{
-        const revertButton = document.createElement('button');
-        revertButton.className = 'btn ghost';
-        revertButton.type = 'button';
-        revertButton.setAttribute('data-revert-to-maintenance', '1');
-        revertButton.textContent = '转回维保';
-        actions.appendChild(revertButton);
-      }}
       resetActualActionTime(form);
       updateNoticePreview(form);
     }}
     function setOngoingSubmitButtons(form) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change],button[data-revert-to-maintenance]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       if (form.dataset.localOnly === '1') {{
-        if (liteIsAdmin) {{
-          const localRemoveButton = document.createElement('button');
-          localRemoveButton.className = 'btn danger-ghost';
-          localRemoveButton.type = 'button';
-          localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
-          localRemoveButton.textContent = '移除显示';
-          actions.appendChild(localRemoveButton);
-        }}
-        setLiteStatus(liteIsAdmin
-          ? '该事件尚未上传，可仅移除前端和 Qt 显示'
-          : '该事件尚未上传，请在 Qt 中移除');
+        const localRemoveButton = document.createElement('button');
+        localRemoveButton.className = 'btn danger-ghost';
+        localRemoveButton.type = 'button';
+        localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
+        localRemoveButton.textContent = '移除显示';
+        actions.appendChild(localRemoveButton);
+        setLiteStatus('该事件尚未上传，可移除前端和 Qt 显示');
         return;
       }}
       const updateButton = document.createElement('button');
@@ -6011,16 +5977,38 @@ def render_workbench_lite(
       actions.appendChild(updateButton);
       actions.appendChild(endButton);
       actions.appendChild(deleteButton);
-      if (liteIsAdmin) {{
-        const localRemoveButton = document.createElement('button');
-        localRemoveButton.className = 'btn danger-ghost';
-        localRemoveButton.type = 'button';
-        localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
-        localRemoveButton.textContent = '移除显示';
-        actions.appendChild(localRemoveButton);
-      }}
+      const localRemoveButton = document.createElement('button');
+      localRemoveButton.className = 'btn danger-ghost';
+      localRemoveButton.type = 'button';
+      localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
+      localRemoveButton.textContent = '移除显示';
+      actions.appendChild(localRemoveButton);
       resetActualActionTime(form);
       updateNoticePreview(form);
+    }}
+    function setUnuploadedSubmitButtons(form) {{
+      form.dataset.action = 'start';
+      setSubmitButtons(form, 'start');
+      const actions = form.querySelector('.form-actions');
+      if (!actions) return;
+      const deleteButton = document.createElement('button');
+      deleteButton.className = 'btn danger-ghost';
+      deleteButton.type = 'button';
+      deleteButton.setAttribute('data-ongoing-delete-mode', 'remote');
+      deleteButton.textContent = '删除通告';
+      const removeButton = document.createElement('button');
+      removeButton.className = 'btn danger-ghost';
+      removeButton.type = 'button';
+      removeButton.setAttribute('data-ongoing-delete-mode', 'local');
+      removeButton.textContent = '移除显示';
+      actions.append(deleteButton, removeButton);
+    }}
+    function resetSourceTypeFields(form) {{
+      for (const name of [
+        'source_work_type', 'converted_from_work_type', 'converted_to_work_type',
+        'sync_maintenance_target', 'paired_maintenance_target_record_id',
+        'paired_maintenance_original_title', 'paired_maintenance_actual_start_time'
+      ]) setFormValue(form, name, '');
     }}
     function applySourceRowToDetail(link) {{
       const form = document.getElementById('lite-notice-form');
@@ -6038,6 +6026,8 @@ def render_workbench_lite(
       delete form.dataset.submitOperationId;
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
+      resetSourceTypeFields(form);
+      setFormValue(form, 'execution_party', draft.execution_party || '');
       for (const [key, value] of Object.entries(draft)) {{
         setFormValue(form, key, value);
       }}
@@ -6091,20 +6081,24 @@ def render_workbench_lite(
       const draft = draftFromRow(link);
       const title = link.getAttribute('data-title') || draft.title || '未结束通告';
       const localOnly = link.getAttribute('data-local-only') === '1';
-      form.dataset.action = 'update';
+      const sourceId = link.getAttribute('data-source-record-id') || '';
+      const rowRecordId = link.getAttribute('data-record-id') || '';
+      const targetId = link.getAttribute('data-target-record-id') || '';
+      const unuploaded = !localOnly && !targetId;
+      const sourceOnly = Boolean(sourceId) && unuploaded;
+      form.dataset.action = unuploaded ? 'start' : 'update';
       form.dataset.detailMode = 'ongoing';
       form.dataset.localOnly = localOnly ? '1' : '';
       form.dataset.targetEnded = '';
       delete form.dataset.submitOperationId;
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
-      const sourceId = link.getAttribute('data-source-record-id') || '';
-      const rowRecordId = link.getAttribute('data-record-id') || '';
-      const targetId = link.getAttribute('data-target-record-id') || (localOnly ? '' : rowRecordId);
+      resetSourceTypeFields(form);
+      setFormValue(form, 'execution_party', draft.execution_party || '');
       const sourceEventId = link.getAttribute('data-source-event-id') || '';
       const sourceEventTitle = link.getAttribute('data-source-event-title') || '';
       resetRepairEventSelection(form, workType === 'repair', sourceId);
-      setFormValue(form, 'record_id', targetId || rowRecordId);
+      setFormValue(form, 'record_id', targetId || sourceId || rowRecordId);
       setFormValue(form, 'source_record_id', sourceId);
       setFormValue(form, 'repair_management_record_id', sourceId);
       setFormValue(form, 'related_event_record_id', sourceEventId);
@@ -6120,7 +6114,7 @@ def render_workbench_lite(
       }}
       // Row identity is canonical. Apply it after the editable draft so stale
       // cached fields cannot erase the ID restored by an undo operation.
-      setFormValue(form, 'record_id', targetId || rowRecordId);
+      setFormValue(form, 'record_id', targetId || sourceId || rowRecordId);
       setFormValue(form, 'source_record_id', sourceId);
       setFormValue(form, 'target_record_id', targetId);
       setFormValue(
@@ -6133,15 +6127,20 @@ def render_workbench_lite(
       if (hint) hint.textContent = '';
       setDetailModeNote(localOnly
         ? '未上传'
-        : (sourceId && targetId ? '' : (targetId ? '' : '需绑定目标'))
+        : (sourceOnly ? '待发送开始' : (sourceId && targetId ? '' : (targetId ? '' : '需绑定目标')))
       );
       syncImagePanelsFromRow(form, link);
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
       resetAliConfirmationState(form);
-      setOngoingSubmitButtons(form);
+      if (unuploaded) setUnuploadedSubmitButtons(form);
+      else setOngoingSubmitButtons(form);
       updateNoticePreview(form);
-      setLiteStatus(localOnly
-        ? (liteIsAdmin ? '该事件尚未上传，可移除显示' : '该事件尚未上传，请在 Qt 中移除')
+      setLiteStatus(sourceOnly
+        ? '源表仍在进行中，但尚无目标通告记录；请先发送开始'
+        : unuploaded
+        ? '纯手填通告尚未上传；可发送开始、删除或移除显示'
+        : localOnly
+        ? '该事件尚未上传，可移除前端和 Qt 显示'
         : '已选择未结束通告，可发送更新或结束'
       );
       openNoticeDrawer(title, link);
@@ -6262,50 +6261,6 @@ def render_workbench_lite(
         throw new Error('后台刷新等待超时，当前仍显示上次成功数据；可稍后再试。');
       }}
       await refreshCurrentLite(label + '完成，正在更新页面...');
-    }}
-    async function applyCurrentMaintenanceWorkTypeOverride(button, targetWorkType) {{
-      const form = button?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
-      if (!form) return;
-      const recordId = previewValue(form, 'source_record_id') || previewValue(form, 'record_id');
-      if (!recordId) {{
-        showLiteError('当前事项缺少源记录，无法转换');
-        return;
-      }}
-      const targetType = targetWorkType === 'maintenance' ? 'maintenance' : 'change';
-      const targetLabel = targetType === 'maintenance' ? '维保' : '变更通告';
-      setLiteFormDirty(false);
-      clearLiteHtmlCache();
-      setButtonBusy(button, true);
-      setLiteStatus('正在转为' + targetLabel + '...');
-      try {{
-        const response = await fetch('/api/notice-work-type-override', {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'application/json' }},
-          credentials: 'same-origin',
-          body: JSON.stringify({{
-            scope: getCurrentScope(),
-            record_id: recordId,
-            source_work_type: 'maintenance',
-            target_work_type: targetType
-          }})
-        }});
-        const data = await response.json().catch(() => ({{}}));
-        if (handleLiteAuthRequired(response, data)) return;
-        if (!response.ok || data.ok === false) {{
-          throw new Error(data.error || (data.data && data.data.error) || '转换失败');
-        }}
-        const url = workbenchBaseUrl(getCurrentScope(), targetType);
-        setLiteStatus('已转为' + targetLabel + '，正在打开列表...');
-        await navigateLite(url, {{
-          push: true,
-          label: '已转为' + targetLabel,
-          selectors: ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace']
-        }});
-      }} catch (error) {{
-        showLiteError(error && error.message ? error.message : '转换失败');
-      }} finally {{
-        setButtonBusy(button, false);
-      }}
     }}
     let liteChangeConfirmationItems = [];
     let liteChangeConfirmationFilter = 'pending';
@@ -6516,18 +6471,6 @@ def render_workbench_lite(
         pasteDrawer?.classList.toggle('open', shouldOpen);
         pasteDrawerToggle.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
         if (content) content.hidden = !shouldOpen;
-        return;
-      }}
-      const convertButton = target.closest('button[data-convert-to-change]');
-      if (convertButton) {{
-        event.preventDefault();
-        await applyCurrentMaintenanceWorkTypeOverride(convertButton, 'change');
-        return;
-      }}
-      const revertButton = target.closest('button[data-revert-to-maintenance]');
-      if (revertButton) {{
-        event.preventDefault();
-        await applyCurrentMaintenanceWorkTypeOverride(revertButton, 'maintenance');
         return;
       }}
       const photoRemove = target.closest('[data-site-photo-remove]');
@@ -7003,6 +6946,10 @@ def render_workbench_lite(
         setLiteStatus('页面状态恢复失败，请点击刷新本页');
       }});
     }});
+    function changeActionWritesTodayYes(action, progress) {{
+      return action === 'start'
+        || (action === 'update' && String(progress || '').includes('准备工作已完成'));
+    }}
     function formPayload(form, submitter, actionOverride) {{
       const actualActionTime = ensureActualActionTime(form);
       const formValues = captureNoticeFormValues(form);
@@ -7058,7 +7005,11 @@ def render_workbench_lite(
         patch.site_photos = photos;
         patch.extra_images = photos;
       }}
-      if (action === 'start' && patch.work_type === 'change' && aliConfirmationImages.length) {{
+      if (
+        patch.work_type === 'change'
+        && changeActionWritesTodayYes(action, patch.progress)
+        && aliConfirmationImages.length
+      ) {{
         patch.ali_confirmation_images = aliConfirmationImages;
       }}
       const commandPatch = compactCommandPatch(patch);
@@ -7691,6 +7642,26 @@ def render_workbench_lite(
         setLiteStatus('提交失败：' + durationIssue);
         updateActionAvailability(form);
         return;
+      }}
+      const workType = String(form.elements.namedItem('work_type')?.value || '').trim();
+      const progress = String(form.elements.namedItem('progress')?.value || '').trim();
+      if (workType === 'change' && changeActionWritesTodayYes(submitAction, progress)) {{
+        const panel = form.querySelector('[data-ali-confirmation-panel]');
+        const selectedPendingUpload = Boolean(
+          liteAliConfirmationImage
+          && !liteAliConfirmationImage.remote_uploaded
+          && !liteAliConfirmationImage.staged
+        );
+        const staged = aliConfirmationPayload(form).length > 0;
+        const existing = Number(panel?.dataset.existingCount || 0) > 0
+          || Boolean(liteAliConfirmationImage?.remote_uploaded);
+        if (selectedPendingUpload || (submitAction === 'start' ? !staged : !staged && !existing)) {{
+          const message = '今日是否进行将写为是，请先上传本次阿里确认截图。';
+          showLiteError(message);
+          setLiteStatus('提交失败：' + message);
+          updateActionAvailability(form);
+          return;
+        }}
       }}
       let payload = null;
       try {{

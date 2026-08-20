@@ -51,6 +51,8 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
             fields[MAINTENANCE_NOTICE_FIELDS["building"]] = buildings
         if payload.maintenance_cycle:
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]] = payload.maintenance_cycle
+        if payload.execution_party:
+            fields[MAINTENANCE_NOTICE_FIELDS["executor"]] = payload.execution_party
 
         content = self._extract_section(payload.text, "内容")
         if content:
@@ -119,6 +121,8 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
             fields[MAINTENANCE_NOTICE_FIELDS["building"]] = buildings
         if payload.maintenance_cycle:
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]] = payload.maintenance_cycle
+        if payload.execution_party:
+            fields[MAINTENANCE_NOTICE_FIELDS["executor"]] = payload.execution_party
 
         content = self._extract_section(payload.text, "内容")
         if content:

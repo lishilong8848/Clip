@@ -992,6 +992,7 @@ CHANGE_NOTICE_FIELDS = {
     "site_images": "过程现场图片",
     "ali_confirmation_snapshot": "阿里确认截图",
     "h_confirmation": "H楼确认",
+    "executor": "执行方",
 }
 
 MAINTENANCE_NOTICE_FIELDS = {
@@ -1011,6 +1012,7 @@ MAINTENANCE_NOTICE_FIELDS = {
     "actual_end": "实际结束时间",
     "notice_images": "过程通告图片",
     "site_images": "过程现场图片",
+    "executor": "执行方",
 }
 
 OVERHAUL_NOTICE_FIELDS = {

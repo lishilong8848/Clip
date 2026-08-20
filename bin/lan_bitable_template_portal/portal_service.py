@@ -39,6 +39,7 @@ from upload_event_module.services.service_registry import (
     refresh_feishu_token,
 )
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
+from upload_event_module.services.handlers import change_today_in_progress_value
 from upload_event_module.utils import get_data_file_path
 
 from .state_store import LanPortalStateStore
@@ -98,6 +99,7 @@ DEFAULT_TABLE_ID = "tblzk7WrXxNWQy6V"
 TOKEN_ERROR_CODES = {99991663, 99991664, 99991665, 99991668, 99991677}
 CHANGE_SOURCE_APP_TOKEN = "JhiVwgfoIimAqEk8YwEc09sknGd"
 CHANGE_SOURCE_TABLE_ID = "tblBvg6wCYSX3hcg"
+CHANGE_CONFIRMATION_NAMESPACE = "change_confirmation"
 ZHIHANG_CHANGE_APP_TOKEN = "IrIibPkUOa6udGsMhu2cbOqhnWg"
 ZHIHANG_CHANGE_TABLE_ID = "tblqMJvYW5dxFFfU"
 REPAIR_SOURCE_APP_TOKEN = "AnEBwJlvGiJfDdkOB32cUPuknzg"
@@ -23479,7 +23481,7 @@ class MaintenancePortalService:
         if action in {"start", "update"}:
             with suppress(Exception):
                 self._remove_hidden_ongoing_keys(
-                    self._ongoing_hidden_keys(identity_payload)
+                    self._ongoing_hidden_keys(identity_payload, all_strong=True)
                 )
         repair_sync_warning = ""
         repair_summary_id = str(
@@ -27141,8 +27143,6 @@ class MaintenancePortalService:
             "source_work_type": source_work_type,
             "converted_from_work_type": str(record.get("converted_from_work_type") or ""),
             "converted_to_work_type": str(record.get("converted_to_work_type") or ""),
-            "work_type_override_key": str(record.get("work_type_override_key") or ""),
-            "work_type_override_title_key": str(record.get("work_type_override_title_key") or ""),
             "work_type": work_type,
             "notice_type": str(record.get("notice_type") or NOTICE_TYPE_MAINTENANCE),
             "source_app_token": str(record.get("source_app_token") or self.app_token),
@@ -27219,24 +27219,8 @@ class MaintenancePortalService:
             building_codes=self._building_codes_from_value(building),
         )
 
-    def _work_type_override_title_key(
-        self, title: Any, source_work_type: str = WORK_TYPE_MAINTENANCE
-    ) -> str:
-        canonical = self._canonical_history_notice_title(title, source_work_type)
-        if canonical:
-            return canonical
-        return re.sub(r"[\s,，;；:：。.【】（）()《》<>\"'“”‘’\-－_/\\]+", "", str(title or "")).lower()
-
-    def _work_type_override_key_for_record(self, record: dict[str, Any]) -> str:
-        source_work_type = self._record_source_work_type(record)
-        if source_work_type == WORK_TYPE_MAINTENANCE:
-            return self._work_type_override_title_key(
-                self._maintenance_title(record), source_work_type
-            )
-        return ""
-
-    def _copy_record_as_change_override(
-        self, record: dict[str, Any], override: dict[str, Any]
+    def _copy_maintenance_record_as_change(
+        self, record: dict[str, Any]
     ) -> dict[str, Any]:
         copied = copy.deepcopy(record)
         fields = dict(copied.get("display_fields") or {})
@@ -27253,31 +27237,19 @@ class MaintenancePortalService:
         copied["title"] = title
         copied["converted_from_work_type"] = WORK_TYPE_MAINTENANCE
         copied["converted_to_work_type"] = WORK_TYPE_CHANGE
-        copied["work_type_override_key"] = str(override.get("override_key") or "")
-        copied["work_type_override_title_key"] = str(override.get("normalized_title") or "")
         return copied
 
-    def _apply_work_type_overrides(
+    def _apply_source_work_type_rules(
         self, records: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        overrides = {
-            str(item.get("normalized_title") or ""): item
-            for item in self._state_store.list_work_type_overrides(
-                source_work_type=WORK_TYPE_MAINTENANCE
-            )
-            if str(item.get("target_work_type") or "") == WORK_TYPE_CHANGE
-        }
-        if not overrides:
-            return records
         converted: list[dict[str, Any]] = []
         for record in records:
-            if self._record_source_work_type(record) != WORK_TYPE_MAINTENANCE:
-                converted.append(record)
-                continue
-            title_key = self._work_type_override_key_for_record(record)
-            override = overrides.get(title_key)
-            if override:
-                converted.append(self._copy_record_as_change_override(record, override))
+            fields = record.get("display_fields") or {}
+            if (
+                self._record_source_work_type(record) == WORK_TYPE_MAINTENANCE
+                and self._truthy_flag(fields.get("是否出发变更"))
+            ):
+                converted.append(self._copy_maintenance_record_as_change(record))
             else:
                 converted.append(record)
         return converted
@@ -27285,11 +27257,11 @@ class MaintenancePortalService:
     def _maintenance_record_is_converted_to_change(
         self, record: dict[str, Any]
     ) -> bool:
-        converted = self._apply_work_type_overrides([record])
         return bool(
-            converted
-            and self._record_work_type(converted[0]) == WORK_TYPE_CHANGE
-            and self._record_source_work_type(converted[0]) == WORK_TYPE_MAINTENANCE
+            self._record_source_work_type(record) == WORK_TYPE_MAINTENANCE
+            and self._truthy_flag(
+                (record.get("display_fields") or {}).get("是否出发变更")
+            )
         )
 
     def _change_title(self, record: dict[str, Any]) -> str:
@@ -27517,14 +27489,20 @@ class MaintenancePortalService:
             )
         )
 
-    def _ongoing_hidden_keys(self, item: dict[str, Any]) -> list[str]:
+    def _ongoing_hidden_keys(
+        self,
+        item: dict[str, Any],
+        *,
+        all_strong: bool = False,
+    ) -> list[str]:
         if not isinstance(item, dict):
             return []
         work_type = self._item_work_type(item)
         active_item_id = str(item.get("active_item_id") or "").strip()
-        if active_item_id:
+        if active_item_id and not all_strong:
             return [f"{work_type}:active:{active_item_id}"]
         values = {
+            "active": active_item_id,
             "source": str(item.get("source_record_id") or "").strip(),
             "record": str(
                 item.get("target_record_id") or item.get("record_id") or ""
@@ -27565,10 +27543,22 @@ class MaintenancePortalService:
         self._touch_state_cache_version()
 
     def _is_ongoing_hidden(self, item: dict[str, Any]) -> bool:
+        keys = self._ongoing_hidden_keys(item, all_strong=True)
+        if not keys:
+            return False
+        with self._hidden_ongoing_lock:
+            payload = self._load_hidden_ongoing_locked()
+            hidden = payload.get("hidden") or {}
+            if any(
+                isinstance(hidden.get(key), dict)
+                and bool(hidden[key].get("force_authoritative"))
+                for key in keys
+            ):
+                return True
         # A complete target-table refresh is authoritative for ongoing notices.
         # Local "remove from display" markers may hide unbound/local drafts, but
-        # they must never suppress a remote record that still exists and is not
-        # ended in Feishu.
+        # they do not suppress a remote record unless an explicit local-remove
+        # marker above says to keep it hidden.
         if (
             bool(item.get("target_snapshot_authoritative"))
             and canonical_target_record_id(item)
@@ -27580,16 +27570,15 @@ class MaintenancePortalService:
             )
         ):
             return False
-        keys = self._ongoing_hidden_keys(item)
-        if not keys:
-            return False
-        with self._hidden_ongoing_lock:
-            payload = self._load_hidden_ongoing_locked()
-            hidden = payload.get("hidden") or {}
-            return any(key in hidden for key in keys)
+        return any(key in hidden for key in keys)
 
     def hide_ongoing_item(
-        self, item: dict[str, Any], *, scope: str = "ALL", deleted_by: str = ""
+        self,
+        item: dict[str, Any],
+        *,
+        scope: str = "ALL",
+        deleted_by: str = "",
+        force_authoritative: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(item, dict):
             raise PortalError("删除参数格式错误。")
@@ -27601,6 +27590,8 @@ class MaintenancePortalService:
             NOTICE_TYPE_BY_WORK_TYPE.get(item["work_type"], NOTICE_TYPE_MAINTENANCE),
         )
         keys = self.validate_ongoing_delete_item(item, scope=scope)
+        if force_authoritative:
+            keys = self._ongoing_hidden_keys(item, all_strong=True)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._hidden_ongoing_lock:
             payload = self._load_hidden_ongoing_locked()
@@ -27618,6 +27609,7 @@ class MaintenancePortalService:
                     "record_id": str(
                         item.get("target_record_id") or item.get("record_id") or ""
                     ),
+                    "force_authoritative": bool(force_authoritative),
                 }
             self._save_hidden_ongoing_locked(payload)
         return {"deleted": True, "keys": keys, "deleted_at": now}
@@ -28687,7 +28679,12 @@ class MaintenancePortalService:
                 )
             )
         if restored_active_payload:
-            identity_keys.update(self._ongoing_hidden_keys(restored_active_payload))
+            identity_keys.update(
+                self._ongoing_hidden_keys(
+                    restored_active_payload,
+                    all_strong=True,
+                )
+            )
         self._remove_hidden_ongoing_keys(identity_keys)
         self._touch_state_cache_version()
         with suppress(Exception):
@@ -29021,6 +29018,10 @@ class MaintenancePortalService:
             "maintenance_cycle": field_value(
                 "maintenance_cycle",
                 fallback_names=("维保周期", "维护周期"),
+            ),
+            "execution_party": field_value(
+                "executor",
+                fallback_names=("执行方",),
             ),
             "location": field_value(
                 "location",
@@ -29407,7 +29408,7 @@ class MaintenancePortalService:
                 and str(item.get("status") or "").strip() == "已结束"
                 and str(item.get("source_record_id") or "").strip()
             }
-        source_records = self._apply_work_type_overrides(
+        source_records = self._apply_source_work_type_rules(
             list(self._records or [])
             + list(self._change_records or [])
             + list(self._repair_records or [])
@@ -29923,7 +29924,11 @@ class MaintenancePortalService:
                         )
                     ).strip()
         for field_name, value in projected_fields.items():
-            if value not in (None, "", [], {}) or field_name not in payload:
+            if (
+                field_name == "execution_party"
+                or value not in (None, "", [], {})
+                or field_name not in payload
+            ):
                 payload[field_name] = value
         projected_notice_type = str(payload.get("notice_type") or "").strip()
         if work_type != WORK_TYPE_POWER or projected_notice_type not in {
@@ -30292,6 +30297,8 @@ class MaintenancePortalService:
                 target_record=target_record,
                 current_payload=current,
             )
+            if self._is_ongoing_hidden(projected):
+                continue
             self._mark_local_notice_active_from_target(projected)
             if not self._target_snapshot_payload_changed(current, projected):
                 continue
@@ -30337,6 +30344,8 @@ class MaintenancePortalService:
                 target_record=target_record,
                 identity=identity,
             )
+            if self._is_ongoing_hidden(projected):
+                continue
             section = "event" if work_type == WORK_TYPE_EVENT else "other"
             row = {
                 "section": section,
@@ -31886,14 +31895,14 @@ class MaintenancePortalService:
     ) -> list[dict[str, Any]]:
         snapshot_records = self._source_snapshot_records(scope)
         if snapshot_records is not None:
-            return self._sort_workbench_records(self._apply_work_type_overrides([
+            return self._sort_workbench_records(self._apply_source_work_type_rules([
                 record
                 for record in snapshot_records
                 if self._source_record_matches_filters(
                     record, month=month, specialty=specialty
                 )
             ]))
-        return self._sort_workbench_records(self._apply_work_type_overrides(
+        return self._sort_workbench_records(self._apply_source_work_type_rules(
             self._workbench_records_from_memory(
                 month=month, specialty=specialty, scope=scope
             )
@@ -37531,77 +37540,6 @@ class MaintenancePortalService:
                 return record
         raise PortalError(f"未找到记录: {record_id}")
 
-    def set_notice_work_type_override(
-        self,
-        *,
-        record_id: str,
-        source_work_type: str = WORK_TYPE_MAINTENANCE,
-        target_work_type: str = WORK_TYPE_CHANGE,
-        scope: str = "ALL",
-        updated_by: str = "",
-    ) -> dict[str, Any]:
-        self.ensure_snapshot_loaded()
-        record_id = str(record_id or "").strip()
-        source_work_type = str(source_work_type or WORK_TYPE_MAINTENANCE).strip()
-        target_work_type = str(target_work_type or WORK_TYPE_CHANGE).strip()
-        if source_work_type != WORK_TYPE_MAINTENANCE:
-            raise PortalError("当前仅支持将维保源记录转为变更。")
-        if target_work_type not in {WORK_TYPE_CHANGE, WORK_TYPE_MAINTENANCE}:
-            raise PortalError("转换目标只支持变更或维保。")
-        if not record_id:
-            raise PortalError("缺少源记录 ID。")
-        record = self._find_record_by_id(record_id, WORK_TYPE_MAINTENANCE)
-        fields = record.get("display_fields") or {}
-        building_codes = self._building_codes_from_value(fields.get("楼栋"))
-        normalized_scope = self._normalize_scope(scope)
-        if not self._scope_matches_buildings(normalized_scope, building_codes):
-            raise PortalError("当前账号无权转换该楼栋通告。")
-        title = self._maintenance_title(record)
-        normalized_title = self._work_type_override_title_key(
-            title, WORK_TYPE_MAINTENANCE
-        )
-        if not normalized_title:
-            raise PortalError("该维保记录缺少可用于长期转换的标题。")
-        if target_work_type == WORK_TYPE_MAINTENANCE:
-            changed = self._state_store.disable_work_type_override(
-                source_work_type=WORK_TYPE_MAINTENANCE,
-                normalized_title=normalized_title,
-                updated_by=updated_by,
-            )
-            self._touch_state_cache_version()
-            return {
-                "record_id": record_id,
-                "source_work_type": WORK_TYPE_MAINTENANCE,
-                "target_work_type": WORK_TYPE_MAINTENANCE,
-                "title": title,
-                "normalized_title": normalized_title,
-                "changed": changed,
-            }
-        override = self._state_store.upsert_work_type_override(
-            source_work_type=WORK_TYPE_MAINTENANCE,
-            normalized_title=normalized_title,
-            target_work_type=WORK_TYPE_CHANGE,
-            title=title,
-            payload={
-                "record_id": record_id,
-                "building": self._building_label_from_codes(building_codes),
-                "building_codes": building_codes,
-                "maintenance_total": str(fields.get("维护总项") or ""),
-                "maintenance_cycle": str(fields.get("维护周期") or ""),
-            },
-            updated_by=updated_by,
-        )
-        self._touch_state_cache_version()
-        return {
-            "record_id": record_id,
-            "source_work_type": WORK_TYPE_MAINTENANCE,
-            "target_work_type": WORK_TYPE_CHANGE,
-            "title": title,
-            "normalized_title": normalized_title,
-            "changed": True,
-            "override": override,
-        }
-
     def generate_templates(self, drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         self.ensure_snapshot_loaded()
         generated: list[dict[str, Any]] = []
@@ -38612,7 +38550,10 @@ class MaintenancePortalService:
     def create_action_job(self, request_payload: dict[str, Any]) -> tuple[str, bool]:
         if not isinstance(request_payload, dict):
             raise PortalError("请求体格式错误。")
-        if str(request_payload.get("command_format") or "") == "notice_command":
+        is_workbench_command = (
+            str(request_payload.get("command_format") or "") == "notice_command"
+        )
+        if is_workbench_command:
             patch_payload = request_payload.get("patch")
             patch_payload = patch_payload if isinstance(patch_payload, dict) else {}
             scope = self._normalize_scope(
@@ -38633,6 +38574,11 @@ class MaintenancePortalService:
         action = str(request_payload.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             raise PortalError("动作必须是 start/update/end。")
+        if is_workbench_command and str(request_payload.get("work_type") or "").strip() in {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+        } and str(request_payload.get("execution_party") or "").strip() not in {"厂维", "自维"}:
+            raise PortalError("请选择执行方（厂维或自维）。")
         if action == "start" and not (
             str(request_payload.get("record_id") or "").strip()
             or (
@@ -39664,6 +39610,7 @@ class MaintenancePortalService:
             raise PortalError("动作必须是 start/update/end。")
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
+        execution_party = str(request_payload.get("execution_party") or "").strip()
         specialty = self._clean_source_text(request_payload.get("specialty"))
         manual = self._truthy_flag(request_payload.get("manual"))
 
@@ -39888,6 +39835,7 @@ class MaintenancePortalService:
             "maintenance_no": maintenance_no,
             "maintenance_project": maintenance_project,
             "maintenance_cycle": maintenance_cycle,
+            "execution_party": execution_party,
             "source_progress": (
                 self._maintenance_status_value(record)
                 if record is not None
@@ -39943,14 +39891,19 @@ class MaintenancePortalService:
     def _default_change_level(level: Any) -> str:
         return str(level or "").strip() or CHANGE_DEFAULT_LEVEL
 
-    def _sync_maintenance_target_requested(
-        self, request_payload: dict[str, Any], *, source_work_type: str
+    def _source_requires_maintenance_target(
+        self,
+        *,
+        source_work_type: str,
+        source_fields: dict[str, Any],
     ) -> bool:
-        if source_work_type != WORK_TYPE_MAINTENANCE:
-            return False
-        if "sync_maintenance_target" not in request_payload:
-            return True
-        return self._truthy_flag(request_payload.get("sync_maintenance_target"))
+        return bool(
+            source_work_type == WORK_TYPE_MAINTENANCE
+            or (
+                source_work_type == WORK_TYPE_CHANGE
+                and self._clean_source_text(source_fields.get("作业类型")) == "维护"
+            )
+        )
 
     def _build_paired_maintenance_upload(
         self,
@@ -39959,6 +39912,7 @@ class MaintenancePortalService:
         job_id: str,
         action: str,
         status: str,
+        source_work_type: str,
         source_record_id: str,
         target_record_id: str,
         active_item_id: str,
@@ -39976,6 +39930,10 @@ class MaintenancePortalService:
         progress: str,
         response_time: str,
     ) -> dict[str, Any]:
+        paired_source_work_type = str(
+            source_work_type or WORK_TYPE_MAINTENANCE
+        ).strip()
+        paired_source_is_change = paired_source_work_type == WORK_TYPE_CHANGE
         paired_actual_start = str(
             request_payload.get("paired_maintenance_actual_start_time") or ""
         ).strip()
@@ -40007,9 +39965,21 @@ class MaintenancePortalService:
             "job_id": f"{job_id}:paired-maintenance",
             "work_type": WORK_TYPE_MAINTENANCE,
             "notice_type": NOTICE_TYPE_MAINTENANCE,
-            "source_work_type": WORK_TYPE_MAINTENANCE,
-            "source_app_token": self.app_token if source_record_id else "",
-            "source_table_id": self.table_id if source_record_id else "",
+            "source_work_type": paired_source_work_type,
+            "source_app_token": (
+                CHANGE_SOURCE_APP_TOKEN
+                if source_record_id and paired_source_is_change
+                else self.app_token
+                if source_record_id
+                else ""
+            ),
+            "source_table_id": (
+                CHANGE_SOURCE_TABLE_ID
+                if source_record_id and paired_source_is_change
+                else self.table_id
+                if source_record_id
+                else ""
+            ),
             "target_app_token": str(config.app_token or "").strip(),
             "target_table_id": str(config.get_table_id(NOTICE_TYPE_MAINTENANCE) or "").strip(),
             "manual": False,
@@ -40037,6 +40007,7 @@ class MaintenancePortalService:
             "target_building": self._building_label_from_codes(building_codes),
             "specialty": specialty,
             "maintenance_cycle": maintenance_cycle,
+            "execution_party": str(request_payload.get("execution_party") or "").strip(),
             "start_time": start_time,
             "end_time": end_time,
             "location": location,
@@ -40068,6 +40039,7 @@ class MaintenancePortalService:
             raise PortalError("动作必须是 start/update/end。")
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
+        execution_party = str(request_payload.get("execution_party") or "").strip()
         manual = self._truthy_flag(request_payload.get("manual"))
         source_work_type = str(
             request_payload.get("source_work_type")
@@ -40102,6 +40074,26 @@ class MaintenancePortalService:
                 )
             ):
                 source_work_type = WORK_TYPE_MAINTENANCE
+        elif (
+            not manual
+            and source_work_type == WORK_TYPE_MAINTENANCE
+            and source_identity_record_id
+        ):
+            try:
+                self._find_record_by_id(
+                    source_identity_record_id,
+                    WORK_TYPE_MAINTENANCE,
+                )
+            except PortalError:
+                try:
+                    self._find_record_by_id(
+                        source_identity_record_id,
+                        WORK_TYPE_CHANGE,
+                    )
+                except PortalError:
+                    pass
+                else:
+                    source_work_type = WORK_TYPE_CHANGE
         target_record_id = ""
         fields: dict[str, Any] = {}
         paired_maintenance_original_title = str(
@@ -40407,6 +40399,70 @@ class MaintenancePortalService:
             str(request_payload.get("progress") or "").strip()
             or (DEFAULT_PROGRESS_TEXT if action == "start" else "")
         )
+        raw_ali_confirmation_images = request_payload.get(
+            "ali_confirmation_images"
+        )
+        if not isinstance(raw_ali_confirmation_images, list):
+            raw_ali_confirmation_images = []
+        ali_confirmation_images = [
+            copy.deepcopy(item)
+            for item in raw_ali_confirmation_images[:1]
+            if isinstance(item, dict)
+        ]
+        today_in_progress = change_today_in_progress_value(action, progress)
+        ali_confirmation_source = ""
+        ali_confirmation_fingerprint = ""
+        web_today_screenshot_required = bool(
+            request_payload.get("_web_action_request")
+            and today_in_progress == "是"
+        )
+        if web_today_screenshot_required:
+            if ali_confirmation_images:
+                upload_id = str(
+                    ali_confirmation_images[0].get("upload_id") or ""
+                ).strip()
+                attachment = (
+                    self._state_store.get_notice_upload_attachment(upload_id)
+                    if upload_id
+                    else None
+                )
+                if not attachment:
+                    raise PortalError(
+                        "今日是否进行将写为是，请先上传本次阿里确认截图。"
+                    )
+                attachment_owner = str(attachment.get("open_id") or "").strip()
+                actor_open_id = str(request_payload.get("_auth_open_id") or "").strip()
+                if attachment_owner and actor_open_id and attachment_owner != actor_open_id:
+                    raise PortalError("不能使用其他账号上传的阿里确认截图。")
+                ali_confirmation_source = "action"
+            elif action == "update" and target_record_id:
+                confirmation_task = self._state_store.get_document(
+                    CHANGE_CONFIRMATION_NAMESPACE,
+                    target_record_id,
+                ) or {}
+                current_fingerprint = str(
+                    confirmation_task.get("screenshot_fingerprint") or ""
+                ).strip()
+                consumed_fingerprint = str(
+                    confirmation_task.get(
+                        "last_today_yes_screenshot_fingerprint"
+                    )
+                    or ""
+                ).strip()
+                if (
+                    current_fingerprint
+                    and current_fingerprint != consumed_fingerprint
+                    and float(
+                        confirmation_task.get("screenshot_uploaded_at") or 0
+                    )
+                    > 0
+                ):
+                    ali_confirmation_source = "standalone"
+                    ali_confirmation_fingerprint = current_fingerprint
+            if not ali_confirmation_source:
+                raise PortalError(
+                    "今日是否进行将写为是，请先上传本次阿里确认截图。"
+                )
         if action == "start":
             remembered_change_fields = {
                 "specialty": specialty,
@@ -40472,9 +40528,9 @@ class MaintenancePortalService:
             raise PortalError(recipient_error)
         skip_personal_message = False
         response_time = self._action_response_time(request_payload)
-        sync_maintenance_target = self._sync_maintenance_target_requested(
-            request_payload,
+        sync_maintenance_target = self._source_requires_maintenance_target(
             source_work_type=source_work_type,
+            source_fields=fields,
         )
         paired_maintenance_upload: dict[str, Any] = {}
         paired_maintenance_actual_start_time = str(
@@ -40494,6 +40550,7 @@ class MaintenancePortalService:
                 job_id=job_id,
                 action=action,
                 status=status,
+                source_work_type=source_work_type,
                 source_record_id=source_record_id or record_id,
                 target_record_id=paired_maintenance_target_record_id,
                 active_item_id=str(request_payload.get("active_item_id") or "").strip(),
@@ -40551,6 +40608,7 @@ class MaintenancePortalService:
             "building_codes": building_codes,
             "target_building": self._building_label_from_code(building_code),
             "specialty": specialty,
+            "execution_party": execution_party,
             "level": level,
             "source_progress": source_progress,
             "zhihang_involved": zhihang_involved,
@@ -40572,6 +40630,15 @@ class MaintenancePortalService:
             "reason": reason,
             "impact": impact,
             "progress": progress,
+            "today_in_progress_value": today_in_progress,
+            "ali_confirmation_images": (
+                ali_confirmation_images if today_in_progress == "是" else []
+            ),
+            "ali_confirmation_source": ali_confirmation_source,
+            "ali_confirmation_screenshot_fingerprint": (
+                ali_confirmation_fingerprint
+            ),
+            "web_today_screenshot_required": web_today_screenshot_required,
             "text": text,
             "extra_images": self._site_photo_payload(request_payload),
             "recipients": recipients,
