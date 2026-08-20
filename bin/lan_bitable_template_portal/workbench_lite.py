@@ -668,9 +668,10 @@ def _record_disabled_reason(
     return ""
 
 
-def _record_sort_key(record: dict[str, Any]) -> tuple[int, int, str, str]:
+def _record_sort_key(record: dict[str, Any]) -> tuple[int, int, int, str, str]:
     progress = _record_progress(record)
     title = _record_title(record)
+    finished_priority = 1 if _record_disabled_reason(progress) else 0
     if "延期未开始" in progress:
         priority = 0
     elif "未开始" in progress:
@@ -685,6 +686,7 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[int, int, str, str]:
         priority = 5
     plan_window_priority = 0 if _truthy_display(record.get("plan_window_active")) else 1
     return (
+        finished_priority,
         plan_window_priority,
         priority,
         title,
@@ -836,6 +838,7 @@ def _change_confirmation_uploader(
     target_record_id: str,
     existing_count: int,
     confirmed: bool,
+    fresh_for_today: bool,
     existing_images: list[dict[str, Any]] | None = None,
 ) -> str:
     if _work_type(work_type) != "change":
@@ -847,6 +850,7 @@ def _change_confirmation_uploader(
         <section class="site-photo-panel ali-confirmation-panel" data-ali-confirmation-panel
           data-target-record-id="{_e(target_record_id)}" data-existing-count="{_e(count)}"
           data-confirmed="{_e('1' if confirmed else '0')}"
+          data-fresh-for-today="{_e('1' if fresh_for_today else '0')}"
           data-existing-images="{_e(_json_dumps(existing_images or []))}">
           <input type="hidden" name="ali_confirmation_images_json" value="[]">
           <header class="site-photo-head">
@@ -860,7 +864,7 @@ def _change_confirmation_uploader(
             <label class="site-photo-drop" for="lite-ali-confirmation-input" tabindex="0">
               <input id="lite-ali-confirmation-input" type="file" accept="image/*">
               <span>点击 / Ctrl+V 粘贴阿里确认截图</span>
-              <small>单张图片，不超过 8MB；重新上传会重置H楼确认</small>
+              <small>每次一张，不超过 8MB；新图追加保留，并重置H楼确认</small>
             </label>
             <div class="site-photo-side">
               <span id="lite-ali-confirmation-status">{_e(status)}</span>
@@ -1630,6 +1634,7 @@ def _record_rows(
         f" data-ali-confirmation-count=\"{_e(ali_confirmation_count)}\""
         f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
         f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(row_source.get('h_building_confirmed')) else '0'}\""
+        f" data-ali-confirmation-fresh=\"{'1' if _truthy_display(row_source.get('ali_confirmation_fresh_for_today')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"{_e(action)}\""
         f" data-disabled-reason=\"{_e(disabled_reason)}\""
@@ -1723,6 +1728,7 @@ def _ongoing_rows(
         f" data-ali-confirmation-count=\"{_e(ali_confirmation_count)}\""
         f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
         f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(item.get('h_building_confirmed')) else '0'}\""
+        f" data-ali-confirmation-fresh=\"{'1' if _truthy_display(item.get('ali_confirmation_fresh_for_today')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"{'update' if target_record_id else 'start'}\""
             f" data-title=\"{_e(title)}\""
@@ -2244,6 +2250,9 @@ def _detail_form(
         len(ali_confirmation_images),
     )
     h_building_confirmed = bool(source.get("h_building_confirmed"))
+    ali_confirmation_fresh_for_today = _truthy_display(
+        source.get("ali_confirmation_fresh_for_today")
+    )
     mop_status = _mop_status_text(source, work)
     require_manual_binding = bool(
         effective_manual and not parsed_draft and not prefill_draft
@@ -2387,7 +2396,7 @@ def _detail_form(
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
         {_site_photo_uploader(work, site_photo_count, site_photo_images)}
-        {_change_confirmation_uploader(work, target_record_id=target_record_id, existing_count=ali_confirmation_count, confirmed=h_building_confirmed, existing_images=ali_confirmation_images)}
+        {_change_confirmation_uploader(work, target_record_id=target_record_id, existing_count=ali_confirmation_count, confirmed=h_building_confirmed, fresh_for_today=ali_confirmation_fresh_for_today, existing_images=ali_confirmation_images)}
         <section class="notice-preview" aria-live="polite">
           <div class="preview-head">
             <span>发送预览</span>
@@ -4290,6 +4299,7 @@ def render_workbench_lite(
         aliPanel.dataset.existingCount = row.getAttribute('data-ali-confirmation-count') || '0';
         aliPanel.dataset.existingImages = row.getAttribute('data-ali-confirmation-images') || '[]';
         aliPanel.dataset.confirmed = row.getAttribute('data-ali-confirmation-confirmed') || '0';
+        aliPanel.dataset.freshForToday = row.getAttribute('data-ali-confirmation-fresh') || '0';
         aliPanel.dataset.targetRecordId = row.getAttribute('data-target-record-id') || '';
       }}
     }}
@@ -4310,14 +4320,24 @@ def render_workbench_lite(
         return local?.preview_url ? {{ ...item, preview_url: local.preview_url }} : item;
       }});
     }}
-    function persistAliImageOnRows(targetRecordId, item) {{
+    function persistAliImageOnRows(targetRecordId, items, freshForToday) {{
       if (!targetRecordId) return;
-      const serialized = JSON.stringify(item ? [item] : []);
+      const normalized = Array.isArray(items) ? items.filter(Boolean) : (items ? [items] : []);
+      const serialized = JSON.stringify(normalized);
       document.querySelectorAll('.ongoing-row').forEach(row => {{
         if (String(row.getAttribute('data-target-record-id') || '') !== targetRecordId) return;
-        row.setAttribute('data-ali-confirmation-count', item ? '1' : '0');
+        row.setAttribute('data-ali-confirmation-count', String(normalized.length));
         row.setAttribute('data-ali-confirmation-images', serialized);
         row.setAttribute('data-ali-confirmation-confirmed', '0');
+        row.setAttribute('data-ali-confirmation-fresh', freshForToday ? '1' : '0');
+      }});
+    }}
+    function aliConfirmationPreviewItems(targetRecordId, items) {{
+      return (Array.isArray(items) ? items : []).map(item => {{
+        const token = String(item?.file_token || item?.token || '');
+        return token
+          ? {{ ...item, preview_url: `/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot/preview?file_token=${{encodeURIComponent(token)}}` }}
+          : item;
       }});
     }}
     function sitePhotoSignature(form) {{
@@ -4508,7 +4528,7 @@ def render_workbench_lite(
       if (!panel || !hidden) return;
       hidden.value = JSON.stringify(aliConfirmationPayload(form));
       const existing = Number(panel.dataset.existingCount || 0) || 0;
-      const existingImage = parsePanelImages(panel)[0] || null;
+      const existingImages = parsePanelImages(panel);
       const confirmed = panel.dataset.confirmed === '1';
       const selected = Boolean(liteAliConfirmationImage);
       const badge = document.getElementById('lite-ali-confirmation-badge');
@@ -4523,9 +4543,11 @@ def render_workbench_lite(
         : (confirmed ? 'H楼已确认' : (existing ? '截图已上传，等待H楼确认' : '尚未上传'));
       const list = document.getElementById('lite-ali-confirmation-file');
       if (list) {{
-        const visibleImage = liteAliConfirmationImage || existingImage;
-        if (!visibleImage) list.replaceChildren();
-        else {{
+        const visibleImages = liteAliConfirmationImage
+          ? existingImages.concat([liteAliConfirmationImage])
+          : existingImages;
+        if (!visibleImages.length) list.replaceChildren();
+        else list.replaceChildren(...visibleImages.map(visibleImage => {{
           const chip = document.createElement('span');
           chip.className = 'site-photo-item';
           appendImagePreview(chip, visibleImage, '阿里确认截图');
@@ -4535,12 +4557,16 @@ def render_workbench_lite(
           remove.className = 'site-photo-remove';
           remove.type = 'button';
           remove.setAttribute('data-ali-confirmation-remove', '1');
+          remove.setAttribute(
+            'data-file-token',
+            String(visibleImage.file_token || visibleImage.token || '')
+          );
           remove.setAttribute('aria-label', '删除阿里确认截图');
           remove.textContent = '×';
           remove.disabled = panel.classList.contains('uploading');
           chip.append(label, remove);
-          list.replaceChildren(chip);
-        }}
+          return chip;
+        }}));
       }}
       const uploadNow = document.getElementById('lite-ali-confirmation-upload-now');
       if (uploadNow) uploadNow.disabled = panel.classList.contains('uploading') || !selected || Boolean(liteAliConfirmationImage?.staged || liteAliConfirmationImage?.remote_uploaded);
@@ -4611,11 +4637,19 @@ def render_workbench_lite(
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图写入失败');
         const result = data.data || data;
-        panel.dataset.existingCount = '1';
+        const screenshotItems = Array.isArray(result.screenshot_items)
+          ? aliConfirmationPreviewItems(targetRecordId, result.screenshot_items)
+          : parsePanelImages(panel).concat([liteAliConfirmationImage]);
+        if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
+          URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
+        }}
+        liteAliConfirmationImage = null;
+        panel.dataset.existingCount = String(screenshotItems.length);
         panel.dataset.confirmed = '0';
-        liteAliConfirmationImage = {{ ...liteAliConfirmationImage, remote_uploaded: true, staged: false, file: null }};
-        panel.dataset.existingImages = JSON.stringify([liteAliConfirmationImage]);
-        persistAliImageOnRows(targetRecordId, liteAliConfirmationImage);
+        const freshForToday = result.screenshot_fresh_for_today === true;
+        panel.dataset.freshForToday = freshForToday ? '1' : '0';
+        panel.dataset.existingImages = JSON.stringify(screenshotItems);
+        persistAliImageOnRows(targetRecordId, screenshotItems, freshForToday);
         updateAliConfirmationUi(form);
         setLiteStatus(result.last_error
           ? `阿里确认截图已上传，H楼通知等待重试：${{result.last_error}}`
@@ -4633,8 +4667,9 @@ def render_workbench_lite(
       const panel = form?.querySelector('[data-ali-confirmation-panel]');
       if (!panel) return;
       const targetRecordId = String(panel.dataset.targetRecordId || '').trim();
+      const fileToken = String(button?.getAttribute('data-file-token') || '').trim();
       const existing = Number(panel.dataset.existingCount || 0) > 0;
-      if (liteAliConfirmationImage && !liteAliConfirmationImage.remote_uploaded) {{
+      if (liteAliConfirmationImage && !fileToken) {{
         if (String(liteAliConfirmationImage.preview_url || '').startsWith('blob:')) {{
           URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
         }}
@@ -4657,21 +4692,24 @@ def render_workbench_lite(
       panel.classList.add('uploading');
       updateAliConfirmationUi(form);
       try {{
-        const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot`, {{
+        const query = fileToken ? `?file_token=${{encodeURIComponent(fileToken)}}` : '';
+        const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot${{query}}`, {{
           method: 'DELETE',
           credentials: 'same-origin',
         }});
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图删除失败');
-        if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
-          URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
-        }}
-        liteAliConfirmationImage = null;
-        panel.dataset.existingCount = '0';
-        panel.dataset.existingImages = '[]';
+        if (!fileToken) liteAliConfirmationImage = null;
+        const result = data.data || data;
+        const screenshotItems = Array.isArray(result.screenshot_items)
+          ? aliConfirmationPreviewItems(targetRecordId, result.screenshot_items)
+          : parsePanelImages(panel).filter(item => String(item.file_token || item.token || '') !== fileToken);
+        panel.dataset.existingCount = String(screenshotItems.length);
+        panel.dataset.existingImages = JSON.stringify(screenshotItems);
         panel.dataset.confirmed = '0';
-        persistAliImageOnRows(targetRecordId, null);
+        panel.dataset.freshForToday = '0';
+        persistAliImageOnRows(targetRecordId, screenshotItems, false);
         updateAliConfirmationUi(form);
         setLiteStatus('阿里确认截图已删除，H楼确认已重置');
       }} catch (error) {{
@@ -7190,6 +7228,7 @@ def render_workbench_lite(
       row.setAttribute('data-ali-confirmation-count', aliImages.length ? '1' : '0');
       row.setAttribute('data-ali-confirmation-images', JSON.stringify(aliImages));
       row.setAttribute('data-ali-confirmation-confirmed', '0');
+      row.setAttribute('data-ali-confirmation-fresh', '0');
       row.setAttribute('data-mop-status', draft.mop_status || '');
       row.setAttribute('data-action', 'update');
       row.setAttribute('data-title', title);
@@ -7653,9 +7692,8 @@ def render_workbench_lite(
           && !liteAliConfirmationImage.staged
         );
         const staged = aliConfirmationPayload(form).length > 0;
-        const existing = Number(panel?.dataset.existingCount || 0) > 0
-          || Boolean(liteAliConfirmationImage?.remote_uploaded);
-        if (selectedPendingUpload || (submitAction === 'start' ? !staged : !staged && !existing)) {{
+        const freshForToday = panel?.dataset.freshForToday === '1';
+        if (selectedPendingUpload || (submitAction === 'start' ? !staged : !staged && !freshForToday)) {{
           const message = '今日是否进行将写为是，请先上传本次阿里确认截图。';
           showLiteError(message);
           setLiteStatus('提交失败：' + message);

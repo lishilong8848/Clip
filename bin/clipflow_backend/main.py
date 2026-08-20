@@ -5583,6 +5583,7 @@ class FastAPIPortalController:
                 item = await asyncio.to_thread(
                     PortalRuntime.delete_change_confirmation_screenshot,
                     record_id,
+                    file_token=str(request.query_params.get("file_token") or ""),
                     actor_open_id=open_id,
                     actor_name=str(user.get("name") or user.get("en_name") or ""),
                     allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),

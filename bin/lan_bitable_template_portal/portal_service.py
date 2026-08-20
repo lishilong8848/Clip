@@ -31863,6 +31863,11 @@ class MaintenancePortalService:
             for _, item in sorted(
                 enumerate(records or []),
                 key=lambda pair: (
+                    1
+                    if self._target_status_is_finished(
+                        self._source_record_progress(pair[1])
+                    )
+                    else 0,
                     0
                     if self._maintenance_plan_window_is_active(
                         pair[1], now=now

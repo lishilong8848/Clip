@@ -146,9 +146,13 @@ class ChangeNoticeHandler(BaseNoticeHandler):
                 {"file_token": token} for token in payload.extra_file_tokens
             ]
         if payload.ali_confirmation_file_tokens:
+            ali_tokens = self.merge_tokens(
+                payload.existing_ali_confirmation_file_tokens,
+                payload.ali_confirmation_file_tokens,
+            )
             fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]] = [
                 {"file_token": token}
-                for token in payload.ali_confirmation_file_tokens
+                for token in ali_tokens
             ]
             fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
 
@@ -243,9 +247,13 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             return fields
 
         if payload.ali_confirmation_file_tokens:
+            ali_tokens = self.merge_tokens(
+                payload.existing_ali_confirmation_file_tokens,
+                payload.ali_confirmation_file_tokens,
+            )
             fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]] = [
                 {"file_token": token}
-                for token in payload.ali_confirmation_file_tokens
+                for token in ali_tokens
             ]
             fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
 
