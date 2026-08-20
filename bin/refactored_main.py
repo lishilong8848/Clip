@@ -19,6 +19,7 @@ from upload_event_module.services.system_alert_webhook import send_system_alert
 if sys.platform == "win32":
     os.environ.setdefault("QT_OPENGL", "software")
 
+
 # The desktop app is the trusted operator entrypoint for real Feishu/Bitable
 # writes. Direct backend/server scripts still require an explicit confirmation.
 os.environ.setdefault("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM", "1")
