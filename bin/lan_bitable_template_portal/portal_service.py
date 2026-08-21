@@ -27543,34 +27543,9 @@ class MaintenancePortalService:
         self._touch_state_cache_version()
 
     def _is_ongoing_hidden(self, item: dict[str, Any]) -> bool:
-        keys = self._ongoing_hidden_keys(item, all_strong=True)
-        if not keys:
-            return False
-        with self._hidden_ongoing_lock:
-            payload = self._load_hidden_ongoing_locked()
-            hidden = payload.get("hidden") or {}
-            if any(
-                isinstance(hidden.get(key), dict)
-                and bool(hidden[key].get("force_authoritative"))
-                for key in keys
-            ):
-                return True
-        # A complete target-table refresh is authoritative for ongoing notices.
-        # Local "remove from display" markers may hide unbound/local drafts, but
-        # they do not suppress a remote record unless an explicit local-remove
-        # marker above says to keep it hidden.
-        if (
-            bool(item.get("target_snapshot_authoritative"))
-            and canonical_target_record_id(item)
-        ) or (
-            bool(item.get("source_snapshot_authoritative"))
-            and (
-                canonical_source_record_id(item)
-                or str(item.get("zhihang_record_id") or "").strip()
-            )
-        ):
-            return False
-        return any(key in hidden for key in keys)
+        # “移除显示”已下线。旧版本留下的本地隐藏文档不再参与投影，
+        # 删除由 Qt 活动表软删除、目标表删除和源计划重置共同决定。
+        return False
 
     def hide_ongoing_item(
         self,
@@ -28241,6 +28216,11 @@ class MaintenancePortalService:
             if removed:
                 payload["hidden"] = hidden
                 self._save_hidden_ongoing_locked(payload)
+
+    def restore_ongoing_visibility(self, item: dict[str, Any]) -> list[str]:
+        keys = set(self._ongoing_hidden_keys(item, all_strong=True))
+        self._remove_hidden_ongoing_keys(keys)
+        return sorted(keys)
 
     def _applied_end_undo_for_context(
         self,
@@ -30459,6 +30439,8 @@ class MaintenancePortalService:
 
         target_record: dict[str, Any] | None = None
         target_building_codes: list[str] = []
+        target_lifecycle: dict[str, Any] = {}
+        target_active_payload: dict[str, Any] = {}
         if target_record_id:
             try:
                 target_records = self._target_records_for_notice_type(
@@ -30506,6 +30488,49 @@ class MaintenancePortalService:
                 scope, target_building_codes
             ):
                 raise PortalError("目标多维记录不属于当前楼栋，请重新选择。")
+            target_lifecycle = self._target_record_lifecycle(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
+            )
+            if target_lifecycle.get("active") and not target_lifecycle.get(
+                "finished"
+            ):
+                current_payload: dict[str, Any] = {}
+                for row in self._state_store.list_visible_qt_active_items():
+                    row_payload = (
+                        row.get("payload")
+                        if isinstance(row.get("payload"), dict)
+                        else {}
+                    )
+                    if canonical_target_record_id(row_payload) == target_record_id:
+                        current_payload = copy.deepcopy(row_payload)
+                        break
+                current_payload.update(
+                    {
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "source_record_id": source_record_id,
+                    }
+                )
+                if active_item_id:
+                    current_payload["active_item_id"] = active_item_id
+                identity = self._state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    target_record_id=target_record_id,
+                )
+                target_active_payload = self._target_snapshot_active_payload(
+                    work_type=work_type,
+                    notice_type=notice_type,
+                    target_record=target_record,
+                    current_payload=current_payload,
+                    identity=identity,
+                )
+                active_item_id = str(
+                    target_active_payload.get("active_item_id")
+                    or active_item_id
+                    or ""
+                ).strip()
 
         return {
             "scope": scope,
@@ -30517,6 +30542,9 @@ class MaintenancePortalService:
             "source_found": bool(source_record),
             "target_found": bool(target_record),
             "target_building_codes": target_building_codes,
+            "target_active": bool(target_lifecycle.get("active")),
+            "target_finished": bool(target_lifecycle.get("finished")),
+            "_target_active_payload": target_active_payload,
             "target_status": str(
                 ((target_record or {}).get("display_fields") or {}).get(
                     get_field_config(notice_type).get("status", "")
@@ -30590,6 +30618,210 @@ class MaintenancePortalService:
                 matches.append(record_id)
         return matches[0] if len(set(matches)) == 1 else ""
 
+    def _lookup_active_target_candidates(
+        self,
+        *,
+        work_type: str,
+        scope: str,
+        action: str = "update",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = self._notice_type_for_work_type(work_type)
+        field_config = get_field_config(notice_type)
+        title_field = field_config.get("title") or field_config.get("name") or "名称"
+        try:
+            target_records = self._target_records_for_notice_type(
+                notice_type,
+                work_type,
+                force_refresh=True,
+            )
+        except Exception as exc:
+            raise PortalError(f"查询{notice_type}目标表失败：{exc}") from exc
+        if self._repair_snapshots_enabled:
+            snapshot_meta = self._state_store.get_repair_snapshot_meta(
+                self._notice_target_snapshot_source_key(work_type)
+            )
+            if str(snapshot_meta.get("status") or "") == "failed":
+                raise PortalError(
+                    f"查询{notice_type}目标表失败："
+                    + (
+                        str(snapshot_meta.get("error") or "").strip()
+                        or "目标表刷新失败，当前电脑仅有旧快照。"
+                    )
+                )
+        candidates: list[dict[str, Any]] = []
+        for target in target_records:
+            fields = target.get("display_fields") or {}
+            lifecycle = self._target_record_lifecycle(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target,
+            )
+            if not lifecycle.get("active") or lifecycle.get("finished"):
+                continue
+            building_codes = self._target_record_building_codes(
+                fields,
+                field_config,
+            )
+            if building_codes and not self._scope_matches_buildings(
+                scope, building_codes
+            ):
+                continue
+            target_record_id = str(target.get("record_id") or "").strip()
+            if not target_record_id:
+                continue
+            title = str(
+                fields.get(title_field)
+                or fields.get("名称")
+                or fields.get("名称（标题）")
+                or ""
+            ).strip()
+            detail_fields = self._target_candidate_detail_fields(fields)
+            form_fields = self._target_record_form_fields(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target,
+            )
+            candidates.append(
+                {
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "work_type": work_type,
+                    "notice_type": notice_type,
+                    "title": title or target_record_id,
+                    "building": self._building_label_from_codes(building_codes),
+                    "building_codes": building_codes,
+                    "status": str(lifecycle.get("status") or "进行中").strip(),
+                    "start_time": str(
+                        form_fields.get("start_time")
+                        or lifecycle.get("started_at")
+                        or ""
+                    ).strip(),
+                    "end_time": str(form_fields.get("end_time") or "").strip(),
+                    "date_matched": False,
+                    "title_matched": False,
+                    "business_text_matched": False,
+                    "business_match_count": 0,
+                    "match_reason": "目标多维已开始未结束",
+                    "form_fields": form_fields,
+                    "fields": detail_fields,
+                    "field_items": [
+                        {"label": key, "value": value}
+                        for key, value in detail_fields.items()
+                    ],
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        return {
+            "scope": scope,
+            "work_type": work_type,
+            "notice_type": notice_type,
+            "action": str(action or "update").strip().lower(),
+            "count": len(candidates),
+            "returned_count": len(candidates),
+            "total_matched": len(candidates),
+            "limit": len(candidates),
+            "limited": False,
+            "candidates": candidates,
+            "source_candidates": [],
+        }
+
+    def _lookup_active_ongoing_candidates(
+        self,
+        *,
+        work_type: str,
+        scope: str,
+        action: str = "update",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = self._notice_type_for_work_type(work_type)
+        candidates: list[dict[str, Any]] = []
+        for item in self._project_ongoing_items(
+            scope,
+            self._state_store.list_visible_qt_active_items(),
+        ):
+            if self._item_work_type(item) != work_type:
+                continue
+            target_record_id = canonical_target_record_id(item)
+            if not target_record_id or self._target_status_is_finished(
+                item.get("target_record_status") or item.get("status")
+            ):
+                continue
+            form_fields = {
+                key: copy.deepcopy(item.get(key))
+                for key in (
+                    "title",
+                    "building",
+                    "building_codes",
+                    "specialty",
+                    "level",
+                    "start_time",
+                    "end_time",
+                    "location",
+                    "content",
+                    "reason",
+                    "impact",
+                    "progress",
+                    "execution_party",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            candidates.append(
+                {
+                    "active_item_id": str(item.get("active_item_id") or "").strip(),
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "work_type": work_type,
+                    "notice_type": str(item.get("notice_type") or notice_type),
+                    "title": str(item.get("title") or target_record_id),
+                    "building": str(item.get("building") or ""),
+                    "building_codes": self._clean_building_codes(
+                        item.get("building_codes")
+                    ),
+                    "status": str(
+                        item.get("target_record_status")
+                        or item.get("status")
+                        or "进行中"
+                    ),
+                    "start_time": str(item.get("start_time") or ""),
+                    "end_time": str(item.get("end_time") or ""),
+                    "date_matched": False,
+                    "title_matched": False,
+                    "business_text_matched": False,
+                    "business_match_count": 0,
+                    "match_reason": "右侧已开始未结束通告",
+                    "form_fields": form_fields,
+                    "fields": {},
+                    "field_items": [],
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        return {
+            "scope": scope,
+            "work_type": work_type,
+            "notice_type": notice_type,
+            "action": str(action or "update").strip().lower(),
+            "count": len(candidates),
+            "returned_count": len(candidates),
+            "total_matched": len(candidates),
+            "limit": len(candidates),
+            "limited": False,
+            "candidates": candidates,
+            "source_candidates": [],
+        }
+
     def lookup_change_target_candidates(
         self,
         *,
@@ -30604,17 +30836,29 @@ class MaintenancePortalService:
         progress: str = "",
         text: str = "",
         limit: int = 30,
+        all_active: bool = False,
+        all_ongoing: bool = False,
     ) -> dict[str, Any]:
+        if all_ongoing:
+            return self._lookup_active_ongoing_candidates(
+                work_type=WORK_TYPE_CHANGE,
+                scope=scope,
+                action=action,
+            )
+        if all_active:
+            return self._lookup_active_target_candidates(
+                work_type=WORK_TYPE_CHANGE,
+                scope=scope,
+                action=action,
+            )
         scope = self._normalize_scope(scope)
         title = str(title or "").strip()
         if not title:
             raise PortalError("变更通告缺少【名称】，无法查询目标记录。")
         self.ensure_snapshot_loaded()
-        title_key = self._match_text(title)
         query_dates = self._date_keys_from_values(start_time, end_time)
         field_config = get_field_config(NOTICE_TYPE_CHANGE)
         title_field = field_config.get("title") or field_config.get("name") or "名称"
-        status_field = field_config.get("status", "")
         date_fields = [
             field_name
             for field_name in self._target_match_date_fields(WORK_TYPE_CHANGE, field_config)
@@ -30665,7 +30909,7 @@ class MaintenancePortalService:
                 continue
             target_start = str(fields.get(field_config.get("start_time", "")) or "").strip()
             target_end = str(fields.get(field_config.get("end_time", "")) or "").strip()
-            status = str(fields.get(status_field) or "").strip() if status_field else ""
+            status = str(fields.get(field_config.get("status", "")) or "").strip()
             detail_fields = self._target_candidate_detail_fields(fields)
             form_fields = self._target_record_form_fields(
                 work_type=WORK_TYPE_CHANGE,
@@ -30706,7 +30950,7 @@ class MaintenancePortalService:
         candidates.sort(
             key=lambda item: (
                 0 if item.get("date_matched") else 1,
-                0 if str(item.get("status") or "") != "结束" else 1,
+                0 if not self._target_status_is_finished(item.get("status")) else 1,
                 str(item.get("start_time") or ""),
             )
         )
@@ -30743,6 +30987,8 @@ class MaintenancePortalService:
         progress: str = "",
         text: str = "",
         limit: int = 30,
+        all_active: bool = False,
+        all_ongoing: bool = False,
     ) -> dict[str, Any]:
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
         aliases = {
@@ -30772,6 +31018,26 @@ class MaintenancePortalService:
             "事件通告": WORK_TYPE_EVENT,
         }
         work_type = aliases.get(work_type.lower()) or aliases.get(work_type) or WORK_TYPE_MAINTENANCE
+        if all_ongoing and work_type in {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+        }:
+            return self._lookup_active_ongoing_candidates(
+                work_type=work_type,
+                scope=scope,
+                action=action,
+            )
+        if all_active and work_type in {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+        }:
+            return self._lookup_active_target_candidates(
+                work_type=work_type,
+                scope=scope,
+                action=action,
+            )
         if work_type == WORK_TYPE_CHANGE:
             return self.lookup_change_target_candidates(
                 scope=scope,
@@ -30803,7 +31069,6 @@ class MaintenancePortalService:
         title = str(title or "").strip()
         if not title:
             raise PortalError(f"{self._history_work_type_label(work_type)}通告缺少标题，无法查询目标记录。")
-        title_key = self._match_text(title)
         query_dates = self._date_keys_from_values(start_time, end_time)
         field_config = get_field_config(notice_type)
         title_field = (
@@ -40417,57 +40682,23 @@ class MaintenancePortalService:
         today_in_progress = change_today_in_progress_value(action, progress)
         ali_confirmation_source = ""
         ali_confirmation_fingerprint = ""
-        web_today_screenshot_required = bool(
-            request_payload.get("_web_action_request")
-            and today_in_progress == "是"
-        )
-        if web_today_screenshot_required:
-            if ali_confirmation_images:
-                upload_id = str(
-                    ali_confirmation_images[0].get("upload_id") or ""
-                ).strip()
-                attachment = (
-                    self._state_store.get_notice_upload_attachment(upload_id)
-                    if upload_id
-                    else None
-                )
-                if not attachment:
-                    raise PortalError(
-                        "今日是否进行将写为是，请先上传本次阿里确认截图。"
-                    )
-                attachment_owner = str(attachment.get("open_id") or "").strip()
-                actor_open_id = str(request_payload.get("_auth_open_id") or "").strip()
-                if attachment_owner and actor_open_id and attachment_owner != actor_open_id:
-                    raise PortalError("不能使用其他账号上传的阿里确认截图。")
-                ali_confirmation_source = "action"
-            elif action == "update" and target_record_id:
-                confirmation_task = self._state_store.get_document(
-                    CHANGE_CONFIRMATION_NAMESPACE,
-                    target_record_id,
-                ) or {}
-                current_fingerprint = str(
-                    confirmation_task.get("screenshot_fingerprint") or ""
-                ).strip()
-                consumed_fingerprint = str(
-                    confirmation_task.get(
-                        "last_today_yes_screenshot_fingerprint"
-                    )
-                    or ""
-                ).strip()
-                if (
-                    current_fingerprint
-                    and current_fingerprint != consumed_fingerprint
-                    and float(
-                        confirmation_task.get("screenshot_uploaded_at") or 0
-                    )
-                    > 0
-                ):
-                    ali_confirmation_source = "standalone"
-                    ali_confirmation_fingerprint = current_fingerprint
-            if not ali_confirmation_source:
-                raise PortalError(
-                    "今日是否进行将写为是，请先上传本次阿里确认截图。"
-                )
+        web_today_screenshot_required = False
+        if request_payload.get("_web_action_request") and ali_confirmation_images:
+            upload_id = str(
+                ali_confirmation_images[0].get("upload_id") or ""
+            ).strip()
+            attachment = (
+                self._state_store.get_notice_upload_attachment(upload_id)
+                if upload_id
+                else None
+            )
+            if not attachment:
+                raise PortalError("阿里确认截图已过期或不存在，请重新添加。")
+            attachment_owner = str(attachment.get("open_id") or "").strip()
+            actor_open_id = str(request_payload.get("_auth_open_id") or "").strip()
+            if attachment_owner and actor_open_id and attachment_owner != actor_open_id:
+                raise PortalError("不能使用其他账号上传的阿里确认截图。")
+            ali_confirmation_source = "action"
         if action == "start":
             remembered_change_fields = {
                 "specialty": specialty,

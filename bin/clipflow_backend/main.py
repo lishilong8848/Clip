@@ -5730,16 +5730,6 @@ class FastAPIPortalController:
                 ):
                     if field_name in (delete_result or {}):
                         data[field_name] = delete_result[field_name]
-                try:
-                    data.update(
-                        PortalRuntime.service.hide_ongoing_item(
-                            cleanup_payload,
-                            scope=scope,
-                            deleted_by=payload["_auth_open_id"],
-                        )
-                    )
-                except Exception as cleanup_exc:
-                    cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
                 if not bool((delete_result or {}).get("local_cleanup_completed")):
                     try:
                         data.update(
@@ -5814,6 +5804,13 @@ class FastAPIPortalController:
             session = self._current_session(request)
             if session is None:
                 return self._auth_required_response()
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "“移除显示”功能已下线，请使用“删除通告”。",
+                },
+                status_code=410,
+            )
             try:
                 payload = (
                     await self._read_model_request(request, OngoingDeleteRequest)
@@ -6011,9 +6008,18 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
+                lookup_context = str(
+                    payload.get("lookup_context") or "target_table"
+                ).strip()
+                lookup_scope = (
+                    "ALL"
+                    if lookup_context == "target_table"
+                    and PortalRuntime.auth_manager.is_admin(session)
+                    else scope
+                )
                 result = await asyncio.to_thread(
                     PortalRuntime.service.lookup_change_target_candidates,
-                    scope=scope,
+                    scope=lookup_scope,
                     title=payload.get("title") or "",
                     start_time=payload.get("start_time") or "",
                     end_time=payload.get("end_time") or "",
@@ -6023,6 +6029,8 @@ class FastAPIPortalController:
                     impact=payload.get("impact") or "",
                     progress=payload.get("progress") or "",
                     text=payload.get("text") or "",
+                    all_active=lookup_context != "ongoing_list",
+                    all_ongoing=lookup_context == "ongoing_list",
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -6040,10 +6048,19 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
+                lookup_context = str(
+                    payload.get("lookup_context") or "target_table"
+                ).strip()
+                lookup_scope = (
+                    "ALL"
+                    if lookup_context == "target_table"
+                    and PortalRuntime.auth_manager.is_admin(session)
+                    else scope
+                )
                 result = await asyncio.to_thread(
                     PortalRuntime.service.lookup_notice_target_candidates,
                     work_type=payload.get("work_type") or "maintenance",
-                    scope=scope,
+                    scope=lookup_scope,
                     title=payload.get("title") or "",
                     start_time=payload.get("start_time") or "",
                     end_time=payload.get("end_time") or "",
@@ -6053,6 +6070,8 @@ class FastAPIPortalController:
                     impact=payload.get("impact") or "",
                     progress=payload.get("progress") or "",
                     text=payload.get("text") or "",
+                    all_active=lookup_context != "ongoing_list",
+                    all_ongoing=lookup_context == "ongoing_list",
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -6100,6 +6119,20 @@ class FastAPIPortalController:
                 source_record_id = str(validation.get("source_record_id") or "")
                 target_record_id = str(validation.get("target_record_id") or "")
                 active_item_id = str(validation.get("active_item_id") or active_item_id)
+                target_active_payload = (
+                    dict(validation.get("_target_active_payload") or {})
+                    if isinstance(validation.get("_target_active_payload"), dict)
+                    else {}
+                )
+                if (
+                    target_record_id
+                    and work_type
+                    in {"maintenance", "change", "repair"}
+                    and not bool(validation.get("target_active"))
+                ):
+                    raise PortalError(
+                        "该目标通告已不再是未结束状态，请重新查找后绑定。"
+                    )
 
                 identity_payload = dict(payload)
                 identity_payload.update(
@@ -6145,9 +6178,6 @@ class FastAPIPortalController:
                     if isinstance(repair_relation.get("projection"), dict)
                     else {}
                 )
-                repair_projection_active_updated = bool(
-                    int(repair_projection.get("active_updated") or 0)
-                )
                 repair_projection_qt_event_ids = [
                     int(event_id)
                     for event_id in (repair_projection.get("qt_event_ids") or [])
@@ -6160,64 +6190,140 @@ class FastAPIPortalController:
                         identity_payload,
                         origin="manual_notice_binding",
                     )
-                    active_updated = repair_projection_active_updated
+                    binding_row = next(
+                        (
+                            row
+                            for row in state_store.list_visible_qt_active_items()
+                            if canonical_target_record_id(
+                                row.get("payload")
+                                if isinstance(row.get("payload"), dict)
+                                else {}
+                            )
+                            == target_record_id
+                            and str(
+                                (
+                                    row.get("payload")
+                                    if isinstance(row.get("payload"), dict)
+                                    else {}
+                                ).get("source_record_id")
+                                or ""
+                            ).strip()
+                            == source_record_id
+                        ),
+                        None,
+                    )
+                    active_updated = bool(binding_row)
                     qt_event_id = (
                         repair_projection_qt_event_ids[0]
                         if repair_projection_qt_event_ids
                         else 0
                     )
-                    if active_item_id and not active_updated:
-                        try:
-                            for row in state_store.list_qt_active_items(include_deleted=False):
-                                if str(row.get("active_item_id") or "") != active_item_id:
-                                    continue
-                                row_payload = row.get("payload")
-                                merged = dict(row_payload if isinstance(row_payload, dict) else {})
-                                merged.update(
-                                    {
-                                        "active_item_id": active_item_id,
-                                        "work_type": work_type or merged.get("work_type") or "",
-                                        "notice_type": notice_type or merged.get("notice_type") or "",
-                                    }
-                                )
-                                if source_record_id:
-                                    merged["source_record_id"] = source_record_id
-                                if target_record_id:
-                                    merged["target_record_id"] = target_record_id
-                                    merged["record_id"] = target_record_id
-                                state_store.upsert_qt_active_item(
-                                    merged,
-                                    section=str(row.get("section") or ""),
-                                    sort_order=int(row.get("sort_order") or 0),
-                                    origin=str(row.get("origin") or "manual_notice_binding"),
-                                )
-                                qt_event_id = state_store.enqueue_outbox_event(
-                                    "qt_action",
-                                    {
-                                        "kind": "active_upsert",
-                                        "payload": {
-                                            "item": {
-                                                "active_item_id": active_item_id,
-                                                "record_id": target_record_id
-                                                or str(row.get("record_id") or ""),
-                                                "notice_type": notice_type
-                                                or str(row.get("notice_type") or ""),
-                                                "section": str(row.get("section") or ""),
-                                                "sort_order": int(row.get("sort_order") or 0),
-                                                "origin": str(
-                                                    row.get("origin")
-                                                    or "manual_notice_binding"
-                                                ),
-                                                "payload": merged,
-                                            },
-                                            "source": "manual_notice_binding",
-                                        },
-                                    },
-                                )
-                                active_updated = True
+                    if target_record_id and binding_row is None:
+                        matched_row: dict[str, Any] = {}
+                        for row in state_store.list_qt_active_items(
+                            include_deleted=False
+                        ):
+                            row_payload = (
+                                row.get("payload")
+                                if isinstance(row.get("payload"), dict)
+                                else {}
+                            )
+                            if (
+                                active_item_id
+                                and str(row.get("active_item_id") or "")
+                                == active_item_id
+                            ) or canonical_target_record_id(
+                                row_payload
+                            ) == target_record_id:
+                                matched_row = row
                                 break
-                        except Exception as exc:
-                            log_warning(f"同步 Qt active 绑定关系失败: {exc}")
+                        row_payload = (
+                            matched_row.get("payload")
+                            if isinstance(matched_row.get("payload"), dict)
+                            else {}
+                        )
+                        merged = dict(row_payload)
+                        merged.update(target_active_payload)
+                        if not merged:
+                            raise RuntimeError(
+                                "目标未结束通告投影为空，请重新查找后绑定。"
+                            )
+                        resolved_active_item_id = str(
+                            merged.get("active_item_id")
+                            or active_item_id
+                            or f"target-{work_type}-{target_record_id}"
+                        ).strip()
+                        merged.update(
+                            {
+                                "active_item_id": resolved_active_item_id,
+                                "work_type": work_type,
+                                "notice_type": notice_type,
+                                "source_record_id": source_record_id,
+                                "target_record_id": target_record_id,
+                                "record_id": target_record_id,
+                            }
+                        )
+                        section = str(matched_row.get("section") or "other")
+                        sort_order = int(matched_row.get("sort_order") or 0)
+                        state_store.upsert_qt_active_item(
+                            merged,
+                            section=section,
+                            sort_order=sort_order,
+                            origin="manual_notice_binding",
+                            allow_revive=True,
+                        )
+                        persisted = next(
+                            (
+                                row
+                                for row in state_store.list_visible_qt_active_items()
+                                if canonical_target_record_id(
+                                    row.get("payload")
+                                    if isinstance(row.get("payload"), dict)
+                                    else {}
+                                )
+                                == target_record_id
+                                and str(
+                                    (
+                                        row.get("payload")
+                                        if isinstance(row.get("payload"), dict)
+                                        else {}
+                                    ).get("source_record_id")
+                                    or ""
+                                ).strip()
+                                == source_record_id
+                            ),
+                            None,
+                        )
+                        if persisted is None:
+                            raise RuntimeError(
+                                "目标未结束通告未写入共享列表，请重试绑定。"
+                            )
+                        restore_visibility = getattr(
+                            PortalRuntime.service,
+                            "restore_ongoing_visibility",
+                            None,
+                        )
+                        if callable(restore_visibility):
+                            restore_visibility(merged)
+                        qt_event_id = state_store.enqueue_outbox_event(
+                            "qt_action",
+                            {
+                                "kind": "active_upsert",
+                                "payload": {
+                                    "item": {
+                                        "active_item_id": resolved_active_item_id,
+                                        "record_id": target_record_id,
+                                        "notice_type": notice_type,
+                                        "section": section,
+                                        "sort_order": sort_order,
+                                        "origin": "manual_notice_binding",
+                                        "payload": merged,
+                                    },
+                                    "source": "manual_notice_binding",
+                                },
+                            },
+                        )
+                        active_updated = True
                     return {
                         "identity": identity or {},
                         "active_updated": active_updated,
@@ -6225,6 +6331,9 @@ class FastAPIPortalController:
                     }
 
                 result = await asyncio.to_thread(persist_binding)
+                PortalRuntime.clear_payload_cache()
+                with suppress(Exception):
+                    PortalRuntime.service._touch_state_cache_version()
                 return self._json_ok(
                     request,
                     session,
@@ -6243,7 +6352,11 @@ class FastAPIPortalController:
                         "event_record_id": str(
                             repair_relation.get("event_record_id") or ""
                         ).strip(),
-                        "validation": validation,
+                        "validation": {
+                            key: value
+                            for key, value in validation.items()
+                            if key != "_target_active_payload"
+                        },
                         "repair_relation": repair_relation,
                         "warnings": list(
                             dict.fromkeys(repair_relation.get("warnings") or [])
@@ -7056,16 +7169,6 @@ class FastAPIPortalController:
                     )
                     if cleanup_retry_warning:
                         data["cleanup_recovered"] = True
-                    try:
-                        data.update(
-                            PortalRuntime.service.hide_ongoing_item(
-                                delete_payload,
-                                scope=scope,
-                                deleted_by=str(delete_payload.get("_auth_open_id") or "qt"),
-                            )
-                        )
-                    except Exception as cleanup_exc:
-                        cleanup_warnings.append(f"隐藏本地通告失败：{cleanup_exc}")
                     if not bool((data or {}).get("local_cleanup_completed")):
                         try:
                             data.update(
@@ -7359,15 +7462,8 @@ class FastAPIPortalController:
                 delete_payload = delete_payload if isinstance(delete_payload, dict) else {}
                 try:
                     scope = str(delete_payload.get("scope") or "ALL")
-                    data = PortalRuntime.service.hide_ongoing_item(
-                        delete_payload,
-                        scope=scope,
-                        deleted_by=str(delete_payload.get("_auth_open_id") or ""),
-                    )
-                    data.update(
-                        PortalRuntime.service.discard_deleted_ongoing_state(
-                            delete_payload, scope=scope
-                        )
+                    data = PortalRuntime.service.discard_deleted_ongoing_state(
+                        delete_payload, scope=scope
                     )
                     PortalRuntime.clear_payload_cache()
                 except Exception as exc:

@@ -407,6 +407,7 @@ class EngineerMopResetRequest(APIModel):
 
 class ChangeTargetLookupRequest(APIModel):
     scope: str = "ALL"
+    lookup_context: str = "target_table"
     title: str = ""
     start_time: str = ""
     end_time: str = ""

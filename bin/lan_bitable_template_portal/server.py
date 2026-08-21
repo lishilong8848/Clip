@@ -2715,6 +2715,11 @@ class PortalRuntime:
                 result = cls.service.refresh_change_source()
                 if not isinstance(result, dict):
                     result = {}
+                if (
+                    result.get("change_target_refreshed") is False
+                    and str(result.get("change_target_warning") or "").strip()
+                ):
+                    raise PortalError(str(result["change_target_warning"]))
                 result = copy.deepcopy(result)
                 result.update(
                     {
@@ -4152,9 +4157,18 @@ class PortalRuntime:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
+                lookup_context = str(
+                    payload.get("lookup_context") or "target_table"
+                ).strip()
+                lookup_scope = (
+                    "ALL"
+                    if lookup_context == "target_table"
+                    and PortalRuntime.auth_manager.is_admin(session)
+                    else scope
+                )
                 if parsed.path == "/api/change-target-candidates":
                     data = self.service.lookup_change_target_candidates(
-                        scope=scope,
+                        scope=lookup_scope,
                         title=payload.get("title") or "",
                         start_time=payload.get("start_time") or "",
                         end_time=payload.get("end_time") or "",
@@ -4164,11 +4178,13 @@ class PortalRuntime:
                         impact=payload.get("impact") or "",
                         progress=payload.get("progress") or "",
                         text=payload.get("text") or "",
+                        all_active=lookup_context != "ongoing_list",
+                        all_ongoing=lookup_context == "ongoing_list",
                     )
                 else:
                     data = self.service.lookup_notice_target_candidates(
                         work_type=payload.get("work_type") or "maintenance",
-                        scope=scope,
+                        scope=lookup_scope,
                         title=payload.get("title") or "",
                         start_time=payload.get("start_time") or "",
                         end_time=payload.get("end_time") or "",
@@ -4178,6 +4194,8 @@ class PortalRuntime:
                         impact=payload.get("impact") or "",
                         progress=payload.get("progress") or "",
                         text=payload.get("text") or "",
+                        all_active=lookup_context != "ongoing_list",
+                        all_ongoing=lookup_context == "ongoing_list",
                     )
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
@@ -4237,11 +4255,7 @@ class PortalRuntime:
                         ).strip()
                         if resolved_value:
                             cleanup_payload[identity_field] = resolved_value
-                data = self.service.hide_ongoing_item(
-                    cleanup_payload,
-                    scope=scope,
-                    deleted_by=payload["_auth_open_id"],
-                )
+                data = {"deleted": True, "scope": scope}
                 if isinstance(accepted, dict):
                     for field_name in (
                         "work_status_removed",
@@ -4277,6 +4291,13 @@ class PortalRuntime:
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/ongoing-items/remove-local":
+            return self._send_json(
+                410,
+                {
+                    "ok": False,
+                    "error": "“移除显示”功能已下线，请使用“删除通告”。",
+                },
+            )
             try:
                 payload = self._read_json_body()
                 payload = normalize_notice_identity_payload(payload)
@@ -6907,7 +6928,7 @@ class PortalRuntime:
         if not isinstance(remote_fields, dict) or not remote_fields:
             return (
                 False,
-                "已阻止删除：无法读取目标多维记录，不能确认该记录就是当前事件。请先核对绑定记录，或使用“移除显示，不删除多维”。",
+                "已阻止删除：无法读取目标多维记录，不能确认该记录就是当前事件。请刷新或重新绑定后重试。",
             )
         remote_payload = {
             "title": remote_fields.get(EVENT_NOTICE_FIELDS["alarm_desc"]),
@@ -6944,8 +6965,7 @@ class PortalRuntime:
         if not notice_type or not isinstance(remote_fields, dict) or not remote_fields:
             return (
                 False,
-                "已阻止删除：无法核对目标多维记录。请刷新后重试，"
-                "或由管理员使用“移除显示，不删除多维”。",
+                "已阻止删除：无法核对目标多维记录。请刷新或重新绑定后重试。",
             )
         prepared = cls._enrich_prepared_notice_lookup_fields(dict(payload or {}))
         field_config = get_field_config(notice_type)
@@ -10789,26 +10809,6 @@ class PortalRuntime:
                     "active_item_id": active_item_id,
                     "remote_deleted": False,
                 }
-        hidden_result: dict[str, Any] = {}
-        try:
-            hidden_result = cls.service.hide_ongoing_item(
-                payload,
-                scope=str(payload.get("scope") or "ALL"),
-                deleted_by=str(payload.get("_auth_open_id") or ""),
-                force_authoritative=True,
-            )
-        except Exception as exc:
-            with suppress(Exception):
-                cls.service._remove_hidden_ongoing_keys(
-                    set(hidden_result.get("keys") or [])
-                )
-            return {
-                "ok": False,
-                "message": f"保存本地移除状态失败: {exc}",
-                "record_id": target_record_id,
-                "active_item_id": active_item_id,
-                "remote_deleted": False,
-            }
         try:
             qt_removed, qt_event_id = cls.state_store.delete_qt_active_item_and_enqueue(
                 active_item_id=active_item_id,
@@ -10827,10 +10827,6 @@ class PortalRuntime:
                 },
             )
         except Exception as exc:
-            with suppress(Exception):
-                cls.service._remove_hidden_ongoing_keys(
-                    set(hidden_result.get("keys") or [])
-                )
             return {
                 "ok": False,
                 "message": f"本地活动通告移除失败: {exc}",
@@ -10868,23 +10864,15 @@ class PortalRuntime:
                     ):
                         matching_rows.append(row)
                 if matching_rows:
-                    with suppress(Exception):
-                        cls.service._remove_hidden_ongoing_keys(
-                            set(hidden_result.get("keys") or [])
-                        )
                     return {
                         "ok": False,
-                        "message": "本地活动通告仍然存在，未执行移除显示。",
+                        "message": "本地活动通告仍然存在，未完成删除。",
                         "record_id": target_record_id,
                         "active_item_id": active_item_id,
                         "remote_deleted": False,
                     }
                 already_absent = True
             except Exception as exc:
-                with suppress(Exception):
-                    cls.service._remove_hidden_ongoing_keys(
-                        set(hidden_result.get("keys") or [])
-                    )
                 return {
                     "ok": False,
                     "message": f"本地活动通告移除结果校验失败: {exc}",

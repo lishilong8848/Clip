@@ -2108,9 +2108,9 @@ def _local_event_ongoing_detail(
     record_id = str(item.get("record_id") or active_item_id).strip()
     source_record_id = _explicit_source_id(item)
     notice_text = str(item.get("text") or item.get("content") or "").strip()
-    remove_action = (
+    delete_action = (
         '<button class="btn danger-ghost" type="button" '
-        'data-ongoing-delete-mode="local">移除显示</button>'
+        'data-ongoing-delete-mode="remote">删除通告</button>'
     )
     notice_text_html = (
         f'<pre class="local-event-text">{_e(notice_text)}</pre>'
@@ -2140,7 +2140,7 @@ def _local_event_ongoing_detail(
         {notice_text_html}
         <div class="form-actions">
           <span id="lite-job-status" class="job-status" aria-live="polite">仅本地显示</span>
-          {remove_action}
+          {delete_action}
         </div>
       </form>
     """
@@ -2322,7 +2322,6 @@ def _detail_form(
             "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
             "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
             "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"remote\">删除通告</button>"
-            "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"local\">移除显示</button>"
         )
     elif ongoing_item:
         action_buttons = (
@@ -2330,8 +2329,6 @@ def _detail_form(
             'name="submit_action" value="start">发送开始</button>'
             '<button class="btn danger-ghost" type="button" '
             'data-ongoing-delete-mode="remote">删除通告</button>'
-            '<button class="btn danger-ghost" type="button" '
-            'data-ongoing-delete-mode="local">移除显示</button>'
         )
     else:
         action_buttons = (
@@ -4032,15 +4029,13 @@ def render_workbench_lite(
     async function deleteOngoingFromForm(button) {{
       const form = button.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
       if (!form) return;
-      const mode = String(button.getAttribute('data-ongoing-delete-mode') || 'remote');
-      const isLocalRemove = mode === 'local';
-      const confirmText = isLocalRemove ? '确认移除' : '确认删除';
-      const originalText = button.getAttribute('data-original-text') || button.textContent || (isLocalRemove ? '移除显示' : '删除通告');
+      const confirmText = '确认删除';
+      const originalText = button.getAttribute('data-original-text') || button.textContent || '删除通告';
       button.setAttribute('data-original-text', originalText);
       if (button.getAttribute('data-confirmed') !== '1') {{
         button.setAttribute('data-confirmed', '1');
         button.textContent = confirmText;
-        setLiteStatus(isLocalRemove ? '再次点击确认仅移除前端和 Qt 显示，不删除多维记录。' : '再次点击确认删除通告，并同步删除对应多维记录。');
+        setLiteStatus('再次点击确认删除通告；有目标多维时会同步删除目标记录。');
         window.setTimeout(() => {{
           if (button && button.getAttribute('data-confirmed') === '1') {{
             button.removeAttribute('data-confirmed');
@@ -4051,7 +4046,7 @@ def render_workbench_lite(
       }}
       const operationId = String(
             button.getAttribute('data-delete-operation-id')
-            || `${{isLocalRemove ? 'remove' : 'delete'}}:${{Date.now()}}:${{
+            || `delete:${{Date.now()}}:${{
               (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function')
                 ? globalThis.crypto.randomUUID()
                 : Math.random().toString(36).slice(2)
@@ -4059,11 +4054,11 @@ def render_workbench_lite(
           );
       button.setAttribute('data-delete-operation-id', operationId);
       const payload = ongoingDeletePayload(form, operationId);
-      const endpoint = isLocalRemove ? '/api/ongoing-items/remove-local' : '/api/ongoing-items/delete';
+      const endpoint = '/api/ongoing-items/delete';
       clearLiteHtmlCache();
       setLiteFormDirty(false);
       setFormSubmitBusy(form, true);
-      setLiteStatus(isLocalRemove ? '正在移除显示...' : '正在删除通告和对应多维记录...');
+      setLiteStatus('正在删除通告和对应多维记录...');
       try {{
         const response = await fetch(endpoint, {{
           method: 'POST',
@@ -4074,18 +4069,18 @@ def render_workbench_lite(
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) {{
-          throw new Error(data.error || (data.data && data.data.error) || (isLocalRemove ? '移除失败' : '删除失败'));
+          throw new Error(data.error || (data.data && data.data.error) || '删除失败');
         }}
         const row = findOngoingRowByDraft(payload);
         if (row) removeOngoingRow(row);
         const result = data.data || {{}};
-        const message = isLocalRemove
-          ? '已移除显示，Qt 和前端将同步消失，多维未删除。'
-          : (result.remote_deleted
-              ? (result.source_plan_reset
-                  ? '已删除通告，对应计划已恢复为未开始。'
-                  : '已删除通告，并同步删除对应多维记录。')
-              : '已删除通告，本地显示已同步。');
+        const message = result.remote_deleted
+          ? (result.source_plan_reset
+              ? '已删除通告，对应计划已恢复为未开始。'
+              : '已删除通告，并同步删除对应多维记录。')
+          : (result.source_plan_reset
+              ? '已删除本地通告，对应计划已恢复为未开始。'
+              : '已删除本地通告。');
         button.removeAttribute('data-delete-operation-id');
         setLiteStatus(message);
         await navigateLite(workbenchBaseUrl(payload.scope, currentViewWorkType() || payload.work_type), {{
@@ -4094,7 +4089,7 @@ def render_workbench_lite(
           selectors: ['.status', '.summary', '.workbench-guide', '.workspace'],
         }});
       }} catch (error) {{
-        const message = error && error.message ? error.message : (isLocalRemove ? '移除失败' : '删除失败');
+        const message = error && error.message ? error.message : '删除失败';
         showLiteError(message);
       }} finally {{
         button.removeAttribute('data-confirmed');
@@ -4214,6 +4209,16 @@ def render_workbench_lite(
           || '',
       }});
       const hasOngoingBinding = Boolean(activeItemId || targetRecordId) && !targetEnded;
+      if (targetRecordId) {{
+        setFormValue(form, 'target_record_id', targetRecordId);
+        setFormValue(form, 'record_id', targetRecordId);
+      }}
+      if (activeItemId) setFormValue(form, 'active_item_id', activeItemId);
+      if (hasOngoingBinding) {{
+        form.dataset.action = 'update';
+        form.dataset.detailMode = 'ongoing';
+        form.dataset.localOnly = '';
+      }}
       if (sourceRecordId) {{
         const sourceRow = Array.from(document.querySelectorAll('.notice-row')).find(row =>
           [row.getAttribute('data-source-record-id'), row.getAttribute('data-record-id')]
@@ -4236,9 +4241,12 @@ def render_workbench_lite(
             sourceRow.setAttribute('data-target-record-id', targetRecordId);
             setOngoingRowStatus(sourceRow, '已结束', 'done');
           }} else if (hasOngoingBinding) {{
-            sourceRow.classList.remove('is-disabled');
-            sourceRow.setAttribute('aria-disabled', 'false');
-            sourceRow.setAttribute('data-disabled-reason', '');
+            sourceRow.classList.add('is-disabled');
+            sourceRow.setAttribute('aria-disabled', 'true');
+            sourceRow.setAttribute(
+              'data-disabled-reason',
+              '该事项已在“未结束通告”中，请从通告处理列表继续办理。'
+            );
             sourceRow.setAttribute('data-linked-ongoing', '1');
             sourceRow.setAttribute('data-action', 'update');
             sourceRow.setAttribute('data-active-item-id', activeItemId);
@@ -5756,6 +5764,9 @@ def render_workbench_lite(
     function targetLookupPayload(form) {{
       return {{
         scope: previewValue(form, 'scope') || getCurrentScope(),
+        lookup_context: form?.dataset.detailMode === 'ongoing'
+          ? 'target_table'
+          : 'ongoing_list',
         work_type: previewValue(form, 'work_type') || form?.dataset.workType || 'maintenance',
         title: previewValue(form, 'title'),
         start_time: previewValue(form, 'start_time'),
@@ -5778,7 +5789,7 @@ def render_workbench_lite(
       if (!liteTargetCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '未找到可关联的目标多维记录。可以先发送开始通告，由后端创建新的目标记录。';
+        empty.textContent = '未找到可关联的未结束通告。可以先发送开始通告，由后端创建新的目标记录。';
         list.replaceChildren(empty);
         return;
       }}
@@ -5808,7 +5819,8 @@ def render_workbench_lite(
         return;
       }}
       const payload = targetLookupPayload(form);
-      if (!payload.title) {{
+      const activeTargetTypes = ['maintenance', 'change', 'repair'];
+      if (!payload.title && !activeTargetTypes.includes(payload.work_type)) {{
         showLiteError('请先填写标题或名称，再查找目标记录。');
         return;
       }}
@@ -5873,7 +5885,9 @@ def render_workbench_lite(
           scope: previewValue(form, 'scope') || getCurrentScope(),
           work_type: previewValue(form, 'work_type') || form.dataset.workType || 'maintenance',
           notice_type: previewValue(form, 'notice_type'),
-          active_item_id: previewValue(form, 'active_item_id'),
+          active_item_id: String(
+            candidate.active_item_id || previewValue(form, 'active_item_id') || ''
+          ).trim(),
           source_record_id: previewValue(form, 'source_record_id'),
           target_record_id: targetRecordId,
           record_id: targetRecordId,
@@ -5986,13 +6000,13 @@ def render_workbench_lite(
       if (!actions) return;
       actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       if (form.dataset.localOnly === '1') {{
-        const localRemoveButton = document.createElement('button');
-        localRemoveButton.className = 'btn danger-ghost';
-        localRemoveButton.type = 'button';
-        localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
-        localRemoveButton.textContent = '移除显示';
-        actions.appendChild(localRemoveButton);
-        setLiteStatus('该事件尚未上传，可移除前端和 Qt 显示');
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'btn danger-ghost';
+        deleteButton.type = 'button';
+        deleteButton.setAttribute('data-ongoing-delete-mode', 'remote');
+        deleteButton.textContent = '删除通告';
+        actions.appendChild(deleteButton);
+        setLiteStatus('该事件尚未上传，可直接删除本地记录');
         return;
       }}
       const updateButton = document.createElement('button');
@@ -6015,12 +6029,6 @@ def render_workbench_lite(
       actions.appendChild(updateButton);
       actions.appendChild(endButton);
       actions.appendChild(deleteButton);
-      const localRemoveButton = document.createElement('button');
-      localRemoveButton.className = 'btn danger-ghost';
-      localRemoveButton.type = 'button';
-      localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
-      localRemoveButton.textContent = '移除显示';
-      actions.appendChild(localRemoveButton);
       resetActualActionTime(form);
       updateNoticePreview(form);
     }}
@@ -6034,12 +6042,7 @@ def render_workbench_lite(
       deleteButton.type = 'button';
       deleteButton.setAttribute('data-ongoing-delete-mode', 'remote');
       deleteButton.textContent = '删除通告';
-      const removeButton = document.createElement('button');
-      removeButton.className = 'btn danger-ghost';
-      removeButton.type = 'button';
-      removeButton.setAttribute('data-ongoing-delete-mode', 'local');
-      removeButton.textContent = '移除显示';
-      actions.append(deleteButton, removeButton);
+      actions.append(deleteButton);
     }}
     function resetSourceTypeFields(form) {{
       for (const name of [
@@ -6176,9 +6179,9 @@ def render_workbench_lite(
       setLiteStatus(sourceOnly
         ? '源表仍在进行中，但尚无目标通告记录；请先发送开始'
         : unuploaded
-        ? '纯手填通告尚未上传；可发送开始、删除或移除显示'
+        ? '纯手填通告尚未上传；可发送开始或删除'
         : localOnly
-        ? '该事件尚未上传，可移除前端和 Qt 显示'
+        ? '该事件尚未上传，可直接删除本地记录'
         : '已选择未结束通告，可发送更新或结束'
       );
       openNoticeDrawer(title, link);
@@ -7681,25 +7684,6 @@ def render_workbench_lite(
         setLiteStatus('提交失败：' + durationIssue);
         updateActionAvailability(form);
         return;
-      }}
-      const workType = String(form.elements.namedItem('work_type')?.value || '').trim();
-      const progress = String(form.elements.namedItem('progress')?.value || '').trim();
-      if (workType === 'change' && changeActionWritesTodayYes(submitAction, progress)) {{
-        const panel = form.querySelector('[data-ali-confirmation-panel]');
-        const selectedPendingUpload = Boolean(
-          liteAliConfirmationImage
-          && !liteAliConfirmationImage.remote_uploaded
-          && !liteAliConfirmationImage.staged
-        );
-        const staged = aliConfirmationPayload(form).length > 0;
-        const freshForToday = panel?.dataset.freshForToday === '1';
-        if (selectedPendingUpload || (submitAction === 'start' ? !staged : !staged && !freshForToday)) {{
-          const message = '今日是否进行将写为是，请先上传本次阿里确认截图。';
-          showLiteError(message);
-          setLiteStatus('提交失败：' + message);
-          updateActionAvailability(form);
-          return;
-        }}
       }}
       let payload = null;
       try {{
