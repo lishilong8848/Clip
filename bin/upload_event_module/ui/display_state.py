@@ -31,6 +31,9 @@ _TRANSIENT_UPLOAD_FIELDS = {
     "_last_upload_error",
     "_pending_upload_hash",
     "_upload_operation_id",
+    "_queued_after_upload",
+    "_queued_action",
+    "_queued_upload_requested",
 }
 
 
@@ -182,6 +185,9 @@ def normalize_active_item_data(data_dict: dict | None) -> dict:
     notice_type = str(info.get("notice_type") or "").strip()
     if notice_type:
         normalized["notice_type"] = notice_type
+    status = str(info.get("status") or "").strip()
+    if status:
+        normalized["status"] = status
 
     level_locked = bool(normalized.get("level_locked"))
     if level_locked:

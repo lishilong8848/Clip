@@ -425,6 +425,7 @@ class NoticeTargetLookupRequest(ChangeTargetLookupRequest):
 
 class NoticeIdentityBindRequest(APIModel):
     scope: str = "ALL"
+    binding_context: str = "ongoing"
     work_type: str = "maintenance"
     notice_type: str = ""
     active_item_id: str = ""

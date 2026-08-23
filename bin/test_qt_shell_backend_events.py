@@ -1772,6 +1772,50 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_event_clipboard_summary_correction_updates_same_uploaded_item(self):
+        start_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】BMS系统\n"
+            "【时间】2026-08-21 10:00\n"
+            "【概述】A楼空调压差告警"
+        )
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】BMS系统\n"
+            "【时间】2026-08-21 10:00\n"
+            "【概述】经现场确认改为A楼过滤器堵塞告警\n"
+            "【进展】正在更换过滤器"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                first = FastAPIPortalController._project_clipboard_entry_to_active(
+                    FastAPIPortalController._clipboard_entry_from_content(start_text) or {}
+                )
+                bound = {
+                    **first["item"]["payload"],
+                    "record_id": "rec-event-summary-corrected",
+                    "target_record_id": "rec-event-summary-corrected",
+                    "_is_placeholder_record": False,
+                }
+                store.upsert_qt_active_item(bound, section="event", origin="qt_upload")
+
+                result = FastAPIPortalController._project_clipboard_entry_to_active(
+                    FastAPIPortalController._clipboard_entry_from_content(update_text) or {}
+                )
+
+                self.assertFalse(result.get("ignored"))
+                self.assertEqual(result["active_item_id"], first["active_item_id"])
+                self.assertEqual(result["record_id"], "rec-event-summary-corrected")
+                self.assertIn("过滤器堵塞告警", result["item"]["payload"]["text"])
+                self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+            finally:
+                PortalRuntime.state_store = original_store
+
     def test_sparse_event_clipboard_update_refuses_ambiguous_targets(self):
         current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (
@@ -1971,6 +2015,75 @@ class QtShellBackendEventTests(unittest.TestCase):
                 result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
                 self.assertEqual(result["active_item_id"], "event-active-1")
                 self.assertEqual(result["record_id"], "rec-event-target")
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_event_upload_success_preserves_newer_clipboard_generation(self):
+        uploaded_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】BMS系统\n"
+            "【时间】2026-08-21 10:00\n"
+            "【概述】本次正在上传的旧内容"
+        )
+        next_text = uploaded_text.replace("状态：更新", "状态：结束").replace(
+            "本次正在上传的旧内容",
+            "上传期间新复制的结束内容",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "event-active-generation",
+                        "record_id": "rec-event-generation",
+                        "target_record_id": "rec-event-generation",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "status": "结束",
+                        "action": "end",
+                        "record_version": "version-before",
+                        "_is_placeholder_record": False,
+                        "_has_unuploaded_changes": True,
+                        "text": next_text,
+                    },
+                    section="event",
+                    origin="clipboard",
+                )
+
+                with patch(
+                    "lan_bitable_template_portal.server.external_real_write_guard",
+                    return_value={"mock_external": True},
+                ):
+                    PortalRuntime._remember_local_upload_target(
+                        {
+                            "active_item_id": "event-active-generation",
+                            "record_id": "rec-event-generation",
+                            "target_record_id": "rec-event-generation",
+                            "notice_type": "事件通告",
+                            "work_type": "event",
+                            "status": "更新",
+                            "action": "update",
+                            "record_version": "version-before",
+                            "_is_placeholder_record": False,
+                            "text": uploaded_text,
+                        },
+                        notice_type="事件通告",
+                        target_record_id="rec-event-generation",
+                        action="update",
+                    )
+
+                rows = store.list_visible_qt_active_items()
+                self.assertEqual(len(rows), 1)
+                payload = rows[0]["payload"]
+                self.assertEqual(payload["text"], next_text)
+                self.assertEqual(payload["status"], "结束")
+                self.assertEqual(payload["action"], "end")
+                self.assertTrue(payload["_has_unuploaded_changes"])
+                self.assertTrue(payload["_queued_after_upload"])
+                self.assertEqual(payload["target_record_id"], "rec-event-generation")
             finally:
                 PortalRuntime.state_store = original_store
 

@@ -99,8 +99,16 @@ class ActiveNoticeModel(QAbstractListModel):
     def action_for_record(cls, record: dict[str, Any] | None) -> str:
         if not isinstance(record, dict):
             return ""
+        if bool(record.get("_queued_upload_requested")):
+            return ""
         if cls.is_uploaded_record(record) or cls.is_uploading_record(record):
             return ""
+        queued_action = str(record.get("_queued_action") or "").strip()
+        if bool(record.get("_queued_after_upload")) and queued_action in {
+            "update",
+            "end",
+        }:
+            return queued_action
         try:
             info = extract_event_info(record.get("text", "")) or {}
         except Exception:
@@ -113,6 +121,8 @@ class ActiveNoticeModel(QAbstractListModel):
 
     @classmethod
     def action_label_for_record(cls, record: dict[str, Any] | None) -> str:
+        if isinstance(record, dict) and bool(record.get("_queued_upload_requested")):
+            return "已排队"
         if cls.is_uploading_record(record):
             return "上传中"
         if cls.has_upload_error(record) and not cls.is_uploaded_record(record):

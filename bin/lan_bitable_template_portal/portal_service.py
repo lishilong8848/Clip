@@ -823,6 +823,16 @@ WORK_TYPE_REPAIR = "repair"
 WORK_TYPE_POWER = "power"
 WORK_TYPE_POLLING = "polling"
 WORK_TYPE_ADJUST = "adjust"
+BINDABLE_NOTICE_TARGET_WORK_TYPES = frozenset(
+    {
+        WORK_TYPE_MAINTENANCE,
+        WORK_TYPE_CHANGE,
+        WORK_TYPE_REPAIR,
+        WORK_TYPE_POWER,
+        WORK_TYPE_POLLING,
+        WORK_TYPE_ADJUST,
+    }
+)
 NOTICE_TYPE_MAINTENANCE = "维保通告"
 NOTICE_TYPE_CHANGE = "变更通告"
 NOTICE_HEADING_CHANGE = NOTICE_TYPE_CHANGE
@@ -21849,10 +21859,7 @@ class MaintenancePortalService:
         self, payload: dict[str, Any]
     ) -> bool:
         payload = normalize_notice_identity_payload(payload or {})
-        if (
-            self._item_work_type(payload) != WORK_TYPE_MAINTENANCE
-            or self._truthy_flag(payload.get("manual"))
-        ):
+        if self._item_work_type(payload) != WORK_TYPE_MAINTENANCE:
             return False
         source_record_id = canonical_source_record_id(payload)
         if not source_record_id or is_local_record_id(source_record_id):
@@ -21871,6 +21878,95 @@ class MaintenancePortalService:
             self._state_store.patch_active_source_record_fields(
                 source_record_id=source_record_id,
                 work_type=WORK_TYPE_MAINTENANCE,
+                fields=local_fields,
+            )
+        self._touch_state_cache_version()
+        return True
+
+    def sync_notice_source_ended_fields(self, payload: dict[str, Any]) -> bool:
+        """Write an ended notice back to its linked maintenance/change source row."""
+        payload = normalize_notice_identity_payload(payload or {})
+        source_record_id = str(payload.get("source_record_id") or "").strip()
+        target_record_id = canonical_target_record_id(payload)
+        if (
+            not source_record_id
+            or source_record_id == target_record_id
+            or is_local_record_id(source_record_id)
+        ):
+            return False
+        source_work_type = str(
+            payload.get("source_work_type")
+            or payload.get("converted_from_work_type")
+            or payload.get("work_type")
+            or ""
+        ).strip()
+        ended_at = self._parse_notice_datetime(payload.get("ended_at"))
+        if ended_at is None:
+            ended_at = dt.datetime.now()
+        ended_at_ms = int(ended_at.timestamp() * 1000)
+        ended_at_text = ended_at.strftime("%Y-%m-%d %H:%M")
+        if source_work_type == WORK_TYPE_MAINTENANCE:
+            app_token = str(payload.get("source_app_token") or self.app_token).strip()
+            table_id = str(payload.get("source_table_id") or self.table_id).strip()
+            remote_fields = {"实际结束时间": ended_at_ms}
+            local_fields = {
+                "实际结束时间": ended_at_text,
+                "维护实施状态": "已结束",
+            }
+            source_records = self._records
+        elif source_work_type == WORK_TYPE_CHANGE:
+            app_token = str(
+                payload.get("source_app_token") or CHANGE_SOURCE_APP_TOKEN
+            ).strip()
+            table_id = str(
+                payload.get("source_table_id") or CHANGE_SOURCE_TABLE_ID
+            ).strip()
+            remote_fields = {
+                "实际结束时间": ended_at_ms,
+                "变更进度": CHANGE_PROGRESS_ENDED,
+            }
+            local_fields = {
+                "实际结束时间": ended_at_text,
+                "变更进度": CHANGE_PROGRESS_ENDED,
+            }
+            source_records = self._change_records
+        else:
+            # 检修源表结束仍由维修单原有流程控制，通告结束不改其源字段。
+            return False
+
+        source_record = next(
+            (
+                record
+                for record in source_records
+                if str(record.get("record_id") or "").strip() == source_record_id
+            ),
+            None,
+        )
+        if source_record is None:
+            return False
+
+        guard = external_real_write_guard()
+        if guard.get("mock_external"):
+            pass
+        elif not guard.get("real_write_allowed"):
+            raise PortalError(str(guard.get("reason") or "真实外部写入未确认。"))
+        else:
+            self._patch_record_fields(
+                app_token=app_token,
+                table_id=table_id,
+                record_id=source_record_id,
+                fields=remote_fields,
+            )
+
+        with self._refresh_lock:
+            fields = source_record.get("display_fields")
+            if not isinstance(fields, dict):
+                fields = {}
+                source_record["display_fields"] = fields
+            fields.update(local_fields)
+            self._state_store.patch_active_source_record_fields(
+                source_record_id=source_record_id,
+                work_type=source_work_type,
                 fields=local_fields,
             )
         self._touch_state_cache_version()
@@ -23312,6 +23408,19 @@ class MaintenancePortalService:
             )
             self.reconcile_source_ongoing_items()
             return
+        identity_payload = dict(prepared)
+        if active_item_id:
+            identity_payload["active_item_id"] = active_item_id
+        if source_record_id:
+            identity_payload["source_record_id"] = source_record_id
+        if target_record_id:
+            identity_payload["target_record_id"] = target_record_id
+            identity_payload["record_id"] = target_record_id
+        identity_payload["status"] = "已结束" if action == "end" else "进行中"
+        self._state_store.upsert_notice_identity(
+            identity_payload,
+            origin=str(prepared.get("origin") or "action_success"),
+        )
         with self._summary_lock:
             payload = self._load_day_summary_locked()
             items = payload.setdefault("items", [])
@@ -23462,22 +23571,6 @@ class MaintenancePortalService:
                     )
                 except Exception:
                     pass
-        identity_payload = dict(prepared)
-        if active_item_id:
-            identity_payload["active_item_id"] = active_item_id
-        if source_record_id:
-            identity_payload["source_record_id"] = source_record_id
-        if target_record_id:
-            identity_payload["target_record_id"] = target_record_id
-            identity_payload["record_id"] = target_record_id
-        identity_payload["status"] = "已结束" if action == "end" else "进行中"
-        try:
-            self._state_store.upsert_notice_identity(
-                identity_payload,
-                origin=str(prepared.get("origin") or "action_success"),
-            )
-        except Exception:
-            pass
         if action in {"start", "update"}:
             with suppress(Exception):
                 self._remove_hidden_ongoing_keys(
@@ -27725,6 +27818,7 @@ class MaintenancePortalService:
     @staticmethod
     def _undo_action_label(action_type: str) -> str:
         return {
+            "start": "开始",
             "update": "更新",
             "end": "结束",
             "delete": "删除",
@@ -27967,12 +28061,17 @@ class MaintenancePortalService:
         scope: str = "ALL",
     ) -> str:
         action_type = str(action_type or "").strip().lower()
-        if action_type not in {"update", "end", "delete"}:
+        if action_type not in {"start", "update", "end", "delete"}:
             return ""
         context = copy.deepcopy(context) if isinstance(context, dict) else {}
         scope = self._normalize_scope(scope or context.get("scope") or "ALL")
         context = self._enrich_ongoing_identity_item(context, scope=scope)
         identity = self._undo_identity_from_context(context, action_type=action_type)
+        if (
+            identity.get("work_type") == WORK_TYPE_EVENT
+            or identity.get("notice_type") == NOTICE_TYPE_EVENT
+        ):
+            return ""
         identity_keys = set(identity.get("identity_keys") or [])
         if not identity.get("identity_key") or not identity_keys:
             raise PortalError("创建回退点失败：缺少通告身份。")
@@ -28020,6 +28119,64 @@ class MaintenancePortalService:
                         )
         now = time.time()
         title = str(identity.get("title") or (daily_item or {}).get("title") or "").strip()
+        source_remote: dict[str, Any] = {}
+        if action_type == "end":
+            source_record_id = str(identity.get("source_record_id") or "").strip()
+            source_work_type = str(
+                context.get("source_work_type")
+                or context.get("converted_from_work_type")
+                or identity.get("work_type")
+                or ""
+            ).strip()
+            source_records = (
+                self._records
+                if source_work_type == WORK_TYPE_MAINTENANCE
+                else self._change_records
+                if source_work_type == WORK_TYPE_CHANGE
+                else []
+            )
+            source_record = next(
+                (
+                    record
+                    for record in source_records
+                    if str(record.get("record_id") or "").strip()
+                    == source_record_id
+                ),
+                None,
+            )
+            if source_record is not None:
+                raw_fields = source_record.get("raw_fields") or {}
+                display_fields = source_record.get("display_fields") or {}
+                source_fields = {"实际结束时间": raw_fields.get("实际结束时间")}
+                if source_work_type == WORK_TYPE_CHANGE:
+                    source_fields["变更进度"] = str(
+                        display_fields.get("变更进度") or "进行中"
+                    ).strip()
+                default_app_token = (
+                    self.app_token
+                    if source_work_type == WORK_TYPE_MAINTENANCE
+                    else CHANGE_SOURCE_APP_TOKEN
+                )
+                default_table_id = (
+                    self.table_id
+                    if source_work_type == WORK_TYPE_MAINTENANCE
+                    else CHANGE_SOURCE_TABLE_ID
+                )
+                source_remote = {
+                    "work_type": source_work_type,
+                    "app_token": str(
+                        context.get("source_app_token")
+                        or source_record.get("source_app_token")
+                        or default_app_token
+                    ).strip(),
+                    "table_id": str(
+                        context.get("source_table_id")
+                        or source_record.get("source_table_id")
+                        or default_table_id
+                    ).strip(),
+                    "record_id": source_record_id,
+                    "fields": source_fields,
+                }
         payload = {
             "undo_id": uuid.uuid4().hex,
             "identity_key": str(identity.get("identity_key") or ""),
@@ -28046,6 +28203,7 @@ class MaintenancePortalService:
                 "missing": bool(remote_missing),
                 "fields": copy.deepcopy(remote_fields or {}),
             },
+            "source_remote": source_remote,
             "local": {
                 "qt_active": qt_active,
                 "daily_document_key": daily_document_key,
@@ -28075,8 +28233,12 @@ class MaintenancePortalService:
     def _available_undo_map(self, scope: str = "ALL") -> dict[str, dict[str, Any]]:
         scope = self._normalize_scope(scope)
         result: dict[str, dict[str, Any]] = {}
-        for undo in self._state_store.list_notice_undo_actions(scope=scope):
+        for undo in self._state_store.list_notice_undo_actions(
+            scope=scope, limit=1000
+        ):
             enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+            if self._item_work_type(enriched_undo) == WORK_TYPE_EVENT:
+                continue
             if not self._scope_matches_item(scope, enriched_undo):
                 continue
             keys = set(enriched_undo.get("identity_keys") or undo.get("identity_keys") or [])
@@ -28124,8 +28286,16 @@ class MaintenancePortalService:
         action_type = str(action_type or "").strip().lower()
         cutoff = time.time() - float(since_seconds or 0) if float(since_seconds or 0) > 0 else 0
         items: list[dict[str, Any]] = []
-        for undo in self._state_store.list_notice_undo_actions(scope=scope):
+        for undo in self._state_store.list_notice_undo_actions(
+            scope=scope, limit=1000
+        ):
             enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+            if (
+                self._item_work_type(enriched_undo) == WORK_TYPE_EVENT
+                or str(enriched_undo.get("notice_type") or "").strip()
+                == NOTICE_TYPE_EVENT
+            ):
+                continue
             if not self._scope_matches_item(scope, enriched_undo):
                 continue
             undo_action_type = str(enriched_undo.get("action_type") or "").strip().lower()
@@ -28295,12 +28465,65 @@ class MaintenancePortalService:
         *,
         target_record_id: str = "",
     ) -> dict[str, Any]:
-        """Restore repair-summary state changed after the target notice write."""
+        """Restore source-table state changed after the target notice write."""
         if not isinstance(undo, dict):
             raise PortalError("回退记录格式错误。")
         action_type = str(undo.get("action_type") or "").strip().lower()
         work_type = str(undo.get("work_type") or "").strip()
-        if action_type != "end" or work_type != WORK_TYPE_REPAIR:
+        if action_type != "end":
+            return {"restored": False, "skipped": True, "warnings": []}
+
+        source_remote = (
+            undo.get("source_remote")
+            if isinstance(undo.get("source_remote"), dict)
+            else {}
+        )
+        source_fields = (
+            source_remote.get("fields")
+            if isinstance(source_remote.get("fields"), dict)
+            else {}
+        )
+        if source_fields and str(source_remote.get("record_id") or "").strip():
+            source_work_type = str(source_remote.get("work_type") or "").strip()
+            source_record_id = str(source_remote.get("record_id") or "").strip()
+            self._patch_record_fields(
+                app_token=str(source_remote.get("app_token") or "").strip(),
+                table_id=str(source_remote.get("table_id") or "").strip(),
+                record_id=source_record_id,
+                fields=source_fields,
+            )
+            local_fields = dict(source_fields)
+            if source_work_type == WORK_TYPE_MAINTENANCE:
+                local_fields["维护实施状态"] = str(
+                    (undo.get("context") or {}).get("source_progress") or "进行中"
+                ).strip()
+                source_records = self._records
+            else:
+                source_records = self._change_records
+            with self._refresh_lock:
+                for record in source_records:
+                    if str(record.get("record_id") or "").strip() != source_record_id:
+                        continue
+                    fields = record.get("display_fields")
+                    if not isinstance(fields, dict):
+                        fields = {}
+                        record["display_fields"] = fields
+                    fields.update(local_fields)
+                    break
+                self._state_store.patch_active_source_record_fields(
+                    source_record_id=source_record_id,
+                    work_type=source_work_type,
+                    fields=local_fields,
+                )
+            self._touch_state_cache_version()
+            return {
+                "restored": True,
+                "skipped": False,
+                "source_record_id": source_record_id,
+                "warnings": [],
+            }
+
+        if work_type != WORK_TYPE_REPAIR:
             return {"restored": False, "skipped": True, "warnings": []}
 
         context = (
@@ -29244,6 +29467,21 @@ class MaintenancePortalService:
             "finished": finished,
         }
 
+    def _target_record_finished_at(
+        self,
+        *,
+        work_type: str,
+        target_record: dict[str, Any],
+        lifecycle: dict[str, Any],
+    ) -> str:
+        modified_at = self._format_source_datetime(
+            target_record.get("last_modified_time")
+        ) or self._format_source_datetime(target_record.get("created_time"))
+        lifecycle_ended_at = str(lifecycle.get("ended_at") or "").strip()
+        if self._normalize_notice_work_type_alias(work_type) == WORK_TYPE_CHANGE:
+            return modified_at or lifecycle_ended_at
+        return lifecycle_ended_at or modified_at
+
     def _source_snapshot_active_payload(
         self,
         record: dict[str, Any],
@@ -29680,10 +29918,14 @@ class MaintenancePortalService:
         for record in source_records:
             upsert(
                 self._source_snapshot_active_payload(record),
-                require_target=self._record_work_type(record) == WORK_TYPE_REPAIR,
+                require_target=True,
             )
         for record in zhihang_records:
-            upsert(self._source_snapshot_active_payload(record, zhihang=True), zhihang=True)
+            upsert(
+                self._source_snapshot_active_payload(record, zhihang=True),
+                zhihang=True,
+                require_target=True,
+            )
 
         target_source_ids = {
             (
@@ -29772,23 +30014,6 @@ class MaintenancePortalService:
                         ):
                         removed += 1
 
-        active_source_ids = {
-            (
-                self._record_work_type(record),
-                str(record.get("record_id") or "").strip(),
-            )
-            for record in source_records
-            if self._record_work_type(record) != WORK_TYPE_REPAIR
-        }
-        active_zhihang_ids = {
-            (WORK_TYPE_CHANGE, str(record.get("record_id") or "").strip())
-            for record in zhihang_records
-        }
-        source_authority = {
-            WORK_TYPE_MAINTENANCE: bool(self._maintenance_loaded_once),
-            WORK_TYPE_CHANGE: bool(self._change_loaded_once),
-            WORK_TYPE_REPAIR: bool(self._repair_loaded_once),
-        }
         for row in rows:
             payload = row_payload(row)
             if canonical_target_record_id(payload) or not (
@@ -29796,23 +30021,10 @@ class MaintenancePortalService:
                 or str(row.get("origin") or "") == "source_snapshot_refresh"
             ):
                 continue
-            source_record_id = canonical_source_record_id(payload)
-            zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
-            work_type = self._item_work_type(payload)
-            if source_record_id and (
-                (work_type, source_record_id) in active_source_ids
-                or not source_authority.get(work_type, False)
-            ):
-                continue
-            if zhihang_record_id and (
-                (work_type, zhihang_record_id) in active_zhihang_ids
-                or not self._zhihang_change_loaded_once
-            ):
-                continue
             with suppress(Exception):
                 if self._enqueue_target_snapshot_active_delete(
                         payload=payload,
-                        reason="source_snapshot_finished",
+                        reason="source_snapshot_without_target",
                     ):
                     removed += 1
 
@@ -29870,6 +30082,9 @@ class MaintenancePortalService:
                 copy.deepcopy(current_payload or {})
             )
         )
+        pending_local_changes = work_type == WORK_TYPE_EVENT and bool(
+            (current_payload or {}).get("_has_unuploaded_changes")
+        )
         projected_fields = self._target_record_form_fields(
             work_type=work_type,
             notice_type=notice_type,
@@ -29905,6 +30120,11 @@ class MaintenancePortalService:
                     ).strip()
         for field_name, value in projected_fields.items():
             if (
+                pending_local_changes
+                and payload.get(field_name) not in (None, "", [], {})
+            ):
+                continue
+            if (
                 field_name == "execution_party"
                 or value not in (None, "", [], {})
                 or field_name not in payload
@@ -29937,6 +30157,8 @@ class MaintenancePortalService:
                 if "更新" in remote_status or current_status == "更新"
                 else "开始"
             )
+        if pending_local_changes and current_status:
+            action_status = current_status
         active_item_id = str(
             (current_payload or {}).get("active_item_id")
             or f"target-{work_type}-{target_record_id}"
@@ -30413,6 +30635,8 @@ class MaintenancePortalService:
         source_record_id: str = "",
         target_record_id: str = "",
         active_item_id: str = "",
+        allow_finished: bool = False,
+        allow_unscoped_target: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
         work_type = self._normalize_notice_work_type_alias(work_type)
@@ -30446,7 +30670,7 @@ class MaintenancePortalService:
                 target_records = self._target_records_for_notice_type(
                     notice_type,
                     work_type,
-                    force_refresh=False,
+                    force_refresh=allow_finished,
                 )
             except Exception as exc:
                 raise PortalError(f"查询{notice_type}目标表失败：{exc}") from exc
@@ -30488,6 +30712,8 @@ class MaintenancePortalService:
                 scope, target_building_codes
             ):
                 raise PortalError("目标多维记录不属于当前楼栋，请重新选择。")
+            if not target_building_codes and not allow_unscoped_target:
+                raise PortalError("目标多维记录未识别到楼栋，当前账号不能绑定。")
             target_lifecycle = self._target_record_lifecycle(
                 work_type=work_type,
                 notice_type=notice_type,
@@ -30540,10 +30766,30 @@ class MaintenancePortalService:
             "target_record_id": target_record_id,
             "active_item_id": active_item_id,
             "source_found": bool(source_record),
+            "source_work_type": (
+                self._record_source_work_type(source_record)
+                if source_record
+                else work_type
+            ),
+            "source_app_token": str(
+                (source_record or {}).get("source_app_token") or ""
+            ).strip(),
+            "source_table_id": str(
+                (source_record or {}).get("source_table_id") or ""
+            ).strip(),
             "target_found": bool(target_record),
             "target_building_codes": target_building_codes,
             "target_active": bool(target_lifecycle.get("active")),
             "target_finished": bool(target_lifecycle.get("finished")),
+            "target_ended_at": (
+                self._target_record_finished_at(
+                    work_type=work_type,
+                    target_record=target_record,
+                    lifecycle=target_lifecycle,
+                )
+                if target_record and target_lifecycle.get("finished")
+                else ""
+            ),
             "_target_active_payload": target_active_payload,
             "target_status": str(
                 ((target_record or {}).get("display_fields") or {}).get(
@@ -30624,6 +30870,8 @@ class MaintenancePortalService:
         work_type: str,
         scope: str,
         action: str = "update",
+        recent_finished_days: int = 0,
+        allow_unscoped_target: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
         work_type = self._normalize_notice_work_type_alias(work_type)
@@ -30651,6 +30899,9 @@ class MaintenancePortalService:
                     )
                 )
         candidates: list[dict[str, Any]] = []
+        recent_finished_days = max(0, int(recent_finished_days or 0))
+        today = dt.date.today()
+        recent_cutoff = today - dt.timedelta(days=recent_finished_days - 1)
         for target in target_records:
             fields = target.get("display_fields") or {}
             lifecycle = self._target_record_lifecycle(
@@ -30658,7 +30909,26 @@ class MaintenancePortalService:
                 notice_type=notice_type,
                 target_record=target,
             )
-            if not lifecycle.get("active") or lifecycle.get("finished"):
+            target_finished = bool(lifecycle.get("finished"))
+            target_active = bool(lifecycle.get("active")) and not target_finished
+            recent_at = (
+                self._target_record_finished_at(
+                    work_type=work_type,
+                    target_record=target,
+                    lifecycle=lifecycle,
+                )
+                if target_finished
+                else ""
+            )
+            if target_finished and recent_finished_days:
+                recent_dt = self._parse_notice_datetime(recent_at)
+                if (
+                    recent_dt is None
+                    or recent_dt.date() < recent_cutoff
+                    or recent_dt.date() > today
+                ):
+                    continue
+            elif target_finished or not target_active:
                 continue
             building_codes = self._target_record_building_codes(
                 fields,
@@ -30667,6 +30937,8 @@ class MaintenancePortalService:
             if building_codes and not self._scope_matches_buildings(
                 scope, building_codes
             ):
+                continue
+            if not building_codes and not allow_unscoped_target:
                 continue
             target_record_id = str(target.get("record_id") or "").strip()
             if not target_record_id:
@@ -30683,6 +30955,15 @@ class MaintenancePortalService:
                 notice_type=notice_type,
                 target_record=target,
             )
+            sort_dt = self._parse_notice_datetime(
+                recent_at
+                if target_finished
+                else str(
+                    form_fields.get("start_time")
+                    or lifecycle.get("started_at")
+                    or ""
+                )
+            )
             candidates.append(
                 {
                     "record_id": target_record_id,
@@ -30692,7 +30973,13 @@ class MaintenancePortalService:
                     "title": title or target_record_id,
                     "building": self._building_label_from_codes(building_codes),
                     "building_codes": building_codes,
-                    "status": str(lifecycle.get("status") or "进行中").strip(),
+                    "status": str(
+                        lifecycle.get("status")
+                        or ("已结束" if target_finished else "进行中")
+                    ).strip(),
+                    "target_active": target_active,
+                    "target_finished": target_finished,
+                    "ended_at": str(recent_at or lifecycle.get("ended_at") or "").strip(),
                     "start_time": str(
                         form_fields.get("start_time")
                         or lifecycle.get("started_at")
@@ -30703,21 +30990,29 @@ class MaintenancePortalService:
                     "title_matched": False,
                     "business_text_matched": False,
                     "business_match_count": 0,
-                    "match_reason": "目标多维已开始未结束",
+                    "match_reason": (
+                        "目标多维近7天已结束"
+                        if target_finished
+                        else "目标多维已开始未结束"
+                    ),
                     "form_fields": form_fields,
                     "fields": detail_fields,
                     "field_items": [
                         {"label": key, "value": value}
                         for key, value in detail_fields.items()
                     ],
+                    "_sort_timestamp": sort_dt.timestamp() if sort_dt else 0.0,
                 }
             )
         candidates.sort(
             key=lambda item: (
-                str(item.get("start_time") or ""),
+                bool(item.get("target_finished")),
+                -float(item.get("_sort_timestamp") or 0),
                 str(item.get("title") or ""),
             )
         )
+        for candidate in candidates:
+            candidate.pop("_sort_timestamp", None)
         return {
             "scope": scope,
             "work_type": work_type,
@@ -30989,6 +31284,8 @@ class MaintenancePortalService:
         limit: int = 30,
         all_active: bool = False,
         all_ongoing: bool = False,
+        recent_finished_days: int = 0,
+        allow_unscoped_target: bool = False,
     ) -> dict[str, Any]:
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
         aliases = {
@@ -31018,25 +31315,19 @@ class MaintenancePortalService:
             "事件通告": WORK_TYPE_EVENT,
         }
         work_type = aliases.get(work_type.lower()) or aliases.get(work_type) or WORK_TYPE_MAINTENANCE
-        if all_ongoing and work_type in {
-            WORK_TYPE_MAINTENANCE,
-            WORK_TYPE_CHANGE,
-            WORK_TYPE_REPAIR,
-        }:
+        if all_ongoing and work_type in BINDABLE_NOTICE_TARGET_WORK_TYPES:
             return self._lookup_active_ongoing_candidates(
                 work_type=work_type,
                 scope=scope,
                 action=action,
             )
-        if all_active and work_type in {
-            WORK_TYPE_MAINTENANCE,
-            WORK_TYPE_CHANGE,
-            WORK_TYPE_REPAIR,
-        }:
+        if all_active and work_type in BINDABLE_NOTICE_TARGET_WORK_TYPES:
             return self._lookup_active_target_candidates(
                 work_type=work_type,
                 scope=scope,
                 action=action,
+                recent_finished_days=recent_finished_days,
+                allow_unscoped_target=allow_unscoped_target,
             )
         if work_type == WORK_TYPE_CHANGE:
             return self.lookup_change_target_candidates(
@@ -31806,6 +32097,11 @@ class MaintenancePortalService:
                 copied = copy.deepcopy(item)
             copied = normalize_notice_identity_payload(copied)
             if not self._scope_matches_item(scope, copied):
+                continue
+            if not canonical_target_record_id(copied) and (
+                bool(copied.get("source_snapshot_authoritative"))
+                or str(copied.get("origin") or "") == "source_snapshot_refresh"
+            ):
                 continue
             copied["work_type"] = self._item_work_type(copied)
             copied.setdefault(

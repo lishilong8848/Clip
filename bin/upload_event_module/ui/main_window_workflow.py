@@ -1157,6 +1157,106 @@ class MainWindowWorkflowMixin:
             if entry_id:
                 self._remove_clipboard_pending_entry(entry_id)
 
+    def _restore_queued_upload_ui(
+        self,
+        record_id: str,
+        *,
+        requested: bool | None = None,
+    ) -> bool:
+        list_widget, item, _matched = self._find_active_item_by_upload_completion_id(
+            record_id
+        )
+        if not item or not self._is_valid_list_item(item):
+            return False
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        if not isinstance(data, dict) or not bool(data.get("_queued_after_upload")):
+            return False
+        data = dict(data)
+        data["_has_unuploaded_changes"] = True
+        data["_upload_in_progress"] = False
+        data["_pending_upload_hash"] = None
+        data.pop("_upload_pending_dialog", None)
+        data.pop("_upload_started_monotonic", None)
+        data.pop("_last_upload_error", None)
+        if requested is not None:
+            data["_queued_upload_requested"] = bool(requested)
+        item.setData(Qt.ItemDataRole.UserRole, data)
+        self._rebuild_active_item_widget(
+            list_widget,
+            item,
+            data,
+            force_status=None,
+            upload_in_progress=False,
+            pending_upload_hash=None,
+            has_unuploaded_changes=True,
+        )
+        if hasattr(self, "_upsert_active_cache_record"):
+            self._upsert_active_cache_record(data)
+        return True
+
+    def _queue_confirmed_upload_if_busy(
+        self,
+        data_dict: dict,
+        *,
+        screenshot_bytes,
+        action_type: str,
+        response_time: str,
+        buildings,
+        extra_images,
+        specialty: str,
+        change_level: str,
+        event_level: str,
+        event_source: str,
+        recover_selected: bool,
+        robot_group_choice: str,
+    ) -> bool:
+        if not isinstance(data_dict, dict) or not bool(
+            data_dict.get("_queued_after_upload")
+        ):
+            return False
+        record_id = str(data_dict.get("record_id") or "").strip()
+        candidate_ids = self._upload_completion_record_id_candidates(record_id)
+        if not any(
+            candidate_id in self.pending_action_record_ids
+            for candidate_id in candidate_ids
+        ):
+            return False
+        queued_data = copy.deepcopy(data_dict)
+        for key in (
+            "_upload_operation_id",
+            "_upload_in_progress",
+            "_upload_pending_dialog",
+            "_upload_started_monotonic",
+            "_pending_upload_hash",
+            "_queued_after_upload",
+            "_queued_action",
+            "_queued_upload_requested",
+        ):
+            queued_data.pop(key, None)
+        queued_data["_has_unuploaded_changes"] = True
+        self._queue_update_after_upload(
+            record_id,
+            {
+                "data": queued_data,
+                "screenshot_bytes": screenshot_bytes,
+                "action_type": action_type,
+                "response_time": response_time,
+                "buildings": buildings,
+                "extra_images": list(extra_images or []),
+                "specialty": specialty,
+                "change_level": change_level,
+                "event_level": event_level,
+                "event_source": event_source,
+                "recover_selected": bool(recover_selected),
+                "robot_group_choice": robot_group_choice,
+            },
+        )
+        self._restore_queued_upload_ui(record_id, requested=True)
+        if self.current_screenshot_record_id == record_id:
+            self.current_screenshot_record_id = None
+            self.current_screenshot_action_type = None
+        return True
+
     def _queue_update_after_upload(self, record_id: str, request: dict | None = None):
         if not record_id:
             return
@@ -1233,11 +1333,23 @@ class MainWindowWorkflowMixin:
             payload_data = request.get("data") or data
             if isinstance(payload_data, dict):
                 payload_data = dict(payload_data)
+                for key in (
+                    "_upload_operation_id",
+                    "_queued_after_upload",
+                    "_queued_action",
+                    "_queued_upload_requested",
+                ):
+                    payload_data.pop(key, None)
                 payload_data["_is_placeholder_record"] = False
-                if data.get("record_id"):
-                    payload_data["record_id"] = data.get("record_id")
-                elif target_record_id:
-                    payload_data["record_id"] = target_record_id
+                current_target_id = str(
+                    data.get("target_record_id")
+                    or data.get("record_id")
+                    or target_record_id
+                    or ""
+                ).strip()
+                if current_target_id:
+                    payload_data["record_id"] = current_target_id
+                    payload_data["target_record_id"] = current_target_id
             notice_type = (
                 payload_data.get("notice_type", "")
                 if isinstance(payload_data, dict)
@@ -1299,6 +1411,22 @@ class MainWindowWorkflowMixin:
                 f"extra_images={len(request.get('extra_images') or [])} "
                 f"response_time={'Y' if request.get('response_time') else 'N'}"
             )
+            current_data = item.data(Qt.ItemDataRole.UserRole) or {}
+            if isinstance(current_data, dict):
+                current_data = dict(current_data)
+                for key in (
+                    "_queued_after_upload",
+                    "_queued_action",
+                    "_queued_upload_requested",
+                    "_upload_operation_id",
+                ):
+                    current_data.pop(key, None)
+                item.setData(Qt.ItemDataRole.UserRole, current_data)
+                self._upsert_active_notice_model_item(
+                    list_widget,
+                    item,
+                    current_data,
+                )
             self.do_feishu_upload(
                 payload_data,
                 request.get("screenshot_bytes"),
@@ -2271,11 +2399,18 @@ class MainWindowWorkflowMixin:
             action_type,
         )
         record_id = data_dict["record_id"]
-        if (
+        upload_busy = (
             record_id in self.pending_action_record_ids
             or bool(data_dict.get("_upload_in_progress"))
             or self._has_pending_upload(record_id)
-        ):
+        )
+        if upload_busy and bool(data_dict.get("_queued_after_upload")):
+            if bool(data_dict.get("_queued_upload_requested")):
+                self.show_message("下一条通告已排队，将在当前上传成功后自动发送。")
+                return
+            self._show_screenshot_dialog(data_dict, action_type)
+            return
+        if upload_busy:
             self.show_message("该项目正在处理中，请稍候...")
             return
 
@@ -2316,10 +2451,21 @@ class MainWindowWorkflowMixin:
         # not block editing, deletion, or retry.
         return False
 
-    def _queue_pending_content(self, record_id, new_content, new_status):
+    def _queue_pending_content(
+        self,
+        record_id,
+        new_content,
+        new_status,
+        *,
+        active_item_id="",
+    ):
         if not record_id:
-            return
+            return False
         list_widget, item = self._find_active_item_by_record_id(record_id)
+        if (not item or not self._is_valid_list_item(item)) and active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(
+                active_item_id
+            )
         if item and not self._is_valid_list_item(item):
             item = None
             list_widget = None
@@ -2345,39 +2491,46 @@ class MainWindowWorkflowMixin:
             }
             self._ensure_payload_for_data(new_data, entry=entry)
 
-            # 上传中收到新内容：立即替换，但保持上传中标记
+            # 当前提交继续上传；新文本作为下一代立即显示并允许排队。
             new_data = self._mark_notice_content_dirty(new_data)
-            if not new_data.get("_pending_upload_hash"):
-                base_text = old_data.get("text", "")
-                new_data["_pending_upload_hash"] = self._calc_text_hash(base_text)
-            new_data["_upload_in_progress"] = bool(old_data.get("_upload_in_progress"))
-            if record_id and self._has_pending_upload(record_id):
-                new_data["_upload_in_progress"] = True
-                new_data["_upload_started_monotonic"] = (
-                    old_data.get("_upload_started_monotonic") or time.monotonic()
-                )
+            queued_action = "end" if new_status == "结束" else "update"
+            pending_request = self.pending_update_after_upload.get(record_id)
+            requested = isinstance(pending_request, dict) and bool(pending_request)
+            new_data["_queued_after_upload"] = True
+            new_data["_queued_action"] = queued_action
+            new_data["_queued_upload_requested"] = requested
+            new_data["_upload_in_progress"] = False
+            new_data["_pending_upload_hash"] = None
+            new_data.pop("_upload_started_monotonic", None)
+            if requested:
+                queued_data = copy.deepcopy(new_data)
+                for key in (
+                    "_upload_operation_id",
+                    "_queued_after_upload",
+                    "_queued_action",
+                    "_queued_upload_requested",
+                ):
+                    queued_data.pop(key, None)
+                pending_request["data"] = queued_data
+                pending_request["action_type"] = queued_action
             item.setData(Qt.ItemDataRole.UserRole, new_data)
-            self.request_active_cache_save()
+            if hasattr(self, "_upsert_active_cache_record"):
+                self._upsert_active_cache_record(new_data)
             if self._should_defer_ui_refresh():
                 self._mark_cache_refresh_needed()
-                return
-            action_type = self.pending_action_types.get(record_id)
-            force_status = None
-            if new_status == "结束":
-                force_status = "end"
-            elif action_type == "upload":
-                force_status = "update"
+                return True
             self._rebuild_active_item_widget(
                 list_widget,
                 item,
                 new_data,
-                force_status=force_status,
-                upload_in_progress=new_data.get("_upload_in_progress"),
-                pending_upload_hash=new_data.get("_pending_upload_hash"),
+                force_status=queued_action,
+                upload_in_progress=False,
+                pending_upload_hash=None,
                 has_unuploaded_changes=True,
             )
             self._maybe_update_detail_dialog(new_data, record_id)
-            self.request_active_cache_save()
+            return True
+        return False
 
     def do_feishu_upload(
         self,
@@ -2479,6 +2632,22 @@ class MainWindowWorkflowMixin:
         elif resolved_level:
             data_dict["level"] = resolved_level
         record_id = data_dict.get("record_id")
+        if self._queue_confirmed_upload_if_busy(
+            data_dict,
+            screenshot_bytes=screenshot_bytes,
+            action_type=action_type,
+            response_time=response_time,
+            buildings=_buildings,
+            extra_images=extra_images,
+            specialty=specialty,
+            change_level=change_level,
+            event_level=event_level,
+            event_source=event_source,
+            recover_selected=recover_selected,
+            robot_group_choice=robot_group_choice,
+        ):
+            self._try_process_deferred_events()
+            return
         operation_id = str(data_dict.get("_upload_operation_id") or "").strip()
         if not operation_id:
             operation_id = f"qt_notice:{uuid.uuid4().hex}"

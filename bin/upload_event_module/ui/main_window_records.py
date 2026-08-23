@@ -12,6 +12,7 @@ from PyQt6 import sip
 
 from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
+    event_lifecycle_fields_match,
     is_local_record_id,
 )
 from ..config import get_field_config
@@ -1125,15 +1126,10 @@ class MainWindowRecordsMixin:
         incoming: dict,
         candidate: dict,
     ) -> bool:
-        incoming_fields = self._event_sparse_match_fields(incoming)
-        candidate_fields = self._event_sparse_match_fields(candidate)
-        for key in ("title", "time", "source"):
-            if not incoming_fields[key] or incoming_fields[key] != candidate_fields[key]:
-                return False
-        for key in ("building", "level"):
-            if incoming_fields[key] and incoming_fields[key] != candidate_fields[key]:
-                return False
-        return True
+        return event_lifecycle_fields_match(
+            self._event_sparse_match_fields(incoming),
+            self._event_sparse_match_fields(candidate),
+        )
 
     @staticmethod
     def _remote_target_record_id_from_data(data: dict | None) -> str:
@@ -1418,6 +1414,15 @@ class MainWindowRecordsMixin:
                 "_pending_upload_hash",
                 "_upload_operation_id",
                 "_has_unuploaded_changes",
+            ):
+                if key in existing_data:
+                    updated[key] = existing_data.get(key)
+        if bool(existing_data.get("_queued_after_upload")):
+            for key in (
+                "_queued_after_upload",
+                "_queued_action",
+                "_queued_upload_requested",
+                "_upload_operation_id",
             ):
                 if key in existing_data:
                     updated[key] = existing_data.get(key)
@@ -3361,6 +3366,8 @@ class MainWindowRecordsMixin:
             return target_data
         if info.get("notice_type"):
             target_data["notice_type"] = info.get("notice_type")
+        if info.get("status"):
+            target_data["status"] = info.get("status")
         if not self._is_level_locked(target_data) and info.get("level"):
             target_data["level"] = info.get("level")
         if info.get("source"):
@@ -3368,6 +3375,16 @@ class MainWindowRecordsMixin:
             target_data["event_source"] = info.get("source")
         if info.get("time_str"):
             target_data["time_str"] = info.get("time_str")
+        if self._is_event_notice(info.get("notice_type")):
+            text = str(info.get("content") or target_data.get("text") or "")
+            for field_name, labels in (
+                ("content", ("概述", "告警描述")),
+                ("impact", ("影响",)),
+                ("progress", ("进展",)),
+            ):
+                value = self._extract_section_text(text, labels)
+                if value:
+                    target_data[field_name] = value
         return target_data
 
     @staticmethod
@@ -4071,6 +4088,9 @@ class MainWindowRecordsMixin:
                 merged = dict(old_data)
                 merged.update(new_data)
                 new_data = merged
+            if isinstance(new_data, dict):
+                info = extract_event_info(str(new_data.get("text") or "")) or {}
+                self._apply_detected_notice_fields(new_data, info)
             if isinstance(new_data, dict) and old_data:
                 new_data["active_item_id"] = old_data.get("active_item_id")
             if hasattr(self, "_mark_notice_content_dirty"):
@@ -4111,6 +4131,16 @@ class MainWindowRecordsMixin:
             if success:
                 for candidate_id in candidate_ids:
                     self.pending_upload_rollback_by_record_id.pop(candidate_id, None)
+            else:
+                pending_updates = getattr(
+                    self,
+                    "pending_update_after_upload",
+                    {},
+                )
+                pending_new = getattr(self, "pending_new_by_record_id", {})
+                for candidate_id in candidate_ids:
+                    pending_updates.pop(candidate_id, None)
+                    pending_new.pop(candidate_id, None)
             list_widget, item, matched_record_id = self._find_active_item_by_upload_completion_id(
                 record_id
             )
@@ -4133,6 +4163,9 @@ class MainWindowRecordsMixin:
                         data["_has_unuploaded_changes"] = True
                         data["_upload_in_progress"] = False
                         data.pop("_upload_started_monotonic", None)
+                        data.pop("_queued_after_upload", None)
+                        data.pop("_queued_action", None)
+                        data.pop("_queued_upload_requested", None)
                         item.setData(Qt.ItemDataRole.UserRole, data)
                         self._rebuild_active_item_widget(
                             list_widget,
@@ -4146,12 +4179,16 @@ class MainWindowRecordsMixin:
                 observed_version = str(data.get("record_version") or "").strip()
                 if observed_version:
                     data["expected_record_version"] = observed_version
+                queued_after_upload = bool(data.get("_queued_after_upload"))
                 if not success:
                     data["_has_unuploaded_changes"] = True
                     if mark_failed:
                         data["_last_upload_error"] = f"{name or '上传'}失败，可重试。"
                     else:
                         data.pop("_last_upload_error", None)
+                elif queued_after_upload:
+                    data["_has_unuploaded_changes"] = True
+                    data.pop("_last_upload_error", None)
                 else:
                     data["_has_unuploaded_changes"] = False
                     data.pop("_last_upload_error", None)
@@ -4300,8 +4337,16 @@ class MainWindowRecordsMixin:
                 data.get("_upload_in_progress")
                 or data.get("_pending_upload_hash") is not None
                 or data.get("_upload_started_monotonic") is not None
-                or (mark_uploaded and data.get("_has_unuploaded_changes"))
-                or (mark_uploaded and str(data.get("_last_upload_error") or "").strip())
+                or (
+                    mark_uploaded
+                    and not bool(data.get("_queued_after_upload"))
+                    and data.get("_has_unuploaded_changes")
+                )
+                or (
+                    mark_uploaded
+                    and not bool(data.get("_queued_after_upload"))
+                    and str(data.get("_last_upload_error") or "").strip()
+                )
             ):
                 data = dict(data)
                 data["_upload_in_progress"] = False
@@ -4309,7 +4354,7 @@ class MainWindowRecordsMixin:
                 data.pop("_upload_started_monotonic", None)
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_upload_operation_id", None)
-                if mark_uploaded:
+                if mark_uploaded and not bool(data.get("_queued_after_upload")):
                     data["_has_unuploaded_changes"] = False
                     data.pop("_last_upload_error", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)

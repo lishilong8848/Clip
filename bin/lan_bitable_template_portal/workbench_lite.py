@@ -1658,7 +1658,12 @@ def _ongoing_rows(
     ongoing_page: int = 1,
 ) -> str:
     filter_work_type = "" if work_type == ALL_WORK_TYPE else work_type
-    filtered = [item for item in items if not filter_work_type or _item_work_type(item) == filter_work_type]
+    filtered = [
+        item
+        for item in items
+        if _item_work_type(item) != "event"
+        and (not filter_work_type or _item_work_type(item) == filter_work_type)
+    ]
     if not filtered:
         return "<div class=\"empty\">当前没有未结束通告</div>"
     rows: list[str] = []
@@ -1666,23 +1671,15 @@ def _ongoing_rows(
         active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
         row_work_type = _item_work_type(item)
         remote_target_record_id = _remote_target_record_id(item)
-        local_only_event = row_work_type == "event" and not remote_target_record_id
-        direct_navigation = row_work_type == "event" and bool(remote_target_record_id)
-        if direct_navigation:
-            event_scope = _record_building_code(item) or scope
-            url = _query_url(
-                "/", scope=event_scope, mode="events", detail="1"
-            )
-        else:
-            url = _query_url(
-                "/workbench-lite",
-                scope=scope,
-                work_type=work_type,
-                month=month,
-                active_item_id=active_id,
-                pending_page=pending_page,
-                ongoing_page=ongoing_page,
-            )
+        url = _query_url(
+            "/workbench-lite",
+            scope=scope,
+            work_type=work_type,
+            month=month,
+            active_item_id=active_id,
+            pending_page=pending_page,
+            ongoing_page=ongoing_page,
+        )
         active = " active" if active_id == selected_id else ""
         title = _record_display_title(item)
         draft = _draft_from_record(item, work_type=row_work_type)
@@ -1714,8 +1711,8 @@ def _ongoing_rows(
         f"<a class=\"ongoing-row{active}{needs_site_class}{needs_mop_class}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
         f" aria-current=\"{'true' if active else 'false'}\""
         f" data-row-kind=\"ongoing\""
-        f" data-direct-navigation=\"{'1' if direct_navigation else ''}\""
-        f" data-local-only=\"{'1' if local_only_event else '0'}\""
+        f" data-direct-navigation=\"\""
+        f" data-local-only=\"0\""
         f" data-work-type=\"{_e(row_work_type)}\""
         f" data-active-item-id=\"{_e(active_id)}\""
         f" data-record-id=\"{_e(str(item.get('record_id') or target_record_id or ''))}\""
@@ -2437,7 +2434,15 @@ def render_workbench_lite(
     prefill_context_id: str = "",
 ) -> str:
     records = payload.get("records") if isinstance(payload.get("records"), list) else []
-    ongoing = payload.get("ongoing") if isinstance(payload.get("ongoing"), list) else []
+    ongoing = (
+        [
+            item
+            for item in payload.get("ongoing", [])
+            if isinstance(item, dict) and _item_work_type(item) != "event"
+        ]
+        if isinstance(payload.get("ongoing"), list)
+        else []
+    )
     payload_filters = (
         payload.get("filters")
         if isinstance(payload.get("filters"), dict)
@@ -2485,12 +2490,8 @@ def render_workbench_lite(
         for key in WORK_TYPE_LABELS
     }
     record_counts[ALL_WORK_TYPE] = sum(record_counts.get(key, 0) for key in WORK_TYPE_LABELS)
-    ongoing_counts[ALL_WORK_TYPE] = (
-        sum(ongoing_counts.get(key, 0) for key in WORK_TYPE_LABELS)
-        + _to_int(
-            payload_ongoing_counts.get("event"),
-            fallback_ongoing_counts.get("event", 0),
-        )
+    ongoing_counts[ALL_WORK_TYPE] = sum(
+        ongoing_counts.get(key, 0) for key in WORK_TYPE_LABELS
     )
     records_pagination = (
         payload.get("records_pagination")
@@ -2655,7 +2656,7 @@ def render_workbench_lite(
         f"<strong>{_e(item.get('title') or item.get('undo_label') or '可回退通告')}</strong>"
         f"<span>{_e(item.get('undo_label') or item.get('undo_action_type') or '回退')}</span>"
         "</button>"
-        for item in undo_items[:12]
+        for item in undo_items
     ) or "<div class=\"empty compact\">近三天暂无可回退通告</div>"
     attention_html = _attention_rows(
         ongoing,
@@ -2666,7 +2667,7 @@ def render_workbench_lite(
         ongoing_page=ongoing_page_num,
     )
     attention_count = 0 if "当前没有需要处理的问题" in attention_html else attention_html.count("attention-row")
-    undo_count = len(undo_items[:12])
+    undo_count = len(undo_items)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -5658,7 +5659,7 @@ def render_workbench_lite(
           throw new Error(payload.error || '读取可回退通告失败');
         }}
         const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
-        const items = Array.isArray(data.items) ? data.items.slice(0, 12) : [];
+        const items = Array.isArray(data.items) ? data.items : [];
         if (list) {{
           list.replaceChildren(
             ...(items.length
@@ -5759,14 +5760,14 @@ def render_workbench_lite(
       return String(candidate?.target_record_id || candidate?.record_id || '').trim();
     }}
     function isEndedCandidate(candidate) {{
-      return String(candidate?.status || '').includes('结束');
+      return Boolean(candidate?.target_finished) || String(candidate?.status || '').includes('结束');
     }}
     function targetLookupPayload(form) {{
       return {{
         scope: previewValue(form, 'scope') || getCurrentScope(),
         lookup_context: form?.dataset.detailMode === 'ongoing'
           ? 'target_table'
-          : 'ongoing_list',
+          : 'planned_target_table',
         work_type: previewValue(form, 'work_type') || form?.dataset.workType || 'maintenance',
         title: previewValue(form, 'title'),
         start_time: previewValue(form, 'start_time'),
@@ -5789,7 +5790,7 @@ def render_workbench_lite(
       if (!liteTargetCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '未找到可关联的未结束通告。可以先发送开始通告，由后端创建新的目标记录。';
+        empty.textContent = '未找到可关联的未结束或近7天已结束目标记录。可以先发送开始通告，由后端创建新的目标记录。';
         list.replaceChildren(empty);
         return;
       }}
@@ -5883,6 +5884,7 @@ def render_workbench_lite(
       try {{
         const payload = {{
           scope: previewValue(form, 'scope') || getCurrentScope(),
+          binding_context: form.dataset.detailMode === 'ongoing' ? 'ongoing' : 'planned',
           work_type: previewValue(form, 'work_type') || form.dataset.workType || 'maintenance',
           notice_type: previewValue(form, 'notice_type'),
           active_item_id: String(

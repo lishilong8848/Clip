@@ -666,6 +666,61 @@ class MainWindowRuntimeMixin:
                 visible_active_item_id = str(
                     existing_data.get("active_item_id") or ""
                 ).strip()
+                existing_text = str(existing_data.get("text") or "").strip()
+                incoming_text = str(data.get("text") or "").strip()
+                is_event = str(
+                    data.get("notice_type")
+                    or existing_data.get("notice_type")
+                    or ""
+                ).strip() == "事件通告"
+                candidate_fn = getattr(
+                    self,
+                    "_upload_completion_record_id_candidates",
+                    None,
+                )
+                candidate_record_id = str(
+                    existing_data.get("record_id") or record_id or ""
+                ).strip()
+                candidate_ids = (
+                    candidate_fn(candidate_record_id)
+                    if callable(candidate_fn)
+                    else [candidate_record_id]
+                    if candidate_record_id
+                    else []
+                )
+                pending_action_ids = set(
+                    getattr(self, "pending_action_record_ids", set()) or set()
+                )
+                current_upload_busy = bool(
+                    existing_data.get("_upload_in_progress")
+                ) or any(
+                    candidate_id in pending_action_ids
+                    for candidate_id in candidate_ids
+                )
+                if (
+                    is_event
+                    and current_upload_busy
+                    and bool(data.get("_has_unuploaded_changes"))
+                    and incoming_text
+                    and incoming_text != existing_text
+                ):
+                    info = extract_event_info(incoming_text) or {}
+                    queued = self._queue_pending_content(
+                        str(existing_data.get("record_id") or record_id),
+                        incoming_text,
+                        str(info.get("status") or data.get("status") or ""),
+                        active_item_id=visible_active_item_id,
+                    )
+                    if queued:
+                        return {"ok": True, "updated": True, "queued": True}
+                if (
+                    is_event
+                    and bool(existing_data.get("_queued_after_upload"))
+                    and incoming_text
+                    and incoming_text != existing_text
+                    and not bool(data.get("_has_unuploaded_changes"))
+                ):
+                    return {"ok": True, "stale": True, "queued": True}
                 data = self._inherit_active_runtime_fields(data, existing_data)
         if not canonical_supersedes:
             data = self._canonical_backend_active_payload(

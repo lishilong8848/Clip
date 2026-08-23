@@ -621,6 +621,68 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertIn("状态：更新", records[0]["text"])
         self.assertIn("现场正在处理积水中", records[0]["text"])
 
+    def test_runtime_upsert_routes_new_event_text_to_serial_queue_while_uploading(self):
+        old_text = (
+            "【事件通告】状态：更新\n【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】BMS\n【时间】2026-08-21 10:00\n【概述】旧上传内容"
+        )
+        new_text = old_text.replace("状态：更新", "状态：结束").replace(
+            "旧上传内容",
+            "新复制的结束内容",
+        )
+        harness = _RuntimeActiveUpsertHarness(
+            {
+                "active_item_id": "aid-runtime-serial",
+                "record_id": "rec-runtime-serial",
+                "target_record_id": "rec-runtime-serial",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": "qt_notice:runtime-old",
+                "text": old_text,
+            }
+        )
+        harness.pending_action_record_ids = {"rec-runtime-serial"}
+        captured = {}
+
+        def queue_content(record_id, content, status, *, active_item_id=""):
+            captured.update(
+                {
+                    "record_id": record_id,
+                    "content": content,
+                    "status": status,
+                    "active_item_id": active_item_id,
+                }
+            )
+            return True
+
+        harness._queue_pending_content = queue_content
+
+        result = harness._apply_backend_active_upsert(
+            {
+                "item": {
+                    "active_item_id": "aid-runtime-serial",
+                    "record_id": "rec-runtime-serial",
+                    "payload": {
+                        "active_item_id": "aid-runtime-serial",
+                        "record_id": "rec-runtime-serial",
+                        "target_record_id": "rec-runtime-serial",
+                        "notice_type": "事件通告",
+                        "_is_placeholder_record": False,
+                        "_has_unuploaded_changes": True,
+                        "text": new_text,
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result["queued"])
+        self.assertEqual(captured["record_id"], "rec-runtime-serial")
+        self.assertEqual(captured["content"], new_text)
+        self.assertEqual(captured["status"], "结束")
+        self.assertEqual(captured["active_item_id"], "aid-runtime-serial")
+
     def test_action_state_helpers_match_legacy_widget_rules(self):
         placeholder = {
             "active_item_id": "aid-1",
@@ -646,6 +708,18 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(ActiveNoticeModel.action_label_for_record(end), "结束")
         self.assertEqual(ActiveNoticeModel.action_for_record(uploaded), "")
         self.assertEqual(ActiveNoticeModel.action_label_for_record(uploaded), "已上传")
+        queued_update = dict(
+            placeholder,
+            _queued_after_upload=True,
+            _queued_action="update",
+        )
+        self.assertEqual(ActiveNoticeModel.action_for_record(queued_update), "update")
+        queued_update["_queued_upload_requested"] = True
+        self.assertEqual(ActiveNoticeModel.action_for_record(queued_update), "")
+        self.assertEqual(
+            ActiveNoticeModel.action_label_for_record(queued_update),
+            "已排队",
+        )
 
     def test_today_progress_helpers(self):
         change = {
@@ -827,6 +901,375 @@ class ActiveNoticeModelTests(unittest.TestCase):
 
         self.assertIs(list_widget, harness.list_active_event)
         self.assertIs(found, item)
+
+    def test_event_update_allows_summary_correction_when_lifecycle_is_unique(self):
+        harness = _ReplaceRecordIdHarness()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-summary",
+                "record_id": "rec-event-summary",
+                "target_record_id": "rec-event-summary",
+                "_is_placeholder_record": False,
+                "notice_type": "事件通告",
+                "buildings": ["A楼"],
+                "level": "I3",
+                "source": "BMS系统",
+                "event_source": "BMS系统",
+                "text": (
+                    "【事件通告】状态：新增\n"
+                    "【标题】EA118机房A楼I3级事件通报\n"
+                    "【来源】BMS系统\n"
+                    "【时间】2026-08-21 10:00\n"
+                    "【概述】A楼空调压差告警"
+                ),
+            },
+        )
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】BMS系统\n"
+            "【时间】2026-08-21 10:00\n"
+            "【概述】经现场确认改为A楼过滤器堵塞告警"
+        )
+
+        list_widget, found = harness._find_active_item_by_content_or_title(
+            update_text,
+            title="EA118机房A楼I3级事件通报",
+            notice_type="事件通告",
+        )
+
+        self.assertIs(list_widget, harness.list_active_event)
+        self.assertIs(found, item)
+
+    def test_manual_event_detail_save_enables_update_and_end(self):
+        harness = _ReplaceRecordIdHarness()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        base = {
+            "active_item_id": "aid-event-manual-edit",
+            "record_id": "rec-event-manual-edit",
+            "target_record_id": "rec-event-manual-edit",
+            "_is_placeholder_record": False,
+            "_has_unuploaded_changes": False,
+            "notice_type": "事件通告",
+            "status": "新增",
+            "text": (
+                "【事件通告】状态：新增\n"
+                "【标题】EA118机房A楼I3级事件通报\n"
+                "【来源】BMS系统\n"
+                "【时间】2026-08-21 10:00\n"
+                "【概述】A楼空调压差告警"
+            ),
+        }
+        item.setData(Qt.ItemDataRole.UserRole, base)
+
+        for status, action in (("更新", "update"), ("结束", "end")):
+            text = (
+                f"【事件通告】状态：{status}\n"
+                "【标题】EA118机房A楼I3级事件通报\n"
+                "【来源】BMS系统\n"
+                "【时间】2026-08-21 10:00\n"
+                "【概述】现场手动修正后的事件详情\n"
+                f"【进展】准备发送{status}"
+            )
+            harness.sync_content_to_widget(
+                "aid-event-manual-edit",
+                "rec-event-manual-edit",
+                {"text": text},
+            )
+            saved = item.data(Qt.ItemDataRole.UserRole)
+
+            self.assertEqual(saved["target_record_id"], "rec-event-manual-edit")
+            self.assertEqual(saved["status"], status)
+            self.assertTrue(saved["_has_unuploaded_changes"])
+            self.assertEqual(saved["content"], "现场手动修正后的事件详情")
+            self.assertEqual(ActiveNoticeModel.action_for_record(saved), action)
+
+    def test_event_copy_during_upload_is_visible_and_actionable_as_next_generation(self):
+        harness = _ReplaceRecordIdHarness()
+        harness.pending_action_record_ids = {"rec-event-serial"}
+        harness.pending_action_types = {"rec-event-serial": "update"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        old_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】BMS系统\n"
+            "【时间】2026-08-21 10:00\n"
+            "【概述】当前正在上传的内容"
+        )
+        new_text = old_text.replace("状态：更新", "状态：结束").replace(
+            "当前正在上传的内容",
+            "上传期间复制的新结束内容",
+        )
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-serial",
+                "record_id": "rec-event-serial",
+                "target_record_id": "rec-event-serial",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": "qt_notice:old",
+                "text": old_text,
+            },
+        )
+
+        queued = harness._queue_pending_content(
+            "rec-event-serial",
+            new_text,
+            "结束",
+            active_item_id="aid-event-serial",
+        )
+        data = item.data(Qt.ItemDataRole.UserRole)
+
+        self.assertTrue(queued)
+        self.assertEqual(data["text"], new_text)
+        self.assertTrue(data["_queued_after_upload"])
+        self.assertEqual(data["_queued_action"], "end")
+        self.assertFalse(data["_upload_in_progress"])
+        self.assertTrue(data["_has_unuploaded_changes"])
+        self.assertEqual(data["_upload_operation_id"], "qt_notice:old")
+        self.assertEqual(ActiveNoticeModel.action_for_record(data), "end")
+        self.assertEqual(
+            harness.pending_upload_rollback_by_record_id[
+                "rec-event-serial"
+            ]["old_data"]["text"],
+            old_text,
+        )
+
+    def test_queued_event_upload_success_keeps_next_text_and_dispatch_request(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._set_last_ui_op = lambda *_args, **_kwargs: None
+        harness.pending_action_record_ids = {"rec-event-serial-success"}
+        harness.pending_action_types = {"rec-event-serial-success": "update"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        harness.current_screenshot_record_id = ""
+        harness.current_screenshot_action_type = None
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        old_text = (
+            "【事件通告】状态：更新\n【标题】A楼I3事件\n"
+            "【来源】BMS\n【时间】2026-08-21 10:00\n【概述】旧上传"
+        )
+        new_text = old_text.replace("【概述】旧上传", "【概述】下一条更新")
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-serial-success",
+                "record_id": "rec-event-serial-success",
+                "target_record_id": "rec-event-serial-success",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": "qt_notice:old-success",
+                "text": old_text,
+            },
+        )
+        harness._queue_pending_content(
+            "rec-event-serial-success",
+            new_text,
+            "更新",
+        )
+        captured = {}
+        harness._queue_update_after_upload = (
+            lambda record_id, request: captured.update(
+                {"record_id": record_id, "request": request}
+            )
+        )
+
+        queued = harness._queue_confirmed_upload_if_busy(
+            item.data(Qt.ItemDataRole.UserRole),
+            screenshot_bytes=b"image",
+            action_type="update",
+            response_time="",
+            buildings=["A楼"],
+            extra_images=[],
+            specialty="电气",
+            change_level="",
+            event_level="I3",
+            event_source="BMS",
+            recover_selected=False,
+            robot_group_choice="auto",
+        )
+        harness.restore_button_state(
+            True,
+            "更新",
+            "rec-event-serial-success",
+        )
+        data = item.data(Qt.ItemDataRole.UserRole)
+
+        self.assertTrue(queued)
+        self.assertEqual(captured["record_id"], "rec-event-serial-success")
+        self.assertEqual(captured["request"]["data"]["text"], new_text)
+        self.assertNotIn(
+            "_upload_operation_id",
+            captured["request"]["data"],
+        )
+        self.assertEqual(data["text"], new_text)
+        self.assertTrue(data["_has_unuploaded_changes"])
+        self.assertTrue(data["_queued_upload_requested"])
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "已排队")
+        self.assertFalse(harness.pending_action_record_ids)
+
+    def test_queued_event_upload_failure_rolls_back_and_discards_next_generation(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._set_last_ui_op = lambda *_args, **_kwargs: None
+        harness.pending_action_record_ids = {"rec-event-serial-fail"}
+        harness.pending_action_types = {"rec-event-serial-fail": "update"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        harness.current_screenshot_record_id = ""
+        harness.current_screenshot_action_type = None
+        persisted = []
+        harness._upsert_active_cache_record = (
+            lambda data: persisted.append(dict(data)) or True
+        )
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        old_text = (
+            "【事件通告】状态：更新\n【标题】A楼I3事件\n"
+            "【来源】BMS\n【时间】2026-08-21 10:00\n【概述】失败的当前上传"
+        )
+        new_text = old_text.replace("失败的当前上传", "应被丢弃的下一条")
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-serial-fail",
+                "record_id": "rec-event-serial-fail",
+                "target_record_id": "rec-event-serial-fail",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": "qt_notice:old-fail",
+                "text": old_text,
+            },
+        )
+        harness._queue_pending_content(
+            "rec-event-serial-fail",
+            new_text,
+            "更新",
+        )
+        harness.pending_update_after_upload["rec-event-serial-fail"] = {
+            "data": {"text": new_text},
+            "action_type": "update",
+        }
+
+        harness.restore_button_state(
+            False,
+            "更新",
+            "rec-event-serial-fail",
+        )
+        data = item.data(Qt.ItemDataRole.UserRole)
+
+        self.assertEqual(data["text"], old_text)
+        self.assertNotIn("_queued_after_upload", data)
+        self.assertNotIn("_queued_upload_requested", data)
+        self.assertTrue(data["_has_unuploaded_changes"])
+        self.assertFalse(data["_upload_in_progress"])
+        self.assertIn("失败", data["_last_upload_error"])
+        self.assertFalse(harness.pending_update_after_upload)
+        self.assertFalse(harness.pending_upload_rollback_by_record_id)
+        self.assertEqual(persisted[-1]["text"], old_text)
+
+    def test_queued_event_dispatches_automatically_after_current_upload_finishes(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._pending_update_after_upload_scheduled = True
+        harness.pending_action_record_ids = set()
+        harness.pending_action_types = {}
+        harness.current_screenshot_record_id = ""
+        harness.screenshot_dialog = type(
+            "HiddenDialog",
+            (),
+            {"isVisible": lambda self: False},
+        )()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        text = (
+            "【事件通告】状态：结束\n【标题】A楼I3事件\n"
+            "【来源】BMS\n【时间】2026-08-21 10:00\n【概述】排队结束"
+        )
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-auto-dispatch",
+                "record_id": "rec-event-auto-dispatch",
+                "target_record_id": "rec-event-auto-dispatch",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": True,
+                "_queued_after_upload": True,
+                "_queued_action": "end",
+                "_queued_upload_requested": True,
+                "_upload_operation_id": "qt_notice:finished-old",
+                "text": text,
+            },
+        )
+        harness.pending_update_after_upload = {
+            "rec-event-auto-dispatch": {
+                "data": {
+                    "active_item_id": "aid-event-auto-dispatch",
+                    "record_id": "local_event_auto_dispatch",
+                    "target_record_id": "",
+                    "notice_type": "事件通告",
+                    "_is_placeholder_record": False,
+                    "_has_unuploaded_changes": True,
+                    "text": text,
+                },
+                "action_type": "end",
+                "event_level": "I3",
+                "event_source": "BMS",
+            }
+        }
+        harness._resolve_upload_fields_from_cache = (
+            lambda _data, _fields: {
+                "buildings": ["A楼"],
+                "specialty": "电气",
+                "level": "I3",
+                "event_source": "BMS",
+            }
+        )
+        captured = {}
+
+        def upload(data, screenshot, action, **kwargs):
+            captured.update(
+                {
+                    "data": dict(data),
+                    "screenshot": screenshot,
+                    "action": action,
+                    "kwargs": kwargs,
+                }
+            )
+
+        harness.do_feishu_upload = upload
+
+        harness._try_process_pending_update_after_upload()
+
+        self.assertEqual(captured["action"], "end")
+        self.assertEqual(captured["data"]["text"], text)
+        self.assertEqual(
+            captured["data"]["target_record_id"],
+            "rec-event-auto-dispatch",
+        )
+        self.assertNotIn("_upload_operation_id", captured["data"])
+        self.assertFalse(harness.pending_update_after_upload)
+        current = item.data(Qt.ItemDataRole.UserRole)
+        self.assertNotIn("_queued_after_upload", current)
+        self.assertNotIn("_queued_upload_requested", current)
+        self.assertNotIn("_upload_operation_id", current)
 
     def test_sparse_event_update_does_not_choose_between_two_active_items(self):
         harness = _ReplaceRecordIdHarness()

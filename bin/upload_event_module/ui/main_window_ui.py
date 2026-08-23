@@ -881,11 +881,15 @@ class MainWindowUiMixin:
         block_reason = self._dialog_block_reason("screenshot")
         if block_reason:
             self.show_message(block_reason)
-            self.restore_button_state(record_id=data.get("record_id") if data else None)
+            record_id = data.get("record_id") if data else None
+            if not self._restore_queued_upload_ui(record_id, requested=False):
+                self.restore_button_state(record_id=record_id)
             return
         if not config.user_token:
             self.show_message("未配置飞书用户令牌。")
-            self.restore_button_state(record_id=data.get("record_id") if data else None)
+            record_id = data.get("record_id") if data else None
+            if not self._restore_queued_upload_ui(record_id, requested=False):
+                self.restore_button_state(record_id=record_id)
             return
         if isinstance(data, dict):
             self._hydrate_data_from_cache(data)
@@ -946,7 +950,9 @@ class MainWindowUiMixin:
             if not pending_hash:
                 pending_hash = self._calc_text_hash(data_dict.get("text", ""))
                 data_dict["_pending_upload_hash"] = pending_hash
-            data_dict["_has_unuploaded_changes"] = False
+            data_dict["_has_unuploaded_changes"] = bool(
+                data_dict.get("_queued_after_upload")
+            )
             data_dict["_upload_in_progress"] = True
             data_dict["_upload_pending_dialog"] = True
             data_dict["_upload_started_monotonic"] = time.monotonic()
@@ -1015,10 +1021,11 @@ class MainWindowUiMixin:
         self._set_delete_interaction_enabled(True)
         self._resume_clipboard_timer()
         if record_id:
-            self.restore_button_state(
-                success=False, record_id=record_id, mark_failed=False
-            )
-            self.pending_new_by_record_id.pop(record_id, None)
+            if not self._restore_queued_upload_ui(record_id, requested=False):
+                self.restore_button_state(
+                    success=False, record_id=record_id, mark_failed=False
+                )
+                self.pending_new_by_record_id.pop(record_id, None)
         self.current_screenshot_record_id = None
         self.current_screenshot_action_type = None
         # 截图取消时恢复显示主界面

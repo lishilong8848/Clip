@@ -88,6 +88,32 @@ def text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def event_lifecycle_fields_match(
+    incoming: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+) -> bool:
+    """Match one event lifecycle while allowing its summary to be corrected."""
+
+    incoming = incoming if isinstance(incoming, dict) else {}
+    candidate = candidate if isinstance(candidate, dict) else {}
+    for key in ("time", "source"):
+        value = text(incoming.get(key))
+        if not value or value != text(candidate.get(key)):
+            return False
+    matched_context = False
+    for key in ("building", "level"):
+        value = text(incoming.get(key))
+        if not value:
+            continue
+        if value != text(candidate.get(key)):
+            return False
+        matched_context = True
+    incoming_title = text(incoming.get("title"))
+    return matched_context or bool(
+        incoming_title and incoming_title == text(candidate.get("title"))
+    )
+
+
 def current_local_month_key(now: date | datetime | None = None) -> str:
     current = now or datetime.now()
     return f"{current.year:04d}-{current.month:02d}"

@@ -9703,6 +9703,38 @@ class LanPortalStateStore:
                 ).fetchone()
         return self._notice_undo_from_row(row) if row else None
 
+    def bind_notice_undo_target(self, undo_id: str, target_record_id: str) -> bool:
+        undo_id = self._text(undo_id)
+        target_record_id = self._text(target_record_id)
+        if not undo_id or not target_record_id:
+            return False
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT payload_json FROM notice_undo_actions WHERE undo_id = ?",
+                    (undo_id,),
+                ).fetchone()
+                if not row:
+                    return False
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                payload = payload if isinstance(payload, dict) else {}
+                payload["target_record_id"] = target_record_id
+                context = payload.get("context")
+                if isinstance(context, dict):
+                    context["target_record_id"] = target_record_id
+                    context["record_id"] = target_record_id
+                conn.execute(
+                    """
+                    UPDATE notice_undo_actions
+                    SET target_record_id = ?, payload_json = ?, updated_at = ?
+                    WHERE undo_id = ?
+                    """,
+                    (target_record_id, self._json(payload), time.time(), undo_id),
+                )
+                conn.commit()
+        return True
+
     def list_notice_undo_actions(
         self,
         *,

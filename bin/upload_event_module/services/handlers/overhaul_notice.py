@@ -164,10 +164,12 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
             fields[OVERHAUL_NOTICE_FIELDS["urgency"]] = level
 
         repair_device = self._extract_section(payload.text, "维修设备")
-        if not repair_device:
-            repair_device = self._extract_section(payload.text, "维修故障")
         if repair_device:
             fields[OVERHAUL_NOTICE_FIELDS["repair_device"]] = repair_device
+
+        repair_fault = self._extract_section(payload.text, "维修故障")
+        if repair_fault:
+            fields[OVERHAUL_NOTICE_FIELDS["repair_fault"]] = repair_fault
 
         fault_type = self._extract_section(payload.text, "故障类型")
         if fault_type:

@@ -46,6 +46,7 @@ from .portal_service import (
 from .identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
+    event_lifecycle_fields_match,
     is_local_record_id,
     normalize_notice_identity_payload,
 )
@@ -739,15 +740,22 @@ class PortalRuntime:
                 CHANGE_CONFIRMATION_NAMESPACE,
                 target_record_id,
             ) or {}
-            if (
-                lifecycle.get("active")
-                and not lifecycle.get("finished")
-                and not existing
-            ):
+            if lifecycle.get("active") and not lifecycle.get("finished"):
+                if existing and str(existing.get("state") or "") != "stopped":
+                    continue
+                active_record = record
+                if existing:
+                    ok, result = query_record_by_id(
+                        target_record_id,
+                        NOTICE_TYPE_CHANGE,
+                    )
+                    if not ok:
+                        continue
+                    active_record = result if isinstance(result, dict) else record
                 cls._put_change_confirmation_task(
                     cls._change_confirmation_task_from_record(
                         target_record_id,
-                        record,
+                        active_record,
                         existing=existing,
                     )
                 )
@@ -2132,6 +2140,52 @@ class PortalRuntime:
         except Exception:
             pass
         return result
+
+    @classmethod
+    def _sync_confirmed_ended_source_fields(cls, *, limit: int = 200) -> dict:
+        """Repair source rows left ongoing by an older successful end action."""
+        synced = 0
+        errors: list[str] = []
+        for identity in cls.state_store.list_notice_identities(limit=limit):
+            if str(identity.get("status") or "").strip() not in {"结束", "已结束"}:
+                continue
+            source_record_id = canonical_source_record_id(identity)
+            target_record_id = canonical_target_record_id(identity)
+            work_type = str(identity.get("work_type") or "").strip()
+            notice_type = str(identity.get("notice_type") or "").strip()
+            if (
+                work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}
+                or not source_record_id
+                or not target_record_id
+                or source_record_id == target_record_id
+            ):
+                continue
+            try:
+                if not cls.service.has_ongoing_source_snapshot(identity):
+                    continue
+                ok, result = query_record_by_id(target_record_id, notice_type)
+                if not ok or not isinstance(result, dict):
+                    continue
+                fields = result.get("fields")
+                if not isinstance(fields, dict) or not fields:
+                    continue
+                lifecycle = cls.service._target_record_lifecycle(
+                    work_type=work_type,
+                    notice_type=notice_type,
+                    target_record={
+                        "record_id": target_record_id,
+                        "display_fields": fields,
+                    },
+                )
+                if not lifecycle.get("finished"):
+                    continue
+                if cls.service.sync_notice_source_ended_fields(identity):
+                    synced += 1
+            except Exception as exc:
+                errors.append(f"{source_record_id}: {exc}")
+        if synced:
+            cls.service.reconcile_source_ongoing_items()
+        return {"synced": synced, "errors": errors}
 
     @classmethod
     def _reconcile_source_ongoing_after_target_terminal(cls) -> dict:
@@ -4874,6 +4928,11 @@ class PortalRuntime:
                             warnings.append(service_warning)
                 if refreshed:
                     cls.clear_payload_cache()
+                    source_end_result = cls._sync_confirmed_ended_source_fields()
+                    for source_end_error in source_end_result.get("errors") or []:
+                        warning = f"已结束通告源字段补写失败: {source_end_error}"
+                        if warning not in warnings:
+                            warnings.append(warning)
                     try:
                         cls.service.refresh_event_month_snapshot()
                     except Exception as exc:
@@ -6368,15 +6427,10 @@ class PortalRuntime:
     def _event_partial_identity_matches(cls, incoming: dict, candidate: dict) -> bool:
         """Match a sparse event update without falling back to title-only routing."""
 
-        incoming_fields = cls._resolved_event_match_fields(incoming)
-        candidate_fields = cls._resolved_event_match_fields(candidate)
-        for key in ("title", "time", "source"):
-            if not incoming_fields[key] or incoming_fields[key] != candidate_fields[key]:
-                return False
-        for key in ("building", "level"):
-            if incoming_fields[key] and incoming_fields[key] != candidate_fields[key]:
-                return False
-        return True
+        return event_lifecycle_fields_match(
+            cls._resolved_event_match_fields(incoming),
+            cls._resolved_event_match_fields(candidate),
+        )
 
     @classmethod
     def _event_operation_lock_key(
@@ -7157,20 +7211,64 @@ class PortalRuntime:
             or str((data or {}).get("action") or "").strip().lower()
             or "update"
         )
+        queued_payload: dict[str, Any] = {}
+        if str(notice_type or "").strip() == "事件通告":
+            uploaded_text = str((data or {}).get("text") or "").strip()
+            active_item_id = str((data or {}).get("active_item_id") or "").strip()
+            for row in cls.state_store.list_qt_active_items(include_deleted=False):
+                current = (
+                    dict(row.get("payload"))
+                    if isinstance(row.get("payload"), dict)
+                    else {}
+                )
+                if str(
+                    current.get("notice_type") or row.get("notice_type") or ""
+                ).strip() != "事件通告":
+                    continue
+                if active_item_id and str(
+                    current.get("active_item_id") or row.get("active_item_id") or ""
+                ).strip() != active_item_id:
+                    continue
+                if (
+                    not active_item_id
+                    and canonical_target_record_id(current) != target_record_id
+                ):
+                    continue
+                current_text = str(current.get("text") or "").strip()
+                if (
+                    bool(current.get("_has_unuploaded_changes"))
+                    and current_text
+                    and current_text != uploaded_text
+                ):
+                    queued_payload = current
+                break
+        payload_source = dict(data or {})
+        if queued_payload:
+            payload_source.update(queued_payload)
         payload = normalize_notice_identity_payload(
             {
-                **dict(data or {}),
+                **payload_source,
                 "record_id": target_record_id,
                 "target_record_id": target_record_id,
                 "_is_placeholder_record": False,
-                "_has_unuploaded_changes": False,
+                "_has_unuploaded_changes": bool(queued_payload),
                 "_upload_in_progress": False,
                 "_last_upload_error": "",
                 "binding_status": "bound",
             },
             action=normalized_action,
         )
-        payload["action"] = normalized_action
+        payload["action"] = (
+            str(queued_payload.get("action") or "").strip().lower()
+            or normalized_action
+        )
+        if queued_payload:
+            payload["_queued_after_upload"] = True
+            payload["_queued_action"] = (
+                "end"
+                if str(payload.get("status") or "").strip() == "结束"
+                else "update"
+            )
         cls._apply_change_today_in_progress_state(
             payload,
             notice_type=notice_type,
@@ -7253,7 +7351,10 @@ class PortalRuntime:
                     },
                     current_payload=payload,
                 )
-                payload["action"] = normalized_action
+                payload["action"] = (
+                    str(queued_payload.get("action") or "").strip().lower()
+                    or normalized_action
+                )
         cls._rebase_remote_record_version(
             payload,
             record_version,
@@ -7672,6 +7773,8 @@ class PortalRuntime:
         remote_missing: bool = False,
         job_id: str = "",
     ) -> str:
+        if getattr(cls.service, "_state_store", None) is not cls.state_store:
+            return ""
         creator = getattr(cls.service, "create_notice_undo_checkpoint", None)
         if not callable(creator):
             return ""
@@ -7718,13 +7821,39 @@ class PortalRuntime:
             action_type == "end"
             and str(undo.get("work_type") or "").strip() == WORK_TYPE_REPAIR
         )
+        has_source_end_snapshot = bool(
+            action_type == "end"
+            and isinstance(undo.get("source_remote"), dict)
+            and isinstance(undo.get("source_remote", {}).get("fields"), dict)
+            and undo.get("source_remote", {}).get("fields")
+        )
         if (
             is_repair_end
             and not guard["mock_external"]
             and (not remote_fields or bool(remote.get("missing")))
         ):
             raise PortalError("检修结束回退缺少目标多维快照，未执行回退。")
-        if remote_fields and not bool(remote.get("missing")):
+        if action_type == "start":
+            if not target_record_id:
+                raise PortalError("开始回退缺少目标多维记录 ID。")
+            if guard["mock_external"]:
+                remote_message = "mock external undo skipped"
+            elif not guard["real_write_allowed"]:
+                raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
+            else:
+                ok_query, query_result = query_record_by_id(
+                    target_record_id, notice_type
+                )
+                if ok_query:
+                    ok_delete, delete_result = delete_bitable_record(
+                        target_record_id, notice_type
+                    )
+                    if not ok_delete:
+                        raise PortalError(str(delete_result or "回退开始通告失败。"))
+                elif not cls._remote_record_not_found(query_result):
+                    raise PortalError(str(query_result or "读取开始通告失败。"))
+                remote_message = "开始创建的多维记录已删除"
+        elif remote_fields and not bool(remote.get("missing")):
             if guard["mock_external"]:
                 remote_message = "mock external undo skipped"
             elif not guard["real_write_allowed"]:
@@ -7763,7 +7892,7 @@ class PortalRuntime:
         else:
             remote_message = "远端记录不可恢复，仅恢复本地状态。"
 
-        if is_repair_end:
+        if is_repair_end or has_source_end_snapshot:
             if guard["mock_external"]:
                 related_remote_result = {
                     "restored": False,
@@ -7779,21 +7908,59 @@ class PortalRuntime:
                     target_record_id=restored_record_id,
                 )
                 if not bool(related_remote_result.get("restored")):
-                    raise PortalError("检修结束回退未恢复关联维修单，未完成本次回退。")
+                    raise PortalError("结束回退未恢复关联源表，未完成本次回退。")
                 remote_message = "；".join(
                     item
-                    for item in (remote_message, "维修单及跟进记录已恢复")
+                    for item in (
+                        remote_message,
+                        "维修单及跟进记录已恢复"
+                        if is_repair_end
+                        else "关联源表已恢复",
+                    )
                     if item
                 )
 
         if job_id:
             cls.service.mark_job(job_id, phase="undoing_local", upload_message=remote_message)
+        if action_type == "start":
+            cls.state_store.mark_notice_identity_deleted(
+                work_type=str(undo.get("work_type") or ""),
+                active_item_id=str(undo.get("active_item_id") or ""),
+                source_record_id=str(undo.get("source_record_id") or ""),
+                target_record_id=target_record_id,
+            )
         local_result = cls.service.restore_notice_undo_local(
             undo,
             target_record_id=restored_record_id,
             applied_by=requested_by,
             job_id=job_id,
         )
+        if (
+            notice_type == NOTICE_TYPE_CHANGE
+            and action_type != "start"
+            and restored_record_id
+        ):
+            try:
+                ok_change, restored_change = query_record_by_id(
+                    restored_record_id,
+                    NOTICE_TYPE_CHANGE,
+                )
+                if ok_change:
+                    existing_task = cls.state_store.get_document(
+                        CHANGE_CONFIRMATION_NAMESPACE,
+                        restored_record_id,
+                    ) or {}
+                    cls._put_change_confirmation_task(
+                        cls._change_confirmation_task_from_record(
+                            restored_record_id,
+                            restored_change
+                            if isinstance(restored_change, dict)
+                            else {},
+                            existing=existing_task,
+                        )
+                    )
+            except Exception as exc:
+                log_warning(f"变更回退后恢复截图确认任务失败: {exc}")
         cls.state_store.mark_notice_undo_action(
             undo_id,
             "undone",
@@ -8284,6 +8451,23 @@ class PortalRuntime:
                     )
                     for upload_id in ali_upload_ids:
                         cls.state_store.mark_notice_upload_attachment_used(upload_id)
+                start_undo_id = str(
+                    prepared.get("undo_checkpoint_id") or ""
+                ).strip()
+                if not start_undo_id:
+                    start_undo_id = cls._create_backend_undo_checkpoint(
+                        "start",
+                        prepared,
+                        remote_missing=True,
+                        job_id=str(prepared.get("job_id") or ""),
+                    )
+                    if start_undo_id:
+                        prepared["undo_checkpoint_id"] = start_undo_id
+                prepared["target_record_id"] = existing_target
+                if start_undo_id and not cls.state_store.bind_notice_undo_target(
+                    start_undo_id, existing_target
+                ):
+                    return False, "开始通告已存在，但回退记录绑定失败。", existing_target
                 return True, existing_target, existing_target
             images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
                 cls._upload_extra_images_for_notice(prepared, notice_type)
@@ -8295,6 +8479,16 @@ class PortalRuntime:
             )
             if not ali_ok:
                 return False, ali_error or "阿里确认截图上传失败。", ""
+            start_undo_id = str(prepared.get("undo_checkpoint_id") or "").strip()
+            if not start_undo_id:
+                start_undo_id = cls._create_backend_undo_checkpoint(
+                    "start",
+                    prepared,
+                    remote_missing=True,
+                    job_id=str(prepared.get("job_id") or ""),
+                )
+                if start_undo_id:
+                    prepared["undo_checkpoint_id"] = start_undo_id
             payload = cls._prepared_to_notice_payload(
                 prepared,
                 file_tokens=image_file_tokens,
@@ -8303,9 +8497,26 @@ class PortalRuntime:
             )
             ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
+            if not ok and start_undo_id:
+                cls.state_store.mark_notice_undo_action(
+                    start_undo_id,
+                    "failed",
+                    error=str(result or "多维创建失败。"),
+                )
             if ok and not record_id:
+                if start_undo_id:
+                    cls.state_store.mark_notice_undo_action(
+                        start_undo_id,
+                        "failed",
+                        error="多维创建未返回 record_id。",
+                    )
                 return False, "多维创建未返回 record_id，已阻止标记上传成功。", ""
             if ok and record_id:
+                prepared["target_record_id"] = record_id
+                if start_undo_id and not cls.state_store.bind_notice_undo_target(
+                    start_undo_id, record_id
+                ):
+                    return False, "开始通告已创建，但回退记录绑定失败。", record_id
                 prepared["ali_confirmation_file_tokens"] = list(ali_tokens)
                 prepared["ali_confirmation_expected_tokens"] = list(ali_tokens)
                 for upload_id in ali_upload_ids:
@@ -8685,25 +8896,22 @@ class PortalRuntime:
         if success:
             prepared["paired_upload_warning"] = ""
             if record_id and isinstance(paired, dict):
-                try:
-                    cls.state_store.upsert_notice_identity(
-                        {
-                            **paired,
-                            "work_type": "maintenance",
-                            "notice_type": "维保通告",
-                            "target_record_id": record_id,
-                            "record_id": record_id,
-                            "status": (
-                                "已结束"
-                                if str(paired.get("action") or "").strip().lower()
-                                == "end"
-                                else "进行中"
-                            ),
-                        },
-                        origin="paired_maintenance_upload",
-                    )
-                except Exception as exc:
-                    log_warning(f"配套维保目标 ID 写入身份表失败: {exc}")
+                cls.state_store.upsert_notice_identity(
+                    {
+                        **paired,
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "target_record_id": record_id,
+                        "record_id": record_id,
+                        "status": (
+                            "已结束"
+                            if str(paired.get("action") or "").strip().lower()
+                            == "end"
+                            else "进行中"
+                        ),
+                    },
+                    origin="paired_maintenance_upload",
+                )
         else:
             prepared["paired_upload_warning"] = str(message or "维保多维同步失败。")
         return prepared
@@ -10076,22 +10284,19 @@ class PortalRuntime:
                         )
                         if lifecycle.get("finished"):
                             target_end_confirmed = True
-                            if work_type == WORK_TYPE_MAINTENANCE:
-                                try:
-                                    cls.service.mark_maintenance_source_ended_locally(
-                                        data
-                                    )
-                                except Exception:
-                                    cls._mark_notice_remote_operation(
-                                        operation_id,
-                                        status="remote_written",
-                                        target_record_id=target_record_id,
-                                        result={
-                                            "record_id": target_record_id,
-                                            "message": str(result or ""),
-                                        },
-                                    )
-                                    raise
+                            try:
+                                cls.service.sync_notice_source_ended_fields(data)
+                            except Exception:
+                                cls._mark_notice_remote_operation(
+                                    operation_id,
+                                    status="remote_written",
+                                    target_record_id=target_record_id,
+                                    result={
+                                        "record_id": target_record_id,
+                                        "message": str(result or ""),
+                                    },
+                                )
+                                raise
                             cls._enqueue_active_delete_for_ended_notice(
                                 data,
                                 remote_record_id=target_record_id,
@@ -11387,17 +11592,35 @@ class PortalRuntime:
                 )
                 if not paired_ok:
                     paired_warning = f"维保多维同步失败：{paired_message}"
+                paired_retry_count = (
+                    0
+                    if paired_ok
+                    else int(current_job.get("paired_upload_retry_count") or 0) + 1
+                )
                 cls.service.mark_job(
                     job_id,
                     phase="remote_written",
                     prepared=prepared,
-                    paired_upload_completed=True,
+                    paired_upload_completed=paired_ok,
+                    paired_upload_pending=not paired_ok,
+                    paired_upload_retry_count=paired_retry_count,
                     paired_upload_status=str(prepared.get("paired_upload_status") or ""),
                     paired_upload_warning=str(prepared.get("paired_upload_warning") or ""),
                     paired_maintenance_target_record_id=str(
                         prepared.get("paired_maintenance_target_record_id") or ""
                     ),
                 )
+                if not paired_ok:
+                    if cls.state_store.requeue_runtime_queue_item(
+                        "qt_action",
+                        job_id,
+                        available_at=time.time()
+                        + min(60.0, float(2 ** min(paired_retry_count, 5))),
+                        error=paired_warning,
+                    ):
+                        cls.action_queue_event.set()
+                        return
+                    raise RuntimeError(paired_warning)
             elif paired_upload_completed:
                 stored_prepared = current_job.get("prepared")
                 if isinstance(stored_prepared, dict) and stored_prepared:
@@ -11800,11 +12023,11 @@ class PortalRuntime:
                             not ok_latest
                             and cls._remote_record_not_found(latest_result)
                         )
-                        if lifecycle.get("finished") or target_missing:
-                            if lifecycle.get("finished"):
-                                cls.service.mark_maintenance_source_ended_locally(
-                                    prepared
-                                )
+                        if lifecycle.get("finished"):
+                            cls.service.sync_notice_source_ended_fields(prepared)
+                            cls.service.mark_maintenance_source_ended_locally(
+                                prepared
+                            )
                             try:
                                 source_fallback_active = (
                                     cls.service.has_ongoing_source_snapshot(prepared)
@@ -11814,6 +12037,8 @@ class PortalRuntime:
                                     "源表未结束状态核对失败，已保留进行中显示："
                                     f"{exc}"
                                 )
+                        elif target_missing:
+                            source_fallback_active = False
                         else:
                             terminal_warning = (
                                 "结束写入已被后续更新覆盖或当前状态无法确认，"

@@ -142,6 +142,7 @@ from lan_bitable_template_portal.operation_audit import (
     finish_business_audit,
 )
 from lan_bitable_template_portal.portal_service import (
+    BINDABLE_NOTICE_TARGET_WORK_TYPES,
     BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
     CHANGE_SOURCE_APP_TOKEN,
@@ -6072,6 +6073,12 @@ class FastAPIPortalController:
                     text=payload.get("text") or "",
                     all_active=lookup_context != "ongoing_list",
                     all_ongoing=lookup_context == "ongoing_list",
+                    recent_finished_days=(
+                        7 if lookup_context == "planned_target_table" else 0
+                    ),
+                    allow_unscoped_target=PortalRuntime.auth_manager.is_admin(
+                        session
+                    ),
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -6090,6 +6097,11 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 work_type = str(payload.get("work_type") or "maintenance").strip()
+                binding_context = str(
+                    payload.get("binding_context") or "ongoing"
+                ).strip().lower()
+                if binding_context not in {"planned", "ongoing"}:
+                    raise PortalError("目标绑定上下文无效，请重新打开通告后再试。")
                 notice_type = str(
                     payload.get("notice_type")
                     or NOTICE_TYPE_BY_WORK_TYPE.get(work_type)
@@ -6112,6 +6124,10 @@ class FastAPIPortalController:
                     source_record_id=source_record_id,
                     target_record_id=target_record_id,
                     active_item_id=active_item_id,
+                    allow_finished=binding_context == "planned",
+                    allow_unscoped_target=PortalRuntime.auth_manager.is_admin(
+                        session
+                    ),
                 )
                 scope = str(validation.get("scope") or scope)
                 work_type = str(validation.get("work_type") or work_type)
@@ -6124,11 +6140,19 @@ class FastAPIPortalController:
                     if isinstance(validation.get("_target_active_payload"), dict)
                     else {}
                 )
-                if (
-                    target_record_id
+                target_finished = bool(validation.get("target_finished"))
+                allow_planned_finished = bool(
+                    binding_context == "planned"
                     and work_type
                     in {"maintenance", "change", "repair"}
+                    and validation.get("source_found")
+                    and target_finished
+                )
+                if (
+                    target_record_id
+                    and work_type in BINDABLE_NOTICE_TARGET_WORK_TYPES
                     and not bool(validation.get("target_active"))
+                    and not allow_planned_finished
                 ):
                     raise PortalError(
                         "该目标通告已不再是未结束状态，请重新查找后绑定。"
@@ -6144,8 +6168,27 @@ class FastAPIPortalController:
                         "target_record_id": target_record_id,
                         "record_id": target_record_id or source_record_id,
                         "active_item_id": active_item_id,
+                        "source_work_type": validation.get("source_work_type") or "",
+                        "source_app_token": validation.get("source_app_token") or "",
+                        "source_table_id": validation.get("source_table_id") or "",
                     }
                 )
+                if target_finished:
+                    identity_payload["status"] = str(
+                        validation.get("target_status") or "已结束"
+                    ).strip()
+                    identity_payload["ended_at"] = str(
+                        validation.get("target_ended_at") or ""
+                    ).strip()
+
+                source_ended_synced = False
+                if target_finished and work_type != WORK_TYPE_REPAIR:
+                    source_ended_synced = await asyncio.to_thread(
+                        PortalRuntime.service.sync_notice_source_ended_fields,
+                        identity_payload,
+                    )
+                    if validation.get("source_found") and not source_ended_synced:
+                        raise PortalError("目标记录已结束，但源表完成状态同步失败，请重试绑定。")
 
                 repair_relation: dict[str, Any] = {}
                 if (
@@ -6190,6 +6233,44 @@ class FastAPIPortalController:
                         identity_payload,
                         origin="manual_notice_binding",
                     )
+                    if target_finished:
+                        finished_payload = dict(identity_payload)
+                        removed = False
+                        for row in state_store.list_qt_active_items(include_deleted=False):
+                            row_payload = (
+                                row.get("payload")
+                                if isinstance(row.get("payload"), dict)
+                                else {}
+                            )
+                            if str(row_payload.get("work_type") or "").strip() != work_type:
+                                continue
+                            if not (
+                                canonical_target_record_id(row_payload)
+                                == target_record_id
+                                or active_item_id
+                                and str(row.get("active_item_id") or "")
+                                == active_item_id
+                                or source_record_id
+                                and str(row_payload.get("source_record_id") or "").strip()
+                                == source_record_id
+                            ):
+                                continue
+                            removed = (
+                                PortalRuntime.service._enqueue_target_snapshot_active_delete(
+                                    payload=row_payload,
+                                    reason="manual_finished_target_binding",
+                                )
+                                or removed
+                            )
+                        PortalRuntime.service._mark_local_notice_finished_from_target(
+                            finished_payload,
+                            ended_at=str(validation.get("target_ended_at") or ""),
+                        )
+                        return {
+                            "identity": identity or {},
+                            "active_updated": removed,
+                            "qt_event_id": 0,
+                        }
                     binding_row = next(
                         (
                             row
@@ -6344,6 +6425,11 @@ class FastAPIPortalController:
                         "source_record_id": source_record_id,
                         "target_record_id": target_record_id,
                         "active_item_id": active_item_id,
+                        "binding_context": binding_context,
+                        "target_finished": target_finished,
+                        "target_status": str(validation.get("target_status") or ""),
+                        "target_ended_at": str(validation.get("target_ended_at") or ""),
+                        "source_ended_synced": source_ended_synced,
                         "repair_management_record_id": (
                             source_record_id
                             if work_type == WORK_TYPE_REPAIR
@@ -6781,7 +6867,7 @@ class FastAPIPortalController:
             def _is_ended(item: dict) -> bool:
                 payload = _active_payload(item)
                 info = extract_event_info(str(payload.get("text") or "")) or {}
-                return (
+                return not bool(payload.get("_has_unuploaded_changes")) and (
                     str(payload.get("status") or "").strip() == "结束"
                     or str(info.get("status") or "").strip() == "结束"
                 )
@@ -9549,8 +9635,15 @@ class FastAPIPortalController:
             info = extract_event_info(text) or {}
             return str(info.get("status") or "").strip() == "结束"
 
+        def _item_is_event(item: dict) -> bool:
+            return str(item.get("work_type") or "").strip() == "event" or str(
+                item.get("notice_type") or ""
+            ).strip() == "事件通告"
+
         def _append(item: dict) -> None:
             if not isinstance(item, dict):
+                return
+            if _item_is_event(item):
                 return
             if _item_is_ended(item):
                 return
@@ -9688,6 +9781,7 @@ class FastAPIPortalController:
                     normalize_notice_identity_payload(dict(item))
                     for item in snapshot.get("items", [])
                     if isinstance(item, dict)
+                    and not _item_is_event(item)
                     and not _item_is_ended(item)
                     and not _item_deleted_in_qt_store(item)
                     and PortalRuntime.service._scope_matches_item(scope, item)
