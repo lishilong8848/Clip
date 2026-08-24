@@ -39,10 +39,36 @@ class WorkbenchActionRequest(APIModel):
     operation_id: str = ""
     execution_party: str = ""
     ali_confirmation_images: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
+    polling_sop_id: str = Field(default="", max_length=80)
+    polling_sop_version: int = 0
+    polling_run_count: int = 0
+    polling_runs: list[dict[str, str]] = Field(default_factory=list, max_length=6)
+    polling_operator_record_id: str = Field(default="", max_length=80)
+    polling_reviewer_record_id: str = Field(default="", max_length=80)
+
+
+class PollingSopRequest(APIModel):
+    sop_id: str = Field(default="", max_length=80)
+    name: str = Field(min_length=1, max_length=160)
+    expected_version: int = 0
+    steps: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class PollingWorkOrderConfirmRequest(APIModel):
+    token: str = Field(min_length=20, max_length=512)
+    step_key: str = Field(min_length=1, max_length=32)
+    expected_version: int
+
+    class Config(APIModel.Config):
+        extra = "forbid"
 
 
 class ChangeConfirmationScreenshotRequest(APIModel):
-    upload_id: str = Field(min_length=1, max_length=128)
+    upload_id: str = Field(default="", max_length=128)
+    local_image_id: str = Field(default="", max_length=80)
 
     class Config(APIModel.Config):
         extra = "forbid"

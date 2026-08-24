@@ -7810,11 +7810,13 @@ class MaintenancePortalService:
             matched.append(
                 {
                     "person_record_id": str(person.get("record_id") or "").strip(),
+                    "record_id": str(person.get("record_id") or "").strip(),
                     "user_id": user_id,
                     "name": name,
                     "employee_no": str(person.get("employee_no") or "").strip(),
                     "building": str(person.get("building") or "").strip(),
                     "position": str(person.get("position") or "").strip(),
+                    "shift": str(person.get("shift") or "").strip(),
                     "selectable": bool(user_id),
                 }
             )
@@ -39054,6 +39056,11 @@ class MaintenancePortalService:
         if not explicit_site_photos:
             for stale_image_key in ("extra_images", "site_photos", "process_site_images"):
                 expanded.pop(stale_image_key, None)
+        if not (
+            payload.get("ali_confirmation_images")
+            or patch.get("ali_confirmation_images")
+        ):
+            expanded.pop("ali_confirmation_images", None)
         for key in (
             "scope",
             "action",
@@ -39828,6 +39835,16 @@ class MaintenancePortalService:
             )
         else:
             prepared = self.prepare_maintenance_action(request_payload, job_id=job_id)
+        if work_type == WORK_TYPE_POLLING:
+            from .polling_work_orders import PollingWorkOrderService
+
+            prepared.update(
+                PollingWorkOrderService(self._state_store).prepare_start(
+                    request_payload,
+                    job_id=job_id,
+                    people=self._load_signature_people(),
+                )
+            )
         return self._synchronize_prepared_notice_text(prepared)
 
     @classmethod
@@ -40980,17 +40997,31 @@ class MaintenancePortalService:
         ali_confirmation_fingerprint = ""
         web_today_screenshot_required = False
         if request_payload.get("_web_action_request") and ali_confirmation_images:
-            upload_id = str(
-                ali_confirmation_images[0].get("upload_id") or ""
-            ).strip()
+            image_entry = ali_confirmation_images[0]
+            upload_id = str(image_entry.get("upload_id") or "").strip()
+            local_image_id = str(image_entry.get("local_image_id") or "").strip()
             attachment = (
                 self._state_store.get_notice_upload_attachment(upload_id)
                 if upload_id
                 else None
             )
-            if not attachment:
+            local_image = None
+            if local_image_id:
+                try:
+                    from .local_notice_images import LocalNoticeImageStore
+
+                    local_image = LocalNoticeImageStore(self._state_store).get(
+                        local_image_id
+                    )
+                except Exception:
+                    local_image = None
+            if not attachment and not local_image:
                 raise PortalError("阿里确认截图已过期或不存在，请重新添加。")
-            attachment_owner = str(attachment.get("open_id") or "").strip()
+            attachment_owner = str(
+                (attachment or {}).get("open_id")
+                or (local_image or {}).get("owner_open_id")
+                or ""
+            ).strip()
             actor_open_id = str(request_payload.get("_auth_open_id") or "").strip()
             if attachment_owner and actor_open_id and attachment_owner != actor_open_id:
                 raise PortalError("不能使用其他账号上传的阿里确认截图。")

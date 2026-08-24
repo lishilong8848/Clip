@@ -1742,7 +1742,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
-    def test_change_confirmation_reminds_buildings_then_notifies_h_once(self):
+    def test_change_confirmation_reminds_h_every_ten_minutes_until_confirmed(self):
         self.assertEqual(portal_server_module.CHANGE_CONFIRMATION_REMINDER_SECONDS, 10 * 60)
         with tempfile.TemporaryDirectory() as temp_dir:
             store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
@@ -1813,6 +1813,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     side_effect=[
                         (True, screenshot_record),
                         (True, refreshed_screenshot_record),
+                        (True, refreshed_screenshot_record),
                     ],
                 ), patch.object(
                     portal_server_module,
@@ -1825,15 +1826,38 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         after_due,
                         now=1700,
                     )
-                    PortalRuntime._process_change_confirmation_task(
+                    before_repeat = PortalRuntime._process_change_confirmation_task(
                         notified,
-                        now=1900,
+                        now=2299,
+                    )
+                    repeated = PortalRuntime._process_change_confirmation_task(
+                        before_repeat,
+                        now=2300,
                     )
                 self.assertEqual(
                     h_messages,
-                    [[portal_server_module.BUILDING_OPEN_ID_MAP["H"]]],
+                    [
+                        [portal_server_module.BUILDING_OPEN_ID_MAP["H"]],
+                        [portal_server_module.BUILDING_OPEN_ID_MAP["H"]],
+                    ],
                 )
                 self.assertEqual(notified["state"], "awaiting_confirmation")
+                confirmed_record = copy.deepcopy(screenshot_record)
+                confirmed_record["fields"]["H楼确认"] = True
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, confirmed_record),
+                ), patch.object(
+                    portal_server_module,
+                    "_send_text_to_open_ids_guarded",
+                ) as send_after_confirm:
+                    confirmed = PortalRuntime._process_change_confirmation_task(
+                        repeated,
+                        now=2900,
+                    )
+                self.assertEqual(confirmed["state"], "confirmed")
+                send_after_confirm.assert_not_called()
                 ended_record = copy.deepcopy(screenshot_record)
                 ended_record["fields"]["变更状态"] = "结束"
                 with patch.object(
@@ -2782,12 +2806,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("H楼通知等待重试", admin_html)
         self.assertIn("liteActiveImagePanel", admin_html)
         self.assertIn("site-photo-thumb", admin_html)
-        self.assertIn("点击 / Ctrl+V 粘贴阿里确认截图", admin_html)
-        self.assertIn("新图追加保留", admin_html)
+        self.assertNotIn("点击 / Ctrl+V 粘贴阿里确认截图", admin_html)
+        self.assertNotIn("新图追加保留", admin_html)
+        self.assertNotIn("仅维保、变更、检修需要", admin_html)
+        self.assertIn("site-photo-add-icon", admin_html)
         self.assertIn("已暂存，将随开始通告上传", admin_html)
         self.assertIn("data-ali-confirmation-remove", admin_html)
         self.assertIn("data-file-token", admin_html)
-        self.assertIn("function aliConfirmationPreviewItems", admin_html)
+        self.assertNotIn("function aliConfirmationPreviewItems", admin_html)
+        self.assertIn("preview.startsWith('/api/notice-images/')", admin_html)
         self.assertIn("data-fresh-for-today", admin_html)
         self.assertIn("freshForToday", admin_html)
         self.assertIn("method: 'DELETE'", admin_html)
@@ -2799,7 +2826,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("? 'ongoing' : 'planned'", admin_html)
         self.assertIn("该事项已在“未结束通告”中，请从通告处理列表继续办理。", admin_html)
         self.assertNotIn("今日是否进行将写为是，请先上传本次阿里确认截图", admin_html)
-        self.assertIn('id="lite-ali-confirmation-upload-now" type="button" disabled>上传</button>', admin_html)
+        self.assertIn('class="btn primary compact-upload" id="lite-ali-confirmation-upload-now" type="button" disabled>上传</button>', admin_html)
         ali_handler = admin_html.split("async function handleAliConfirmationFile", 1)[1].split(
             "async function uploadAliConfirmationNow", 1
         )[0]
@@ -2818,6 +2845,34 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ali_items[0]["preview_url"],
             "/api/change-confirmations/target%20change%2Fpreview/screenshot/preview?file_token=token%2Fwith%20space",
         )
+        local_only_html = render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [
+                    {
+                        "active_item_id": "target-local-preview",
+                        "target_record_id": "target-local-preview",
+                        "record_id": "target-local-preview",
+                        "work_type": "change",
+                        "notice_type": "变更通告",
+                        "title": "本地预览测试",
+                        "status": "开始",
+                        "extra_images": [
+                            {"file_token": "remote-site-token-should-not-render"}
+                        ],
+                        "ali_confirmation_images": [
+                            {"file_token": "remote-token-should-not-render"}
+                        ],
+                    }
+                ],
+            },
+            session={"role": "admin", "can_manage_change_confirmations": True},
+            scope="ALL",
+            work_type="change",
+            active_item_id="target-local-preview",
+        )
+        self.assertNotIn("remote-token-should-not-render", local_only_html)
+        self.assertNotIn("remote-site-token-should-not-render", local_only_html)
 
     def test_change_confirmation_api_permissions(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -2925,6 +2980,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "ali-token",
                 )
                 self.assertFalse(delete_screenshot.call_args.kwargs["privileged"])
+            with patch.object(
+                PortalRuntime,
+                "local_notice_images",
+                return_value=SimpleNamespace(
+                    get=lambda _image_id: {"feishu_file_token": "ali-local-token"}
+                ),
+            ), patch.object(
+                PortalRuntime,
+                "delete_change_confirmation_screenshot",
+                return_value={"target_record_id": "target-change"},
+            ) as delete_local_screenshot:
+                response = client.delete(
+                    "/api/change-confirmations/target-change/screenshot?local_image_id=local-image",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=d-session"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(
+                    delete_local_screenshot.call_args.kwargs["file_token"],
+                    "ali-local-token",
+                )
             with patch.object(
                 PortalRuntime,
                 "get_change_confirmation_screenshot_bytes",
@@ -3188,6 +3263,35 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(
                 prepared["ali_confirmation_images"][0]["upload_id"],
                 attachment["upload_id"],
+            )
+
+            local_image = portal_server_module.LocalNoticeImageStore(
+                service._state_store
+            )
+            local_image.root = Path(tmp) / "notice_images"
+            saved_local = local_image.save(
+                identity="change:local-change-today",
+                kind="ali",
+                content=b"local-image",
+                file_name="local-ali.png",
+                mime_type="image/png",
+                owner_open_id="operator",
+            )
+            prepared_local = service.prepare_change_action(
+                {
+                    **base,
+                    "ali_confirmation_images": [
+                        {
+                            "local_image_id": saved_local["local_image_id"],
+                            "file_name": "local-ali.png",
+                        }
+                    ],
+                },
+                job_id="job-web-change-local-image",
+            )
+            self.assertEqual(
+                prepared_local["ali_confirmation_images"][0]["local_image_id"],
+                saved_local["local_image_id"],
             )
 
             update = {
@@ -26820,6 +26924,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "file_name": "old.png",
                         }
                     ],
+                    "ali_confirmation_images": [
+                        {
+                            "file_token": "existing-ali-token",
+                            "file_name": "confirmed.png",
+                        }
+                    ],
                 }
             ],
         )
@@ -26828,6 +26938,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(expanded.get("progress"), "测试更新")
         self.assertNotIn("extra_images", expanded)
         self.assertNotIn("site_photos", expanded)
+        self.assertNotIn("ali_confirmation_images", expanded)
 
     def test_manual_notice_command_requires_explicit_source_binding_choice(self):
         service = _TestMaintenancePortalService()

@@ -64,6 +64,18 @@ class PollingNoticeHandler(BaseNoticeHandler):
             fields[POLLING_NOTICE_FIELDS["notice_images"]] = [
                 {"file_token": token} for token in payload.file_tokens
             ]
+        if payload.polling_work_order_required:
+            fields.update(
+                {
+                    POLLING_NOTICE_FIELDS["work_order_required"]: True,
+                    POLLING_NOTICE_FIELDS["work_order_operator"]: str(
+                        payload.polling_operator_name or ""
+                    ).strip(),
+                    POLLING_NOTICE_FIELDS["work_order_reviewer"]: str(
+                        payload.polling_reviewer_name or ""
+                    ).strip(),
+                }
+            )
 
         return fields
 

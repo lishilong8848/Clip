@@ -801,30 +801,19 @@ def _site_photo_uploader(
     if work not in SITE_PHOTO_REQUIRED_WORK_TYPES:
         return ""
     count = max(0, _to_int(existing_count, 0))
-    status_text = (
-        f"已累计 {count} 张，结束时满足现场照片要求。"
-        if count > 0
-        else "开始、更新、结束任意一次上传 1 张现场照片后，即可满足结束要求。"
-    )
     return f"""
         <section class="site-photo-panel" data-site-photo-panel data-existing-count="{_e(count)}"
           data-existing-images="{_e(_json_dumps(existing_images or []))}">
           <input type="hidden" name="site_photos_json" value="[]">
           <header class="site-photo-head">
-            <div>
-              <strong>现场照片</strong>
-              <span>仅维保、变更、检修需要；用于多维表“过程现场图片”。</span>
-            </div>
-            <b id="lite-site-photo-badge">{_e('已满足' if count > 0 else '待添加')}</b>
+            <strong>现场照片</strong>
           </header>
           <div class="site-photo-upload">
-            <label class="site-photo-drop" for="lite-site-photo-input" tabindex="0">
+            <label class="site-photo-drop" for="lite-site-photo-input" tabindex="0" aria-label="添加现场照片">
               <input id="lite-site-photo-input" type="file" accept="image/*" multiple>
-              <span>点击 / 拖入 / Ctrl+V 粘贴现场照片</span>
-              <small>支持截图粘贴、多张图片，单张不超过 8MB</small>
+              <span class="site-photo-add-icon" aria-hidden="true">＋</span>
             </label>
             <div class="site-photo-side">
-              <span id="lite-site-photo-status">{_e(status_text)}</span>
               <div id="lite-site-photo-list" class="site-photo-list" aria-live="polite"></div>
             </div>
           </div>
@@ -844,8 +833,7 @@ def _change_confirmation_uploader(
     if _work_type(work_type) != "change":
         return ""
     count = max(0, _to_int(existing_count, 0))
-    status = "H楼已确认" if confirmed else "待H楼确认" if count else "待上传"
-    upload_now = '<button class="btn primary" id="lite-ali-confirmation-upload-now" type="button" disabled>上传</button>'
+    upload_now = '<button class="btn primary compact-upload" id="lite-ali-confirmation-upload-now" type="button" disabled>上传</button>'
     return f"""
         <section class="site-photo-panel ali-confirmation-panel" data-ali-confirmation-panel
           data-target-record-id="{_e(target_record_id)}" data-existing-count="{_e(count)}"
@@ -854,25 +842,55 @@ def _change_confirmation_uploader(
           data-existing-images="{_e(_json_dumps(existing_images or []))}">
           <input type="hidden" name="ali_confirmation_images_json" value="[]">
           <header class="site-photo-head">
-            <div>
-              <strong>阿里确认截图</strong>
-              <span>{_e('上传后将通知H楼确认。' if target_record_id else '点击上传暂存，发送开始时写入目标表。')}</span>
-            </div>
-            <b id="lite-ali-confirmation-badge">{_e(status)}</b>
+            <strong>阿里确认截图</strong>
           </header>
           <div class="site-photo-upload">
-            <label class="site-photo-drop" for="lite-ali-confirmation-input" tabindex="0">
+            <label class="site-photo-drop" for="lite-ali-confirmation-input" tabindex="0" aria-label="添加阿里确认截图">
               <input id="lite-ali-confirmation-input" type="file" accept="image/*">
-              <span>点击 / Ctrl+V 粘贴阿里确认截图</span>
-              <small>每次一张，不超过 8MB；新图追加保留，并重置H楼确认</small>
+              <span class="site-photo-add-icon" aria-hidden="true">＋</span>
             </label>
             <div class="site-photo-side">
-              <span id="lite-ali-confirmation-status">{_e(status)}</span>
               <div id="lite-ali-confirmation-file" class="site-photo-list" aria-live="polite"></div>
               {upload_now}
             </div>
           </div>
         </section>
+    """
+
+
+def _polling_work_order_selector(work_type: str) -> str:
+    if _work_type(work_type) != "polling":
+        return ""
+    return """
+      <section class="form-section polling-work-order-select" data-polling-work-order-select>
+        <header><strong>轮巡工单</strong><span id="lite-polling-selection-summary">未选择 SOP</span></header>
+        <button class="btn ghost" id="lite-polling-select-open" type="button">选择操作步骤</button>
+      </section>
+    """
+
+
+def _polling_work_order_status(source: dict[str, Any], work_type: str) -> str:
+    if _work_type(work_type) != "polling":
+        return ""
+    group_id = str(source.get("polling_work_order_group_id") or "").strip()
+    if not group_id:
+        return ""
+    state = str(source.get("polling_work_order_state") or "active").strip()
+    operator_link = str(source.get("polling_work_order_operator_link") or "").strip()
+    reviewer_link = str(source.get("polling_work_order_reviewer_link") or "").strip()
+    link_buttons = "".join(
+        f'<button class="btn ghost" type="button" data-polling-copy-link="{_e(link)}">复制{_e(label)}链接</button>'
+        for label, link in (("操作人", operator_link), ("审核人", reviewer_link))
+        if link
+    )
+    return f"""
+      <section class="form-section polling-work-order-status">
+        <header><strong>轮巡工单</strong><span>{_e(state)}</span></header>
+        <div class="polling-sop-inline">{link_buttons}
+          <button class="btn ghost" type="button" data-polling-resend-links="{_e(group_id)}">重发链接</button>
+          <button class="btn ghost" type="button" data-polling-retry-upload="{_e(group_id)}">重试附件上传</button>
+        </div>
+      </section>
     """
 
 
@@ -1582,9 +1600,6 @@ def _record_rows(
             linked_ongoing=bool(linked_ongoing),
         )
         site_photo_count = _site_photo_count(row_source)
-        site_photo_images = _attachment_items(
-            row_source, "extra_images", "site_photos", "process_site_images", "过程现场图片", "现场图片"
-        )
         ali_confirmation_images = _attachment_items(row_source, "ali_confirmation_images", "阿里确认截图")
         ali_confirmation_count = max(
             _to_int(row_source.get("ali_confirmation_screenshot_count"), 0),
@@ -1630,9 +1645,9 @@ def _record_rows(
         f" data-active-item-id=\"{_e(linked_active_item_id)}\""
         f" data-target-record-id=\"{_e(linked_target_record_id)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
-        f" data-site-photo-images=\"{_e(_json_dumps(site_photo_images))}\""
+        f" data-site-photo-images=\"[]\""
         f" data-ali-confirmation-count=\"{_e(ali_confirmation_count)}\""
-        f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
+        f" data-ali-confirmation-images=\"[]\""
         f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(row_source.get('h_building_confirmed')) else '0'}\""
         f" data-ali-confirmation-fresh=\"{'1' if _truthy_display(row_source.get('ali_confirmation_fresh_for_today')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
@@ -1696,9 +1711,6 @@ def _ongoing_rows(
         )
         status = _ongoing_display_status(item)
         site_photo_count = _site_photo_count(item)
-        site_photo_images = _attachment_items(
-            item, "extra_images", "site_photos", "process_site_images", "过程现场图片", "现场图片"
-        )
         ali_confirmation_images = _attachment_items(item, "ali_confirmation_images", "阿里确认截图")
         ali_confirmation_count = max(
             _to_int(item.get("ali_confirmation_screenshot_count"), 0),
@@ -1721,9 +1733,9 @@ def _ongoing_rows(
         f" data-source-event-id=\"{_e(source_event_id)}\""
         f" data-source-event-title=\"{_e(source_event_title)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
-        f" data-site-photo-images=\"{_e(_json_dumps(site_photo_images))}\""
+        f" data-site-photo-images=\"[]\""
         f" data-ali-confirmation-count=\"{_e(ali_confirmation_count)}\""
-        f" data-ali-confirmation-images=\"{_e(_json_dumps(ali_confirmation_images))}\""
+        f" data-ali-confirmation-images=\"[]\""
         f" data-ali-confirmation-confirmed=\"{'1' if _truthy_display(item.get('h_building_confirmed')) else '0'}\""
         f" data-ali-confirmation-fresh=\"{'1' if _truthy_display(item.get('ali_confirmation_fresh_for_today')) else '0'}\""
         f" data-mop-status=\"{_e(mop_status)}\""
@@ -2229,14 +2241,6 @@ def _detail_form(
         else ""
     )
     site_photo_count = _site_photo_count(source)
-    site_photo_images = _attachment_items(
-        source,
-        "extra_images",
-        "site_photos",
-        "process_site_images",
-        "过程现场图片",
-        "现场图片",
-    )
     ali_confirmation_images = _attachment_items(
         source,
         "ali_confirmation_images",
@@ -2389,8 +2393,10 @@ def _detail_form(
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
-        {_site_photo_uploader(work, site_photo_count, site_photo_images)}
-        {_change_confirmation_uploader(work, target_record_id=target_record_id, existing_count=ali_confirmation_count, confirmed=h_building_confirmed, fresh_for_today=ali_confirmation_fresh_for_today, existing_images=ali_confirmation_images)}
+        {_polling_work_order_selector(work)}
+        {_polling_work_order_status(source, work)}
+        {_site_photo_uploader(work, site_photo_count, [])}
+        {_change_confirmation_uploader(work, target_record_id=target_record_id, existing_count=ali_confirmation_count, confirmed=h_building_confirmed, fresh_for_today=ali_confirmation_fresh_for_today, existing_images=[])}
         <section class="notice-preview" aria-live="polite">
           <div class="preview-head">
             <span>发送预览</span>
@@ -2624,6 +2630,12 @@ def render_workbench_lite(
         '<button class="top-link" id="lite-change-confirmation-open" type="button" '
         'aria-haspopup="dialog" aria-controls="lite-change-confirmations">变更确认</button>'
         if can_manage_change_confirmations
+        else ""
+    )
+    polling_sop_button = (
+        '<button class="top-link" id="lite-polling-sop-open" type="button" '
+        'aria-haspopup="dialog" aria-controls="lite-polling-sop-modal">轮巡 SOP</button>'
+        if view_work == "polling"
         else ""
     )
     scope_options = scope_options or []
@@ -2884,13 +2896,13 @@ def render_workbench_lite(
     .site-photo-head strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.25; }}
     .site-photo-head span {{ display:block; margin-top:2px; color:#64748b; font-size:11px; line-height:1.35; }}
     .site-photo-head b {{ white-space:nowrap; border-radius:999px; padding:4px 9px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.14); font-size:11px; }}
-    .site-photo-upload {{ display:grid; grid-template-columns:minmax(150px,190px) minmax(0,1fr); gap:10px; align-items:stretch; }}
+    .site-photo-upload {{ display:grid; grid-template-columns:64px minmax(0,1fr); gap:10px; align-items:stretch; }}
     .site-photo-drop {{ min-height:62px; border:1px dashed #93c5fd; border-radius:14px; display:grid; place-items:center; gap:2px; padding:10px; color:#0a57d8; background:#fff; cursor:pointer; font-weight:950; text-align:center; transition:border-color .16s ease, background .16s ease, box-shadow .16s ease; }}
     .site-photo-drop:hover,.site-photo-drop.dragover {{ border-color:#1f63ff; background:#eef6ff; box-shadow:0 10px 22px rgba(31,99,255,.1); }}
     .site-photo-drop input {{ display:none; }}
-    .site-photo-drop small {{ color:#64748b; font-size:10px; font-weight:800; }}
+    .site-photo-add-icon {{ margin:0; color:#0a57d8; font-size:25px; font-weight:500; line-height:1; }}
     .site-photo-side {{ min-width:0; display:grid; gap:7px; align-content:start; }}
-    #lite-site-photo-status {{ color:#53677f; font-size:12px; font-weight:900; line-height:1.45; }}
+    .compact-upload {{ width:auto; min-width:64px; min-height:32px; justify-self:start; padding:6px 12px; }}
     .site-photo-list {{ display:flex; flex-wrap:wrap; gap:6px; min-height:24px; }}
     .site-photo-item {{ max-width:180px; min-width:0; display:inline-flex; align-items:center; gap:6px; border:1px solid #d8e5f7; border-radius:999px; padding:4px 8px; color:#0c244d; background:#fff; font-size:11px; font-weight:900; }}
     .site-photo-item span {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
@@ -3007,7 +3019,28 @@ def render_workbench_lite(
     .change-confirmation-error {{ margin-top:6px; color:#b42318; font-size:11px; font-weight:800; }}
     .change-confirmation-actions {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; }}
     .change-confirmation-file {{ max-width:190px; font-size:11px; }}
+    .polling-sop-dialog {{ width:min(1120px,100%); max-height:min(880px,94vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
+    .polling-sop-body {{ min-height:0; display:grid; grid-template-columns:minmax(210px,.36fr) minmax(0,1fr); gap:10px; padding:12px; overflow:hidden; background:#f7faff; }}
+    .polling-sop-list,.polling-sop-editor {{ min-height:0; overflow:auto; border:1px solid #d8e5f7; border-radius:16px; padding:10px; background:#fff; }}
+    .polling-sop-list {{ display:grid; align-content:start; gap:7px; }}
+    .polling-sop-row {{ width:100%; border:1px solid #d8e5f7; border-radius:12px; padding:9px; color:#0c244d; background:#f8fbff; text-align:left; cursor:pointer; }}
+    .polling-sop-row.active {{ border-color:#75adff; background:#eef6ff; }}
+    .polling-sop-row strong,.polling-sop-row small {{ display:block; }}
+    .polling-sop-row small {{ margin-top:3px; color:#64748b; }}
+    .polling-sop-editor {{ display:grid; align-content:start; gap:10px; }}
+    .polling-sop-steps {{ display:grid; gap:8px; }}
+    .polling-step-edit {{ border:1px solid #d8e5f7; border-radius:14px; padding:9px; background:#fbfdff; }}
+    .polling-step-edit header {{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }}
+    .polling-step-flags,.polling-sop-inline {{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; }}
+    .polling-step-flags label {{ display:inline-flex; align-items:center; gap:5px; }}
+    .polling-step-flags input {{ width:16px; min-height:16px; }}
+    .polling-sop-attachments {{ display:grid; gap:6px; }}
+    .polling-sop-attachment {{ display:flex; align-items:center; justify-content:space-between; gap:8px; border:1px solid #d8e5f7; border-radius:12px; padding:7px 9px; }}
+    .polling-run-row {{ display:grid; grid-template-columns:34px 1fr auto 1fr; gap:7px; align-items:center; }}
+    .polling-people-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }}
+    .polling-work-order-select[hidden] {{ display:none; }}
     @media (max-width:760px) {{ .change-confirmation-summary {{ grid-template-columns:1fr; }} .change-confirmation-row {{ grid-template-columns:1fr; }} .change-confirmation-actions {{ justify-content:flex-start; }} }}
+    @media (max-width:760px) {{ .polling-sop-body {{ grid-template-columns:1fr; overflow:auto; }} .polling-sop-list,.polling-sop-editor {{ overflow:visible; }} .polling-people-grid {{ grid-template-columns:1fr; }} }}
     .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
     .repair-event-candidate-dialog {{ width:min(980px,100%); }}
     .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
@@ -3044,7 +3077,7 @@ def render_workbench_lite(
       .manual-picker > .btn,.refresh-picker > .btn {{ width:100%; }}
       .manual-menu,.refresh-menu {{ left:0; right:auto; max-width:calc(100vw - 32px); }}
       .form-grid {{ grid-template-columns:1fr; }}
-      .site-photo-upload {{ grid-template-columns:1fr; }}
+      .site-photo-upload {{ grid-template-columns:64px minmax(0,1fr); }}
       .detail-head {{ grid-template-columns:1fr; }}
       label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
       .form-actions {{ flex-wrap:wrap; }}
@@ -3066,6 +3099,7 @@ def render_workbench_lite(
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
       <a class="top-link" href="/" aria-label="返回">返回</a>
       <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
+      {polling_sop_button}
       {change_confirmation_button}
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
     </nav>
@@ -3163,6 +3197,13 @@ def render_workbench_lite(
       </div><!--LITE_FRAGMENT:detail:END-->
     </section><!--LITE_FRAGMENT:workspace:END-->
   </main>
+  <div class="end-check-backdrop" id="lite-polling-sop-modal" hidden>
+    <section class="end-check-dialog polling-sop-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-polling-sop-title">
+      <header class="end-check-head"><span>轮巡 SOP</span><strong id="lite-polling-sop-title">SOP 管理</strong></header>
+      <div class="polling-sop-body"><aside class="polling-sop-list" id="lite-polling-sop-list"></aside><section class="polling-sop-editor" id="lite-polling-sop-editor"></section></div>
+      <footer class="end-check-actions"><button class="btn ghost" type="button" id="lite-polling-sop-new">新增 SOP</button><button class="btn primary" type="button" id="lite-polling-sop-close">关闭</button></footer>
+    </section>
+  </div>
   <div class="end-check-backdrop" id="lite-change-confirmations" hidden>
     <section class="end-check-dialog change-confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-change-confirmation-title">
       <header class="end-check-head">
@@ -3271,6 +3312,91 @@ def render_workbench_lite(
     const initialScope = {_json_dumps(scope)};
     const liteIsAdmin = {_json_dumps(bool(is_admin_session))};
     let liteFormDirty = false;
+    let litePollingSops = [];
+    let litePollingSopMode = 'manage';
+    let litePollingEditingSop = null;
+    let litePollingSelectedSop = null;
+    let litePollingPeople = [];
+    let litePollingSelection = null;
+    const litePollingUnits = ['1#','2#','3#','4#','5#','6#'];
+    async function pollingApi(url, options = {{}}) {{
+      const response = await fetch(url, {{ credentials:'same-origin', ...options }});
+      const data = await response.json().catch(() => ({{}}));
+      if (handleLiteAuthRequired(response, data)) throw new Error('登录已过期');
+      if (!response.ok || data.ok === false) throw new Error(data.error || '轮巡 SOP 操作失败');
+      return data.data || data;
+    }}
+    async function loadPollingSops() {{
+      const data = await pollingApi('/api/polling-sops');
+      litePollingSops = Array.isArray(data.items) ? data.items : [];
+      return litePollingSops;
+    }}
+    function pollingSopModal() {{ return document.getElementById('lite-polling-sop-modal'); }}
+    function closePollingSopModal() {{ const modal=pollingSopModal(); if(modal) modal.hidden=true; }}
+    function pollingPersonDisplay(person) {{
+      return [person?.name,person?.position,person?.building,person?.employee_no].map(value=>String(value||'').trim()).filter(Boolean).join(' · ');
+    }}
+    function pollingSortedPeople(people) {{
+      return [...(people||[])].sort((a,b)=>String(a.employee_no||'').localeCompare(String(b.employee_no||''),'zh-CN')||String(a.name||'').localeCompare(String(b.name||''),'zh-CN'));
+    }}
+    function pollingCurrentBuildingLabel() {{
+      const scope=String(getCurrentScope()||'').toUpperCase();
+      return ['A','B','C','D','E','H'].includes(scope)?`${{scope}}楼`:scope==='110'?'110站':'';
+    }}
+    async function loadPollingPeople() {{
+      const data=await pollingApi('/api/signatures/people?limit=200');
+      litePollingPeople=pollingSortedPeople(Array.isArray(data.people)?data.people:[]);
+      return litePollingPeople;
+    }}
+    function pollingNewDraft() {{ return {{sop_id:'',name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true}}],attachments:[]}}; }}
+    function pollingStepEditor(step,index) {{
+      const node=document.createElement('article');node.className='polling-step-edit';
+      const head=document.createElement('header'),title=document.createElement('strong'),remove=document.createElement('button');title.textContent=`步骤 ${{index+1}}`;remove.type='button';remove.className='btn danger-ghost';remove.textContent='删除';remove.onclick=()=>{{litePollingEditingSop.steps.splice(index,1);renderPollingSopEditor()}};head.append(title,remove);
+      const textarea=document.createElement('textarea');textarea.value=String(step.content||'');textarea.placeholder='输入操作内容，可插入起点/终点';textarea.oninput=()=>step.content=textarea.value;
+      const tools=document.createElement('div');tools.className='polling-sop-inline';
+      for(const [label,token] of [['插入起点','{{from}}'],['插入终点','{{to}}']]){{const button=document.createElement('button');button.type='button';button.className='btn ghost';button.textContent=label;button.onclick=()=>{{const start=textarea.selectionStart??textarea.value.length,end=textarea.selectionEnd??start;textarea.value=textarea.value.slice(0,start)+token+textarea.value.slice(end);step.content=textarea.value;textarea.focus();textarea.setSelectionRange(start+token.length,start+token.length)}};tools.append(button)}}
+      const flags=document.createElement('div');flags.className='polling-step-flags';
+      for(const [key,label] of [['operator_required','操作人是否需要'],['reviewer_required','现场审核人是否需要']]){{const labelNode=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.checked=Boolean(step[key]);input.onchange=()=>step[key]=input.checked;labelNode.append(input,document.createTextNode(label));flags.append(labelNode)}}
+      node.append(head,textarea,tools,flags);return node;
+    }}
+    function renderPollingSopList() {{
+      const list=document.getElementById('lite-polling-sop-list');if(!list)return;const items=litePollingSopMode==='select'?litePollingSops.filter(item=>item.ready):litePollingSops;
+      const nodes=items.map(item=>{{const button=document.createElement('button');button.type='button';button.className='polling-sop-row '+((litePollingSopMode==='select'?litePollingSelectedSop?.sop_id:litePollingEditingSop?.sop_id)===item.sop_id?'active':'');const strong=document.createElement('strong'),small=document.createElement('small');strong.textContent=item.name;small.textContent=`${{item.steps?.length||0}} 步 · ${{item.attachments?.length||0}} 附件${{item.ready?'':' · 不可选'}}`;button.append(strong,small);button.onclick=()=>{{if(litePollingSopMode==='select'){{litePollingSelectedSop=item;renderPollingSopList();renderPollingSelectionEditor()}}else{{litePollingEditingSop=structuredClone(item);renderPollingSopList();renderPollingSopEditor()}}}};return button}});
+      if(!nodes.length){{const empty=document.createElement('div');empty.className='empty compact';empty.textContent=litePollingSopMode==='select'?'暂无包含步骤和附件的可用 SOP':'本机还没有轮巡 SOP';nodes.push(empty)}}list.replaceChildren(...nodes);
+    }}
+    function pollingAttachmentRows(sop) {{
+      const box=document.createElement('div');box.className='polling-sop-attachments';
+      for(const item of sop.attachments||[]){{const row=document.createElement('div');row.className='polling-sop-attachment';const link=document.createElement('a');link.href=item.download_url||'#';link.textContent=`${{item.name}} · ${{Math.ceil(Number(item.size||0)/1024)}}KB`;const remove=document.createElement('button');remove.type='button';remove.className='btn danger-ghost';remove.textContent='删除';remove.onclick=async()=>{{try{{litePollingEditingSop=await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}/attachments/${{encodeURIComponent(item.attachment_id)}}?expected_version=${{sop.version}}`,{{method:'DELETE'}});await loadPollingSops();renderPollingSopList();renderPollingSopEditor()}}catch(error){{showLiteError(error.message)}}}};row.append(link,remove);box.append(row)}}return box;
+    }}
+    function renderPollingSopEditor() {{
+      const editor=document.getElementById('lite-polling-sop-editor');if(!editor)return;const sop=litePollingEditingSop||pollingNewDraft();litePollingEditingSop=sop;editor.replaceChildren();
+      const label=document.createElement('label'),span=document.createElement('span'),name=document.createElement('input');span.textContent='SOP 名称';name.value=sop.name||'';name.oninput=()=>sop.name=name.value;label.append(span,name);
+      const steps=document.createElement('div');steps.className='polling-sop-steps';steps.replaceChildren(...(sop.steps||[]).map(pollingStepEditor));
+      const add=document.createElement('button');add.type='button';add.className='btn ghost';add.textContent='添加步骤';add.onclick=()=>{{sop.steps.push({{step_id:'',content:'',operator_required:true,reviewer_required:true}});renderPollingSopEditor()}};
+      const save=document.createElement('button');save.type='button';save.className='btn primary';save.textContent='保存 SOP';save.onclick=async()=>{{try{{const body={{sop_id:sop.sop_id||'',name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},url=sop.sop_id?`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`:'/api/polling-sops';litePollingEditingSop=await pollingApi(url,{{method:sop.sop_id?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setLiteStatus('SOP 已保存')}}catch(error){{showLiteError(error.message)}}}};
+      const actions=document.createElement('div');actions.className='polling-sop-inline';actions.append(add,save);
+      if(sop.sop_id){{const del=document.createElement('button');del.type='button';del.className='btn danger';del.textContent='删除 SOP';del.onclick=async()=>{{if(!confirm('确认删除该 SOP 及本地附件？'))return;try{{await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}?expected_version=${{sop.version}}`,{{method:'DELETE'}});litePollingEditingSop=pollingNewDraft();await loadPollingSops();renderPollingSopList();renderPollingSopEditor()}}catch(error){{showLiteError(error.message)}}}};actions.append(del)}}
+      editor.append(label,steps,actions);
+      if(sop.sop_id){{const attachmentTitle=document.createElement('strong');attachmentTitle.textContent='本地附件（至少 1 个才可用）';const files=pollingAttachmentRows(sop),input=document.createElement('input');input.type='file';input.multiple=true;input.onchange=async()=>{{for(const file of Array.from(input.files||[])){{const form=new FormData();form.append('file',file);form.append('expected_version',String(litePollingEditingSop.version||0));try{{litePollingEditingSop=await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}/attachments`,{{method:'POST',body:form}})}}catch(error){{showLiteError(error.message);break}}}}await loadPollingSops();renderPollingSopList();renderPollingSopEditor()}};editor.append(attachmentTitle,files,input)}}
+    }}
+    function pollingRunRows(container,count,runs) {{
+      const nodes=[];for(let index=0;index<count;index++){{const row=document.createElement('div');row.className='polling-run-row';const label=document.createElement('b');label.textContent=String(index+1);const from=document.createElement('select'),arrow=document.createElement('span'),to=document.createElement('select');arrow.textContent='→';for(const unit of litePollingUnits){{const a=document.createElement('option'),b=document.createElement('option');a.value=b.value=unit;a.textContent=b.textContent=unit;from.append(a);to.append(b)}}from.value=runs[index]?.from_unit||litePollingUnits[index%6];to.value=runs[index]?.to_unit||litePollingUnits[(index+1)%6];from.onchange=()=>runs[index].from_unit=from.value;to.onchange=()=>runs[index].to_unit=to.value;runs[index]=runs[index]||{{from_unit:from.value,to_unit:to.value}};row.append(label,from,arrow,to);nodes.push(row)}}container.replaceChildren(...nodes);
+    }}
+    function pollingChoosePerson(input,recordId) {{const person=litePollingPeople.find(item=>String(item.record_id||'')===String(recordId||''));input.value=person?pollingPersonDisplay(person):'';input.dataset.recordId=person?.record_id||'';return person}}
+    function pollingSyncPersonInput(input,people=litePollingPeople) {{const value=String(input.value||'').trim(),matches=people.filter(person=>pollingPersonDisplay(person)===value||String(person.name||'').trim()===value);input.dataset.recordId=matches.length===1?String(matches[0].record_id||''):''}}
+    function renderPollingSelectionEditor() {{
+      const editor=document.getElementById('lite-polling-sop-editor');if(!editor)return;editor.replaceChildren();const sop=litePollingSelectedSop;if(!sop){{const empty=document.createElement('div');empty.className='empty';empty.textContent='请先选择一个 SOP';editor.append(empty);return}}
+      const preview=document.createElement('div');preview.className='polling-sop-steps';for(const step of sop.steps||[]){{const row=document.createElement('div');row.className='polling-step-edit';row.textContent=`${{step.order}}. ${{step.content}}`;preview.append(row)}}
+      const countLabel=document.createElement('label'),countText=document.createElement('span'),count=document.createElement('select');countText.textContent='需要轮巡几次';for(let i=1;i<=6;i++){{const option=document.createElement('option');option.value=String(i);option.textContent=`${{i}} 次`;count.append(option)}}const initial=litePollingSelection?.sop_id===sop.sop_id?litePollingSelection:{{run_count:1,runs:[{{from_unit:'1#',to_unit:'2#'}}]}};count.value=String(initial.run_count||1);countLabel.append(countText,count);
+      const runs=document.createElement('div');runs.className='polling-sop-steps';const runValues=Array.from({{length:Number(count.value)}},(_,i)=>({{from_unit:initial.runs?.[i]?.from_unit||'1#',to_unit:initial.runs?.[i]?.to_unit||'2#'}}));pollingRunRows(runs,Number(count.value),runValues);count.onchange=()=>{{const value=Number(count.value);while(runValues.length<value)runValues.push({{from_unit:'1#',to_unit:'2#'}});runValues.length=value;pollingRunRows(runs,value,runValues)}};
+      const peopleGrid=document.createElement('div');peopleGrid.className='polling-people-grid';const operatorLabel=document.createElement('label'),reviewerLabel=document.createElement('label'),operatorText=document.createElement('span'),reviewerText=document.createElement('span'),operator=document.createElement('input'),reviewer=document.createElement('input'),operatorList=document.createElement('datalist'),reviewerList=document.createElement('datalist');operatorText.textContent='操作人';reviewerText.textContent='现场审核人';operator.type=reviewer.type='search';operator.placeholder='搜索操作人';reviewer.placeholder='搜索现场审核人';operatorList.id='polling-operator-options';reviewerList.id='polling-reviewer-options';operator.setAttribute('list',operatorList.id);reviewer.setAttribute('list',reviewerList.id);const fillList=(list,people)=>list.replaceChildren(...people.map(person=>{{const option=document.createElement('option');option.value=pollingPersonDisplay(person);return option}}));fillList(operatorList,litePollingPeople);fillList(reviewerList,litePollingPeople);operator.oninput=()=>pollingSyncPersonInput(operator);reviewer.oninput=()=>pollingSyncPersonInput(reviewer);
+      const building=pollingCurrentBuildingLabel(),inBuilding=litePollingPeople.filter(person=>String(person.building||'').includes(building));const defaultOperator=inBuilding.find(person=>String(person.shift||'').trim()&&/(值班长|楼长|H楼值班主管|110站站长)/.test(String(person.position||'')));const defaultReviewer=inBuilding.find(person=>String(person.record_id||'')!==String(defaultOperator?.record_id||'')&&String(person.position||'').includes('暖通工程师'));pollingChoosePerson(operator,initial.operator_record_id||defaultOperator?.record_id);pollingChoosePerson(reviewer,initial.reviewer_record_id||defaultReviewer?.record_id);
+      const hQuick=document.createElement('button');hQuick.type='button';hQuick.className='btn ghost';hQuick.textContent='快捷选择 H楼人员';hQuick.onclick=()=>{{const hPeople=litePollingPeople.filter(person=>String(person.building||'').includes('H楼'));fillList(reviewerList,hPeople);reviewer.value='';reviewer.dataset.recordId='';reviewer.focus()}};operatorLabel.append(operatorText,operator,operatorList);reviewerLabel.append(reviewerText,reviewer,reviewerList,hQuick);peopleGrid.append(operatorLabel,reviewerLabel);
+      const apply=document.createElement('button');apply.type='button';apply.className='btn primary';apply.textContent='确认选择';apply.onclick=()=>{{pollingSyncPersonInput(operator);pollingSyncPersonInput(reviewer);const operatorId=String(operator.dataset.recordId||''),reviewerId=String(reviewer.dataset.recordId||'');if(!operatorId||!reviewerId){{showLiteError('请选择操作人和现场审核人');return}}if(operatorId===reviewerId){{showLiteError('操作人和现场审核人不能是同一人');return}}const pairs=new Set();for(const run of runValues){{if(run.from_unit===run.to_unit){{showLiteError('起点和终点不能相同');return}}const key=`${{run.from_unit}}>${{run.to_unit}}`;if(pairs.has(key)){{showLiteError('轮巡组合不能重复');return}}pairs.add(key)}}litePollingSelection={{identity:sitePhotoSignature(document.getElementById('lite-notice-form')),sop_id:sop.sop_id,sop_version:sop.version,sop_name:sop.name,run_count:Number(count.value),runs:runValues.map(item=>({{...item}})),operator_record_id:operatorId,reviewer_record_id:reviewerId,operator_name:litePollingPeople.find(person=>person.record_id===operatorId)?.name||'',reviewer_name:litePollingPeople.find(person=>person.record_id===reviewerId)?.name||''}};updatePollingSelectionSummary(document.getElementById('lite-notice-form'));closePollingSopModal();setLiteFormDirty(true);updateActionAvailability(document.getElementById('lite-notice-form'))}};
+      editor.append(preview,countLabel,runs,peopleGrid,apply);
+    }}
+    function updatePollingSelectionSummary(form) {{const section=form?.querySelector('[data-polling-work-order-select]');if(!section)return;const start=String(form.dataset.action||'start')==='start';section.hidden=!start;const valid=litePollingSelection&&litePollingSelection.identity===sitePhotoSignature(form);const summary=document.getElementById('lite-polling-selection-summary');if(summary)summary.textContent=valid?`${{litePollingSelection.sop_name}} · ${{litePollingSelection.run_count}}次 · ${{litePollingSelection.operator_name}}/${{litePollingSelection.reviewer_name}}`:'未选择 SOP';}}
+    async function openPollingSopModal(mode='manage') {{litePollingSopMode=mode;const modal=pollingSopModal();if(!modal)return;modal.hidden=false;document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':'SOP 管理';document.getElementById('lite-polling-sop-new').hidden=mode==='select';try{{await loadPollingSops();if(mode==='select')await loadPollingPeople();litePollingEditingSop=litePollingEditingSop||pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id&&item.ready)||null):litePollingSelectedSop;renderPollingSopList();if(mode==='select')renderPollingSelectionEditor();else renderPollingSopEditor()}}catch(error){{showLiteError(error.message);closePollingSopModal()}}}}
     function currentUrlScope() {{
       return new URLSearchParams(location.search).get('scope') || initialScope;
     }}
@@ -3947,6 +4073,8 @@ def render_workbench_lite(
       'cabinet', 'quantity', 'device',
       'status', 'site_photo_count', 'site_photos', 'extra_images',
       'ali_confirmation_images',
+      'polling_sop_id', 'polling_sop_version', 'polling_run_count', 'polling_runs',
+      'polling_operator_record_id', 'polling_reviewer_record_id',
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
     const noticeFormValueKeys = [
@@ -3978,7 +4106,7 @@ def render_workbench_lite(
           compact[key] = value.map(item => {{
             if (item && typeof item === 'object') {{
               const safe = {{}};
-              for (const field of ['upload_id', 'file_token', 'token', 'file_name', 'url', 'mime_type', 'content_type', 'size']) {{
+              for (const field of ['upload_id', 'file_token', 'token', 'local_image_id', 'file_name', 'url', 'mime_type', 'content_type', 'size', 'from_unit', 'to_unit']) {{
                 if (item[field] != null && item[field] !== '') safe[field] = String(item[field]).slice(0, 500);
               }}
               return safe;
@@ -4294,7 +4422,10 @@ def render_workbench_lite(
     function parsePanelImages(panel) {{
       try {{
         const parsed = JSON.parse(panel?.dataset.existingImages || '[]');
-        return Array.isArray(parsed) ? parsed.filter(item => item && typeof item === 'object') : [];
+        return Array.isArray(parsed) ? parsed.filter(item => {{
+          const preview = String(item?.preview_url || '');
+          return item && typeof item === 'object' && (preview.startsWith('/api/notice-images/') || preview.startsWith('blob:'));
+        }}) : [];
       }} catch {{
         return [];
       }}
@@ -4313,8 +4444,8 @@ def render_workbench_lite(
       }}
     }}
     function appendImagePreview(chip, item, alt) {{
-      const previewUrl = String(item?.preview_url || item?.url || '');
-      if (!previewUrl) return;
+      const previewUrl = String(item?.preview_url || '');
+      if (!(previewUrl.startsWith('/api/notice-images/') || previewUrl.startsWith('blob:'))) return;
       const image = document.createElement('img');
       image.className = 'site-photo-thumb';
       image.src = previewUrl;
@@ -4322,12 +4453,8 @@ def render_workbench_lite(
       chip.classList.add('has-preview');
       chip.append(image);
     }}
-    function imageItemsWithLocalPreviews(items, localItems) {{
-      return (Array.isArray(items) ? items : []).map(item => {{
-        const uploadId = String(item?.upload_id || '');
-        const local = (localItems || []).find(candidate => String(candidate?.upload_id || '') === uploadId);
-        return local?.preview_url ? {{ ...item, preview_url: local.preview_url }} : item;
-      }});
+    function imageItemsWithLocalPreviews(_items, localItems) {{
+      return (localItems || []).filter(item => String(item?.preview_url || '').startsWith('/api/notice-images/') || String(item?.preview_url || '').startsWith('blob:'));
     }}
     function persistAliImageOnRows(targetRecordId, items, freshForToday) {{
       if (!targetRecordId) return;
@@ -4339,14 +4466,6 @@ def render_workbench_lite(
         row.setAttribute('data-ali-confirmation-images', serialized);
         row.setAttribute('data-ali-confirmation-confirmed', '0');
         row.setAttribute('data-ali-confirmation-fresh', freshForToday ? '1' : '0');
-      }});
-    }}
-    function aliConfirmationPreviewItems(targetRecordId, items) {{
-      return (Array.isArray(items) ? items : []).map(item => {{
-        const token = String(item?.file_token || item?.token || '');
-        return token
-          ? {{ ...item, preview_url: `/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot/preview?file_token=${{encodeURIComponent(token)}}` }}
-          : item;
       }});
     }}
     function sitePhotoSignature(form) {{
@@ -4361,12 +4480,72 @@ def render_workbench_lite(
         previewValue(form, 'manual_id'),
       ].join('|');
     }}
+    function localNoticeImageIdentity(form) {{
+      if (!form) return '';
+      const workType = previewValue(form, 'work_type') || form.dataset.workType || '';
+      const identity = previewValue(form, 'source_record_id')
+        || previewValue(form, 'manual_id')
+        || previewValue(form, 'active_item_id')
+        || previewValue(form, 'target_record_id')
+        || previewValue(form, 'record_id');
+      return identity ? `${{workType}}:${{identity}}` : '';
+    }}
+    let liteLocalImageLoadSequence = 0;
+    function invalidateLocalNoticeImageLoad() {{ liteLocalImageLoadSequence += 1; }}
+    function mergeNoticeImageItems(existing, local) {{
+      const merged = [], tokenIndexes = new Map(), localIndexes = new Map();
+      for (const item of [...(existing||[]),...(local||[])]) {{
+        const token = String(item?.file_token || item?.token || '');
+        const localId = String(item?.local_image_id || '');
+        let index = token && tokenIndexes.has(token) ? tokenIndexes.get(token) : (localId && localIndexes.has(localId) ? localIndexes.get(localId) : -1);
+        if (index < 0) {{ index = merged.length; merged.push(item); }}
+        else merged[index] = {{...merged[index],...item}};
+        if (token) tokenIndexes.set(token,index);
+        if (localId) localIndexes.set(localId,index);
+      }}
+      return merged;
+    }}
+    async function loadLocalNoticeImages(form) {{
+      const identity = localNoticeImageIdentity(form);
+      if (!identity) return;
+      const sequence = ++liteLocalImageLoadSequence;
+      const response = await fetch(`/api/notice-image-drafts?identity=${{encodeURIComponent(identity)}}&scope=${{encodeURIComponent(previewValue(form,'scope')||getCurrentScope())}}`, {{ credentials:'same-origin' }});
+      const data = await response.json().catch(() => ({{}}));
+      if (!response.ok || data.ok === false || sequence !== liteLocalImageLoadSequence) return;
+      if (identity !== localNoticeImageIdentity(form)) return;
+      const items = Array.isArray(data?.data?.items) ? data.data.items : [];
+      const siteItems = items.filter(item => item.kind === 'site');
+      const sitePending = siteItems.filter(item => !item.target_written);
+      const siteWritten = siteItems.filter(item => item.target_written);
+      const sitePanel = form.querySelector('[data-site-photo-panel]');
+      if (sitePanel) {{
+        if (siteWritten.length) liteExistingSitePhotos = mergeNoticeImageItems(liteExistingSitePhotos,siteWritten);
+        liteSitePhotos = sitePending;
+        sitePanel.dataset.existingCount = String(Math.max(Number(sitePanel.dataset.existingCount || 0), liteExistingSitePhotos.length));
+        updateSitePhotoUi(form);
+      }}
+      const aliItems = items.filter(item => item.kind === 'ali');
+      const aliWritten = aliItems.filter(item => item.target_written);
+      const aliPending = aliItems.filter(item => !item.target_written);
+      const aliPanel = form.querySelector('[data-ali-confirmation-panel]');
+      if (aliPanel) {{
+        if (aliWritten.length) {{
+          const mergedAli = mergeNoticeImageItems(parsePanelImages(aliPanel),aliWritten);
+          aliPanel.dataset.existingImages = JSON.stringify(mergedAli);
+          aliPanel.dataset.existingCount = String(Math.max(Number(aliPanel.dataset.existingCount || 0), mergedAli.length));
+        }}
+        liteAliConfirmationImage = aliPending.length ? aliPending[aliPending.length - 1] : null;
+        updateAliConfirmationUi(form);
+      }}
+    }}
     function parseSitePhotosFromForm(form) {{
       const hidden = form?.querySelector('[name="site_photos_json"]');
       if (!hidden) return [];
       try {{
         const parsed = JSON.parse(hidden.value || '[]');
-        return Array.isArray(parsed) ? parsed.filter(item => item && typeof item === 'object' && item.upload_id) : [];
+        return Array.isArray(parsed)
+          ? parsed.filter(item => item && typeof item === 'object' && (item.upload_id || item.local_image_id || item.file_token))
+          : [];
       }} catch {{
         return [];
       }}
@@ -4388,6 +4567,7 @@ def render_workbench_lite(
       liteSitePhotos = parseSitePhotosFromForm(form);
       liteSitePhotoSignature = sitePhotoSignature(form);
       updateSitePhotoUi(form);
+      loadLocalNoticeImages(form).catch(() => null);
     }}
     function ensureSitePhotoState(form) {{
       if (!form) return;
@@ -4446,16 +4626,21 @@ def render_workbench_lite(
       ensureSitePhotoState(form);
       return liteSitePhotos.map(item => ({{
         upload_id: String(item.upload_id || ''),
+        local_image_id: String(item.local_image_id || ''),
+        file_token: String(item.file_token || ''),
         file_name: String(item.file_name || 'site_photo.png'),
         mime_type: String(item.mime_type || item.content_type || 'image/png'),
         size: Number(item.size || 0),
-      }})).filter(item => item.upload_id);
+      }})).filter(item => item.upload_id || item.local_image_id || item.file_token);
     }}
-    async function uploadSitePhotoFile(file, form) {{
+    async function uploadSitePhotoFile(file, form, kind = 'site') {{
       if (!file || !form) return null;
       if (!String(file.type || '').startsWith('image/')) throw new Error('只能上传图片作为现场照片。');
       if (file.size > 8 * 1024 * 1024) throw new Error('现场照片不能超过 8MB。');
-      const url = '/api/notice-attachments?file_name=' + encodeURIComponent(file.name || 'site_photo.png');
+      const identity = localNoticeImageIdentity(form);
+      const url = '/api/notice-attachments?file_name=' + encodeURIComponent(file.name || 'site_photo.png')
+        + '&identity=' + encodeURIComponent(identity) + '&kind=' + encodeURIComponent(kind)
+        + '&scope=' + encodeURIComponent(previewValue(form,'scope')||getCurrentScope());
       const response = await fetch(url, {{
         method: 'POST',
         headers: {{ 'Content-Type': file.type || 'image/png' }},
@@ -4468,6 +4653,7 @@ def render_workbench_lite(
       const item = data.data || data;
       if (!item.upload_id) throw new Error('现场照片上传返回缺少 upload_id');
       return {{
+        ...item,
         upload_id: item.upload_id,
         file_name: item.file_name || file.name || 'site_photo.png',
         mime_type: item.mime_type || file.type || 'image/png',
@@ -4480,14 +4666,15 @@ def render_workbench_lite(
       ensureSitePhotoState(form);
       const fileItems = Array.from(files || []).filter(Boolean);
       if (!fileItems.length) return;
+      invalidateLocalNoticeImageLoad();
       const status = document.getElementById('lite-site-photo-status');
       panel.classList.add('uploading');
       if (status) status.textContent = '现场照片上传中...';
       const uploaded = [];
       try {{
         for (const file of fileItems) {{
-          const item = await uploadSitePhotoFile(file, form);
-          if (item) uploaded.push({{ ...item, preview_url: URL.createObjectURL(file) }});
+          const item = await uploadSitePhotoFile(file, form, 'site');
+          if (item) uploaded.push({{ ...item, preview_url: item.preview_url || URL.createObjectURL(file) }});
         }}
         liteSitePhotos = liteSitePhotos.concat(uploaded);
         setLiteFormDirty(true);
@@ -4526,10 +4713,12 @@ def render_workbench_lite(
       if (!panel || !liteAliConfirmationImage || liteAliConfirmationImage.remote_uploaded) return [];
       return [{{
         upload_id: String(liteAliConfirmationImage.upload_id || ''),
+        local_image_id: String(liteAliConfirmationImage.local_image_id || ''),
+        file_token: String(liteAliConfirmationImage.file_token || ''),
         file_name: String(liteAliConfirmationImage.file_name || 'ali_confirmation.png'),
         mime_type: String(liteAliConfirmationImage.mime_type || 'image/png'),
         size: Number(liteAliConfirmationImage.size || 0),
-      }}].filter(item => item.upload_id);
+      }}].filter(item => item.upload_id || item.local_image_id || item.file_token);
     }}
     function updateAliConfirmationUi(form) {{
       const panel = form?.querySelector('[data-ali-confirmation-panel]');
@@ -4570,6 +4759,10 @@ def render_workbench_lite(
             'data-file-token',
             String(visibleImage.file_token || visibleImage.token || '')
           );
+          remove.setAttribute(
+            'data-local-image-id',
+            String(visibleImage.local_image_id || '')
+          );
           remove.setAttribute('aria-label', '删除阿里确认截图');
           remove.textContent = '×';
           remove.disabled = panel.classList.contains('uploading');
@@ -4586,6 +4779,7 @@ def render_workbench_lite(
       if (!panel) return;
       const status = document.getElementById('lite-ali-confirmation-status');
       try {{
+        invalidateLocalNoticeImageLoad();
         if (!String(file.type || '').startsWith('image/')) throw new Error('只能上传图片作为阿里确认截图。');
         if (file.size > 8 * 1024 * 1024) throw new Error('阿里确认截图不能超过 8MB。');
         if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
@@ -4619,12 +4813,13 @@ def render_workbench_lite(
         showLiteError('请先选择阿里确认截图。');
         return;
       }}
+      invalidateLocalNoticeImageLoad();
       setButtonBusy(button, true);
       panel.classList.add('uploading');
       updateAliConfirmationUi(form);
       try {{
-        if (!liteAliConfirmationImage.upload_id) {{
-          const uploaded = await uploadSitePhotoFile(liteAliConfirmationImage.file, form);
+        if (!liteAliConfirmationImage.upload_id && !liteAliConfirmationImage.local_image_id) {{
+          const uploaded = await uploadSitePhotoFile(liteAliConfirmationImage.file, form, 'ali');
           if (!uploaded?.upload_id) throw new Error('阿里确认截图上传失败');
           liteAliConfirmationImage = {{ ...liteAliConfirmationImage, ...uploaded }};
         }}
@@ -4635,25 +4830,33 @@ def render_workbench_lite(
           return;
         }}
         const item = aliConfirmationPayload(form)[0];
-        if (!item?.upload_id) throw new Error('阿里确认截图缺少 upload_id');
+        if (!item?.upload_id && !item?.local_image_id) throw new Error('阿里确认截图缺少本地图片记录');
         const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot`, {{
           method: 'POST',
           credentials: 'same-origin',
           headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ upload_id: item.upload_id }}),
+          body: JSON.stringify({{ upload_id: item.upload_id, local_image_id: item.local_image_id || '' }}),
         }});
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图写入失败');
         const result = data.data || data;
-        const screenshotItems = Array.isArray(result.screenshot_items)
-          ? aliConfirmationPreviewItems(targetRecordId, result.screenshot_items)
-          : parsePanelImages(panel).concat([liteAliConfirmationImage]);
+        const localPreview = String(liteAliConfirmationImage?.preview_url || '');
+        const localImageId = String(liteAliConfirmationImage?.local_image_id || '');
+        const screenshotItems = mergeNoticeImageItems(
+          parsePanelImages(panel),
+          [{{
+            ...liteAliConfirmationImage,
+            preview_url: localPreview,
+            local_image_id: localImageId,
+            remote_uploaded: true,
+          }}],
+        );
         if (String(liteAliConfirmationImage?.preview_url || '').startsWith('blob:')) {{
           URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
         }}
         liteAliConfirmationImage = null;
-        panel.dataset.existingCount = String(screenshotItems.length);
+        panel.dataset.existingCount = String(Math.max(Number(result.screenshot_count || 0), screenshotItems.length));
         panel.dataset.confirmed = '0';
         const freshForToday = result.screenshot_fresh_for_today === true;
         panel.dataset.freshForToday = freshForToday ? '1' : '0';
@@ -4675,10 +4878,14 @@ def render_workbench_lite(
       const form = button?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
       const panel = form?.querySelector('[data-ali-confirmation-panel]');
       if (!panel) return;
+      invalidateLocalNoticeImageLoad();
       const targetRecordId = String(panel.dataset.targetRecordId || '').trim();
       const fileToken = String(button?.getAttribute('data-file-token') || '').trim();
+      const buttonLocalImageId = String(button?.getAttribute('data-local-image-id') || '').trim();
       const existing = Number(panel.dataset.existingCount || 0) > 0;
       if (liteAliConfirmationImage && !fileToken) {{
+        const localImageId = String(liteAliConfirmationImage.local_image_id || '');
+        if (localImageId) await fetch(`/api/notice-images/${{encodeURIComponent(localImageId)}}`, {{ method:'DELETE', credentials:'same-origin' }}).catch(() => null);
         if (String(liteAliConfirmationImage.preview_url || '').startsWith('blob:')) {{
           URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
         }}
@@ -4701,7 +4908,9 @@ def render_workbench_lite(
       panel.classList.add('uploading');
       updateAliConfirmationUi(form);
       try {{
-        const query = fileToken ? `?file_token=${{encodeURIComponent(fileToken)}}` : '';
+        const query = buttonLocalImageId
+          ? `?local_image_id=${{encodeURIComponent(buttonLocalImageId)}}`
+          : (fileToken ? `?file_token=${{encodeURIComponent(fileToken)}}` : '');
         const response = await fetch(`/api/change-confirmations/${{encodeURIComponent(targetRecordId)}}/screenshot${{query}}`, {{
           method: 'DELETE',
           credentials: 'same-origin',
@@ -4711,14 +4920,16 @@ def render_workbench_lite(
         if (!response.ok || data.ok === false) throw new Error(data.error || '阿里确认截图删除失败');
         if (!fileToken) liteAliConfirmationImage = null;
         const result = data.data || data;
-        const screenshotItems = Array.isArray(result.screenshot_items)
-          ? aliConfirmationPreviewItems(targetRecordId, result.screenshot_items)
-          : parsePanelImages(panel).filter(item => String(item.file_token || item.token || '') !== fileToken);
-        panel.dataset.existingCount = String(screenshotItems.length);
+        const screenshotItems = parsePanelImages(panel).filter(item =>
+          String(item.local_image_id || '') !== buttonLocalImageId
+          && String(item.file_token || item.token || '') !== fileToken
+        );
+        panel.dataset.existingCount = String(Math.max(Number(result.screenshot_count || 0), screenshotItems.length));
         panel.dataset.existingImages = JSON.stringify(screenshotItems);
         panel.dataset.confirmed = '0';
         panel.dataset.freshForToday = '0';
         persistAliImageOnRows(targetRecordId, screenshotItems, false);
+        if (buttonLocalImageId) await fetch(`/api/notice-images/${{encodeURIComponent(buttonLocalImageId)}}`, {{ method:'DELETE', credentials:'same-origin' }}).catch(() => null);
         updateAliConfirmationUi(form);
         setLiteStatus('阿里确认截图已删除，H楼确认已重置');
       }} catch (error) {{
@@ -4920,6 +5131,11 @@ def render_workbench_lite(
         .filter(([name]) => !previewValue(form, name))
         .map(([, label]) => label);
       if (!selectedBuildingCodes(form).length) missing.unshift('楼栋/范围');
+      if (
+        workType === 'polling'
+        && String(form?.dataset.action || 'start') === 'start'
+        && !(litePollingSelection && litePollingSelection.identity === sitePhotoSignature(form))
+      ) missing.push('轮巡 SOP/人员');
       return missing;
     }}
     function manualBindingIssue(form) {{
@@ -5004,6 +5220,7 @@ def render_workbench_lite(
       const title = previewValue(targetForm, 'title');
       const action = targetForm.dataset.action || 'start';
       const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
+      if (workType === 'polling') updatePollingSelectionSummary(targetForm);
       const sitePhotoCount = Number(previewValue(targetForm, 'site_photo_count') || 0);
       const buttons = targetForm.querySelectorAll('button[name="submit_action"]');
       const bindingIssue = manualBindingIssue(targetForm);
@@ -6475,6 +6692,37 @@ def render_workbench_lite(
       if (!target) return;
       if (target.closest('[data-ali-confirmation-panel]')) liteActiveImagePanel = 'ali';
       else if (target.closest('[data-site-photo-panel]')) liteActiveImagePanel = 'site';
+      const pollingSopOpen = target.closest('#lite-polling-sop-open');
+      if (pollingSopOpen) {{ event.preventDefault(); await openPollingSopModal('manage'); return; }}
+      const pollingSelectOpen = target.closest('#lite-polling-select-open');
+      if (pollingSelectOpen) {{ event.preventDefault(); await openPollingSopModal('select'); return; }}
+      const pollingSopClose = target.closest('#lite-polling-sop-close');
+      if (pollingSopClose) {{ event.preventDefault(); closePollingSopModal(); return; }}
+      const pollingSopNew = target.closest('#lite-polling-sop-new');
+      if (pollingSopNew) {{ event.preventDefault(); litePollingEditingSop=pollingNewDraft(); renderPollingSopList(); renderPollingSopEditor(); return; }}
+      const pollingBackdrop = target.closest('#lite-polling-sop-modal');
+      if (pollingBackdrop && target === pollingBackdrop) {{ event.preventDefault(); closePollingSopModal(); return; }}
+      const pollingCopyLink = target.closest('[data-polling-copy-link]');
+      if (pollingCopyLink) {{
+        event.preventDefault();
+        try {{ await navigator.clipboard.writeText(String(pollingCopyLink.getAttribute('data-polling-copy-link') || '')); setLiteStatus('工单链接已复制'); }}
+        catch {{ showLiteError('复制失败，请检查浏览器剪贴板权限'); }}
+        return;
+      }}
+      const pollingRetryUpload = target.closest('[data-polling-retry-upload]');
+      if (pollingRetryUpload) {{
+        event.preventDefault(); setButtonBusy(pollingRetryUpload,true);
+        try {{ const data=await pollingApi(`/api/polling-work-orders/${{encodeURIComponent(pollingRetryUpload.getAttribute('data-polling-retry-upload')||'')}}/retry-upload`,{{method:'POST'}}); setLiteStatus(data.ok?'工单附件已上传':(data.error||'工单附件仍在等待上传')); }}
+        catch(error) {{ showLiteError(error.message); }} finally {{ setButtonBusy(pollingRetryUpload,false); }}
+        return;
+      }}
+      const pollingResendLinks = target.closest('[data-polling-resend-links]');
+      if (pollingResendLinks) {{
+        event.preventDefault(); setButtonBusy(pollingResendLinks,true);
+        try {{ await pollingApi(`/api/polling-work-orders/${{encodeURIComponent(pollingResendLinks.getAttribute('data-polling-resend-links')||'')}}/resend-links`,{{method:'POST'}}); setLiteStatus('工单链接已重新发送'); }}
+        catch(error) {{ showLiteError(error.message); }} finally {{ setButtonBusy(pollingResendLinks,false); }}
+        return;
+      }}
       const changeConfirmationOpen = target.closest('#lite-change-confirmation-open');
       if (changeConfirmationOpen) {{ event.preventDefault(); await openChangeConfirmations(); return; }}
       const changeConfirmationClose = target.closest('#lite-change-confirmation-close');
@@ -6519,12 +6767,15 @@ def render_workbench_lite(
       const photoRemove = target.closest('[data-site-photo-remove]');
       if (photoRemove) {{
         event.preventDefault();
+        invalidateLocalNoticeImageLoad();
         const form = photoRemove.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
         ensureSitePhotoState(form);
         const index = Number(photoRemove.getAttribute('data-site-photo-remove'));
         if (Number.isInteger(index) && index >= 0) {{
           const removed = liteSitePhotos[index];
           if (String(removed?.preview_url || '').startsWith('blob:')) URL.revokeObjectURL(removed.preview_url);
+          const localImageId = String(removed?.local_image_id || '');
+          if (localImageId) fetch(`/api/notice-images/${{encodeURIComponent(localImageId)}}`, {{ method:'DELETE', credentials:'same-origin' }}).catch(() => null);
           liteSitePhotos.splice(index, 1);
           setLiteFormDirty(true);
           updateSitePhotoUi(form);
@@ -6977,6 +7228,7 @@ def render_workbench_lite(
         closeRepairEventCandidates();
         closeUndoConfirm();
         closeChangeConfirmations();
+        closePollingSopModal();
         if (!hadOpenDialog) requestCloseNoticeDrawer().catch(() => null);
       }}
     }});
@@ -7054,6 +7306,19 @@ def render_workbench_lite(
         && aliConfirmationImages.length
       ) {{
         patch.ali_confirmation_images = aliConfirmationImages;
+      }}
+      if (
+        patch.work_type === 'polling'
+        && action === 'start'
+        && litePollingSelection
+        && litePollingSelection.identity === sitePhotoSignature(form)
+      ) {{
+        patch.polling_sop_id = litePollingSelection.sop_id;
+        patch.polling_sop_version = litePollingSelection.sop_version;
+        patch.polling_run_count = litePollingSelection.run_count;
+        patch.polling_runs = litePollingSelection.runs;
+        patch.polling_operator_record_id = litePollingSelection.operator_record_id;
+        patch.polling_reviewer_record_id = litePollingSelection.reviewer_record_id;
       }}
       const commandPatch = compactCommandPatch(patch);
       return {{
@@ -7762,3 +8027,20 @@ def render_workbench_lite(
   </script>
 </body>
 </html>"""
+
+
+def render_polling_work_order_page() -> str:
+    return r"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单</title>
+<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;background:linear-gradient(145deg,#eef6ff,#f8fbff 46%,#edf4ff);color:#0c244d;font-family:"Microsoft YaHei",system-ui,sans-serif}.shell{width:min(760px,100%);margin:auto;padding:18px 14px 34px}.head{position:sticky;top:0;z-index:5;margin-bottom:12px;padding:14px 16px;border:1px solid #cfe0f7;border-radius:20px;background:#fffffff2;box-shadow:0 14px 32px #174f9417;backdrop-filter:blur(12px)}.head span{color:#1663d8;font-size:12px;font-weight:900}.head h1{margin:4px 0;font-size:20px}.head p{margin:0;color:#60738c;font-size:12px}.status{margin:10px 0;padding:9px 12px;border-radius:13px;background:#fff;color:#52657f;font-size:12px;font-weight:800}.status.error{background:#fff1f0;color:#b42318}.status.success{background:#e9fff3;color:#087443}.steps{display:grid;gap:10px}.step{border:1px solid #d7e4f6;border-radius:18px;padding:13px;background:#ffffffcf;opacity:.66}.step.current{border:2px solid #1678ff;padding:16px;background:#fff;opacity:1;box-shadow:0 18px 40px #1467e22b;transform:scale(1.01)}.step header{display:flex;justify-content:space-between;gap:8px;align-items:center}.step header b{color:#0757d7}.step header span{border-radius:999px;padding:4px 8px;background:#eef5ff;color:#4d6582;font-size:11px;font-weight:900}.step p{margin:10px 0;line-height:1.7;white-space:pre-wrap}.checks{display:flex;flex-wrap:wrap;gap:6px}.checks em{border-radius:999px;padding:4px 8px;background:#f0f4f8;color:#62748a;font-size:11px;font-style:normal;font-weight:850}.checks em.done{background:#e8fff3;color:#087443}.action{width:100%;min-height:48px;margin-top:13px;border:0;border-radius:16px;background:linear-gradient(135deg,#1f63ff,#0757d7);color:#fff;font-size:15px;font-weight:950;cursor:pointer}.action:disabled{opacity:.55;cursor:not-allowed}.links{margin-top:12px;color:#64748b;font-size:11px}@media(max-width:520px){.shell{padding:10px 9px 26px}.head{border-radius:16px}.step.current{transform:none}.step p{font-size:14px}}</style></head>
+<body><main class="shell"><section class="head"><span id="role">轮巡工单</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status">正在读取工单状态...</div><button id="retry" class="action" type="button" hidden>重试上传工单附件</button><section id="steps" class="steps"></section><p class="links">页面会自动刷新，请不要将本链接发给无关人员。</p></main>
+<script>
+const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type};
+function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`工单 ${step.run_index}/${step.run_count} · 步骤 ${step.step_index}/${step.step_count}`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';head.append(title,badge);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;checks.append(mark)}article.append(head,run,content,checks);if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.textContent=busy?'提交中...':done?'已确认':waiting?'等待操作人确认':`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting;button.onclick=()=>confirmStep(step.step_key);article.append(button)}return article}
+function render(data){current=data;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||'轮巡工单';q('summary').textContent=`${data.sop_name||''} · 已完成 ${Math.min(data.current_index,data.total_steps)}/${data.total_steps}`;q('steps').replaceChildren(...(data.steps||[]).map(card));q('retry').hidden=data.state!=='upload_pending';status(data.state==='upload_pending'?'步骤已全部完成，正在上传工单附件...':data.last_error||'请按顺序完成当前步骤',data.last_error?'error':'')}
+async function load(){try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'工单读取失败');render(body.data)}catch(error){status(error.message||'工单读取失败','error');clearInterval(timer)}}
+async function confirmStep(stepKey){if(!current||busy)return;busy=true;render(current);try{const r=await fetch('/api/polling-work-orders/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,step_key:stepKey,expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'确认失败');if(body.data?.completion?.ok){status('全部工单已完成，附件已上传。','success');clearInterval(timer)}else render(body.data.session)}catch(error){status(error.message||'确认失败','error')}finally{busy=false}}
+async function retryUpload(){if(!current||busy)return;busy=true;q('retry').disabled=true;try{const r=await fetch(`/api/polling-work-orders/${encodeURIComponent(current.group_id)}/retry-upload?token=${encodeURIComponent(token)}`,{method:'POST'}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'附件上传失败');if(body.data?.ok){status('工单附件已上传，可以结束通告。','success');q('retry').hidden=true;clearInterval(timer)}else status(body.data?.error||'附件仍在等待上传','error')}catch(error){status(error.message||'附件上传失败','error')}finally{busy=false;q('retry').disabled=false}}
+q('retry').onclick=retryUpload;
+if(!token)status('工单链接缺少令牌。','error');else{load();timer=setInterval(load,3000)}
+</script></body></html>"""

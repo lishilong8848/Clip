@@ -30,6 +30,7 @@ from .portal_service import (
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
     NOTICE_TYPE_CHANGE,
+    NOTICE_TYPE_POLLING,
     PortalConflictError,
     PortalError,
     PortalExternalError,
@@ -38,6 +39,7 @@ from .portal_service import (
     SOURCE_CACHE_TTL_SECONDS,
     WORK_TYPE_CHANGE,
     WORK_TYPE_MAINTENANCE,
+    WORK_TYPE_POLLING,
     WORK_TYPE_REPAIR,
     engineer_mop_fill_kwargs_from_payload,
     engineer_mop_upload_signed_kwargs_from_payload,
@@ -51,10 +53,14 @@ from .identity_utils import (
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
+from .polling_work_orders import PollingWorkOrderService
+from .local_notice_images import LocalNoticeImageStore
 from upload_event_module.config import (
     CHANGE_NOTICE_FIELDS,
     EVENT_NOTICE_FIELDS,
+    POLLING_NOTICE_FIELDS,
     SPECIALTY_FIRE,
+    config,
     get_field_config,
 )
 from upload_event_module.services.handlers import (
@@ -147,6 +153,14 @@ class PortalRuntime:
     service = MaintenancePortalService(enable_repair_snapshots=True)
     auth_manager = PortalAuthManager()
     state_store = LanPortalStateStore()
+
+    @classmethod
+    def polling_work_orders(cls) -> PollingWorkOrderService:
+        return PollingWorkOrderService(cls.state_store)
+
+    @classmethod
+    def local_notice_images(cls) -> LocalNoticeImageStore:
+        return LocalNoticeImageStore(cls.state_store)
     notice_callback = None
     ongoing_callback = None
     ongoing_delete_callback = None
@@ -946,7 +960,7 @@ class PortalRuntime:
                 task["next_reminder_at"] = now + CHANGE_CONFIRMATION_REMINDER_SECONDS
                 return cls._put_change_confirmation_task(task)
             fingerprint = str(task.get("screenshot_fingerprint") or "")
-            if fingerprint and task.get("h_notification_fingerprint") != fingerprint:
+            if fingerprint:
                 if now < float(task.get("h_notification_next_at") or 0):
                     return cls._put_change_confirmation_task(task)
                 h_open_id = str(BUILDING_OPEN_ID_MAP.get("H") or "").strip()
@@ -974,9 +988,9 @@ class PortalRuntime:
                     task["last_error"] = ""
                 else:
                     task["last_error"] = str(message or "H楼确认通知发送失败")
-                    task["h_notification_next_at"] = (
-                        now + CHANGE_CONFIRMATION_REMINDER_SECONDS
-                    )
+                task["h_notification_next_at"] = (
+                    now + CHANGE_CONFIRMATION_REMINDER_SECONDS
+                )
             return cls._put_change_confirmation_task(task)
         finally:
             cls._release_event_operation_lock(lock_key, lock_owner)
@@ -1009,6 +1023,223 @@ class PortalRuntime:
             "failed": failed,
             "seed_error": seed_error,
         }
+
+    @classmethod
+    def _polling_work_order_public_base_url(cls) -> str:
+        return str(cls.service._critical_guard_public_base_url() or "").rstrip("/")
+
+    @classmethod
+    def _send_polling_work_order_links(
+        cls,
+        group: dict,
+        *,
+        force: bool = False,
+    ) -> dict:
+        manager = cls.polling_work_orders()
+        group = manager.group_with_links(
+            group,
+            cls._polling_work_order_public_base_url(),
+        )
+        notifications = dict(group.get("notifications") or {})
+        initiator_open_id = str(group.get("initiator_open_id") or "").strip()
+        for role, label in (("operator", "操作人"), ("reviewer", "现场审核人")):
+            previous = notifications.get(role) if isinstance(notifications.get(role), dict) else {}
+            if not force and previous.get("sent"):
+                continue
+            person = group.get(role) if isinstance(group.get(role), dict) else {}
+            assigned_open_id = str(person.get("open_id") or "").strip()
+            link = str(group.get(f"{role}_link") or "").strip()
+            text = "\n".join(
+                (
+                    "【轮巡工单待确认】",
+                    f"通告：{group.get('title') or group.get('target_record_id') or '-'}",
+                    f"SOP：{group.get('sop_name') or '-'}",
+                    f"角色：{label} {person.get('name') or ''}",
+                    f"工单数：{len(group.get('runs') or [])}",
+                    link or "工单链接尚未生成。",
+                )
+            ).strip()
+            recipient = assigned_open_id or initiator_open_id
+            ok_send, message, _results = _send_text_to_open_ids_guarded(
+                text,
+                [recipient] if recipient and link else [],
+            )
+            fallback = False
+            if (
+                not ok_send
+                and initiator_open_id
+                and initiator_open_id != recipient
+                and link
+            ):
+                fallback = True
+                ok_send, message, _results = _send_text_to_open_ids_guarded(
+                    text,
+                    [initiator_open_id],
+                )
+                if ok_send:
+                    recipient = initiator_open_id
+            notifications[role] = {
+                "sent": bool(ok_send),
+                "recipient_open_id": recipient,
+                "fallback": fallback or not bool(assigned_open_id),
+                "message": str(message or ""),
+                "updated_at": time.time(),
+            }
+        return manager.update_notifications(
+            str(group.get("target_record_id") or ""),
+            notifications,
+        )
+
+    @classmethod
+    def _create_polling_work_order_group(
+        cls,
+        prepared: dict,
+        target_record_id: str,
+    ) -> dict:
+        if (
+            str(prepared.get("work_type") or "") != WORK_TYPE_POLLING
+            or str(prepared.get("action") or "").lower() != "start"
+            or not prepared.get("polling_work_order_required")
+        ):
+            return {}
+        group = cls.polling_work_orders().create_group(
+            prepared,
+            target_record_id=target_record_id,
+            title=str(prepared.get("title") or ""),
+            public_base_url=cls._polling_work_order_public_base_url(),
+        )
+        if group:
+            cls._send_polling_work_order_links(group)
+            prepared["polling_work_order_group_id"] = target_record_id
+        return group
+
+    @classmethod
+    def finalize_polling_work_order_group(cls, target_record_id: str) -> dict:
+        manager = cls.polling_work_orders()
+        try:
+            group = manager.get_group(target_record_id)
+            if str(group.get("state") or "") == "completed":
+                return {"ok": True, "state": "completed", "group": group}
+            if str(group.get("state") or "") != "upload_pending":
+                return {"ok": False, "state": str(group.get("state") or ""), "error": "工单步骤尚未全部完成。"}
+            ok_read, record = query_record_by_id(target_record_id, NOTICE_TYPE_POLLING)
+            if not ok_read:
+                if cls._remote_record_not_found(record):
+                    manager.cancel_group(target_record_id, reason="target_not_found")
+                    return {"ok": False, "state": "cancelled", "error": "轮巡目标记录不存在。"}
+                raise PortalExternalError(str(record or "轮巡目标记录读取失败。"))
+            fields = cls._change_confirmation_fields(record)
+            lifecycle = cls.service._target_record_lifecycle(
+                work_type=WORK_TYPE_POLLING,
+                notice_type=NOTICE_TYPE_POLLING,
+                target_record={"record_id": target_record_id, "display_fields": fields},
+            )
+            if lifecycle.get("finished") or not lifecycle.get("active"):
+                manager.cancel_group(target_record_id, reason="target_terminal")
+                return {"ok": False, "state": "cancelled", "error": "轮巡通告已结束，工单已停止。"}
+            uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
+            for attachment in group.get("attachments") or []:
+                digest = str(attachment.get("sha256") or "").strip()
+                if digest and str(uploaded_by_hash.get(digest) or "").strip():
+                    continue
+                token = cls.service._upload_bitable_file(
+                    file_path=str(attachment.get("path") or ""),
+                    file_name=str(attachment.get("name") or "work_order_attachment"),
+                    app_token=str(config.app_token or ""),
+                )
+                uploaded_by_hash[digest] = token
+                manager.mark_upload_progress(
+                    target_record_id,
+                    token_by_sha256=uploaded_by_hash,
+                )
+            new_tokens = list(
+                dict.fromkeys(
+                    str(token or "").strip()
+                    for token in uploaded_by_hash.values()
+                    if str(token or "").strip()
+                )
+            )
+            existing_tokens = cls._change_confirmation_attachment_tokens(
+                fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+            )
+            expected_tokens = list(dict.fromkeys(existing_tokens + new_tokens))
+            ok_patch, patch_result = update_bitable_record_fields(
+                target_record_id,
+                NOTICE_TYPE_POLLING,
+                {
+                    POLLING_NOTICE_FIELDS["work_order_attachments"]: [
+                        {"file_token": token} for token in expected_tokens
+                    ]
+                },
+            )
+            if not ok_patch:
+                raise PortalExternalError(str(patch_result or "工单附件写入失败。"))
+            verified = False
+            for attempt in range(3):
+                ok_verify, verify_record = query_record_by_id(
+                    target_record_id, NOTICE_TYPE_POLLING
+                )
+                verify_fields = cls._change_confirmation_fields(verify_record)
+                actual_tokens = cls._change_confirmation_attachment_tokens(
+                    verify_fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                )
+                if ok_verify and set(new_tokens).issubset(actual_tokens):
+                    verified = True
+                    break
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+            if not verified:
+                raise PortalExternalError("工单附件已提交，但目标表尚未确认写入。")
+            completed = manager.mark_upload_result(
+                target_record_id,
+                success=True,
+                file_tokens=new_tokens,
+            )
+            return {"ok": True, "state": "completed", "group": completed}
+        except Exception as exc:
+            with suppress(Exception):
+                manager.mark_upload_result(
+                    target_record_id,
+                    success=False,
+                    error=str(exc),
+                )
+            return {"ok": False, "state": "upload_pending", "error": str(exc)}
+
+    @classmethod
+    def process_polling_work_order_uploads(cls) -> dict:
+        processed = 0
+        failed = 0
+        errors: list[str] = []
+        manager = cls.polling_work_orders()
+        for group in manager.open_groups():
+            target_record_id = str(group.get("target_record_id") or "").strip()
+            if str(group.get("state") or "") == "active":
+                ok_read, record = query_record_by_id(
+                    target_record_id, NOTICE_TYPE_POLLING
+                )
+                if not ok_read and cls._remote_record_not_found(record):
+                    manager.cancel_group(target_record_id, reason="target_not_found")
+                elif ok_read:
+                    fields = cls._change_confirmation_fields(record)
+                    lifecycle = cls.service._target_record_lifecycle(
+                        work_type=WORK_TYPE_POLLING,
+                        notice_type=NOTICE_TYPE_POLLING,
+                        target_record={
+                            "record_id": target_record_id,
+                            "display_fields": fields,
+                        },
+                    )
+                    if lifecycle.get("finished") or not lifecycle.get("active"):
+                        manager.cancel_group(
+                            target_record_id, reason="target_terminal"
+                        )
+                continue
+            result = cls.finalize_polling_work_order_group(target_record_id)
+            processed += 1
+            if not result.get("ok") and result.get("state") != "cancelled":
+                failed += 1
+                errors.append(str(result.get("error") or target_record_id))
+        return {"processed": processed, "failed": failed, "errors": errors[:10]}
 
     @classmethod
     def _query_active_change_confirmation_record(
@@ -1123,6 +1354,7 @@ class PortalRuntime:
         target_record_id: str,
         *,
         upload_id: str,
+        local_image_id: str = "",
         actor_open_id: str,
         actor_name: str,
         allowed_scopes: list[str] | tuple[str, ...] | None,
@@ -1132,7 +1364,7 @@ class PortalRuntime:
         upload_id = str(upload_id or "").strip()
         if not target_record_id or is_local_record_id(target_record_id):
             raise PortalError("缺少有效的变更目标记录ID。")
-        if not upload_id:
+        if not upload_id and not local_image_id:
             raise PortalError("请选择要上传的阿里确认截图。")
         lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
             {"work_type": WORK_TYPE_CHANGE, "notice_type": NOTICE_TYPE_CHANGE, "target_record_id": target_record_id},
@@ -1149,7 +1381,23 @@ class PortalRuntime:
                 allowed_scopes=allowed_scopes,
                 privileged=privileged,
             )
-            attachment = cls.state_store.get_notice_upload_attachment(upload_id)
+            attachment = (
+                cls.state_store.get_notice_upload_attachment(upload_id)
+                if upload_id
+                else None
+            )
+            if not attachment and local_image_id:
+                try:
+                    local_content, local_type, local_name = (
+                        cls.local_notice_images().content(local_image_id)
+                    )
+                    attachment = {
+                        "content": local_content,
+                        "mime_type": local_type,
+                        "file_name": local_name,
+                    }
+                except Exception:
+                    attachment = None
             if not attachment:
                 raise PortalError("截图已过期或不存在，请重新选择。")
             attachment_owner = str(attachment.get("open_id") or "").strip()
@@ -1203,7 +1451,14 @@ class PortalRuntime:
                     time.sleep(0.2 * (attempt + 1))
             if not verified_record:
                 raise PortalExternalError("截图已提交，但目标表尚未确认写入，请稍后重试。")
-            cls.state_store.mark_notice_upload_attachment_used(upload_id)
+            if upload_id:
+                cls.state_store.mark_notice_upload_attachment_used(upload_id)
+            if local_image_id:
+                cls.local_notice_images().mark_feishu_uploaded(
+                    local_image_id,
+                    file_token=str(file_token),
+                    target_written=True,
+                )
             existing = cls.state_store.get_document(CHANGE_CONFIRMATION_NAMESPACE, target_record_id) or {}
             task = cls._change_confirmation_task_from_record(
                 target_record_id,
@@ -5963,6 +6218,15 @@ class PortalRuntime:
             ),
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
             execution_party=str(prepared.get("execution_party") or "").strip() or None,
+            polling_work_order_required=(
+                True if prepared.get("polling_work_order_required") else None
+            ),
+            polling_operator_name=(
+                str(prepared.get("polling_operator_name") or "").strip() or None
+            ),
+            polling_reviewer_name=(
+                str(prepared.get("polling_reviewer_name") or "").strip() or None
+            ),
         )
 
     @staticmethod
@@ -6020,6 +6284,7 @@ class PortalRuntime:
             if isinstance(item, dict):
                 if str(
                     item.get("upload_id")
+                    or item.get("local_image_id")
                     or item.get("file_token")
                     or item.get("token")
                     or ""
@@ -6088,9 +6353,38 @@ class PortalRuntime:
             if existing_token:
                 uploaded_tokens.append(existing_token)
                 continue
+            local_image_id = str(entry.get("local_image_id") or "").strip()
+            local_image = {}
+            if local_image_id:
+                try:
+                    local_image = cls.local_notice_images().get(local_image_id)
+                except Exception:
+                    local_image = {}
+                existing_token = str(
+                    local_image.get("feishu_file_token") or ""
+                ).strip()
+                if existing_token:
+                    uploaded_tokens.append(existing_token)
+                    continue
             upload_id = str(entry.get("upload_id") or "").strip()
-            if upload_id:
-                attachment = cls.state_store.get_notice_upload_attachment(upload_id)
+            if upload_id or local_image_id:
+                attachment = (
+                    cls.state_store.get_notice_upload_attachment(upload_id)
+                    if upload_id
+                    else None
+                )
+                if not attachment and local_image_id:
+                    try:
+                        content, mime_type, local_name = (
+                            cls.local_notice_images().content(local_image_id)
+                        )
+                        attachment = {
+                            "content": content,
+                            "mime_type": mime_type,
+                            "file_name": local_name,
+                        }
+                    except Exception:
+                        attachment = None
                 if not attachment:
                     return False, "现场照片已过期或不存在，请重新添加。", [], []
                 image_bytes = bytes(attachment.get("content") or b"")
@@ -6104,7 +6398,14 @@ class PortalRuntime:
                 success, result = upload_media_to_feishu(image_bytes, file_name=file_name)
                 if not success:
                     return False, str(result or "现场照片上传失败。"), [], []
-                cls.state_store.mark_notice_upload_attachment_used(upload_id)
+                if upload_id:
+                    cls.state_store.mark_notice_upload_attachment_used(upload_id)
+                if local_image_id:
+                    cls.local_notice_images().mark_feishu_uploaded(
+                        local_image_id,
+                        file_token=str(result or ""),
+                        target_written=False,
+                    )
                 uploaded_tokens.append(str(result or "").strip())
                 continue
         if not uploaded_tokens:
@@ -6125,8 +6426,33 @@ class PortalRuntime:
         existing_token = str(entry.get("file_token") or entry.get("token") or "").strip()
         if existing_token:
             return True, "", [existing_token], []
+        local_image_id = str(entry.get("local_image_id") or "").strip()
+        if local_image_id:
+            try:
+                local_item = cls.local_notice_images().get(local_image_id)
+            except Exception:
+                local_item = {}
+            existing_token = str(local_item.get("feishu_file_token") or "").strip()
+            if existing_token:
+                return True, "", [existing_token], []
         upload_id = str(entry.get("upload_id") or "").strip()
-        attachment = cls.state_store.get_notice_upload_attachment(upload_id)
+        attachment = (
+            cls.state_store.get_notice_upload_attachment(upload_id)
+            if upload_id
+            else None
+        )
+        if not attachment and local_image_id:
+            try:
+                content, mime_type, local_name = cls.local_notice_images().content(
+                    local_image_id
+                )
+                attachment = {
+                    "content": content,
+                    "mime_type": mime_type,
+                    "file_name": local_name,
+                }
+            except Exception:
+                attachment = None
         if not attachment:
             return False, "阿里确认截图已过期或不存在，请重新添加。", [], []
         content = bytes(attachment.get("content") or b"")
@@ -6142,7 +6468,65 @@ class PortalRuntime:
         )
         if not ok or not str(result or "").strip():
             return False, str(result or "阿里确认截图上传失败。"), [], []
+        if local_image_id:
+            cls.local_notice_images().mark_feishu_uploaded(
+                local_image_id,
+                file_token=str(result),
+                target_written=False,
+            )
         return True, "", [str(result).strip()], [upload_id]
+
+    @classmethod
+    def _mark_local_notice_images_target_written(
+        cls,
+        payload: dict,
+        *,
+        kinds: tuple[str, ...] = ("site", "ali"),
+    ) -> None:
+        entries: list[dict] = []
+        if "site" in kinds:
+            site_entries = payload.get("extra_images") or payload.get("site_photos") or []
+            if isinstance(site_entries, list):
+                entries.extend(item for item in site_entries if isinstance(item, dict))
+        if "ali" in kinds:
+            ali_entries = payload.get("ali_confirmation_images") or []
+            if isinstance(ali_entries, list):
+                entries.extend(item for item in ali_entries if isinstance(item, dict))
+        for entry in entries:
+            image_id = str(entry.get("local_image_id") or "").strip()
+            if not image_id:
+                continue
+            with suppress(Exception):
+                local_item = cls.local_notice_images().get(image_id)
+                token = str(
+                    entry.get("file_token")
+                    or local_item.get("feishu_file_token")
+                    or ""
+                ).strip()
+                if token:
+                    cls.local_notice_images().mark_feishu_uploaded(
+                        image_id,
+                        file_token=token,
+                        target_written=True,
+                    )
+
+    @classmethod
+    def _polling_work_order_remote_fields_match(
+        cls, fields: dict, prepared: dict
+    ) -> bool:
+        return bool(
+            cls._change_confirmation_checked(
+                fields.get(POLLING_NOTICE_FIELDS["work_order_required"])
+            )
+            and str(
+                fields.get(POLLING_NOTICE_FIELDS["work_order_operator"]) or ""
+            ).strip()
+            == str(prepared.get("polling_operator_name") or "").strip()
+            and str(
+                fields.get(POLLING_NOTICE_FIELDS["work_order_reviewer"]) or ""
+            ).strip()
+            == str(prepared.get("polling_reviewer_name") or "").strip()
+        )
 
     @staticmethod
     def _remote_record_not_found(message: object) -> bool:
@@ -8400,6 +8784,99 @@ class PortalRuntime:
                 notice_type,
             )
             if existing_target:
+                if cls._has_extra_images_payload(prepared):
+                    ok_existing_images, existing_image_record = query_record_by_id(
+                        existing_target, notice_type
+                    )
+                    if not ok_existing_images or not isinstance(
+                        existing_image_record, dict
+                    ):
+                        return (
+                            False,
+                            str(existing_image_record or "目标记录读取失败。"),
+                            existing_target,
+                        )
+                    existing_image_fields = cls._change_confirmation_fields(
+                        existing_image_record
+                    )
+                    existing_tokens, existing_site_tokens, _response_time = (
+                        cls._existing_tokens_for_notice_type(
+                            notice_type, existing_image_fields
+                        )
+                    )
+                    images_ok, images_error, image_tokens, site_tokens = (
+                        cls._upload_extra_images_for_notice(
+                            prepared, notice_type
+                        )
+                    )
+                    if not images_ok:
+                        return (
+                            False,
+                            images_error or "现场照片上传失败。",
+                            existing_target,
+                        )
+                    field_config = get_field_config(notice_type)
+                    field_key = (
+                        "site_images"
+                        if cls._notice_supports_site_image_field(notice_type)
+                        else "notice_images"
+                    )
+                    final_tokens = list(
+                        dict.fromkeys(
+                            (
+                                existing_site_tokens + site_tokens
+                                if field_key == "site_images"
+                                else existing_tokens + image_tokens
+                            )
+                        )
+                    )
+                    field_name = str(field_config.get(field_key) or "").strip()
+                    if final_tokens and not field_name:
+                        return False, "目标表未配置现场图片字段。", existing_target
+                    if final_tokens:
+                        ok_patch, patch_result = update_bitable_record_fields(
+                            existing_target,
+                            notice_type,
+                            {
+                                field_name: [
+                                    {"file_token": token}
+                                    for token in final_tokens
+                                ]
+                            },
+                        )
+                        if not ok_patch:
+                            return (
+                                False,
+                                str(patch_result or "现场照片写入失败。"),
+                                existing_target,
+                            )
+                        verified_images = False
+                        for attempt in range(3):
+                            ok_verify, verify_record = query_record_by_id(
+                                existing_target, notice_type
+                            )
+                            verify_fields = cls._change_confirmation_fields(
+                                verify_record
+                            )
+                            verify_tokens = cls._change_confirmation_attachment_tokens(
+                                verify_fields.get(field_name)
+                            )
+                            if ok_verify and set(final_tokens).issubset(
+                                verify_tokens
+                            ):
+                                verified_images = True
+                                break
+                            if attempt < 2:
+                                time.sleep(0.2 * (attempt + 1))
+                        if not verified_images:
+                            return (
+                                False,
+                                "现场照片已提交，但目标表尚未确认写入。",
+                                existing_target,
+                            )
+                    cls._mark_local_notice_images_target_written(
+                        prepared, kinds=("site",)
+                    )
                 ali_ok, ali_error, ali_tokens, ali_upload_ids = (
                     cls._upload_change_confirmation_images(prepared)
                 )
@@ -8451,6 +8928,54 @@ class PortalRuntime:
                     )
                     for upload_id in ali_upload_ids:
                         cls.state_store.mark_notice_upload_attachment_used(upload_id)
+                if (
+                    notice_type == NOTICE_TYPE_POLLING
+                    and prepared.get("polling_work_order_required")
+                ):
+                    work_order_fields = {
+                        POLLING_NOTICE_FIELDS["work_order_required"]: True,
+                        POLLING_NOTICE_FIELDS["work_order_operator"]: str(
+                            prepared.get("polling_operator_name") or ""
+                        ).strip(),
+                        POLLING_NOTICE_FIELDS["work_order_reviewer"]: str(
+                            prepared.get("polling_reviewer_name") or ""
+                        ).strip(),
+                    }
+                    ok_patch, patch_result = update_bitable_record_fields(
+                        existing_target,
+                        notice_type,
+                        work_order_fields,
+                    )
+                    if not ok_patch:
+                        return (
+                            False,
+                            str(patch_result or "轮巡工单人员写入失败。"),
+                            existing_target,
+                        )
+                    verified_work_order = False
+                    for attempt in range(3):
+                        ok_verify, verify_record = query_record_by_id(
+                            existing_target, notice_type
+                        )
+                        verify_fields = cls._change_confirmation_fields(
+                            verify_record
+                        )
+                        if (
+                            ok_verify
+                            and cls._polling_work_order_remote_fields_match(
+                                verify_fields, prepared
+                            )
+                        ):
+                            verified_work_order = True
+                            break
+                        if attempt < 2:
+                            time.sleep(0.2 * (attempt + 1))
+                    if not verified_work_order:
+                        return (
+                            False,
+                            "轮巡工单人员已提交，但目标表尚未确认写入。",
+                            existing_target,
+                        )
                 start_undo_id = str(
                     prepared.get("undo_checkpoint_id") or ""
                 ).strip()
@@ -8468,6 +8993,10 @@ class PortalRuntime:
                     start_undo_id, existing_target
                 ):
                     return False, "开始通告已存在，但回退记录绑定失败。", existing_target
+                cls._mark_local_notice_images_target_written(
+                    prepared,
+                    kinds=("ali",),
+                )
                 return True, existing_target, existing_target
             images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
                 cls._upload_extra_images_for_notice(prepared, notice_type)
@@ -8529,6 +9058,38 @@ class PortalRuntime:
                     prepared["remote_last_modified_time"] = str(
                         created_result.get("last_modified_time") or ""
                     ).strip()
+                if (
+                    notice_type == NOTICE_TYPE_POLLING
+                    and prepared.get("polling_work_order_required")
+                ):
+                    work_order_verified = bool(
+                        ok_created
+                        and cls._polling_work_order_remote_fields_match(
+                            cls._change_confirmation_fields(created_result),
+                            prepared,
+                        )
+                    )
+                    for attempt in range(2):
+                        if work_order_verified:
+                            break
+                        ok_work_order, work_order_record = query_record_by_id(
+                            record_id, notice_type
+                        )
+                        work_order_verified = bool(
+                            ok_work_order
+                            and cls._polling_work_order_remote_fields_match(
+                                cls._change_confirmation_fields(work_order_record),
+                                prepared,
+                            )
+                        )
+                        if not work_order_verified and attempt < 1:
+                            time.sleep(0.2 * (attempt + 1))
+                    if not work_order_verified:
+                        return (
+                            False,
+                            "轮巡工单记录已创建，但人员字段尚未确认写入。",
+                            record_id,
+                        )
                 if ali_tokens:
                     verified, _verified_record = (
                         cls._verify_change_confirmation_remote_fields(
@@ -8538,6 +9099,7 @@ class PortalRuntime:
                         )
                     )
                     prepared["ali_confirmation_remote_pending"] = not verified
+                cls._mark_local_notice_images_target_written(prepared)
             return bool(ok), str(result or ""), record_id
 
         record_id = str(
@@ -8584,6 +9146,23 @@ class PortalRuntime:
             current_record_version or expected_record_version,
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+        if action == "end" and notice_type == NOTICE_TYPE_POLLING:
+            work_order_required = cls._change_confirmation_checked(
+                fields.get(POLLING_NOTICE_FIELDS["work_order_required"])
+            )
+            if work_order_required:
+                operator_name = str(
+                    fields.get(POLLING_NOTICE_FIELDS["work_order_operator"]) or ""
+                ).strip()
+                reviewer_name = str(
+                    fields.get(POLLING_NOTICE_FIELDS["work_order_reviewer"]) or ""
+                ).strip()
+                if not operator_name or not reviewer_name:
+                    return False, "轮巡工单缺少操作人或现场审核人，不能发送结束。", record_id
+                if not cls._change_confirmation_attachment_count(
+                    fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                ):
+                    return False, "轮巡工单尚未全部完成或附件尚未上传，不能发送结束。", record_id
         if (
             prepared.get("web_today_screenshot_required")
             and prepared.get("ali_confirmation_source") == "standalone"
@@ -8621,6 +9200,16 @@ class PortalRuntime:
         ali_ok, ali_error, ali_tokens, ali_upload_ids = (
             cls._upload_change_confirmation_images(prepared)
         )
+        if (
+            not ali_ok
+            and "已过期或不存在" in str(ali_error or "")
+            and notice_type == NOTICE_TYPE_CHANGE
+            and cls._change_confirmation_attachment_count(
+                fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+            )
+        ):
+            prepared["ali_confirmation_images"] = []
+            ali_ok, ali_error, ali_tokens, ali_upload_ids = True, "", [], []
         if not ali_ok:
             return False, ali_error or "阿里确认截图上传失败。", record_id
         if ali_tokens:
@@ -8644,6 +9233,8 @@ class PortalRuntime:
             existing_response_time=existing_response_time if action == "update" else "",
         )
         ok, result = update_bitable_record_by_payload(record_id, notice_type, payload)
+        if ok:
+            cls._mark_local_notice_images_target_written(prepared)
         if not ok and checkpoint_id:
             cls.state_store.mark_notice_undo_action(
                 checkpoint_id,
@@ -9144,6 +9735,25 @@ class PortalRuntime:
         target_record_id = str(event_payload.get("target_record_id") or "").strip()
         source_record_id = canonical_source_record_id(event_payload)
         work_type = str(event_payload.get("work_type") or "").strip()
+        polling_group = cls._create_polling_work_order_group(
+            prepared,
+            target_record_id,
+        )
+        if polling_group:
+            event_payload.update(
+                {
+                    "polling_work_order_group_id": target_record_id,
+                    "polling_work_order_state": str(
+                        polling_group.get("state") or "active"
+                    ),
+                    "polling_work_order_operator_link": str(
+                        polling_group.get("operator_link") or ""
+                    ),
+                    "polling_work_order_reviewer_link": str(
+                        polling_group.get("reviewer_link") or ""
+                    ),
+                }
+            )
         superseded_active_ids: list[str] = []
         if source_record_id and active_item_id:
             for row in cls.state_store.list_qt_active_items(include_deleted=False):
@@ -9297,6 +9907,15 @@ class PortalRuntime:
             or str(prepared.get("notice_type") or "").strip() == NOTICE_TYPE_CHANGE
         ):
             cls.stop_change_confirmation(
+                target_record_id,
+                reason="target_terminal",
+            )
+        if (
+            str(prepared.get("work_type") or "").strip() == WORK_TYPE_POLLING
+            or str(prepared.get("notice_type") or "").strip()
+            == NOTICE_TYPE_POLLING
+        ):
+            cls.polling_work_orders().cancel_group(
                 target_record_id,
                 reason="target_terminal",
             )
@@ -10468,6 +11087,11 @@ class PortalRuntime:
             )
             if work_type == WORK_TYPE_CHANGE:
                 cls.stop_change_confirmation(
+                    target_record_id,
+                    reason="target_deleted",
+                )
+            if work_type == WORK_TYPE_POLLING:
+                cls.polling_work_orders().cancel_group(
                     target_record_id,
                     reason="target_deleted",
                 )

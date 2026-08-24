@@ -32,6 +32,9 @@ class NoticePayload:
     robot_group_choice: Optional[str] = None
     maintenance_cycle: Optional[str] = None
     execution_party: Optional[str] = None
+    polling_work_order_required: Optional[bool] = None
+    polling_operator_name: Optional[str] = None
+    polling_reviewer_name: Optional[str] = None
 
 
 class BaseNoticeHandler:

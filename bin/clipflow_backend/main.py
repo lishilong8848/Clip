@@ -75,6 +75,8 @@ from clipflow_backend.api_models import (
     PermissionRequestConfirm,
     PermissionRequestCreate,
     PermissionRequestReviewRequest,
+    PollingSopRequest,
+    PollingWorkOrderConfirmRequest,
     RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
     RepairScopeRequest,
@@ -122,6 +124,7 @@ from lan_bitable_template_portal.workbench_lite import (
     PENDING_PAGE_SIZE,
     extract_workbench_lite_fragments,
     parse_pasted_notice_to_draft,
+    render_polling_work_order_page,
     render_workbench_lite,
 )
 from lan_bitable_template_portal.portal_auth import (
@@ -5222,6 +5225,253 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/polling-sops")
+        async def polling_sops_list(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                items = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().list_sops
+                )
+                return self._json_ok(request, session, {"items": items})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/polling-sops")
+        async def polling_sops_create(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, PollingSopRequest)
+                ).to_payload()
+                payload["sop_id"] = ""
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                item = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().save_sop,
+                    payload,
+                    actor_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.put("/api/polling-sops/{sop_id}")
+        async def polling_sops_update(sop_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, PollingSopRequest)
+                ).to_payload()
+                payload["sop_id"] = sop_id
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                item = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().save_sop,
+                    payload,
+                    actor_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.delete("/api/polling-sops/{sop_id}")
+        async def polling_sops_delete(sop_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                item = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().delete_sop,
+                    sop_id,
+                    expected_version=int(
+                        str(request.query_params.get("expected_version") or "0") or 0
+                    ),
+                )
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/polling-sops/{sop_id}/attachments")
+        async def polling_sop_attachment_upload(
+            sop_id: str,
+            request: Request,
+            file: UploadFile = File(...),
+            expected_version: int = Form(...),
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                content = await file.read(20 * 1024 * 1024 + 1)
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                item = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().add_sop_attachment,
+                    sop_id,
+                    file_name=str(file.filename or "attachment.bin"),
+                    content=content,
+                    expected_version=expected_version,
+                    actor_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+            finally:
+                with suppress(Exception):
+                    await file.close()
+
+        @app.get("/api/polling-sops/{sop_id}/attachments/{attachment_id}")
+        async def polling_sop_attachment_download(
+            sop_id: str,
+            attachment_id: str,
+            request: Request,
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                content, file_name = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop_attachment,
+                    sop_id,
+                    attachment_id,
+                )
+                return Response(
+                    content=content,
+                    media_type="application/octet-stream",
+                    headers={
+                        "Cache-Control": "private, no-store",
+                        "Content-Disposition": (
+                            f"attachment; filename*=UTF-8''{quote(file_name, safe='')}"
+                        ),
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.delete("/api/polling-sops/{sop_id}/attachments/{attachment_id}")
+        async def polling_sop_attachment_delete(
+            sop_id: str,
+            attachment_id: str,
+            request: Request,
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                item = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().delete_sop_attachment,
+                    sop_id,
+                    attachment_id,
+                    expected_version=int(
+                        str(request.query_params.get("expected_version") or "0") or 0
+                    ),
+                    actor_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/polling-work-order")
+        async def polling_work_order_page():
+            return Response(
+                content=render_polling_work_order_page(),
+                media_type="text/html; charset=utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        @app.get("/api/polling-work-orders/session")
+        async def polling_work_order_session(request: Request):
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().session,
+                    str(request.query_params.get("token") or ""),
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/polling-work-orders/confirm")
+        async def polling_work_order_confirm(request: Request):
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PollingWorkOrderConfirmRequest
+                    )
+                ).to_payload()
+                session = self._current_session(request)
+                user = (
+                    session.get("user")
+                    if isinstance(session, dict)
+                    and isinstance(session.get("user"), dict)
+                    else {}
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().confirm,
+                    str(payload.get("token") or ""),
+                    step_key=str(payload.get("step_key") or ""),
+                    expected_version=int(payload.get("expected_version") or 0),
+                    actual_open_id=str(user.get("open_id") or ""),
+                    actual_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                completion = {"ok": False, "state": data.get("state")}
+                if str(data.get("state") or "") == "upload_pending":
+                    completion = await asyncio.to_thread(
+                        PortalRuntime.finalize_polling_work_order_group,
+                        str(data.get("group_id") or ""),
+                    )
+                return {"ok": True, "data": {"session": data, "completion": completion}}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/polling-work-orders/{group_id}/retry-upload")
+        async def polling_work_order_retry_upload(group_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                try:
+                    await asyncio.to_thread(
+                        PortalRuntime.polling_work_orders().validate_group_token,
+                        str(request.query_params.get("token") or ""),
+                        group_id,
+                    )
+                except Exception as exc:
+                    return self._portal_error_response(exc, default_status=403)
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.finalize_polling_work_order_group,
+                    group_id,
+                )
+                return (
+                    self._json_ok(request, session, data)
+                    if session is not None
+                    else {"ok": True, "data": data}
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/polling-work-orders/{group_id}/resend-links")
+        async def polling_work_order_resend_links(group_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                group = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_group,
+                    group_id,
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime._send_polling_work_order_links,
+                    group,
+                    force=True,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.post("/api/maintenance-actions")
         @app.post("/api/workbench-actions")
         async def workbench_actions(request: Request):
@@ -5392,6 +5642,14 @@ class FastAPIPortalController:
                 if len(body) > MAX_SITE_PHOTO_BYTES:
                     raise PortalError("现场照片不能超过 8MB。")
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                identity = str(request.query_params.get("identity") or "").strip()
+                kind = str(request.query_params.get("kind") or "site").strip()
+                scope = ""
+                if identity:
+                    requested_scope = str(request.query_params.get("scope") or "").strip()
+                    if not requested_scope:
+                        raise PortalError("本地图片缺少楼栋范围。")
+                    scope = self._authorized_scope_or_error(session, requested_scope)
                 file_name = str(
                     request.query_params.get("file_name")
                     or f"site_photo_{uuid.uuid4().hex[:8]}.png"
@@ -5413,6 +5671,18 @@ class FastAPIPortalController:
                     )
                 except ValueError as exc:
                     raise PortalError(str(exc)) from exc
+                local_image = {}
+                if identity:
+                    local_image = await asyncio.to_thread(
+                        PortalRuntime.local_notice_images().save,
+                        identity=identity,
+                        kind=kind,
+                        content=body,
+                        file_name=file_name,
+                        mime_type=content_type,
+                        owner_open_id=str(user.get("open_id") or ""),
+                        scope=scope,
+                    )
                 return self._json_ok(
                     request,
                     session,
@@ -5422,6 +5692,7 @@ class FastAPIPortalController:
                         "mime_type": attachment.get("mime_type"),
                         "size": attachment.get("size"),
                         "expires_at": attachment.get("expires_at"),
+                        **local_image,
                     },
                 )
             except Exception as exc:
@@ -5482,6 +5753,92 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/notice-image-drafts")
+        async def notice_image_drafts(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                requested_scope = str(request.query_params.get("scope") or "").strip()
+                if not requested_scope:
+                    raise PortalError("本地图片查询缺少楼栋范围。")
+                scope = self._authorized_scope_or_error(
+                    session, requested_scope
+                )
+                items = await asyncio.to_thread(
+                    PortalRuntime.local_notice_images().list,
+                    str(request.query_params.get("identity") or ""),
+                    kind=str(request.query_params.get("kind") or ""),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, {"items": items})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/notice-images/{image_id}")
+        async def notice_image_preview(image_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                item = await asyncio.to_thread(
+                    PortalRuntime.local_notice_images().get, image_id
+                )
+                item_scope = str(item.get("scope") or "").strip()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                if item_scope:
+                    self._authorized_scope_or_error(session, item_scope)
+                elif (
+                    str(item.get("owner_open_id") or "").strip()
+                    != str(user.get("open_id") or "").strip()
+                    and not PortalRuntime.auth_manager.is_admin(session)
+                ):
+                    raise PortalError("无权查看该本地图片。")
+                content, content_type, file_name = await asyncio.to_thread(
+                    PortalRuntime.local_notice_images().content,
+                    image_id,
+                )
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "private, max-age=300",
+                        "Content-Disposition": (
+                            f"inline; filename*=UTF-8''{quote(file_name, safe='')}"
+                        ),
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.delete("/api/notice-images/{image_id}")
+        async def notice_image_delete(image_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                item = await asyncio.to_thread(
+                    PortalRuntime.local_notice_images().get, image_id
+                )
+                item_scope = str(item.get("scope") or "").strip()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                if item_scope:
+                    self._authorized_scope_or_error(session, item_scope)
+                elif (
+                    str(item.get("owner_open_id") or "").strip()
+                    != str(user.get("open_id") or "").strip()
+                    and not PortalRuntime.auth_manager.is_admin(session)
+                ):
+                    raise PortalError("无权删除该本地图片。")
+                await asyncio.to_thread(
+                    PortalRuntime.local_notice_images().delete,
+                    image_id,
+                )
+                return self._json_ok(request, session, {"deleted": True})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/change-confirmations")
         async def change_confirmations(request: Request):
             session = self._current_session(request)
@@ -5528,6 +5885,7 @@ class FastAPIPortalController:
                     PortalRuntime.upload_change_confirmation_screenshot,
                     record_id,
                     upload_id=str(payload.get("upload_id") or ""),
+                    local_image_id=str(payload.get("local_image_id") or ""),
                     actor_open_id=open_id,
                     actor_name=str(user.get("name") or user.get("en_name") or ""),
                     allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
@@ -5577,6 +5935,16 @@ class FastAPIPortalController:
             try:
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 open_id = str(user.get("open_id") or "").strip()
+                file_token = str(request.query_params.get("file_token") or "").strip()
+                local_image_id = str(request.query_params.get("local_image_id") or "").strip()
+                if local_image_id and not file_token:
+                    local_image = await asyncio.to_thread(
+                        PortalRuntime.local_notice_images().get,
+                        local_image_id,
+                    )
+                    file_token = str(
+                        local_image.get("feishu_file_token") or ""
+                    ).strip()
                 privileged = bool(
                     PortalRuntime.auth_manager.is_admin(session)
                     or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
@@ -5584,7 +5952,7 @@ class FastAPIPortalController:
                 item = await asyncio.to_thread(
                     PortalRuntime.delete_change_confirmation_screenshot,
                     record_id,
-                    file_token=str(request.query_params.get("file_token") or ""),
+                    file_token=file_token,
                     actor_open_id=open_id,
                     actor_name=str(user.get("name") or user.get("en_name") or ""),
                     allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
@@ -10766,6 +11134,19 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"变更确认任务处理失败: {exc}")
 
+    def _run_scheduled_polling_work_orders(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            result = PortalRuntime.process_polling_work_order_uploads()
+            if int((result or {}).get("failed") or 0):
+                log_warning(
+                    "轮巡工单附件仍有上传失败项，将继续重试: "
+                    f"failed={result.get('failed')}"
+                )
+        except Exception as exc:
+            log_warning(f"轮巡工单附件重试失败: {exc}")
+
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
             pressure = PortalRuntime.runtime_pressure()
@@ -11013,6 +11394,15 @@ class FastAPIPortalController:
             coalesce=True,
         )
         scheduler.add_job(
+            self._run_scheduled_polling_work_orders,
+            "interval",
+            minutes=1,
+            id="polling_work_orders",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
@@ -11058,6 +11448,14 @@ class FastAPIPortalController:
                 "date",
                 run_date=dt.datetime.now() + dt.timedelta(seconds=20),
                 id="change_confirmations_startup",
+                replace_existing=True,
+                max_instances=1,
+            )
+            scheduler.add_job(
+                self._run_scheduled_polling_work_orders,
+                "date",
+                run_date=dt.datetime.now() + dt.timedelta(seconds=25),
+                id="polling_work_orders_startup",
                 replace_existing=True,
                 max_instances=1,
             )

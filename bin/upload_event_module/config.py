@@ -1053,6 +1053,10 @@ POLLING_NOTICE_FIELDS = {
     "actual_start": "实际开始时间",
     "actual_end": "实际结束时间",
     "notice_images": "过程通告截图",
+    "work_order_required": "是否涉及重要操作",
+    "work_order_operator": "操作人",
+    "work_order_reviewer": "现场复核人",
+    "work_order_attachments": "工单附件",
 }
 
 POWER_NOTICE_FIELDS = {
