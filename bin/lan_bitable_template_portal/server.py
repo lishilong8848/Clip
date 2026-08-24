@@ -1213,7 +1213,7 @@ class PortalRuntime:
         manager = cls.polling_work_orders()
         for group in manager.open_groups():
             target_record_id = str(group.get("target_record_id") or "").strip()
-            if str(group.get("state") or "") == "active":
+            if str(group.get("state") or "") in {"active", "completed"}:
                 ok_read, record = query_record_by_id(
                     target_record_id, NOTICE_TYPE_POLLING
                 )
@@ -7397,134 +7397,9 @@ class PortalRuntime:
     def _validate_notice_delete_target(
         cls, payload: dict, remote_fields: dict | None
     ) -> tuple[bool, str]:
-        notice_type = str((payload or {}).get("notice_type") or "").strip()
-        if notice_type == "事件通告":
-            return cls._validate_event_delete_target(payload, remote_fields)
-        if not notice_type or not isinstance(remote_fields, dict) or not remote_fields:
-            return (
-                False,
-                "已阻止删除：无法核对目标多维记录。请刷新或重新绑定后重试。",
-            )
-        prepared = cls._enrich_prepared_notice_lookup_fields(dict(payload or {}))
-        field_config = get_field_config(notice_type)
-        title_field = str(
-            field_config.get("title") or field_config.get("name") or ""
-        ).strip()
-        local_title = str(prepared.get("title") or "").strip()
-        remote_title_value = remote_fields.get(title_field) if title_field else ""
-        remote_title = cls._remote_compare_value(remote_title_value)
-        if isinstance(remote_title, list):
-            remote_title = "".join(str(item or "") for item in remote_title)
-
-        def normalized_title(value: Any) -> str:
-            return re.sub(
-                r"[\s，,。；;：:（）()【】\[\]_\-]+",
-                "",
-                str(value or "").strip().lower(),
-            )
-
-        if not local_title or not remote_title:
-            return (
-                False,
-                "已阻止删除：当前通告或目标记录缺少名称，无法确认删除对象。",
-            )
-        if normalized_title(local_title) != normalized_title(remote_title):
-            return (
-                False,
-                "已阻止删除：当前通告与目标多维记录的名称不一致，"
-                "请先核对绑定记录。",
-            )
-        building_field = str(field_config.get("building") or "").strip()
-        local_buildings = (
-            prepared.get("building_codes")
-            or prepared.get("buildings")
-            or prepared.get("building")
-            or prepared.get("scope")
-            or ""
-        )
-        remote_buildings = remote_fields.get(building_field) if building_field else ""
-        local_codes = set(
-            MaintenancePortalService._building_codes_from_value(local_buildings)
-        )
-        remote_codes = set(
-            MaintenancePortalService._building_codes_from_value(remote_buildings)
-        )
-        if local_codes and remote_codes and not (local_codes & remote_codes):
-            return (
-                False,
-                "已阻止删除：当前通告与目标多维记录的楼栋不一致，"
-                "请先核对绑定记录。",
-            )
-        local_specialty = str(prepared.get("specialty") or "").strip()
-        specialty_field = str(field_config.get("specialty") or "").strip()
-        remote_specialty = cls._remote_compare_value(
-            remote_fields.get(specialty_field)
-            if specialty_field
-            else ""
-        )
-        if isinstance(remote_specialty, list):
-            remote_specialty = "、".join(
-                str(item or "").strip()
-                for item in remote_specialty
-                if str(item or "").strip()
-            )
-        if (
-            local_specialty
-            and str(remote_specialty or "").strip()
-            and local_specialty not in str(remote_specialty)
-            and str(remote_specialty) not in local_specialty
-        ):
-            return (
-                False,
-                "已阻止删除：当前通告与目标多维记录的专业不一致，"
-                "请先核对绑定记录。",
-            )
-
-        if notice_type == "设备检修":
-            time_pairs = (
-                (
-                    prepared.get("fault_time") or prepared.get("end_time"),
-                    field_config.get("fault_time"),
-                    "发生故障时间",
-                ),
-                (
-                    prepared.get("expected_time") or prepared.get("start_time"),
-                    field_config.get("expected_time"),
-                    "期望完成时间",
-                ),
-            )
-        else:
-            time_pairs = (
-                (
-                    prepared.get("start_time"),
-                    field_config.get("start_time")
-                    or field_config.get("plan_start"),
-                    "开始时间",
-                ),
-                (
-                    prepared.get("end_time"),
-                    field_config.get("plan_end"),
-                    "结束时间",
-                ),
-            )
-        for local_time, remote_field_name, label in time_pairs:
-            remote_field_name = str(remote_field_name or "").strip()
-            if not local_time or not remote_field_name:
-                continue
-            local_time_keys = cls._remote_datetime_minute_keys(local_time)
-            remote_time_keys = cls._remote_datetime_minute_keys(
-                remote_fields.get(remote_field_name)
-            )
-            if (
-                local_time_keys
-                and remote_time_keys
-                and not (local_time_keys & remote_time_keys)
-            ):
-                return (
-                    False,
-                    f"已阻止删除：当前通告与目标多维记录的{label}不一致，"
-                    "请先核对绑定记录。",
-                )
+        target_record_id = canonical_target_record_id(payload)
+        if not target_record_id or is_local_record_id(target_record_id):
+            return False, "当前通告没有可删除的目标多维记录。"
         return True, ""
 
     @classmethod
@@ -11381,19 +11256,7 @@ class PortalRuntime:
                             if isinstance(operation.get("result"), dict)
                             else {}
                         )
-                        prior_verified = (
-                            not bool(operation.get("created"))
-                            and operation_status
-                            in {"verified", "executing", "failed"}
-                            and (
-                                operation_status in {"verified", "executing"}
-                                or bool(prior_result.get("undo_id"))
-                            )
-                        )
-                        if (
-                            prior_verified
-                            and cls._remote_record_not_found(raw_query_result)
-                        ):
+                        if cls._remote_record_not_found(raw_query_result):
                             checkpoint_id = str(
                                 prior_result.get("undo_id") or ""
                             )
@@ -11414,8 +11277,7 @@ class PortalRuntime:
                                 success=True,
                                 record_id=target_record_id,
                                 message=(
-                                    "远端记录已不存在，已按持久化删除意图"
-                                    "继续清理本地显示。"
+                                    "目标记录已不存在，已直接清理本地通告。"
                                 ),
                             )
                             return cls._finalize_local_delete_after_remote(

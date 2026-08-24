@@ -18,7 +18,12 @@ from urllib.parse import quote
 
 from upload_event_module.utils import get_data_file_path
 
-from .portal_service import PortalConflictError, PortalError, PortalNotFoundError
+from .portal_service import (
+    BUILDING_OPEN_ID_MAP,
+    PortalConflictError,
+    PortalError,
+    PortalNotFoundError,
+)
 
 
 POLLING_SOP_NAMESPACE = "polling_sop"
@@ -26,7 +31,9 @@ POLLING_WORK_ORDER_NAMESPACE = "polling_work_order"
 POLLING_WORK_ORDER_SECRET_NAMESPACE = "polling_work_order_secret"
 POLLING_WORK_ORDER_SECRET_KEY = "hmac"
 POLLING_UNITS = tuple(f"{index}#" for index in range(1, 7))
+POLLING_UNIT_GROUPS = (POLLING_UNITS[:3], POLLING_UNITS[3:])
 POLLING_SOP_SCOPES = frozenset({"110", "A", "B", "C", "D", "E", "H"})
+POLLING_H_DUTY_RECORD_ID = "h_duty_account"
 POLLING_SOP_MAX_FILE_BYTES = 20 * 1024 * 1024
 POLLING_SOP_MAX_FILES = 10
 POLLING_SOP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
@@ -55,6 +62,10 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _polling_unit_group(unit: str) -> tuple[str, ...]:
+    return next((group for group in POLLING_UNIT_GROUPS if unit in group), ())
 
 
 class PollingWorkOrderService:
@@ -123,6 +134,11 @@ class PollingWorkOrderService:
             content = str(raw.get("content") or "").strip()
             if not content:
                 raise PortalError(f"第 {index + 1} 个 SOP 步骤缺少操作内容。")
+            if re.search(r"(?<!\{)\{(?:from|to|other)\}(?!\})", content):
+                raise PortalError(
+                    f"第 {index + 1} 个 SOP 步骤占位符必须使用 "
+                    "{{from}}、{{to}}、{{other}}。"
+                )
             if len(content) > 5000:
                 raise PortalError(f"第 {index + 1} 个 SOP 步骤内容过长。")
             operator_required = _flag(raw.get("operator_required"))
@@ -311,7 +327,19 @@ class PollingWorkOrderService:
         return {"deleted": True, "sop_id": sop_id}
 
     @staticmethod
-    def _person_by_id(people: list[dict], record_id: str) -> dict:
+    def _person_by_id(
+        people: list[dict], record_id: str, *, allow_h_duty: bool = False
+    ) -> dict:
+        if allow_h_duty and str(record_id or "").strip() == POLLING_H_DUTY_RECORD_ID:
+            return {
+                "record_id": POLLING_H_DUTY_RECORD_ID,
+                "name": "H楼值班账号",
+                "open_id": str(BUILDING_OPEN_ID_MAP.get("H") or "").strip(),
+                "employee_no": "",
+                "building": "H楼",
+                "position": "值班账号",
+                "shift": "",
+            }
         person = next(
             (
                 item
@@ -354,10 +382,11 @@ class PollingWorkOrderService:
         runs = request_payload.get("polling_runs")
         runs = runs if isinstance(runs, list) else []
         run_count = int(request_payload.get("polling_run_count") or 0)
-        if run_count not in range(1, 7) or len(runs) != run_count:
-            raise PortalError("轮巡次数必须为 1–6 且与轮巡组合数量一致。")
+        if run_count not in range(1, 3) or len(runs) != run_count:
+            raise PortalError("轮巡次数必须为 1–2 且与轮巡组合数量一致。")
         normalized_runs: list[dict] = []
         seen_pairs: set[tuple[str, str]] = set()
+        used_units: set[str] = set()
         for index, item in enumerate(runs):
             item = item if isinstance(item, dict) else {}
             from_unit = str(item.get("from_unit") or "").strip()
@@ -366,12 +395,29 @@ class PollingWorkOrderService:
                 raise PortalError(f"第 {index + 1} 次轮巡设备必须从 1#–6# 中选择。")
             if from_unit == to_unit:
                 raise PortalError(f"第 {index + 1} 次轮巡的起点和终点不能相同。")
+            group = _polling_unit_group(from_unit)
+            if not group or to_unit not in group:
+                raise PortalError(
+                    f"第 {index + 1} 次轮巡不能跨越 1#–3# 与 4#–6# 分组。"
+                )
+            if from_unit in used_units or to_unit in used_units:
+                raise PortalError(
+                    f"第 {index + 1} 次轮巡使用了前序工单已选择的设备编号。"
+                )
             pair = (from_unit, to_unit)
             if pair in seen_pairs:
                 raise PortalError("轮巡组合不能重复。")
             seen_pairs.add(pair)
+            used_units.update((from_unit, to_unit))
             normalized_runs.append(
-                {"run_index": index + 1, "from_unit": from_unit, "to_unit": to_unit}
+                {
+                    "run_index": index + 1,
+                    "from_unit": from_unit,
+                    "to_unit": to_unit,
+                    "other_unit": next(
+                        unit for unit in group if unit not in {from_unit, to_unit}
+                    ),
+                }
             )
         operator = self._person_by_id(
             people,
@@ -380,6 +426,7 @@ class PollingWorkOrderService:
         reviewer = self._person_by_id(
             people,
             str(request_payload.get("polling_reviewer_record_id") or ""),
+            allow_h_duty=True,
         )
         if operator["record_id"] == reviewer["record_id"]:
             raise PortalError("操作人和现场审核人不能是同一人。")
@@ -457,7 +504,7 @@ class PollingWorkOrderService:
         if not hmac.compare_digest(expected, str(token or "").strip()):
             raise PollingWorkOrderTokenError("工单链接无效或已失效。")
         group = self.get_group(target_record_id)
-        if str(group.get("state") or "") in {"completed", "cancelled", "stopped"}:
+        if str(group.get("state") or "") in {"cancelled", "stopped"}:
             raise PollingWorkOrderTokenError("该工单链接已失效。")
         token_hash = hashlib.sha256(str(token).encode("utf-8")).hexdigest()
         if not hmac.compare_digest(
@@ -541,6 +588,7 @@ class PollingWorkOrderService:
                     content = str(template_step.get("content") or "")
                     content = content.replace("{{from}}", str(run.get("from_unit") or ""))
                     content = content.replace("{{to}}", str(run.get("to_unit") or ""))
+                    content = content.replace("{{other}}", str(run.get("other_unit") or ""))
                     flattened.append(
                         {
                             "step_key": f"{run_index}:{step_index}",
@@ -711,7 +759,7 @@ class PollingWorkOrderService:
             for document in self.state_store.list_documents(POLLING_WORK_ORDER_NAMESPACE)
             if isinstance(document.get("payload"), dict)
             and str((document.get("payload") or {}).get("state") or "")
-            in {"active", "upload_pending"}
+            in {"active", "upload_pending", "completed"}
         ]
 
     def mark_upload_result(
@@ -772,7 +820,7 @@ class PollingWorkOrderService:
                 group = self.get_group(target_record_id)
             except PortalNotFoundError:
                 return
-            if str(group.get("state") or "") == "completed":
+            if str(group.get("state") or "") in {"cancelled", "stopped"}:
                 return
             group.update(
                 {

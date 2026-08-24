@@ -1182,9 +1182,10 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
 
         self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
 
-    def test_notice_delete_blocks_same_title_with_different_start_time(self) -> None:
+    def test_notice_delete_uses_bound_target_id_without_field_matching(self) -> None:
         payload = {
             "notice_type": "维保通告",
+            "target_record_id": "recBoundTarget",
             "title": "EA118机房A楼同名维保",
             "building": "A楼",
             "buildings": ["A楼"],
@@ -1202,18 +1203,30 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             MAINTENANCE_NOTICE_FIELDS["plan_start"]: "2026-07-30 10:00",
         }
 
+        for remote_fields in (matching_fields, other_time_fields, {}):
+            with self.subTest(remote_fields=remote_fields):
+                self.assertTrue(
+                    PortalRuntime._validate_notice_delete_target(
+                        payload,
+                        remote_fields,
+                    )[0]
+                )
         self.assertTrue(
             PortalRuntime._validate_notice_delete_target(
-                payload,
+                {
+                    "notice_type": "事件通告",
+                    "target_record_id": "recBoundEvent",
+                    "title": "本地名称",
+                },
+                {EVENT_NOTICE_FIELDS["alarm_desc"]: "远端其他名称"},
+            )[0]
+        )
+        self.assertFalse(
+            PortalRuntime._validate_notice_delete_target(
+                {"notice_type": "维保通告"},
                 matching_fields,
             )[0]
         )
-        allowed, message = PortalRuntime._validate_notice_delete_target(
-            payload,
-            other_time_fields,
-        )
-        self.assertFalse(allowed)
-        self.assertIn("开始时间不一致", message)
 
     def test_event_existing_target_requires_same_event_time(self) -> None:
         class FakeStateStore:
@@ -1443,7 +1456,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             PortalRuntime.service = old_service
             PortalRuntime.local_upload_created_targets = old_created_targets
 
-    def test_event_delete_missing_remote_preserves_local_item(self) -> None:
+    def test_event_delete_missing_remote_cleans_local_item(self) -> None:
         class FakeStateStore:
             def __init__(self) -> None:
                 self.deleted = []
@@ -1488,14 +1501,24 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 return_value=(False, "查询记录失败:1254043-RecordIdNotFound"),
             ), mock.patch(
                 "lan_bitable_template_portal.server.delete_bitable_record"
-            ) as delete_record:
+            ) as delete_record, mock.patch.object(
+                PortalRuntime,
+                "_finalize_local_delete_after_remote",
+                return_value={
+                    "ok": True,
+                    "remote_deleted": True,
+                    "local_cleanup_completed": True,
+                },
+            ) as finalize_local:
                 result = PortalRuntime.execute_local_delete_active_item(payload)
 
-            self.assertFalse(result.get("ok"))
-            self.assertFalse(result.get("remote_deleted"))
-            self.assertIn("本地显示已保留", result.get("message", ""))
-            self.assertEqual(fake_state.deleted, [])
-            self.assertEqual(fake_state.identity_deleted, [])
+            self.assertTrue(result.get("ok"))
+            self.assertTrue(result.get("remote_deleted"))
+            finalize_local.assert_called_once()
+            self.assertEqual(
+                finalize_local.call_args.kwargs["target_record_id"],
+                "recMissingEvent",
+            )
             delete_record.assert_not_called()
         finally:
             PortalRuntime.state_store = old_state_store
