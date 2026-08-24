@@ -2633,8 +2633,8 @@ def render_workbench_lite(
         else ""
     )
     polling_sop_button = (
-        '<button class="top-link" id="lite-polling-sop-open" type="button" '
-        'aria-haspopup="dialog" aria-controls="lite-polling-sop-modal">轮巡 SOP</button>'
+        '<button class="btn ghost" id="lite-polling-sop-open" type="button" '
+        'aria-haspopup="dialog" aria-controls="lite-polling-sop-modal">SOP步骤填写</button>'
         if view_work == "polling"
         else ""
     )
@@ -3099,7 +3099,6 @@ def render_workbench_lite(
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
       <a class="top-link" href="/" aria-label="返回">返回</a>
       <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
-      {polling_sop_button}
       {change_confirmation_button}
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
     </nav>
@@ -3150,7 +3149,7 @@ def render_workbench_lite(
     <!--LITE_FRAGMENT:workspace:START--><section class="workspace">
       <aside class="task-inbox panel" aria-label="通告处理">
         <div class="inbox-head">
-          <h2 class="inbox-title"><span>通告处理</span></h2>
+          <h2 class="inbox-title"><span>通告处理</span>{polling_sop_button}</h2>
           <div class="inbox-summary" aria-label="任务数量">
             <span>计划通告 <b>{_e(current_pending_count)}</b></span>
             <span>未结束 <b data-inbox-ongoing-count>{_e(current_ongoing_count)}</b></span>
@@ -3319,6 +3318,8 @@ def render_workbench_lite(
     let litePollingPeople = [];
     let litePollingSelection = null;
     const litePollingUnits = ['1#','2#','3#','4#','5#','6#'];
+    const litePollingSopScopes = new Set(['110','A','B','C','D','E','H']);
+    function pollingSopScope() {{ const scope=String(getCurrentScope()||'').toUpperCase();return litePollingSopScopes.has(scope)?scope:''; }}
     async function pollingApi(url, options = {{}}) {{
       const response = await fetch(url, {{ credentials:'same-origin', ...options }});
       const data = await response.json().catch(() => ({{}}));
@@ -3327,7 +3328,9 @@ def render_workbench_lite(
       return data.data || data;
     }}
     async function loadPollingSops() {{
-      const data = await pollingApi('/api/polling-sops');
+      const scope=pollingSopScope();
+      if(!scope)throw new Error('请先切换到具体楼栋，再填写或选择 SOP 步骤');
+      const data = await pollingApi(`/api/polling-sops?scope=${{encodeURIComponent(scope)}}`);
       litePollingSops = Array.isArray(data.items) ? data.items : [];
       return litePollingSops;
     }}
@@ -3348,7 +3351,7 @@ def render_workbench_lite(
       litePollingPeople=pollingSortedPeople(Array.isArray(data.people)?data.people:[]);
       return litePollingPeople;
     }}
-    function pollingNewDraft() {{ return {{sop_id:'',name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true}}],attachments:[]}}; }}
+    function pollingNewDraft() {{ return {{sop_id:'',scope:pollingSopScope(),name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true}}],attachments:[]}}; }}
     function pollingStepEditor(step,index) {{
       const node=document.createElement('article');node.className='polling-step-edit';
       const head=document.createElement('header'),title=document.createElement('strong'),remove=document.createElement('button');title.textContent=`步骤 ${{index+1}}`;remove.type='button';remove.className='btn danger-ghost';remove.textContent='删除';remove.onclick=()=>{{litePollingEditingSop.steps.splice(index,1);renderPollingSopEditor()}};head.append(title,remove);
@@ -3373,7 +3376,7 @@ def render_workbench_lite(
       const label=document.createElement('label'),span=document.createElement('span'),name=document.createElement('input');span.textContent='SOP 名称';name.value=sop.name||'';name.oninput=()=>sop.name=name.value;label.append(span,name);
       const steps=document.createElement('div');steps.className='polling-sop-steps';steps.replaceChildren(...(sop.steps||[]).map(pollingStepEditor));
       const add=document.createElement('button');add.type='button';add.className='btn ghost';add.textContent='添加步骤';add.onclick=()=>{{sop.steps.push({{step_id:'',content:'',operator_required:true,reviewer_required:true}});renderPollingSopEditor()}};
-      const save=document.createElement('button');save.type='button';save.className='btn primary';save.textContent='保存 SOP';save.onclick=async()=>{{try{{const body={{sop_id:sop.sop_id||'',name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},url=sop.sop_id?`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`:'/api/polling-sops';litePollingEditingSop=await pollingApi(url,{{method:sop.sop_id?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setLiteStatus('SOP 已保存')}}catch(error){{showLiteError(error.message)}}}};
+      const save=document.createElement('button');save.type='button';save.className='btn primary';save.textContent='保存 SOP';save.onclick=async()=>{{try{{const body={{sop_id:sop.sop_id||'',scope:pollingSopScope(),name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},url=sop.sop_id?`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`:'/api/polling-sops';litePollingEditingSop=await pollingApi(url,{{method:sop.sop_id?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setLiteStatus('SOP 已保存')}}catch(error){{showLiteError(error.message)}}}};
       const actions=document.createElement('div');actions.className='polling-sop-inline';actions.append(add,save);
       if(sop.sop_id){{const del=document.createElement('button');del.type='button';del.className='btn danger';del.textContent='删除 SOP';del.onclick=async()=>{{if(!confirm('确认删除该 SOP 及本地附件？'))return;try{{await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}?expected_version=${{sop.version}}`,{{method:'DELETE'}});litePollingEditingSop=pollingNewDraft();await loadPollingSops();renderPollingSopList();renderPollingSopEditor()}}catch(error){{showLiteError(error.message)}}}};actions.append(del)}}
       editor.append(label,steps,actions);
@@ -3396,7 +3399,7 @@ def render_workbench_lite(
       editor.append(preview,countLabel,runs,peopleGrid,apply);
     }}
     function updatePollingSelectionSummary(form) {{const section=form?.querySelector('[data-polling-work-order-select]');if(!section)return;const start=String(form.dataset.action||'start')==='start';section.hidden=!start;const valid=litePollingSelection&&litePollingSelection.identity===sitePhotoSignature(form);const summary=document.getElementById('lite-polling-selection-summary');if(summary)summary.textContent=valid?`${{litePollingSelection.sop_name}} · ${{litePollingSelection.run_count}}次 · ${{litePollingSelection.operator_name}}/${{litePollingSelection.reviewer_name}}`:'未选择 SOP';}}
-    async function openPollingSopModal(mode='manage') {{litePollingSopMode=mode;const modal=pollingSopModal();if(!modal)return;modal.hidden=false;document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':'SOP 管理';document.getElementById('lite-polling-sop-new').hidden=mode==='select';try{{await loadPollingSops();if(mode==='select')await loadPollingPeople();litePollingEditingSop=litePollingEditingSop||pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id&&item.ready)||null):litePollingSelectedSop;renderPollingSopList();if(mode==='select')renderPollingSelectionEditor();else renderPollingSopEditor()}}catch(error){{showLiteError(error.message);closePollingSopModal()}}}}
+    async function openPollingSopModal(mode='manage') {{litePollingSopMode=mode;const modal=pollingSopModal();if(!modal)return;if(!pollingSopScope()){{showLiteError('请先切换到具体楼栋，再填写或选择 SOP 步骤');return}}modal.hidden=false;document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':'SOP步骤填写';document.getElementById('lite-polling-sop-new').hidden=mode==='select';try{{await loadPollingSops();if(mode==='select')await loadPollingPeople();litePollingEditingSop=litePollingEditingSop&&litePollingEditingSop.scope===pollingSopScope()?litePollingEditingSop:pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id&&item.ready)||null):litePollingSelectedSop;renderPollingSopList();if(mode==='select')renderPollingSelectionEditor();else renderPollingSopEditor()}}catch(error){{showLiteError(error.message);closePollingSopModal()}}}}
     function currentUrlScope() {{
       return new URLSearchParams(location.search).get('scope') || initialScope;
     }}

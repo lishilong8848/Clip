@@ -19,11 +19,29 @@ from lan_bitable_template_portal.polling_work_orders import (
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 import lan_bitable_template_portal.server as portal_server
 from lan_bitable_template_portal.server import PortalRuntime
+from lan_bitable_template_portal.workbench_lite import render_workbench_lite
 from upload_event_module.services.handlers.base import NoticePayload
 from upload_event_module.services.handlers.polling_notice import PollingNoticeHandler
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_polling_sop_button_is_in_notice_panel_and_uses_floating_editor(self) -> None:
+        html = render_workbench_lite(
+            payload={"records": [], "ongoing": []},
+            session={"role": "admin"},
+            scope="A",
+            work_type="polling",
+        )
+        self.assertIn(
+            '<h2 class="inbox-title"><span>通告处理</span><button class="btn ghost" id="lite-polling-sop-open"',
+            html,
+        )
+        self.assertIn(
+            'class="end-check-backdrop" id="lite-polling-sop-modal" hidden',
+            html,
+        )
+        self.assertIn("/api/polling-sops?scope=", html)
+
     def test_polling_end_is_blocked_before_write_until_work_order_attachment_exists(self) -> None:
         prepared = {
             "action": "end",
@@ -84,6 +102,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             service.work_order_root = root / "orders"
             sop = service.save_sop(
                 {
+                    "scope": "A",
                     "name": "制冷单元切换",
                     "steps": [
                         {"content": "将{{from}}切换至{{to}}", "operator_required": True, "reviewer_required": True},
@@ -100,6 +119,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             prepared = service.prepare_start(
                 {
                     "work_type": "polling",
+                    "scope": "A",
                     "action": "start",
                     "_web_action_request": True,
                     "polling_sop_id": sop["sop_id"],
@@ -115,6 +135,19 @@ class PollingWorkOrderTests(unittest.TestCase):
                     {"record_id": "reviewer", "name": "审核员", "open_id": "ou_reviewer"},
                 ],
             )
+            with self.assertRaisesRegex(Exception, "不属于当前楼栋"):
+                service.prepare_start(
+                    {
+                        "work_type": "polling",
+                        "scope": "B",
+                        "action": "start",
+                        "_web_action_request": True,
+                        "polling_sop_id": sop["sop_id"],
+                        "polling_sop_version": sop["version"],
+                    },
+                    job_id="job-wrong-building",
+                    people=[],
+                )
             group = service.create_group(
                 prepared,
                 target_record_id="recTarget1",
@@ -134,6 +167,18 @@ class PollingWorkOrderTests(unittest.TestCase):
             service.mark_upload_result("recTarget1", success=True, file_tokens=["file-token"])
             with self.assertRaises(PollingWorkOrderTokenError):
                 service.session(operator_token)
+
+            other_building = service.save_sop(
+                {
+                    "scope": "B",
+                    "name": "制冷单元切换",
+                    "steps": [
+                        {"content": "B楼步骤", "operator_required": True, "reviewer_required": False}
+                    ],
+                }
+            )
+            self.assertEqual([item["sop_id"] for item in service.list_sops("A")], [sop["sop_id"]])
+            self.assertEqual([item["sop_id"] for item in service.list_sops("B")], [other_building["sop_id"]])
 
     def test_local_notice_image_survives_store_reload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

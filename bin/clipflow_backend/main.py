@@ -5231,8 +5231,12 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
                 items = await asyncio.to_thread(
-                    PortalRuntime.polling_work_orders().list_sops
+                    PortalRuntime.polling_work_orders().list_sops,
+                    scope,
                 )
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
@@ -5247,6 +5251,9 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, PollingSopRequest)
                 ).to_payload()
+                payload["scope"] = self._authorized_scope_or_error(
+                    session, payload.get("scope") or ""
+                )
                 payload["sop_id"] = ""
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
@@ -5267,6 +5274,13 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, PollingSopRequest)
                 ).to_payload()
+                existing_sop = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop,
+                    sop_id,
+                )
+                payload["scope"] = self._authorized_scope_or_error(
+                    session, existing_sop.get("scope") or ""
+                )
                 payload["sop_id"] = sop_id
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
@@ -5284,6 +5298,13 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                existing_sop = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop,
+                    sop_id,
+                )
+                self._authorized_scope_or_error(
+                    session, existing_sop.get("scope") or ""
+                )
                 item = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().delete_sop,
                     sop_id,
@@ -5306,6 +5327,13 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                existing_sop = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop,
+                    sop_id,
+                )
+                self._authorized_scope_or_error(
+                    session, existing_sop.get("scope") or ""
+                )
                 content = await file.read(20 * 1024 * 1024 + 1)
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
@@ -5333,6 +5361,13 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                existing_sop = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop,
+                    sop_id,
+                )
+                self._authorized_scope_or_error(
+                    session, existing_sop.get("scope") or ""
+                )
                 content, file_name = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().get_sop_attachment,
                     sop_id,
@@ -5362,6 +5397,13 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                existing_sop = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop,
+                    sop_id,
+                )
+                self._authorized_scope_or_error(
+                    session, existing_sop.get("scope") or ""
+                )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().delete_sop_attachment,

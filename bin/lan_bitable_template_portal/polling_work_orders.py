@@ -26,6 +26,7 @@ POLLING_WORK_ORDER_NAMESPACE = "polling_work_order"
 POLLING_WORK_ORDER_SECRET_NAMESPACE = "polling_work_order_secret"
 POLLING_WORK_ORDER_SECRET_KEY = "hmac"
 POLLING_UNITS = tuple(f"{index}#" for index in range(1, 7))
+POLLING_SOP_SCOPES = frozenset({"110", "A", "B", "C", "D", "E", "H"})
 POLLING_SOP_MAX_FILE_BYTES = 20 * 1024 * 1024
 POLLING_SOP_MAX_FILES = 10
 POLLING_SOP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
@@ -88,11 +89,18 @@ class PollingWorkOrderService:
         result["ready"] = bool(result.get("steps") and result.get("attachments"))
         return result
 
-    def list_sops(self) -> list[dict]:
+    def list_sops(self, scope: str) -> list[dict]:
+        scope = str(scope or "").strip().upper()
+        if scope not in POLLING_SOP_SCOPES:
+            raise PortalError("请在明确的单楼页面读取轮巡 SOP。")
         items = [
             self._public_sop(document.get("payload") or {})
             for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE)
             if isinstance(document.get("payload"), dict)
+            and (
+                str((document.get("payload") or {}).get("scope") or "").strip().upper()
+                == scope
+            )
         ]
         return sorted(items, key=lambda item: str(item.get("name") or "").casefold())
 
@@ -137,6 +145,9 @@ class PollingWorkOrderService:
     def save_sop(self, payload: dict, *, actor_open_id: str = "") -> dict:
         payload = payload if isinstance(payload, dict) else {}
         name = str(payload.get("name") or "").strip()
+        scope = str(payload.get("scope") or "").strip().upper()
+        if scope not in POLLING_SOP_SCOPES:
+            raise PortalError("请在明确的单楼页面维护轮巡 SOP。")
         if not name or len(name) > 160:
             raise PortalError("SOP 名称不能为空且不能超过 160 个字符。")
         steps = self._normalized_steps(payload.get("steps"))
@@ -148,9 +159,12 @@ class PollingWorkOrderService:
                 raise PortalConflictError("SOP 已被其他用户修改，请刷新后重试。")
             if not existing and expected_version:
                 raise PortalConflictError("SOP 版本已失效，请刷新后重试。")
-            for item in self.list_sops():
+            if existing and str(existing.get("scope") or "").strip().upper() not in {"", scope}:
+                raise PortalConflictError("轮巡 SOP 不能跨楼栋修改。")
+            for item in self.list_sops(scope):
                 if (
                     str(item.get("sop_id") or "") != sop_id
+                    and str(item.get("scope") or "").strip().upper() == scope
                     and str(item.get("name") or "").strip().casefold() == name.casefold()
                 ):
                     raise PortalConflictError("已存在同名轮巡 SOP。")
@@ -158,6 +172,7 @@ class PollingWorkOrderService:
             sop = {
                 **(existing or {}),
                 "sop_id": sop_id,
+                "scope": scope,
                 "name": name,
                 "steps": steps,
                 "attachments": copy.deepcopy((existing or {}).get("attachments") or []),
@@ -326,6 +341,11 @@ class PollingWorkOrderService:
         ):
             return {}
         sop = self.get_sop(str(request_payload.get("polling_sop_id") or ""), public=False)
+        request_scope = str(request_payload.get("scope") or "").strip().upper()
+        if request_scope not in POLLING_SOP_SCOPES or str(
+            sop.get("scope") or ""
+        ).strip().upper() != request_scope:
+            raise PortalError("所选轮巡 SOP 不属于当前楼栋，请重新选择。")
         expected_version = int(request_payload.get("polling_sop_version") or 0)
         if expected_version != int(sop.get("version") or 0):
             raise PortalConflictError("所选 SOP 已修改，请重新选择。")
