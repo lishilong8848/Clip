@@ -26,8 +26,6 @@ from urllib.parse import urlparse
 
 
 
-
-
 APP_NAME = "ClipFlow"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
