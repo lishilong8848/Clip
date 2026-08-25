@@ -32,6 +32,46 @@ from upload_event_module.services.handlers.polling_notice import PollingNoticeHa
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_attachment_result_keeps_unsaved_sop_name_and_steps(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        html = render_workbench_lite(
+            payload={"records": [], "ongoing": []},
+            session={"role": "admin"},
+            scope="A",
+            work_type="polling",
+        )
+        match = re.search(
+            r"function pollingMergeSopAttachmentResult\(.*?\n    \}",
+            html,
+            re.S,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(
+            html.count(
+                "litePollingEditingSop=pollingMergeSopAttachmentResult(draft,remote)"
+            ),
+            2,
+        )
+        script = "\n".join(
+            [
+                match.group(0),
+                "const draft={name:'修改后的名称',steps:[{content:'修改后的步骤'}]};",
+                "const remote={name:'旧名称',steps:[{content:'旧步骤'}],version:3,attachments:[{name:'附件.pdf'}]};",
+                "console.log(JSON.stringify(pollingMergeSopAttachmentResult(draft,remote)));",
+            ]
+        )
+        result = subprocess.run(
+            [node, "-e", script], check=True, capture_output=True, text=True
+        )
+
+        merged = json.loads(result.stdout)
+        self.assertEqual(merged["name"], "修改后的名称")
+        self.assertEqual(merged["steps"][0]["content"], "修改后的步骤")
+        self.assertEqual(merged["version"], 3)
+        self.assertEqual(merged["attachments"][0]["name"], "附件.pdf")
+
     def test_work_order_page_uses_global_step_number_without_fake_run_count(self) -> None:
         html = render_polling_work_order_page()
 

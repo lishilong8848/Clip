@@ -7687,6 +7687,69 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
+    def test_backend_event_update_and_end_keep_initial_clipboard_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                base_lines = (
+                    "【标题】EA118机房B楼I3级事件通报\n"
+                    "【来源】BMS系统\n"
+                    "【时间】2026-08-25 09:30\n"
+                    "【概述】B楼蓄电池温度过高报警\n"
+                    "【影响】IT业务暂无影响\n"
+                )
+                started = controller._clipboard_entry_from_content(
+                    "【事件通告】状态：开始\n" + base_lines + "【进展】开始处理"
+                )
+                controller._project_clipboard_entry_to_active(started)
+                first = PortalRuntime.state_store.list_qt_active_items()[0]
+                uploaded = dict(first["payload"])
+                original_fields = dict(uploaded["event_match_fields"])
+                uploaded.update(
+                    {
+                        "record_id": "rec_event_identity_stable",
+                        "target_record_id": "rec_event_identity_stable",
+                        "_is_placeholder_record": False,
+                        "source": "BMS动环系统告警",
+                        "event_source": "BMS动环系统告警",
+                    }
+                )
+                uploaded.update(PortalRuntime._event_identity_payload_patch(uploaded))
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    uploaded,
+                    section="event",
+                    origin="qt_upload",
+                )
+
+                for status, progress in (
+                    ("更新", "人员正在排查"),
+                    ("结束", "告警已恢复"),
+                ):
+                    entry = controller._clipboard_entry_from_content(
+                        f"【事件通告】状态：{status}\n"
+                        + base_lines
+                        + f"【进展】{progress}"
+                    )
+                    result = controller._project_clipboard_entry_to_active(entry)
+                    self.assertTrue(result["ok"])
+                    self.assertFalse(result.get("ignored"))
+
+                items = PortalRuntime.state_store.list_qt_active_items()
+                self.assertEqual(len(items), 1)
+                payload = items[0]["payload"]
+                self.assertEqual(payload["status"], "结束")
+                self.assertEqual(
+                    payload["target_record_id"],
+                    "rec_event_identity_stable",
+                )
+                self.assertEqual(payload["event_match_fields"], original_fields)
+            finally:
+                PortalRuntime.state_store = previous_store
+
     def test_backend_manual_update_with_target_record_projects_to_bound_active_item(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store

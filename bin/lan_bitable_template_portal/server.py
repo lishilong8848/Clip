@@ -6810,7 +6810,7 @@ class PortalRuntime:
         stored = data.get("event_match_fields")
         stored = stored if isinstance(stored, dict) else {}
         return {
-            key: str(computed.get(key) or stored.get(key) or "").strip()
+            key: str(stored.get(key) or computed.get(key) or "").strip()
             for key in ("title", "time", "building", "source", "level")
         }
 
@@ -7283,15 +7283,27 @@ class PortalRuntime:
     def _event_identity_payload_patch(cls, data: dict) -> dict:
         if str((data or {}).get("notice_type") or "").strip() != "事件通告":
             return {}
+        existing_key = str((data or {}).get("event_identity_key") or "").strip()
         try:
-            identity_key = cls._event_notice_identity_key(data)
+            computed_key = cls._event_notice_identity_key(data)
         except Exception:
-            identity_key = ""
+            computed_key = ""
+        identity_key = existing_key or computed_key
         if not identity_key:
             return {}
         patch: dict[str, Any] = {"event_identity_key": identity_key}
         try:
-            patch["event_match_fields"] = cls._event_match_fields(data)
+            computed_fields = cls._event_match_fields(data)
+            existing_fields = (data or {}).get("event_match_fields")
+            existing_fields = (
+                existing_fields if isinstance(existing_fields, dict) else {}
+            )
+            patch["event_match_fields"] = {
+                key: str(
+                    existing_fields.get(key) or computed_fields.get(key) or ""
+                ).strip()
+                for key in ("title", "time", "building", "source", "level")
+            }
         except Exception:
             pass
         return patch
@@ -7626,13 +7638,7 @@ class PortalRuntime:
             record_version,
         )
         if str(notice_type or "").strip() == "事件通告":
-            event_identity_key = (
-                cls._event_notice_identity_key(payload)
-                or str(payload.get("event_identity_key") or "").strip()
-            )
-            if event_identity_key:
-                payload["event_identity_key"] = event_identity_key
-                payload["event_match_fields"] = cls._event_match_fields(payload)
+            payload.update(cls._event_identity_payload_patch(payload))
             payload["last_remote_write_at"] = time.time()
         if not str(payload.get("status") or "").strip():
             payload["status"] = "开始" if str(payload.get("action") or "") == "start" else str(payload.get("action") or "")
