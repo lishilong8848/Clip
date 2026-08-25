@@ -3018,6 +3018,12 @@ def render_workbench_lite(
     .change-confirmation-meta .warn {{ color:#9a5b00; background:#fff5db; }}
     .change-confirmation-meta .success {{ color:#087443; background:#e8fff3; }}
     .change-confirmation-error {{ margin-top:6px; color:#b42318; font-size:11px; font-weight:800; }}
+    .change-confirmation-gallery {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:9px; }}
+    .change-confirmation-thumb {{ width:84px; height:64px; overflow:hidden; border:1px solid #c9daf1; border-radius:10px; padding:0; background:#eef5ff; cursor:zoom-in; }}
+    .change-confirmation-thumb img {{ display:block; width:100%; height:100%; object-fit:cover; }}
+    .change-confirmation-preview-dialog {{ width:min(1120px,96vw); max-height:94vh; display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
+    .change-confirmation-preview-body {{ display:grid; place-items:center; min-height:240px; overflow:auto; padding:14px; background:#071426; }}
+    .change-confirmation-preview-body img {{ display:block; max-width:100%; max-height:76vh; object-fit:contain; }}
     .change-confirmation-actions {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; }}
     .change-confirmation-file {{ max-width:190px; font-size:11px; }}
     .polling-sop-dialog {{ width:min(1120px,100%); max-height:min(880px,94vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
@@ -3235,6 +3241,13 @@ def render_workbench_lite(
         <button class="btn ghost" type="button" id="lite-change-confirmation-refresh">刷新</button>
         <button class="btn primary" type="button" id="lite-change-confirmation-close">关闭</button>
       </footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-change-screenshot-preview" hidden>
+    <section class="end-check-dialog change-confirmation-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-change-screenshot-preview-title">
+      <header class="end-check-head"><span>阿里确认截图</span><strong id="lite-change-screenshot-preview-title">查看原图</strong></header>
+      <div class="change-confirmation-preview-body"><img id="lite-change-screenshot-preview-image" alt="阿里确认截图原图"></div>
+      <footer class="end-check-actions"><button class="btn primary" type="button" id="lite-change-screenshot-preview-close">关闭</button></footer>
     </section>
   </div>
   <div class="end-check-backdrop" id="lite-end-check" hidden>
@@ -5907,6 +5920,7 @@ def render_workbench_lite(
       }}
     }}
     let pendingUndoButton = null;
+    function undoCreatedTime(value) {{const timestamp=Number(value||0);if(!Number.isFinite(timestamp)||timestamp<=0)return '';return new Date(timestamp*1000).toLocaleString('zh-CN',{{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}})}}
     function undoRowFromItem(item) {{
       const button = document.createElement('button');
       button.className = 'undo-row';
@@ -5914,7 +5928,7 @@ def render_workbench_lite(
       button.setAttribute('data-undo-id', String(item.undo_id || ''));
       button.setAttribute('data-undo-title', String(item.title || item.undo_label || '可回退通告'));
       button.setAttribute('data-undo-action', String(item.undo_label || item.undo_action_type || '回退'));
-      button.setAttribute('data-undo-time', String(item.undo_created_at || ''));
+      button.setAttribute('data-undo-time', undoCreatedTime(item.undo_created_at));
       const title = document.createElement('strong');
       title.textContent = String(item.title || item.undo_label || '可回退通告');
       const action = document.createElement('span');
@@ -6595,6 +6609,8 @@ def render_workbench_lite(
       const modal = changeConfirmationModal();
       if (modal) modal.hidden = true;
     }}
+    function closeChangeScreenshotPreview() {{const modal=document.getElementById('lite-change-screenshot-preview'),image=document.getElementById('lite-change-screenshot-preview-image');if(modal)modal.hidden=true;if(image)image.removeAttribute('src')}}
+    function openChangeScreenshotPreview(url,title) {{const modal=document.getElementById('lite-change-screenshot-preview'),image=document.getElementById('lite-change-screenshot-preview-image'),heading=document.getElementById('lite-change-screenshot-preview-title');if(!modal||!image||!url)return;image.src=url;image.alt=title||'阿里确认截图原图';if(heading)heading.textContent=title||'查看原图';modal.hidden=false;document.getElementById('lite-change-screenshot-preview-close')?.focus()}}
     function changeConfirmationStateLabel(state) {{
       if (state === 'missing_screenshot') return '待上传截图';
       if (state === 'awaiting_confirmation') return '待H楼确认';
@@ -6637,6 +6653,8 @@ def render_workbench_lite(
           meta.append(chip);
         }}
         body.append(title, meta);
+        const screenshotTokens=Array.isArray(item.screenshot_tokens)?item.screenshot_tokens.filter(Boolean):[];
+        if(screenshotTokens.length){{const gallery=document.createElement('div');gallery.className='change-confirmation-gallery';for(const [index,token] of screenshotTokens.entries()){{const attachment=(item.screenshot_items||[]).find(entry=>String(entry?.file_token||entry?.token||'')===String(token))||{{}},label=String(attachment.name||attachment.file_name||`阿里确认截图${{index+1}}`),url=`/api/change-confirmations/${{encodeURIComponent(item.target_record_id||'')}}/screenshot/preview?file_token=${{encodeURIComponent(token)}}`,button=document.createElement('button'),image=document.createElement('img');button.type='button';button.className='change-confirmation-thumb';button.title=`点击放大：${{label}}`;button.setAttribute('aria-label',button.title);image.src=url;image.alt=label;image.loading='lazy';button.append(image);button.onclick=()=>openChangeScreenshotPreview(url,label);gallery.append(button)}}body.append(gallery)}}
         if (item.last_error) {{
           const error = document.createElement('div');
           error.className = 'change-confirmation-error';
@@ -6774,6 +6792,10 @@ def render_workbench_lite(
       if (pollingSopDeleteBackdrop && target === pollingSopDeleteBackdrop) {{ event.preventDefault(); closePollingSopDeleteConfirm(); return; }}
       const pollingBackdrop = target.closest('#lite-polling-sop-modal');
       if (pollingBackdrop && target === pollingBackdrop) {{ event.preventDefault(); closePollingSopModal(); return; }}
+      const changeScreenshotPreviewClose=target.closest('#lite-change-screenshot-preview-close');
+      if(changeScreenshotPreviewClose){{event.preventDefault();closeChangeScreenshotPreview();return}}
+      const changeScreenshotPreviewBackdrop=target.closest('#lite-change-screenshot-preview');
+      if(changeScreenshotPreviewBackdrop&&target===changeScreenshotPreviewBackdrop){{event.preventDefault();closeChangeScreenshotPreview();return}}
       const pollingCopyLink = target.closest('[data-polling-copy-link]');
       if (pollingCopyLink) {{
         event.preventDefault();
@@ -7292,6 +7314,8 @@ def render_workbench_lite(
     }});
     document.addEventListener('keydown', (event) => {{
       if (event.key === 'Escape') {{
+        const changeScreenshotPreview=document.getElementById('lite-change-screenshot-preview');
+        if(changeScreenshotPreview&&!changeScreenshotPreview.hidden){{closeChangeScreenshotPreview();return}}
         const pollingDeleteModal=document.getElementById('lite-polling-sop-delete-confirm');
         if(pollingDeleteModal&&!pollingDeleteModal.hidden){{closePollingSopDeleteConfirm();return}}
         const hadOpenDialog = Array.from(document.querySelectorAll('.end-check-backdrop')).some(node => !node.hidden);
@@ -8110,8 +8134,8 @@ def render_polling_work_order_page() -> str:
 <body><main class="shell"><section class="head"><span id="role">轮巡工单</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status">正在读取工单状态...</div><button id="retry" class="action" type="button" hidden>重试上传工单附件</button><section id="steps" class="steps"></section><p class="links">页面会自动刷新，请不要将本链接发给无关人员。</p></main>
 <script>
 const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type};
-function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`工单 ${step.run_index}/${step.run_count} · 步骤 ${step.step_index}/${step.step_count}`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';head.append(title,badge);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;checks.append(mark)}article.append(head,run,content,checks);if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.textContent=busy?'提交中...':done?'已确认':waiting?'等待操作人确认':`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting;button.onclick=()=>confirmStep(step.step_key);article.append(button)}return article}
-function render(data){current=data;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||'轮巡工单';q('summary').textContent=`${data.sop_name||''} · 已完成 ${Math.min(data.current_index,data.total_steps)}/${data.total_steps}`;q('steps').replaceChildren(...(data.steps||[]).map(card));q('retry').hidden=data.state!=='upload_pending';status(data.state==='upload_pending'?'步骤已全部完成，正在上传工单附件...':data.last_error||'请按顺序完成当前步骤',data.last_error?'error':'')}
+function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`第 ${Number(step.global_index||0)+1} 步`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';head.append(title,badge);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;checks.append(mark)}article.append(head,run,content,checks);if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.textContent=busy?'提交中...':done?'已确认':waiting?'等待操作人确认':`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting;button.onclick=()=>confirmStep(step.step_key);article.append(button)}return article}
+function render(data){current=data;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||'轮巡工单';q('summary').textContent=`${data.sop_name||''} · 已完成 ${Math.min(data.current_index,data.total_steps)} 步`;q('steps').replaceChildren(...(data.steps||[]).map(card));q('retry').hidden=data.state!=='upload_pending';status(data.state==='upload_pending'?'步骤已全部完成，正在上传工单附件...':data.last_error||'请按顺序完成当前步骤',data.last_error?'error':'')}
 async function load(){try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'工单读取失败');render(body.data)}catch(error){status(error.message||'工单读取失败','error');clearInterval(timer)}}
 async function confirmStep(stepKey){if(!current||busy)return;busy=true;render(current);try{const r=await fetch('/api/polling-work-orders/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,step_key:stepKey,expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'确认失败');if(body.data?.completion?.ok){status('全部工单已完成，附件已上传。','success');clearInterval(timer)}else render(body.data.session)}catch(error){status(error.message||'确认失败','error')}finally{busy=false}}
 async function retryUpload(){if(!current||busy)return;busy=true;q('retry').disabled=true;try{const r=await fetch(`/api/polling-work-orders/${encodeURIComponent(current.group_id)}/retry-upload?token=${encodeURIComponent(token)}`,{method:'POST'}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'附件上传失败');if(body.data?.ok){status('工单附件已上传，可以结束通告。','success');q('retry').hidden=true;clearInterval(timer)}else status(body.data?.error||'附件仍在等待上传','error')}catch(error){status(error.message||'附件上传失败','error')}finally{busy=false;q('retry').disabled=false}}

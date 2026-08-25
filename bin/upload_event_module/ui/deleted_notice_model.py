@@ -75,7 +75,7 @@ class DeletedNoticeModel(QAbstractListModel):
             normalized = [
                 {
                     "_empty": True,
-                    "title": "近两天没有可回退的删除记录。",
+                    "title": "近三天没有可回退的删除记录。",
                     "_meta": "",
                 }
             ]

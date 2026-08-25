@@ -138,7 +138,7 @@ class MainWindowUiMixin:
         self.deleted_history_btn = QPushButton("历史删除")
         self.deleted_history_btn.setObjectName("NavBtn")
         self.deleted_history_btn.setFixedSize(80, 40)
-        self.deleted_history_btn.setToolTip("查看近两天已删除且可回退的通告")
+        self.deleted_history_btn.setToolTip("查看近三天已删除且可回退的通告")
         self.deleted_history_btn.clicked.connect(self._show_deleted_notice_history)
 
         self.title_label = QLabel("剪贴板助手")
@@ -200,7 +200,7 @@ class MainWindowUiMixin:
         deleted_history_layout.setSpacing(8)
 
         deleted_history_head = QHBoxLayout()
-        self.deleted_history_info = QLabel("近两天已删除且仍可回退的通告。")
+        self.deleted_history_info = QLabel("近三天已删除且仍可回退的通告。")
         self.deleted_history_info.setStyleSheet("color: #64748B; font-size: 12px;")
         self.deleted_history_info.setWordWrap(True)
         deleted_history_head.addWidget(self.deleted_history_info, 1)

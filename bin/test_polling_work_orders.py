@@ -23,12 +23,26 @@ from lan_bitable_template_portal.polling_work_orders import (
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 import lan_bitable_template_portal.server as portal_server
 from lan_bitable_template_portal.server import PortalRuntime
-from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+from lan_bitable_template_portal.workbench_lite import (
+    render_polling_work_order_page,
+    render_workbench_lite,
+)
 from upload_event_module.services.handlers.base import NoticePayload
 from upload_event_module.services.handlers.polling_notice import PollingNoticeHandler
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_work_order_page_uses_global_step_number_without_fake_run_count(self) -> None:
+        html = render_polling_work_order_page()
+
+        self.assertIn("第 ${Number(step.global_index||0)+1} 步", html)
+        self.assertIn(
+            "已完成 ${Math.min(data.current_index,data.total_steps)} 步",
+            html,
+        )
+        self.assertNotIn("工单 ${step.run_index}/${step.run_count}", html)
+        self.assertNotIn("步骤 ${step.step_index}/${step.step_count}", html)
+
     def test_notice_content_prefills_polling_runs(self) -> None:
         node = shutil.which("node")
         if not node:

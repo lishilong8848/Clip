@@ -28236,7 +28236,7 @@ class MaintenancePortalService:
         scope = self._normalize_scope(scope)
         result: dict[str, dict[str, Any]] = {}
         for undo in self._state_store.list_notice_undo_actions(
-            scope=scope, limit=1000
+            scope="", limit=1000
         ):
             enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
             if self._item_work_type(enriched_undo) == WORK_TYPE_EVENT:
@@ -28289,7 +28289,7 @@ class MaintenancePortalService:
         cutoff = time.time() - float(since_seconds or 0) if float(since_seconds or 0) > 0 else 0
         items: list[dict[str, Any]] = []
         for undo in self._state_store.list_notice_undo_actions(
-            scope=scope, limit=1000
+            scope="", limit=1000
         ):
             enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
             if (
@@ -28330,6 +28330,11 @@ class MaintenancePortalService:
         undo = self._state_store.get_notice_undo_action(undo_id)
         if not undo or str(undo.get("status") or "") != "available":
             raise PortalError("该回退记录不可用或已过期。")
+        if float(undo.get("expires_at") or 0) <= time.time():
+            self._state_store.mark_notice_undo_action(
+                undo_id, "expired", error="回退记录已过期"
+            )
+            raise PortalError("该回退记录已过期。")
         scope = self._normalize_scope(scope or undo.get("scope") or "ALL")
         undo = self._enrich_ongoing_identity_item(undo, scope=scope)
         if not self._scope_matches_item(scope, undo):
@@ -30231,6 +30236,21 @@ class MaintenancePortalService:
         payload = normalize_notice_identity_payload(payload)
         return self._synchronize_prepared_notice_text(payload)
 
+    @staticmethod
+    def _is_paired_maintenance_identity(identity: dict[str, Any] | None) -> bool:
+        if not isinstance(identity, dict):
+            return False
+        payload = identity.get("payload")
+        return bool(
+            str(identity.get("origin") or "").strip()
+            == "paired_maintenance_upload"
+            or (
+                isinstance(payload, dict)
+                and str(payload.get("paired_target_role") or "").strip()
+                == "maintenance_mirror"
+            )
+        )
+
     def _enqueue_target_snapshot_active_upsert(
         self,
         *,
@@ -30318,6 +30338,27 @@ class MaintenancePortalService:
         notice_type = str(
             notice_type or self._notice_type_for_work_type(work_type)
         ).strip()
+        paired_maintenance_target_ids: set[str] = set()
+        if work_type == WORK_TYPE_MAINTENANCE:
+            for notice_identity in self._state_store.list_notice_identities(limit=5000):
+                identity_payload = (
+                    notice_identity.get("payload")
+                    if isinstance(notice_identity.get("payload"), dict)
+                    else {}
+                )
+                if self._is_paired_maintenance_identity(notice_identity):
+                    paired_target_id = str(
+                        notice_identity.get("target_record_id") or ""
+                    ).strip()
+                elif str(notice_identity.get("work_type") or "").strip() == WORK_TYPE_CHANGE:
+                    paired_target_id = str(
+                        identity_payload.get("paired_maintenance_target_record_id")
+                        or ""
+                    ).strip()
+                else:
+                    paired_target_id = ""
+                if paired_target_id:
+                    paired_maintenance_target_ids.add(paired_target_id)
         remote_by_id = {
             str(record.get("record_id") or "").strip(): record
             for record in records
@@ -30350,6 +30391,7 @@ class MaintenancePortalService:
         missing_deferred = 0
         restore_deferred = 0
         restored = 0
+        paired_suppressed = 0
         warnings: list[str] = []
 
         for row in rows:
@@ -30366,6 +30408,28 @@ class MaintenancePortalService:
                 or str(row.get("record_id") or "").strip()
             )
             if not target_record_id or is_local_record_id(target_record_id):
+                continue
+            identity = self._state_store.resolve_notice_identity(
+                work_type=work_type,
+                target_record_id=target_record_id,
+            )
+            if (
+                work_type == WORK_TYPE_MAINTENANCE
+                and (
+                    target_record_id in paired_maintenance_target_ids
+                    or self._is_paired_maintenance_identity(identity)
+                )
+            ):
+                current["active_item_id"] = str(
+                    current.get("active_item_id")
+                    or row.get("active_item_id")
+                    or ""
+                )
+                if self._enqueue_target_snapshot_active_delete(
+                    payload=current,
+                    reason="paired_maintenance_target",
+                ):
+                    paired_suppressed += 1
                 continue
             active_target_ids.add(target_record_id)
             target_record = remote_by_id.get(target_record_id)
@@ -30542,6 +30606,14 @@ class MaintenancePortalService:
                 work_type=work_type,
                 target_record_id=target_record_id,
             )
+            if (
+                work_type == WORK_TYPE_MAINTENANCE
+                and (
+                    target_record_id in paired_maintenance_target_ids
+                    or self._is_paired_maintenance_identity(identity)
+                )
+            ):
+                continue
             projected = self._target_snapshot_active_payload(
                 work_type=work_type,
                 notice_type=notice_type,
@@ -30575,7 +30647,7 @@ class MaintenancePortalService:
                     )
                 restored += 1
 
-        if updated or finished_removed or missing_removed or restored:
+        if updated or finished_removed or missing_removed or restored or paired_suppressed:
             self._touch_state_cache_version()
         source_reconcile = self.reconcile_source_ongoing_items()
         return {
@@ -30586,6 +30658,7 @@ class MaintenancePortalService:
             "missing_deferred": missing_deferred,
             "restore_deferred": restore_deferred,
             "restored": restored,
+            "paired_suppressed": paired_suppressed,
             "source_reconcile": source_reconcile,
             "warnings": warnings,
         }
@@ -40609,6 +40682,7 @@ class MaintenancePortalService:
                 str(request_payload.get("operation_id") or "").strip() or job_id
             )
             + ":paired-maintenance",
+            "paired_target_role": "maintenance_mirror",
         }
 
     def prepare_change_action(

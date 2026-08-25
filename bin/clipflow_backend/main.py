@@ -8283,7 +8283,7 @@ class FastAPIPortalController:
         except Exception:
             pass
         PortalRuntime.auth_manager = PortalAuthManager()
-        PortalRuntime.state_store = LanPortalStateStore()
+        PortalRuntime.state_store = PortalRuntime.service._state_store
         PortalRuntime.apply_runtime_settings()
         self._state_store = PortalRuntime.state_store
         try:
@@ -11324,11 +11324,15 @@ class FastAPIPortalController:
             )
         except Exception as exc:
             if undo_id:
-                PortalRuntime.state_store.mark_notice_undo_action(
-                    undo_id,
-                    "available",
-                    error=str(exc),
+                current_undo = PortalRuntime.state_store.get_notice_undo_action(
+                    undo_id
                 )
+                if str((current_undo or {}).get("status") or "") == "available":
+                    PortalRuntime.state_store.mark_notice_undo_action(
+                        undo_id,
+                        "available",
+                        error=str(exc),
+                    )
             PortalRuntime.service.mark_job(
                 job_id,
                 phase="failed",

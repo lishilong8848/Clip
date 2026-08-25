@@ -2806,6 +2806,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("H楼通知等待重试", admin_html)
         self.assertIn("liteActiveImagePanel", admin_html)
         self.assertIn("site-photo-thumb", admin_html)
+        self.assertIn('id="lite-change-screenshot-preview"', admin_html)
+        self.assertIn("change-confirmation-gallery", admin_html)
+        self.assertIn("change-confirmation-thumb", admin_html)
+        self.assertIn("openChangeScreenshotPreview(url,label)", admin_html)
+        self.assertIn(
+            "/screenshot/preview?file_token=${encodeURIComponent(token)}",
+            admin_html,
+        )
         self.assertNotIn("点击 / Ctrl+V 粘贴阿里确认截图", admin_html)
         self.assertNotIn("新图追加保留", admin_html)
         self.assertNotIn("仅维保、变更、检修需要", admin_html)
@@ -26553,6 +26561,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("确认回退这条通告", html)
         self.assertIn("openUndoConfirm(undoButton);", html)
         self.assertIn("await pollUndoJob(jobId);", html)
+        self.assertIn("function undoCreatedTime(value)", html)
+        self.assertIn("undoCreatedTime(item.undo_created_at)", html)
         self.assertIn(
             "await refreshCurrentLite('回退成功，正在更新列表...', ['.status', '.summary', '.workspace']);",
             html,
@@ -35949,6 +35959,93 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn(
                 "【名称】A楼多维手工修改后的名称",
                 payload["text"],
+            )
+
+    def test_target_snapshot_suppresses_paired_maintenance_mirror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            paired_target_id = "rec_paired_maintenance_mirror"
+            genuine_target_id = "rec_genuine_maintenance"
+            paired_payload = {
+                "active_item_id": f"target-maintenance-{paired_target_id}",
+                "source_record_id": "rec_change_source",
+                "target_record_id": paired_target_id,
+                "record_id": paired_target_id,
+                "work_type": WORK_TYPE_MAINTENANCE,
+                "notice_type": "维保通告",
+                "status": "开始",
+                "title": "A楼变更配套维保目标",
+                "building": "A楼",
+            }
+            service._state_store.upsert_notice_identity(
+                paired_payload,
+                origin="paired_maintenance_upload",
+            )
+            service._state_store.upsert_notice_identity(
+                {
+                    "active_item_id": "rec_change_primary",
+                    "source_record_id": "rec_change_source",
+                    "target_record_id": "rec_change_primary",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "paired_maintenance_target_record_id": paired_target_id,
+                    "title": "A楼变更配套维保目标",
+                },
+                origin="portal",
+            )
+            service._state_store.upsert_qt_active_item(
+                paired_payload,
+                section="other",
+                origin="target_snapshot_refresh",
+            )
+            records = [
+                {
+                    "record_id": paired_target_id,
+                    "display_fields": {
+                        "维保状态": "开始",
+                        "名称": "A楼变更配套维保目标",
+                        "楼栋": "A楼",
+                    },
+                    "raw_fields": {},
+                },
+                {
+                    "record_id": genuine_target_id,
+                    "display_fields": {
+                        "维保状态": "开始",
+                        "名称": "A楼真实维保通告",
+                        "楼栋": "A楼",
+                    },
+                    "raw_fields": {},
+                },
+            ]
+
+            result = service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_MAINTENANCE,
+                notice_type="维保通告",
+                records=records,
+            )
+
+            self.assertEqual(result["paired_suppressed"], 1)
+            self.assertEqual(result["restored"], 1)
+            self.assertEqual(
+                {
+                    row["payload"]["target_record_id"]
+                    for row in service._state_store.list_visible_qt_active_items()
+                },
+                {genuine_target_id},
+            )
+
+            service._reconcile_notice_target_snapshot(
+                work_type=WORK_TYPE_MAINTENANCE,
+                notice_type="维保通告",
+                records=records,
+            )
+            self.assertEqual(
+                {
+                    row["payload"]["target_record_id"]
+                    for row in service._state_store.list_visible_qt_active_items()
+                },
+                {genuine_target_id},
             )
 
     def test_event_target_snapshot_builds_qt_text_from_remote_fields(self):

@@ -8061,8 +8061,16 @@ class PortalRuntime:
             cls.state_store.mark_notice_undo_action(undo_id, "expired", error="回退记录已过期")
             raise PortalError("该回退记录已过期。")
         notice_type = str(undo.get("notice_type") or "").strip()
-        target_record_id = str(undo.get("target_record_id") or "").strip()
         action_type = str(undo.get("action_type") or "").strip().lower()
+        target_record_id = str(
+            (
+                undo.get("restored_target_record_id")
+                if action_type == "delete"
+                else ""
+            )
+            or undo.get("target_record_id")
+            or ""
+        ).strip()
         remote = undo.get("remote") if isinstance(undo.get("remote"), dict) else {}
         remote_fields = cls._undo_restore_fields(
             notice_type,
@@ -8140,6 +8148,8 @@ class PortalRuntime:
                     restored_record_id = target_record_id
                     remote_message = "多维已恢复"
                 else:
+                    if not cls._remote_record_not_found(query_result):
+                        raise PortalError(str(query_result or "读取待恢复多维记录失败。"))
                     ok_create, result = create_bitable_record_fields(
                         notice_type,
                         remote_fields,
@@ -8147,6 +8157,15 @@ class PortalRuntime:
                     if not ok_create:
                         raise PortalError(str(result or "重建多维记录失败。"))
                     restored_record_id = str(result or "").strip()
+                    if not restored_record_id:
+                        raise PortalError("重建多维记录成功但未返回记录 ID。")
+                    cls.state_store.mark_notice_undo_action(
+                        undo_id,
+                        "available",
+                        payload_patch={
+                            "restored_target_record_id": restored_record_id,
+                        },
+                    )
                     remote_message = "多维已重建"
         else:
             remote_message = "远端记录不可恢复，仅恢复本地状态。"

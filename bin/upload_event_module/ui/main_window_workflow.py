@@ -2111,7 +2111,7 @@ class MainWindowWorkflowMixin:
             return False, str((result or {}).get("message") or "回退提交失败。"), result if isinstance(result, dict) else {}
         return True, "", result if isinstance(result, dict) else {}
 
-    def _list_deleted_notice_undos_from_backend(self, *, days: int = 2) -> tuple[bool, str, list[dict]]:
+    def _list_deleted_notice_undos_from_backend(self, *, days: int = 3) -> tuple[bool, str, list[dict]]:
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，无法读取历史删除。", []
@@ -2161,7 +2161,7 @@ class MainWindowWorkflowMixin:
             self._render_deleted_notice_history(items or [])
 
         def _worker() -> None:
-            success, error, items = self._list_deleted_notice_undos_from_backend(days=2)
+            success, error, items = self._list_deleted_notice_undos_from_backend(days=3)
             enqueue = getattr(self, "_enqueue_ui_mutation", None)
             if callable(enqueue):
                 enqueue(
