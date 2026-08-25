@@ -32,7 +32,12 @@ from typing import Any, Callable
 from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
-from upload_event_module.config import EVENT_NOTICE_FIELDS, config, get_field_config
+from upload_event_module.config import (
+    EVENT_NOTICE_FIELDS,
+    MAINTENANCE_NOTICE_FIELDS,
+    config,
+    get_field_config,
+)
 from upload_event_module.building_normalizer import extract_building_codes
 from upload_event_module.services.service_registry import (
     ensure_feishu_token,
@@ -27314,40 +27319,19 @@ class MaintenancePortalService:
             building_codes=self._building_codes_from_value(building),
         )
 
-    def _copy_maintenance_record_as_change(
-        self, record: dict[str, Any]
-    ) -> dict[str, Any]:
-        copied = copy.deepcopy(record)
-        fields = dict(copied.get("display_fields") or {})
-        title = self._maintenance_title(record)
-        fields.setdefault("变更简述", title)
-        fields.setdefault("变更楼栋", fields.get("楼栋") or "")
-        fields.setdefault("变更进度", self._maintenance_status_value(record) or DEFAULT_MAINTENANCE_STATUS)
-        fields.setdefault("专业", fields.get("专业类别") or "")
-        copied["display_fields"] = fields
-        copied["source_work_type"] = WORK_TYPE_MAINTENANCE
-        copied["original_work_type"] = WORK_TYPE_MAINTENANCE
-        copied["work_type"] = WORK_TYPE_CHANGE
-        copied["notice_type"] = NOTICE_TYPE_CHANGE
-        copied["title"] = title
-        copied["converted_from_work_type"] = WORK_TYPE_MAINTENANCE
-        copied["converted_to_work_type"] = WORK_TYPE_CHANGE
-        return copied
-
     def _apply_source_work_type_rules(
         self, records: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        converted: list[dict[str, Any]] = []
+        visible: list[dict[str, Any]] = []
         for record in records:
             fields = record.get("display_fields") or {}
             if (
                 self._record_source_work_type(record) == WORK_TYPE_MAINTENANCE
                 and self._truthy_flag(fields.get("是否出发变更"))
             ):
-                converted.append(self._copy_maintenance_record_as_change(record))
-            else:
-                converted.append(record)
-        return converted
+                continue
+            visible.append(record)
+        return visible
 
     def _maintenance_record_is_converted_to_change(
         self, record: dict[str, Any]
@@ -30251,6 +30235,21 @@ class MaintenancePortalService:
             )
         )
 
+    @classmethod
+    def _maintenance_target_involves_change(
+        cls,
+        target_record: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(target_record, dict):
+            return False
+        for bucket_name in ("display_fields", "raw_fields"):
+            fields = target_record.get(bucket_name)
+            if isinstance(fields, dict) and cls._truthy_flag(
+                fields.get(MAINTENANCE_NOTICE_FIELDS["involves_change"])
+            ):
+                return True
+        return False
+
     def _enqueue_target_snapshot_active_upsert(
         self,
         *,
@@ -30520,6 +30519,22 @@ class MaintenancePortalService:
                 )
                 continue
 
+            if (
+                work_type == WORK_TYPE_MAINTENANCE
+                and self._maintenance_target_involves_change(target_record)
+            ):
+                current["active_item_id"] = str(
+                    current.get("active_item_id")
+                    or row.get("active_item_id")
+                    or ""
+                )
+                if self._enqueue_target_snapshot_active_delete(
+                    payload=current,
+                    reason="maintenance_target_involves_change",
+                ):
+                    paired_suppressed += 1
+                continue
+
             lifecycle = self._target_record_lifecycle(
                 work_type=work_type,
                 notice_type=notice_type,
@@ -30585,6 +30600,11 @@ class MaintenancePortalService:
 
         for target_record_id, target_record in remote_by_id.items():
             if target_record_id in active_target_ids:
+                continue
+            if (
+                work_type == WORK_TYPE_MAINTENANCE
+                and self._maintenance_target_involves_change(target_record)
+            ):
                 continue
             lifecycle = self._target_record_lifecycle(
                 work_type=work_type,
@@ -40683,6 +40703,7 @@ class MaintenancePortalService:
             )
             + ":paired-maintenance",
             "paired_target_role": "maintenance_mirror",
+            "involves_change": True,
         }
 
     def prepare_change_action(

@@ -6218,6 +6218,13 @@ class PortalRuntime:
             ),
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
             execution_party=str(prepared.get("execution_party") or "").strip() or None,
+            involves_change=(
+                True
+                if prepared.get("involves_change")
+                or str(prepared.get("paired_target_role") or "").strip()
+                == "maintenance_mirror"
+                else None
+            ),
             polling_work_order_required=(
                 True if prepared.get("polling_work_order_required") else None
             ),

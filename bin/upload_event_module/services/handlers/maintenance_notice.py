@@ -53,6 +53,10 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]] = payload.maintenance_cycle
         if payload.execution_party:
             fields[MAINTENANCE_NOTICE_FIELDS["executor"]] = payload.execution_party
+        if payload.involves_change is not None:
+            fields[MAINTENANCE_NOTICE_FIELDS["involves_change"]] = bool(
+                payload.involves_change
+            )
 
         content = self._extract_section(payload.text, "内容")
         if content:
@@ -123,6 +127,10 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]] = payload.maintenance_cycle
         if payload.execution_party:
             fields[MAINTENANCE_NOTICE_FIELDS["executor"]] = payload.execution_party
+        if payload.involves_change is not None:
+            fields[MAINTENANCE_NOTICE_FIELDS["involves_change"]] = bool(
+                payload.involves_change
+            )
 
         content = self._extract_section(payload.text, "内容")
         if content:

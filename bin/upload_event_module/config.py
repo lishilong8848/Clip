@@ -1013,6 +1013,7 @@ MAINTENANCE_NOTICE_FIELDS = {
     "notice_images": "过程通告图片",
     "site_images": "过程现场图片",
     "executor": "执行方",
+    "involves_change": "涉及变更",
 }
 
 OVERHAUL_NOTICE_FIELDS = {
