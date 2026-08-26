@@ -76,6 +76,7 @@ from clipflow_backend.api_models import (
     PermissionRequestCreate,
     PermissionRequestReviewRequest,
     PollingSopRequest,
+    PollingWorkOrderActivateRequest,
     PollingWorkOrderConfirmRequest,
     RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
@@ -125,6 +126,7 @@ from lan_bitable_template_portal.workbench_lite import (
     extract_workbench_lite_fragments,
     parse_pasted_notice_to_draft,
     render_polling_work_order_page,
+    render_polling_work_order_steps_page,
     render_workbench_lite,
 )
 from lan_bitable_template_portal.portal_auth import (
@@ -5427,6 +5429,14 @@ class FastAPIPortalController:
                 headers={"Cache-Control": "no-store"},
             )
 
+        @app.get("/polling-work-order/steps")
+        async def polling_work_order_steps_page():
+            return Response(
+                content=render_polling_work_order_steps_page(),
+                media_type="text/html; charset=utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
+
         @app.get("/api/polling-work-orders/session")
         async def polling_work_order_session(request: Request):
             try:
@@ -5538,6 +5548,42 @@ class FastAPIPortalController:
                         "queued": queued,
                     }
                 return {"ok": True, "data": {"session": data, "completion": completion}}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/polling-work-orders/activate")
+        async def polling_work_order_activate(request: Request):
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PollingWorkOrderActivateRequest
+                    )
+                ).to_payload()
+                data = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().activate,
+                    str(payload.get("token") or ""),
+                    run_index=int(payload.get("run_index") or 0),
+                    expected_version=int(payload.get("expected_version") or 0),
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/polling-work-orders/release")
+        async def polling_work_order_release(request: Request):
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PollingWorkOrderActivateRequest
+                    )
+                ).to_payload()
+                data = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().release_selection,
+                    str(payload.get("token") or ""),
+                    run_index=int(payload.get("run_index") or 0),
+                    expected_version=int(payload.get("expected_version") or 0),
+                )
+                return {"ok": True, "data": data}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 

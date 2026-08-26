@@ -230,7 +230,54 @@ class PollingWorkOrderService:
                 "updated_by": str(actor_open_id or ""),
             }
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, sop)
+            self._sync_unstarted_work_order_limits(sop)
         return self._public_sop(sop)
+
+    def _sync_unstarted_work_order_limits(self, sop: dict) -> None:
+        limits_by_id = {
+            str(step.get("step_id") or ""): int(step.get("time_limit_seconds") or 0)
+            for step in sop.get("steps") or []
+            if str(step.get("step_id") or "")
+        }
+        limits_by_index = {
+            index: int(step.get("time_limit_seconds") or 0)
+            for index, step in enumerate(sop.get("steps") or [], start=1)
+        }
+        for document in self.state_store.list_documents(POLLING_WORK_ORDER_NAMESPACE):
+            group = document.get("payload") or {}
+            if (
+                not isinstance(group, dict)
+                or str(group.get("state") or "") != "active"
+                or str(group.get("sop_id") or "") != str(sop.get("sop_id") or "")
+            ):
+                continue
+            steps = list(group.get("steps") or [])
+            started_runs = {
+                int(step.get("run_index") or 0)
+                for step in steps
+                if float(step.get("activated_at_ts") or 0) > 0
+                or bool(step.get("operator_confirmation"))
+                or bool(step.get("reviewer_confirmation"))
+            }
+            changed = False
+            for step in steps:
+                if int(step.get("run_index") or 0) in started_runs:
+                    continue
+                sop_step_id = str(step.get("sop_step_id") or "")
+                limit = limits_by_id.get(sop_step_id) if sop_step_id else None
+                if not sop_step_id:
+                    limit = limits_by_index.get(int(step.get("step_index") or 0))
+                if limit is not None and int(step.get("time_limit_seconds") or 0) != limit:
+                    step["time_limit_seconds"] = limit
+                    changed = True
+            if changed:
+                group["steps"] = steps
+                group["updated_at"] = self._now_text()
+                self.state_store.put_document(
+                    POLLING_WORK_ORDER_NAMESPACE,
+                    str(group.get("target_record_id") or ""),
+                    group,
+                )
 
     def _sop_directory(self, sop_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", str(sop_id or "")):
@@ -399,6 +446,8 @@ class PollingWorkOrderService:
             or not _flag(request_payload.get("_web_action_request"))
         ):
             return {}
+        if _flag(request_payload.get("polling_work_order_exempt")):
+            return {"polling_work_order_exempt": True}
         sop = self.get_sop(str(request_payload.get("polling_sop_id") or ""), public=False)
         request_scope = str(request_payload.get("scope") or "").strip().upper()
         if request_scope not in POLLING_SOP_SCOPES or str(
@@ -629,6 +678,7 @@ class PollingWorkOrderService:
                     flattened.append(
                         {
                             "step_key": f"{run_index}:{step_index}",
+                            "sop_step_id": str(template_step.get("step_id") or ""),
                             "global_index": len(flattened),
                             "run_index": run_index,
                             "run_count": len(runs),
@@ -647,8 +697,6 @@ class PollingWorkOrderService:
                             "reviewer_confirmation": {},
                         }
                     )
-            if flattened:
-                flattened[0]["activated_at_ts"] = time.time()
             operator_token = self.role_token(target_record_id, "operator")
             reviewer_token = self.role_token(target_record_id, "reviewer")
             now = self._now_text()
@@ -671,6 +719,8 @@ class PollingWorkOrderService:
                     "reviewer": hashlib.sha256(reviewer_token.encode("utf-8")).hexdigest(),
                 },
                 "current_index": 0,
+                "selected_run_index": 0,
+                "selected_by_role": "",
                 "version": 1,
                 "state": "active",
                 "uploaded_file_tokens": [],
@@ -707,10 +757,16 @@ class PollingWorkOrderService:
         result["operator_confirmed"] = bool(result.pop("operator_confirmation", {}))
         result["reviewer_confirmed"] = bool(result.pop("reviewer_confirmation", {}))
         activated_at = float(result.get("activated_at_ts") or 0)
-        available_at = activated_at + int(result.get("time_limit_seconds") or 0)
+        time_limit = int(result.get("time_limit_seconds") or 0)
+        timer_started = bool(activated_at > 0 or time_limit <= 0)
+        available_at = activated_at + time_limit if timer_started else 0
+        result["timer_started"] = timer_started
         result["confirm_available_at"] = available_at
         result["remaining_seconds"] = max(
-            0, int(math.ceil(available_at - time.time()))
+            0,
+            time_limit
+            if not timer_started
+            else int(math.ceil(available_at - time.time())),
         )
         result["photos"] = [
             {
@@ -723,25 +779,55 @@ class PollingWorkOrderService:
         ]
         return result
 
+    @staticmethod
+    def _step_done(step: dict) -> bool:
+        return (
+            not step.get("operator_required")
+            or bool(step.get("operator_confirmation"))
+        ) and (
+            not step.get("reviewer_required")
+            or bool(step.get("reviewer_confirmation"))
+        )
+
+    @classmethod
+    def _selected_run_index(cls, group: dict, steps: list[dict]) -> int:
+        selected = int(group.get("selected_run_index") or 0)
+        if selected > 0 or "selected_run_index" in group:
+            return selected
+        current_index = int(group.get("current_index") or 0)
+        if str(group.get("state") or "") != "active" or not 0 <= current_index < len(steps):
+            return 0
+        step = steps[current_index]
+        if (
+            float(step.get("activated_at_ts") or 0) > 0
+            or bool(step.get("operator_confirmation"))
+            or bool(step.get("reviewer_confirmation"))
+        ):
+            return int(step.get("run_index") or 0)
+        return 0
+
     def session(self, token: str) -> dict:
         group, role = self._resolve_token(token)
         steps = list(group.get("steps") or [])
         current_index = int(group.get("current_index") or 0)
-        current = min(current_index, max(0, len(steps) - 1))
-        current_run_index = (
-            int(steps[current].get("run_index") or 0)
-            if current_index < len(steps)
-            and str(group.get("state") or "") == "active"
+        selected_run_index = self._selected_run_index(group, steps)
+        run_indexes = [
+            index
+            for index, step in enumerate(steps)
+            if int(step.get("run_index") or 0) == selected_run_index
+        ]
+        incomplete_indexes = [index for index in run_indexes if not self._step_done(steps[index])]
+        if selected_run_index and not incomplete_indexes:
+            selected_run_index = 0
+        current = (
+            current_index
+            if current_index in incomplete_indexes
+            else incomplete_indexes[0]
+            if incomplete_indexes
             else 0
         )
-        visible_indexes = sorted(
-            {
-                index
-                for index in (current - 1, current, current + 1)
-                if 0 <= index < len(steps)
-                and int(steps[index].get("run_index") or 0) == current_run_index
-            }
-        )
+        position = run_indexes.index(current) if current in run_indexes else 0
+        visible_indexes = run_indexes[max(0, position - 1) : position + 2] if selected_run_index else []
         public_steps = [
             self._step_public(
                 steps[index], int(group.get("current_index") or 0)
@@ -762,23 +848,14 @@ class PollingWorkOrderService:
                 for step in steps
                 if int(step.get("run_index") or 0) == run_index
             ]
-            completed_steps = sum(
-                1
-                for step in run_steps
-                if (
-                    not step.get("operator_required")
-                    or bool(step.get("operator_confirmation"))
-                )
-                and (
-                    not step.get("reviewer_required")
-                    or bool(step.get("reviewer_confirmation"))
-                )
-            )
+            completed_steps = sum(1 for step in run_steps if self._step_done(step))
             state = (
                 "completed"
                 if run_steps and completed_steps == len(run_steps)
                 else "active"
-                if run_index == current_run_index
+                if run_index == selected_run_index
+                else "available"
+                if str(group.get("state") or "") == "active" and not selected_run_index
                 else "locked"
             )
             work_orders.append(
@@ -790,8 +867,25 @@ class PollingWorkOrderService:
                     "step_count": len(run_steps),
                     "completed_steps": completed_steps,
                     "state": state,
+                    "selectable": state in {"active", "available"},
                 }
             )
+        selected_steps = [
+            step
+            for step in steps
+            if int(step.get("run_index") or 0) == selected_run_index
+        ]
+        selection_owner = str(group.get("selected_by_role") or "")
+        can_release_selection = bool(
+            selected_run_index
+            and (not selection_owner or selection_owner == role)
+            and not any(
+                step.get("operator_confirmation")
+                or step.get("reviewer_confirmation")
+                or step.get("photos")
+                for step in selected_steps
+            )
+        )
         return {
             "group_id": str(group.get("group_id") or ""),
             "title": str(group.get("title") or ""),
@@ -803,11 +897,126 @@ class PollingWorkOrderService:
             "version": int(group.get("version") or 0),
             "current_index": current_index,
             "total_steps": len(steps),
-            "current_run_index": current_run_index,
+            "current_run_index": selected_run_index,
+            "can_release_selection": can_release_selection,
             "work_orders": work_orders,
             "steps": public_steps,
             "last_error": str(group.get("last_error") or ""),
         }
+
+    def activate(
+        self,
+        token: str,
+        *,
+        run_index: int,
+        expected_version: int,
+    ) -> dict:
+        with self._lock:
+            group, _role = self._resolve_token(token)
+            if str(group.get("state") or "") != "active":
+                raise PortalConflictError("当前工单已不能开始倒计时。")
+            steps = list(group.get("steps") or [])
+            selected_run_index = self._selected_run_index(group, steps)
+            if selected_run_index and selected_run_index != int(run_index or 0):
+                raise PortalConflictError("另一角色已选择其他工单，请进入已选择的工单。")
+            run_indexes = [
+                index
+                for index, item in enumerate(steps)
+                if int(item.get("run_index") or 0) == int(run_index or 0)
+                and not self._step_done(item)
+            ]
+            if not run_indexes:
+                raise PortalConflictError("所选工单已完成。")
+            current_index = int(group.get("current_index") or 0)
+            if current_index not in run_indexes:
+                current_index = run_indexes[0]
+            step = steps[current_index]
+            if float(step.get("activated_at_ts") or 0) > 0:
+                return self.session(token)
+            if int(expected_version or 0) != int(group.get("version") or 0):
+                raise PortalConflictError("工单状态已更新，请刷新后重试。")
+            step["activated_at_ts"] = time.time()
+            selected_by_role = (
+                str(group.get("selected_by_role") or "")
+                if selected_run_index
+                else _role
+            )
+            group.update(
+                {
+                    "steps": steps,
+                    "current_index": current_index,
+                    "selected_run_index": int(run_index or 0),
+                    "selected_by_role": selected_by_role,
+                    "version": int(group.get("version") or 0) + 1,
+                    "updated_at": self._now_text(),
+                    "last_error": "",
+                }
+            )
+            self.state_store.put_document(
+                POLLING_WORK_ORDER_NAMESPACE,
+                str(group.get("target_record_id") or ""),
+                group,
+            )
+        return self.session(token)
+
+    def release_selection(
+        self,
+        token: str,
+        *,
+        run_index: int,
+        expected_version: int,
+    ) -> dict:
+        with self._lock:
+            group, role = self._resolve_token(token)
+            if str(group.get("state") or "") != "active":
+                raise PortalConflictError("当前工单已不能退出选择。")
+            steps = list(group.get("steps") or [])
+            selected_run_index = self._selected_run_index(group, steps)
+            if not selected_run_index:
+                return self.session(token)
+            if selected_run_index != int(run_index or 0):
+                raise PortalConflictError("当前选择已变化，请刷新后重试。")
+            selection_owner = str(group.get("selected_by_role") or "")
+            if selection_owner and selection_owner != role:
+                raise PortalConflictError("当前工单由另一角色选择，不能代为退出。")
+            if int(expected_version or 0) != int(group.get("version") or 0):
+                raise PortalConflictError("工单状态已更新，请刷新后重试。")
+            selected_steps = [
+                step
+                for step in steps
+                if int(step.get("run_index") or 0) == selected_run_index
+            ]
+            if any(
+                step.get("operator_confirmation")
+                or step.get("reviewer_confirmation")
+                or step.get("photos")
+                for step in selected_steps
+            ):
+                raise PortalConflictError("当前工单已有操作记录，不能退出后改选其他工单。")
+            for step in selected_steps:
+                step["activated_at_ts"] = 0.0
+            remaining_indexes = [
+                index
+                for index, step in enumerate(steps)
+                if not self._step_done(step)
+            ]
+            group.update(
+                {
+                    "steps": steps,
+                    "current_index": remaining_indexes[0] if remaining_indexes else len(steps),
+                    "selected_run_index": 0,
+                    "selected_by_role": "",
+                    "version": int(group.get("version") or 0) + 1,
+                    "updated_at": self._now_text(),
+                    "last_error": "",
+                }
+            )
+            self.state_store.put_document(
+                POLLING_WORK_ORDER_NAMESPACE,
+                str(group.get("target_record_id") or ""),
+                group,
+            )
+        return self.session(token)
 
     def confirm(
         self,
@@ -828,14 +1037,21 @@ class PollingWorkOrderService:
                 raise PortalConflictError("工单状态已更新，请刷新后重试。")
             steps = list(group.get("steps") or [])
             current_index = int(group.get("current_index") or 0)
+            selected_run_index = self._selected_run_index(group, steps)
+            if not selected_run_index:
+                raise PortalConflictError("请先从工单总览选择要执行的工单。")
             if current_index >= len(steps):
                 return self.session(token)
             step = steps[current_index]
+            if int(step.get("run_index") or 0) != selected_run_index:
+                raise PortalConflictError("当前工单选择已变化，请刷新后重试。")
             if str(step.get("step_key") or "") != str(step_key or ""):
                 raise PortalConflictError("只能确认当前步骤。")
-            available_at = float(step.get("activated_at_ts") or 0) + int(
-                step.get("time_limit_seconds") or 0
-            )
+            time_limit = int(step.get("time_limit_seconds") or 0)
+            activated_at = float(step.get("activated_at_ts") or 0)
+            if time_limit > 0 and activated_at <= 0:
+                raise PortalConflictError("请先进入当前工单并启动步骤倒计时。")
+            available_at = activated_at + time_limit
             if time.time() < available_at:
                 raise PortalConflictError(
                     f"当前步骤还需等待 {max(1, int(math.ceil(available_at - time.time())))} 秒。"
@@ -857,13 +1073,27 @@ class PollingWorkOrderService:
                 and (not step.get("reviewer_required") or bool(step.get("reviewer_confirmation")))
             )
             if required_done:
-                group["current_index"] = current_index + 1
-                if int(group["current_index"]) >= len(steps):
-                    group["state"] = "upload_pending"
+                next_indexes = [
+                    index
+                    for index, item in enumerate(steps)
+                    if int(item.get("run_index") or 0) == selected_run_index
+                    and not self._step_done(item)
+                ]
+                remaining_indexes: list[int] = []
+                if next_indexes:
+                    group["current_index"] = next_indexes[0]
+                    steps[next_indexes[0]]["activated_at_ts"] = time.time()
                 else:
-                    steps[int(group["current_index"])]["activated_at_ts"] = (
-                        time.time()
-                    )
+                    group["selected_run_index"] = 0
+                    group["selected_by_role"] = ""
+                    remaining_indexes = [
+                        index
+                        for index, item in enumerate(steps)
+                        if not self._step_done(item)
+                    ]
+                    group["current_index"] = remaining_indexes[0] if remaining_indexes else len(steps)
+                if not next_indexes and not remaining_indexes:
+                    group["state"] = "upload_pending"
             group.update(
                 {
                     "steps": steps,
@@ -896,6 +1126,17 @@ class PollingWorkOrderService:
             raise PortalError("单张操作照片不能超过 8MB。")
         if not str(mime_type or "").startswith("image/"):
             raise PortalError("只能上传图片作为操作照片。")
+        try:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(content)) as image:
+                detected_mime_type = str(Image.MIME.get(image.format) or "")
+                image.verify()
+            if not detected_mime_type.startswith("image/"):
+                raise ValueError("unsupported image format")
+        except Exception as exc:
+            raise PortalError("操作照片内容损坏，无法保存。") from exc
+        mime_type = detected_mime_type
         with self._lock:
             group, role = self._resolve_token(token)
             if str(group.get("state") or "") != "active":
@@ -903,12 +1144,19 @@ class PollingWorkOrderService:
             if int(expected_version or 0) != int(group.get("version") or 0):
                 raise PortalConflictError("工单状态已更新，请刷新后重试。")
             steps = list(group.get("steps") or [])
+            selected_run_index = self._selected_run_index(group, steps)
+            if not selected_run_index:
+                raise PortalConflictError("请先从工单总览选择要执行的工单。")
             current_index = int(group.get("current_index") or 0)
             if current_index >= len(steps):
                 raise PortalConflictError("当前工单步骤已完成。")
             step = steps[current_index]
+            if int(step.get("run_index") or 0) != selected_run_index:
+                raise PortalConflictError("当前工单选择已变化，请刷新后重试。")
             if str(step.get("step_key") or "") != str(step_key or ""):
                 raise PortalConflictError("只能给当前步骤拍照。")
+            if step.get("operator_confirmation") or step.get("reviewer_confirmation"):
+                raise PortalConflictError("当前步骤已有确认，不能再更换操作照片。")
             digest = hashlib.sha256(content).hexdigest()
             existing_photos = list(step.get("photos") or [])
             if existing_photos and str(existing_photos[0].get("sha256") or "") == digest:

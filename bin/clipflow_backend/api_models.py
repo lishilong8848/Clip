@@ -39,6 +39,7 @@ class WorkbenchActionRequest(APIModel):
     operation_id: str = ""
     execution_party: str = ""
     ali_confirmation_images: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
+    polling_work_order_exempt: bool = False
     polling_sop_id: str = Field(default="", max_length=80)
     polling_sop_version: int = 0
     polling_run_count: int = 0
@@ -61,6 +62,15 @@ class PollingSopRequest(APIModel):
 class PollingWorkOrderConfirmRequest(APIModel):
     token: str = Field(min_length=20, max_length=512)
     step_key: str = Field(min_length=1, max_length=32)
+    expected_version: int
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class PollingWorkOrderActivateRequest(APIModel):
+    token: str = Field(min_length=20, max_length=512)
+    run_index: int = Field(ge=1, le=6)
     expected_version: int
 
     class Config(APIModel.Config):

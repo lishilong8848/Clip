@@ -30,6 +30,7 @@ from clipflow_backend.main import FastAPIPortalController
 from fastapi.testclient import TestClient
 from lan_bitable_template_portal.workbench_lite import (
     render_polling_work_order_page,
+    render_polling_work_order_steps_page,
     render_workbench_lite,
 )
 from upload_event_module.services.handlers.base import NoticePayload
@@ -85,25 +86,51 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(merged["version"], 3)
         self.assertEqual(merged["attachments"][0]["name"], "附件.pdf")
 
-    def test_work_order_page_has_overview_and_per_run_step_numbers(self) -> None:
-        html = render_polling_work_order_page()
+    def test_work_order_overview_and_steps_are_separate_pages(self) -> None:
+        overview = render_polling_work_order_page()
+        steps = render_polling_work_order_steps_page()
 
-        self.assertIn("第 ${Number(step.step_index||0)} 步", html)
-        self.assertIn('id="overview"', html)
-        self.assertIn("function workOrderCard(order)", html)
-        self.assertIn("等待前一工单完成", html)
-        self.assertIn("返回工单总览", html)
-        self.assertIn(
-            "${data.work_orders?.length||0} 个工单",
-            html,
+        self.assertIn('id="overview"', overview)
+        self.assertNotIn('id="steps"', overview)
+        self.assertIn("function workOrderCard(order)", overview)
+        self.assertIn("另一工单执行中", overview)
+        self.assertIn("button.disabled=!order.selectable||busy", overview)
+        self.assertIn("/api/polling-work-orders/activate", overview)
+        self.assertIn("/polling-work-order/steps?token=", overview)
+        self.assertIn("取消当前选择", overview)
+        self.assertIn("/api/polling-work-orders/release", overview)
+        self.assertIn("全部工单已完成，工单表格已上传。", overview)
+
+        self.assertIn('id="steps"', steps)
+        self.assertNotIn('id="overview"', steps)
+        self.assertNotIn("function workOrderCard(order)", steps)
+        self.assertIn("第 ${Number(step.step_index||0)} 步", steps)
+        self.assertNotIn("工单 ${step.run_index}/${step.run_count}", steps)
+        self.assertNotIn("步骤 ${step.step_index}/${step.step_count}", steps)
+        self.assertIn("倒计时 ${wait} 秒", steps)
+        self.assertIn("Number(step.remaining_seconds||0)", steps)
+        self.assertIn("function refreshCountdown()", steps)
+        self.assertIn("setInterval(refreshCountdown,1000)", steps)
+        self.assertIn("const next=body.data,sameView=", steps)
+        self.assertNotIn("setInterval(()=>{if(current&&!busy&&!navigating)render(current)},1000)", steps)
+        self.assertIn("function leaveWorkOrder()", steps)
+        self.assertIn("/api/polling-work-orders/release", steps)
+        self.assertIn("退出当前工单并重新选择", steps)
+        self.assertIn("浏览器返回不会取消当前选择", steps)
+        self.assertIn("拍照/上传操作照片", steps)
+        self.assertIn("capture','environment", steps)
+        self.assertIn("image.loading='eager'", steps)
+        self.assertIn("缩略图加载失败", steps)
+
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        overview_response = client.get("/polling-work-order?token=test")
+        steps_response = client.get(
+            "/polling-work-order/steps?token=test&run_index=1"
         )
-        self.assertNotIn("工单 ${step.run_index}/${step.run_count}", html)
-        self.assertNotIn("步骤 ${step.step_index}/${step.step_count}", html)
-        self.assertIn("倒计时 ${wait} 秒", html)
-        self.assertIn("拍照/上传操作照片", html)
-        self.assertIn("capture','environment", html)
-        self.assertIn("全部工单已完成，工单表格和操作照片已上传。", html)
-        self.assertIn("if(completed||stopped){clearInterval(timer);clearInterval(clock)}", html)
+        self.assertEqual(overview_response.status_code, 200)
+        self.assertEqual(steps_response.status_code, 200)
+        self.assertNotEqual(overview_response.text, steps_response.text)
 
     def test_polling_step_photo_api_accepts_image_and_serves_preview(self) -> None:
         manager = MagicMock()
@@ -132,6 +159,37 @@ class PollingWorkOrderTests(unittest.TestCase):
             manager.add_step_photo.call_args.kwargs["expected_version"], 1
         )
         self.assertEqual(manager.add_step_photo.call_args.kwargs["content"], b"photo-bytes")
+
+    def test_polling_work_order_activate_api_starts_selected_run(self) -> None:
+        manager = MagicMock()
+        manager.activate.return_value = {
+            "version": 2,
+            "current_run_index": 1,
+            "steps": [{"timer_started": True, "remaining_seconds": 30}],
+        }
+        manager.release_selection.return_value = {
+            "version": 3,
+            "current_run_index": 0,
+            "steps": [],
+        }
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        with patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            response = client.post(
+                "/api/polling-work-orders/activate",
+                json={"token": "r" * 32, "run_index": 1, "expected_version": 1},
+            )
+            release_response = client.post(
+                "/api/polling-work-orders/release",
+                json={"token": "r" * 32, "run_index": 1, "expected_version": 2},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["data"]["steps"][0]["timer_started"])
+        self.assertEqual(manager.activate.call_args.kwargs["run_index"], 1)
+        self.assertEqual(manager.activate.call_args.kwargs["expected_version"], 1)
+        self.assertEqual(release_response.status_code, 200, release_response.text)
+        self.assertEqual(manager.release_selection.call_args.kwargs["run_index"], 1)
 
     def test_last_confirmation_queues_attachment_upload(self) -> None:
         manager = MagicMock()
@@ -235,6 +293,11 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("设备指向（1#–3# / 4#–6# 组内选择）", html)
         self.assertIn("第${index+1}次起点", html)
         self.assertIn("SOP 必须至少包含一个附件", html)
+        self.assertIn("非制冷单元/二次泵轮巡", html)
+        self.assertIn('name="polling_work_order_exempt"', html)
+        self.assertIn("function pollingWorkOrderExempt(form)", html)
+        self.assertIn("patch.polling_work_order_exempt = pollingWorkOrderExempt(form)", html)
+        self.assertIn("&& !pollingWorkOrderExempt(form)", html)
         self.assertIn('id="lite-polling-sop-feedback"', html)
         self.assertIn('id="lite-polling-sop-delete-confirm"', html)
         self.assertIn("确认删除这份 SOP", html)
@@ -308,6 +371,78 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
         self.assertFalse(ok)
         self.assertIn("尚未全部完成", message)
+
+    def test_exempt_polling_start_clears_stale_work_order_fields(self) -> None:
+        prepared = {
+            "action": "start",
+            "work_type": "polling",
+            "notice_type": "设备轮巡",
+            "record_id": "recTarget1",
+            "target_record_id": "recTarget1",
+            "polling_work_order_exempt": True,
+            "text": "【设备轮巡】状态：开始\n【标题】非工单轮巡",
+        }
+        patches = []
+        manager = MagicMock()
+
+        def update_fields(_record_id, _notice_type, fields):
+            patches.append(fields)
+            return True, "ok"
+
+        with patch.object(
+            portal_server,
+            "external_real_write_guard",
+            return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
+        ), patch.object(
+            PortalRuntime,
+            "_existing_target_for_prepared_start",
+            return_value="recTarget1",
+        ), patch.object(
+            PortalRuntime,
+            "_upload_change_confirmation_images",
+            return_value=(True, "", [], []),
+        ), patch.object(
+            portal_server,
+            "update_bitable_record_fields",
+            side_effect=update_fields,
+        ), patch.object(
+            portal_server,
+            "query_record_by_id",
+            return_value=(
+                True,
+                {
+                    "fields": {
+                        "是否涉及重要操作": False,
+                        "操作人": "",
+                        "现场复核人": "",
+                    }
+                },
+            ),
+        ), patch.object(
+            PortalRuntime,
+            "_create_backend_undo_checkpoint",
+            return_value="",
+        ), patch.object(
+            PortalRuntime,
+            "_mark_local_notice_images_target_written",
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_orders",
+            return_value=manager,
+        ):
+            ok, _message, record_id = PortalRuntime._execute_backend_prepared_upload(
+                prepared
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(record_id, "recTarget1")
+        self.assertIn(
+            {"是否涉及重要操作": False, "操作人": "", "现场复核人": ""},
+            patches,
+        )
+        manager.cancel_group.assert_called_once_with(
+            "recTarget1", reason="work_order_exempt"
+        )
 
     def test_polling_start_writes_work_order_fields_but_not_h_confirmation(self) -> None:
         fields = PollingNoticeHandler().build_create_fields(
@@ -404,6 +539,20 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
             self.assertEqual(sop["version"], prior_version + 1)
             self.assertEqual(sop["steps"][1]["content"], "修改后复查{{to}}")
+            exempt = service.prepare_start(
+                {
+                    "work_type": "polling",
+                    "scope": "A",
+                    "action": "start",
+                    "_web_action_request": True,
+                    "polling_work_order_exempt": True,
+                },
+                job_id="job-exempt",
+                people=[],
+            )
+            self.assertTrue(exempt["polling_work_order_exempt"])
+            self.assertNotIn("polling_work_order_required", exempt)
+            self.assertNotIn("polling_work_order_spec", exempt)
             prepared = service.prepare_start(
                 {
                     "work_type": "polling",
@@ -507,9 +656,22 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(group["steps"][1]["content"], "修改后复查3#")
             operator_token = service.role_token("recTarget1", "operator")
             reviewer_token = service.role_token("recTarget1", "reviewer")
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(Exception, "工单总览"):
                 service.confirm(reviewer_token, step_key="1:1", expected_version=1)
-            session = service.confirm(operator_token, step_key="1:1", expected_version=1)
+            session = service.activate(
+                operator_token, run_index=1, expected_version=1
+            )
+            with self.assertRaises(Exception):
+                service.confirm(
+                    reviewer_token,
+                    step_key="1:1",
+                    expected_version=session["version"],
+                )
+            session = service.confirm(
+                operator_token,
+                step_key="1:1",
+                expected_version=session["version"],
+            )
             session = service.confirm(reviewer_token, step_key="1:1", expected_version=session["version"])
             self.assertEqual(session["current_index"], 1)
             session = service.confirm(reviewer_token, step_key="1:2", expected_version=session["version"])
@@ -551,36 +713,113 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
             operator_two = service.role_token("recTargetTwoRuns", "operator")
             reviewer_two = service.role_token("recTargetTwoRuns", "reviewer")
+            overview = service.session(operator_two)
+            self.assertEqual(
+                [item["state"] for item in overview["work_orders"]],
+                ["available", "available"],
+            )
+            second_run_started = service.activate(
+                operator_two,
+                run_index=2,
+                expected_version=overview["version"],
+            )
+            with self.assertRaisesRegex(Exception, "已选择其他工单"):
+                service.activate(
+                    reviewer_two,
+                    run_index=1,
+                    expected_version=overview["version"],
+                )
+            self.assertTrue(service.session(operator_two)["can_release_selection"])
+            self.assertFalse(service.session(reviewer_two)["can_release_selection"])
+            with self.assertRaisesRegex(Exception, "不能代为退出"):
+                service.release_selection(
+                    reviewer_two,
+                    run_index=2,
+                    expected_version=second_run_started["version"],
+                )
+            released = service.release_selection(
+                operator_two,
+                run_index=2,
+                expected_version=second_run_started["version"],
+            )
+            self.assertEqual(
+                [item["state"] for item in released["work_orders"]],
+                ["available", "available"],
+            )
+            self.assertEqual(
+                service.get_group("recTargetTwoRuns")["steps"][2]["activated_at_ts"],
+                0.0,
+            )
+            second_run_started = service.activate(
+                reviewer_two,
+                run_index=2,
+                expected_version=released["version"],
+            )
+            sop = service.save_sop(
+                {
+                    "sop_id": sop["sop_id"],
+                    "scope": "A",
+                    "name": "制冷单元切换",
+                    "expected_version": sop["version"],
+                    "steps": [
+                        {**step, "time_limit_seconds": seconds}
+                        for step, seconds in zip(sop["steps"], (4, 6))
+                    ],
+                }
+            )
+            two_run_group = service.get_group("recTargetTwoRuns")
+            self.assertEqual(
+                [step["time_limit_seconds"] for step in two_run_group["steps"][:2]],
+                [4, 6],
+            )
+            self.assertEqual(
+                [step["time_limit_seconds"] for step in two_run_group["steps"][2:]],
+                [0, 0],
+            )
+            self.assertEqual(two_run_group["version"], second_run_started["version"])
             first_run = service.session(operator_two)
             self.assertEqual(
                 [item["state"] for item in first_run["work_orders"]],
-                ["active", "locked"],
+                ["locked", "active"],
             )
             self.assertTrue(first_run["steps"])
             self.assertTrue(
-                all(step["run_index"] == 1 for step in first_run["steps"])
+                all(step["run_index"] == 2 for step in first_run["steps"])
             )
             first_run = service.confirm(
-                operator_two, step_key="1:1", expected_version=first_run["version"]
+                operator_two, step_key="2:1", expected_version=first_run["version"]
             )
             first_run = service.confirm(
-                reviewer_two, step_key="1:1", expected_version=first_run["version"]
+                reviewer_two, step_key="2:1", expected_version=first_run["version"]
             )
             second_run = service.confirm(
-                reviewer_two, step_key="1:2", expected_version=first_run["version"]
+                reviewer_two, step_key="2:2", expected_version=first_run["version"]
             )
             self.assertEqual(
                 [item["state"] for item in second_run["work_orders"]],
-                ["completed", "active"],
+                ["available", "completed"],
             )
-            self.assertEqual(second_run["current_run_index"], 2)
-            self.assertTrue(second_run["steps"])
-            self.assertTrue(
-                all(step["run_index"] == 2 for step in second_run["steps"])
+            self.assertEqual(second_run["current_run_index"], 0)
+            self.assertFalse(second_run["steps"])
+            activated_second_run = service.activate(
+                operator_two,
+                run_index=1,
+                expected_version=second_run["version"],
             )
-            self.assertEqual(second_run["steps"][0]["step_index"], 1)
+            self.assertEqual(activated_second_run["steps"][0]["step_index"], 1)
             self.assertEqual(
-                second_run["steps"][0]["content"], "将4#切换至5#，检查6#"
+                activated_second_run["steps"][0]["content"],
+                "将1#切换至2#，检查3#",
+            )
+            self.assertTrue(activated_second_run["steps"][0]["timer_started"])
+            self.assertGreater(activated_second_run["steps"][0]["remaining_seconds"], 0)
+            idempotent_activation = service.activate(
+                reviewer_two,
+                run_index=1,
+                expected_version=second_run["version"],
+            )
+            self.assertEqual(
+                idempotent_activation["version"], activated_second_run["version"]
             )
 
             with self.assertRaisesRegex(Exception, "必须使用"):
@@ -626,7 +865,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                         {
                             "content": "将{{from}}切换到{{to}}",
                             "operator_required": True,
-                            "reviewer_required": False,
+                            "reviewer_required": True,
                             "time_limit_seconds": 2,
                         }
                     ],
@@ -664,19 +903,43 @@ class PollingWorkOrderTests(unittest.TestCase):
                 public_base_url="http://127.0.0.1:18766",
             )
             operator_token = service.role_token("recTimerPhoto", "operator")
+            reviewer_token = service.role_token("recTimerPhoto", "reviewer")
             first_session = service.session(operator_token)
-            self.assertGreater(first_session["steps"][0]["remaining_seconds"], 0)
-            with self.assertRaisesRegex(Exception, "还需等待"):
+            self.assertFalse(first_session["steps"])
+            self.assertEqual(first_session["work_orders"][0]["state"], "available")
+            with self.assertRaisesRegex(Exception, "工单总览"):
                 service.confirm(
                     operator_token,
                     step_key="1:1",
                     expected_version=first_session["version"],
                 )
+            activated_session = service.activate(
+                operator_token,
+                run_index=1,
+                expected_version=first_session["version"],
+            )
+            self.assertTrue(activated_session["steps"][0]["timer_started"])
+            self.assertGreater(activated_session["steps"][0]["remaining_seconds"], 0)
+            with self.assertRaisesRegex(Exception, "还需等待"):
+                service.confirm(
+                    operator_token,
+                    step_key="1:1",
+                    expected_version=activated_session["version"],
+                )
+            with self.assertRaisesRegex(Exception, "内容损坏"):
+                service.add_step_photo(
+                    operator_token,
+                    step_key="1:1",
+                    expected_version=activated_session["version"],
+                    file_name="损坏.png",
+                    mime_type="image/png",
+                    content=b"not-an-image",
+                )
             photo_bytes = _png_bytes()
             photo_session = service.add_step_photo(
                 operator_token,
                 step_key="1:1",
-                expected_version=first_session["version"],
+                expected_version=activated_session["version"],
                 file_name="现场.png",
                 mime_type="image/png",
                 content=photo_bytes,
@@ -689,6 +952,12 @@ class PollingWorkOrderTests(unittest.TestCase):
                 )[0],
                 photo_bytes,
             )
+            with self.assertRaisesRegex(Exception, "已有操作记录"):
+                service.release_selection(
+                    operator_token,
+                    run_index=1,
+                    expected_version=photo_session["version"],
+                )
             stored_before_replace = service.get_group("recTimerPhoto")["steps"][0][
                 "photos"
             ][0]
@@ -711,10 +980,24 @@ class PollingWorkOrderTests(unittest.TestCase):
             group = service.get_group("recTimerPhoto")
             group["steps"][0]["activated_at_ts"] = time.time() - 3
             store.put_document("polling_work_order", "recTimerPhoto", group)
-            completed_session = service.confirm(
+            operator_confirmed_session = service.confirm(
                 operator_token,
                 step_key="1:1",
                 expected_version=photo_session["version"],
+            )
+            with self.assertRaisesRegex(Exception, "已有确认"):
+                service.add_step_photo(
+                    operator_token,
+                    step_key="1:1",
+                    expected_version=operator_confirmed_session["version"],
+                    file_name="确认后替换.png",
+                    mime_type="image/png",
+                    content=_png_bytes("#00ff00"),
+                )
+            completed_session = service.confirm(
+                reviewer_token,
+                step_key="1:1",
+                expected_version=operator_confirmed_session["version"],
             )
             self.assertEqual(completed_session["state"], "upload_pending")
             workbook_info = service.build_execution_workbook("recTimerPhoto")
@@ -961,10 +1244,15 @@ class PollingWorkOrderTests(unittest.TestCase):
                 public_base_url="",
             )
             token = service.role_token("recFinalize", "operator")
+            active_session = service.activate(
+                token,
+                run_index=1,
+                expected_version=service.session(token)["version"],
+            )
             photo_session = service.add_step_photo(
                 token,
                 step_key="1:1",
-                expected_version=1,
+                expected_version=active_session["version"],
                 file_name="步骤照片.png",
                 mime_type="image/png",
                 content=_png_bytes(),

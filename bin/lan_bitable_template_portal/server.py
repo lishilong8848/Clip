@@ -9053,6 +9053,77 @@ class PortalRuntime:
                             "轮巡工单人员已提交，但目标表尚未确认写入。",
                             existing_target,
                         )
+                elif (
+                    notice_type == NOTICE_TYPE_POLLING
+                    and prepared.get("polling_work_order_exempt")
+                ):
+                    cleared_work_order_fields = {
+                        POLLING_NOTICE_FIELDS["work_order_required"]: False,
+                        POLLING_NOTICE_FIELDS["work_order_operator"]: "",
+                        POLLING_NOTICE_FIELDS["work_order_reviewer"]: "",
+                    }
+                    ok_patch, patch_result = update_bitable_record_fields(
+                        existing_target,
+                        notice_type,
+                        cleared_work_order_fields,
+                    )
+                    if not ok_patch:
+                        return (
+                            False,
+                            str(patch_result or "轮巡工单标记清除失败。"),
+                            existing_target,
+                        )
+                    cleared_verified = False
+                    for attempt in range(3):
+                        ok_verify, verify_record = query_record_by_id(
+                            existing_target, notice_type
+                        )
+                        verify_fields = cls._change_confirmation_fields(
+                            verify_record
+                        )
+                        if (
+                            ok_verify
+                            and not cls._change_confirmation_checked(
+                                verify_fields.get(
+                                    POLLING_NOTICE_FIELDS["work_order_required"]
+                                )
+                            )
+                            and not str(
+                                verify_fields.get(
+                                    POLLING_NOTICE_FIELDS["work_order_operator"]
+                                )
+                                or ""
+                            ).strip()
+                            and not str(
+                                verify_fields.get(
+                                    POLLING_NOTICE_FIELDS["work_order_reviewer"]
+                                )
+                                or ""
+                            ).strip()
+                        ):
+                            cleared_verified = True
+                            break
+                        if attempt < 2:
+                            time.sleep(0.2 * (attempt + 1))
+                    if not cleared_verified:
+                        return (
+                            False,
+                            "轮巡工单标记已提交，但目标表尚未确认清除。",
+                            existing_target,
+                        )
+                    try:
+                        cls.polling_work_orders().cancel_group(
+                            existing_target,
+                            reason="work_order_exempt",
+                        )
+                    except PortalNotFoundError:
+                        pass
+                    except Exception as exc:
+                        return (
+                            False,
+                            f"目标表工单标记已清除，但本地工单停止失败：{exc}",
+                            existing_target,
+                        )
                 start_undo_id = str(
                     prepared.get("undo_checkpoint_id") or ""
                 ).strip()
