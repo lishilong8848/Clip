@@ -1389,7 +1389,12 @@ class MaintenancePortalService:
         self._state_version = 0
         self._legacy_summary_migrated = False
         self._legacy_work_status_migrated = False
-        self._work_status_backfilled = False
+        try:
+            self._work_status_backfilled = bool(
+                self._state_store.list_document_meta(STATE_NS_WORK_STATUS)
+            )
+        except Exception:
+            self._work_status_backfilled = False
         self._work_status_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._work_status_cache_items: list[dict[str, Any]] | None = None
         self._target_record_cache_lock = threading.RLock()
@@ -17169,14 +17174,19 @@ class MaintenancePortalService:
             )
         self.reconcile_source_ongoing_items()
 
-    def _source_snapshot_records(self, scope: str) -> list[dict[str, Any]] | None:
-        try:
-            snapshot = self._state_store.get_source_scope_snapshot(scope)
-        except Exception as exc:
-            warning = f"SQLite源表快照读取失败: {exc}"
-            if warning not in self._load_warnings:
-                self._load_warnings.append(warning)
-            return None
+    def _source_snapshot_records(
+        self,
+        scope: str,
+        snapshot: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]] | None:
+        if snapshot is None:
+            try:
+                snapshot = self._state_store.get_source_scope_snapshot(scope)
+            except Exception as exc:
+                warning = f"SQLite源表快照读取失败: {exc}"
+                if warning not in self._load_warnings:
+                    self._load_warnings.append(warning)
+                return None
         if not snapshot.get("exists"):
             return None
         meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
@@ -17192,14 +17202,19 @@ class MaintenancePortalService:
         ]
         return records
 
-    def _source_snapshot_zhihang_records(self, scope: str) -> list[dict[str, Any]] | None:
-        try:
-            snapshot = self._state_store.get_source_scope_snapshot(scope)
-        except Exception as exc:
-            warning = f"SQLite智航源表快照读取失败: {exc}"
-            if warning not in self._load_warnings:
-                self._load_warnings.append(warning)
-            return None
+    def _source_snapshot_zhihang_records(
+        self,
+        scope: str,
+        snapshot: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]] | None:
+        if snapshot is None:
+            try:
+                snapshot = self._state_store.get_source_scope_snapshot(scope)
+            except Exception as exc:
+                warning = f"SQLite智航源表快照读取失败: {exc}"
+                if warning not in self._load_warnings:
+                    self._load_warnings.append(warning)
+                return None
         if not snapshot.get("exists"):
             return None
         meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
@@ -21738,8 +21753,11 @@ class MaintenancePortalService:
             return [name for name in meta.option_names if name]
         return []
 
-    def _sorted_unique_work_specialties(self) -> list[str]:
-        records = self._source_snapshot_records("ALL")
+    def _sorted_unique_work_specialties(
+        self,
+        source_snapshot: dict[str, Any] | None = None,
+    ) -> list[str]:
+        records = self._source_snapshot_records("ALL", source_snapshot)
         if records is None:
             maintenance_records = list(self._records)
             change_records = list(self._change_records)
@@ -22318,8 +22336,12 @@ class MaintenancePortalService:
         month: str = "",
         scope: str = "ALL",
         exclude_record_ids: set[str] | None = None,
+        source_snapshot: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        snapshot_records = self._source_snapshot_zhihang_records(scope)
+        snapshot_records = self._source_snapshot_zhihang_records(
+            scope,
+            source_snapshot,
+        )
         if snapshot_records is not None:
             return self._filter_zhihang_change_records_list(
                 snapshot_records,
@@ -22857,6 +22879,7 @@ class MaintenancePortalService:
         *,
         action: str = "",
         now: str = "",
+        payload_cache: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         if not isinstance(incoming, dict):
             return
@@ -22865,7 +22888,12 @@ class MaintenancePortalService:
         building = str(incoming.get("building") or "").strip()
         building_code = str(incoming.get("building_code") or "").strip()
         work_type = self._item_work_type(incoming)
-        payload = self._load_work_status_locked(building, building_code)
+        cache_key = self._work_status_path(building, building_code).stem
+        payload = payload_cache.get(cache_key) if payload_cache is not None else None
+        if payload is None:
+            payload = self._load_work_status_locked(building, building_code)
+            if payload_cache is not None:
+                payload_cache[cache_key] = payload
         if building and not payload.get("building"):
             payload["building"] = building
         if building_code and not payload.get("building_code"):
@@ -22987,7 +23015,12 @@ class MaintenancePortalService:
             actions.append(copy.deepcopy(incoming_action))
         item["updated_at"] = now
         payload["updated_at"] = now
-        self._save_work_status_locked(payload, building=building, building_code=building_code)
+        if payload_cache is None:
+            self._save_work_status_locked(
+                payload,
+                building=building,
+                building_code=building_code,
+            )
 
     def _build_action_frontend_patch(
         self,
@@ -25410,6 +25443,7 @@ class MaintenancePortalService:
         if self._work_status_backfilled:
             return
         self._work_status_backfilled = True
+        payload_cache: dict[str, dict[str, Any]] = {}
         for payload in self._iter_day_summary_payloads_locked():
             day = str(payload.get("date") or "")
             for raw_item in payload.get("items") or []:
@@ -25426,7 +25460,10 @@ class MaintenancePortalService:
                     item,
                     action=last_action,
                     now=str(payload.get("updated_at") or item.get("updated_at") or day),
+                    payload_cache=payload_cache,
                 )
+        for payload in payload_cache.values():
+            self._save_work_status_locked(payload)
 
     def _load_work_status_items_locked(self, scope: str = "ALL") -> list[dict[str, Any]]:
         self._backfill_work_status_from_daily_summaries_locked()
@@ -26001,7 +26038,11 @@ class MaintenancePortalService:
             ),
         }
 
-    def _get_record_memory(self, record: dict[str, Any]) -> dict[str, str]:
+    def _get_record_memory(
+        self,
+        record: dict[str, Any],
+        building_memory_cache: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, str]:
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         source_work_type = self._record_source_work_type(record)
         fields = record.get("display_fields") or {}
@@ -26054,7 +26095,15 @@ class MaintenancePortalService:
                 )
             )
         with self._memory_lock:
-            payload = self._load_building_memory_locked(building)
+            payload = (
+                building_memory_cache.get(building)
+                if building_memory_cache is not None
+                else None
+            )
+            if payload is None:
+                payload = self._load_building_memory_locked(building)
+                if building_memory_cache is not None:
+                    building_memory_cache[building] = payload
             items = payload.get("items") or {}
             item: dict[str, Any] = {}
             for key in lookup_keys:
@@ -27202,7 +27251,10 @@ class MaintenancePortalService:
         }
 
     def _serialize_record(
-        self, record: dict[str, Any], summary_by_record: dict[str, dict[str, Any]] | None = None
+        self,
+        record: dict[str, Any],
+        summary_by_record: dict[str, dict[str, Any]] | None = None,
+        building_memory_cache: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         summary_by_record = summary_by_record or {}
         record_id = str(record.get("record_id") or "").strip()
@@ -27249,7 +27301,7 @@ class MaintenancePortalService:
             "source_table_id": str(record.get("source_table_id") or self.table_id),
             "title": title,
             "display_fields": record["display_fields"],
-            "memory": self._get_record_memory(record),
+            "memory": self._get_record_memory(record, building_memory_cache),
             "work_summary": work_summary,
             "source_progress": source_progress,
             "source_status": source_progress,
@@ -27887,12 +27939,21 @@ class MaintenancePortalService:
     def _items_identity_intersects(keys: set[str], item_keys: set[str]) -> bool:
         return bool(keys and item_keys and keys.intersection(item_keys))
 
-    def _find_qt_active_snapshot(self, identity: dict[str, Any]) -> dict[str, Any] | None:
+    def _find_qt_active_snapshot(
+        self,
+        identity: dict[str, Any],
+        active_rows: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         active_item_id = str(identity.get("active_item_id") or "").strip()
         target_record_id = str(identity.get("target_record_id") or "").strip()
         source_record_id = str(identity.get("source_record_id") or "").strip()
         title = str(identity.get("title") or "").strip()
-        for row in self._state_store.list_qt_active_items(include_deleted=True):
+        rows = (
+            active_rows
+            if active_rows is not None
+            else self._state_store.list_qt_active_items(include_deleted=True)
+        )
+        for row in rows:
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             if active_item_id and (
                 str(row.get("active_item_id") or "") == active_item_id
@@ -27949,7 +28010,12 @@ class MaintenancePortalService:
         )
 
     def _enrich_ongoing_identity_item(
-        self, item: dict[str, Any], *, scope: str = "ALL"
+        self,
+        item: dict[str, Any],
+        *,
+        scope: str = "ALL",
+        active_rows: list[dict[str, Any]] | None = None,
+        notice_identities: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         enriched = normalize_notice_identity_payload(
             copy.deepcopy(item) if isinstance(item, dict) else {}
@@ -27961,7 +28027,7 @@ class MaintenancePortalService:
         )
         work_type = enriched["work_type"]
         identity = self._undo_identity_from_context(enriched, action_type="delete")
-        qt_snapshot = self._find_qt_active_snapshot(identity)
+        qt_snapshot = self._find_qt_active_snapshot(identity, active_rows)
         qt_payload = normalize_notice_identity_payload(
             qt_snapshot.get("payload")
             if isinstance(qt_snapshot, dict) and isinstance(qt_snapshot.get("payload"), dict)
@@ -28022,12 +28088,36 @@ class MaintenancePortalService:
         source_record_id = str(enriched.get("source_record_id") or "").strip()
         current_record_id = str(enriched.get("record_id") or "").strip()
         if not target_record_id:
-            target_record_id = self._target_record_id_from_identity_map(
-                work_type=work_type,
-                active_item_id=str(enriched.get("active_item_id") or "").strip(),
-                source_record_id=source_record_id,
-                target_record_id="",
-            )
+            active_item_id = str(enriched.get("active_item_id") or "").strip()
+            if notice_identities is not None:
+                for field_name, value in (
+                    ("source_record_id", source_record_id),
+                    ("active_item_id", active_item_id),
+                ):
+                    if not value:
+                        continue
+                    identity = next(
+                        (
+                            candidate
+                            for candidate in notice_identities
+                            if str(candidate.get(field_name) or "").strip() == value
+                            and str(candidate.get("work_type") or "").strip()
+                            in {"", work_type}
+                        ),
+                        None,
+                    )
+                    if identity:
+                        target_record_id = str(
+                            identity.get("target_record_id") or ""
+                        ).strip()
+                        break
+            else:
+                target_record_id = self._target_record_id_from_identity_map(
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id="",
+                )
         if target_record_id:
             enriched["target_record_id"] = target_record_id
             enriched["record_id"] = target_record_id
@@ -28219,10 +28309,27 @@ class MaintenancePortalService:
     def _available_undo_map(self, scope: str = "ALL") -> dict[str, dict[str, Any]]:
         scope = self._normalize_scope(scope)
         result: dict[str, dict[str, Any]] = {}
-        for undo in self._state_store.list_notice_undo_actions(
-            scope="", limit=1000
-        ):
-            enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+        undo_items = self._state_store.list_notice_undo_actions(scope="", limit=1000)
+        if not undo_items:
+            return result
+        try:
+            active_rows = self._state_store.list_qt_active_items(include_deleted=True)
+        except Exception:
+            active_rows = None
+        try:
+            notice_identities = self._state_store.list_notice_identities(
+                include_deleted=False,
+                limit=5000,
+            )
+        except Exception:
+            notice_identities = None
+        for undo in undo_items:
+            enriched_undo = self._enrich_ongoing_identity_item(
+                undo,
+                scope=scope,
+                active_rows=active_rows,
+                notice_identities=notice_identities,
+            )
             if self._item_work_type(enriched_undo) == WORK_TYPE_EVENT:
                 continue
             if not self._scope_matches_item(scope, enriched_undo):
@@ -28272,10 +28379,26 @@ class MaintenancePortalService:
         action_type = str(action_type or "").strip().lower()
         cutoff = time.time() - float(since_seconds or 0) if float(since_seconds or 0) > 0 else 0
         items: list[dict[str, Any]] = []
-        for undo in self._state_store.list_notice_undo_actions(
-            scope="", limit=1000
-        ):
-            enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+        undo_items = self._state_store.list_notice_undo_actions(
+            scope="",
+            action_type=action_type,
+            created_after=cutoff,
+            limit=1000,
+        )
+        if not undo_items:
+            return []
+        active_rows = self._state_store.list_qt_active_items(include_deleted=True)
+        notice_identities = self._state_store.list_notice_identities(
+            include_deleted=False,
+            limit=5000,
+        )
+        for undo in undo_items:
+            enriched_undo = self._enrich_ongoing_identity_item(
+                undo,
+                scope=scope,
+                active_rows=active_rows,
+                notice_identities=notice_identities,
+            )
             if (
                 self._item_work_type(enriched_undo) == WORK_TYPE_EVENT
                 or str(enriched_undo.get("notice_type") or "").strip()
@@ -28283,12 +28406,6 @@ class MaintenancePortalService:
             ):
                 continue
             if not self._scope_matches_item(scope, enriched_undo):
-                continue
-            undo_action_type = str(enriched_undo.get("action_type") or "").strip().lower()
-            created_at = float(enriched_undo.get("created_at") or 0)
-            if action_type and undo_action_type != action_type:
-                continue
-            if cutoff and created_at < cutoff:
                 continue
             items.append(
                 {
@@ -32552,9 +32669,14 @@ class MaintenancePortalService:
         return maintenance_records + change_records + repair_records
 
     def _workbench_records(
-        self, *, month: str = "", specialty: str = "", scope: str = "ALL"
+        self,
+        *,
+        month: str = "",
+        specialty: str = "",
+        scope: str = "ALL",
+        source_snapshot: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        snapshot_records = self._source_snapshot_records(scope)
+        snapshot_records = self._source_snapshot_records(scope, source_snapshot)
         if snapshot_records is not None:
             return self._sort_workbench_records(self._apply_source_work_type_rules([
                 record
@@ -32728,6 +32850,7 @@ class MaintenancePortalService:
         records_page_size: int | str = 0,
         ongoing_page: int | str = 1,
         ongoing_page_size: int | str = 0,
+        ongoing_items_authoritative: bool = False,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
@@ -32749,16 +32872,37 @@ class MaintenancePortalService:
             WORK_TYPE_ADJUST,
         }:
             requested_work_type = ""
-        canonical_ongoing = self._state_store.list_visible_qt_active_items()
+        canonical_ongoing = (
+            []
+            if ongoing_items_authoritative
+            else self._state_store.list_visible_qt_active_items()
+        )
         merged_ongoing = self._project_ongoing_items(
             scope, [*canonical_ongoing, *(ongoing_items or [])]
         )
+        try:
+            scope_snapshot = self._state_store.get_source_scope_snapshot(scope)
+        except Exception as exc:
+            warning = f"SQLite源表快照读取失败: {exc}"
+            if warning not in self._load_warnings:
+                self._load_warnings.append(warning)
+            scope_snapshot = {}
+        # The service hydrates the complete ALL snapshot at startup and refreshes
+        # it together with SQLite. Reuse that memory for the scope-independent
+        # specialty options instead of opening four more SQLite readers.
+        all_snapshot = scope_snapshot if scope == "ALL" else {}
         scoped_records = self._workbench_records(
-            month=selected_month, specialty=specialty, scope=scope
+            month=selected_month,
+            specialty=specialty,
+            scope=scope,
+            source_snapshot=scope_snapshot,
         )
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
-            month=selected_month, scope=scope, exclude_record_ids=linked_zhihang_ids
+            month=selected_month,
+            scope=scope,
+            exclude_record_ids=linked_zhihang_ids,
+            source_snapshot=scope_snapshot,
         )
         if building:
             scoped_records = [
@@ -32862,9 +33006,14 @@ class MaintenancePortalService:
             ongoing_by_source.setdefault(key, []).append(item)
 
         serialized_records: list[dict[str, Any]] = []
+        building_memory_cache: dict[str, dict[str, Any]] = {}
         if include_records:
             for record in visible_records:
-                serialized = self._serialize_record(record, summary_by_record)
+                serialized = self._serialize_record(
+                    record,
+                    summary_by_record,
+                    building_memory_cache,
+                )
                 source_record_id = str(record.get("record_id") or "").strip()
                 linked_items = ongoing_by_source.get(
                     (self._record_work_type(record), source_record_id),
@@ -32890,7 +33039,7 @@ class MaintenancePortalService:
                 ongoing_items=merged_ongoing,
                 daily_summary=daily_summary,
             ),
-            "source_snapshot_ready": self._source_snapshot_exists(scope),
+            "source_snapshot_ready": bool(scope_snapshot.get("exists")),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": self._current_load_warnings(),
             "records": serialized_records,
@@ -32908,7 +33057,7 @@ class MaintenancePortalService:
             "filters": {
                 "default_month": selected_month,
                 "months": self._recent_month_labels(),
-                "specialties": self._sorted_unique_work_specialties(),
+                "specialties": self._sorted_unique_work_specialties(all_snapshot),
             },
             "count": len(filtered_records),
         }

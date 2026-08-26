@@ -640,6 +640,7 @@ class FastAPIPortalController:
                 login_url = f"/api/auth/login?{urlencode({'next': next_path})}"
                 return Response(status_code=302, headers={"Location": login_url})
             try:
+                route_started_at = time.perf_counter()
                 self._ensure_source_snapshot_background()
                 requested_scope = (
                     request.query_params.get("scope")
@@ -683,7 +684,9 @@ class FastAPIPortalController:
                     "yes",
                     "on",
                 }
+                stage_started_at = time.perf_counter()
                 ongoing = await asyncio.to_thread(self._get_ongoing, scope)
+                ongoing_ms = (time.perf_counter() - stage_started_at) * 1000.0
                 self._reconcile_orphan_started_items(scope, ongoing)
                 sections = (
                     ("records", "ongoing", "stats", "zhihang")
@@ -720,9 +723,12 @@ class FastAPIPortalController:
                         records_page_size=PENDING_PAGE_SIZE,
                         ongoing_page=ongoing_page,
                         ongoing_page_size=ONGOING_PAGE_SIZE,
+                        ongoing_items_authoritative=True,
                     ),
                 )
+                stage_started_at = time.perf_counter()
                 payload = await payload_task
+                query_ms = (time.perf_counter() - stage_started_at) * 1000.0
                 notice_undos: list[dict[str, Any]] = []
                 prefill_source_record = repair_notice_prefill.get("source_record")
                 if (
@@ -758,7 +764,9 @@ class FastAPIPortalController:
                     PortalRuntime.auth_manager.is_admin(session)
                     or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
                 )
-                html_body = render_workbench_lite(
+                stage_started_at = time.perf_counter()
+                html_body = await asyncio.to_thread(
+                    render_workbench_lite,
                     payload=payload if isinstance(payload, dict) else {},
                     session=render_session,
                     scope=scope,
@@ -789,9 +797,26 @@ class FastAPIPortalController:
                     ),
                     prefill_context_id=repair_management_record_id,
                 )
+                render_ms = (time.perf_counter() - stage_started_at) * 1000.0
+                total_ms = (time.perf_counter() - route_started_at) * 1000.0
+                timings = {
+                    "ongoing_ms": round(ongoing_ms, 2),
+                    "query_ms": round(query_ms, 2),
+                    "render_ms": round(render_ms, 2),
+                    "total_ms": round(total_ms, 2),
+                }
+                request.state.workbench_timings = timings
                 return Response(
                     content=html_body.encode("utf-8"),
                     media_type="text/html; charset=utf-8",
+                    headers={
+                        "Server-Timing": (
+                            f"ongoing;dur={ongoing_ms:.2f}, "
+                            f"query;dur={query_ms:.2f}, "
+                            f"render;dur={render_ms:.2f}, "
+                            f"total;dur={total_ms:.2f}"
+                        )
+                    },
                 )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -820,7 +845,10 @@ class FastAPIPortalController:
                 "utf-8",
                 errors="ignore",
             )
-            fragments = extract_workbench_lite_fragments(html_body)
+            fragments = await asyncio.to_thread(
+                extract_workbench_lite_fragments,
+                html_body,
+            )
             if detail_only:
                 fragments = {
                     "detail": str(fragments.get("detail") or ""),
@@ -859,6 +887,9 @@ class FastAPIPortalController:
                         "payload_version": int(time.time() * 1000),
                         "fragments": fragments,
                         "elapsed_ms": elapsed_ms,
+                        "timings": dict(
+                            getattr(request.state, "workbench_timings", {}) or {}
+                        ),
                     },
                 },
                 status_code=200,
@@ -1989,6 +2020,7 @@ class FastAPIPortalController:
                         records_page_size=records_page_size,
                         ongoing_page=ongoing_page,
                         ongoing_page_size=ongoing_page_size,
+                        ongoing_items_authoritative=True,
                     ),
                 )
                 if payload_key == "workbench" and prefetch_only:
@@ -7484,7 +7516,6 @@ class FastAPIPortalController:
             runtime_pressure = PortalRuntime.runtime_pressure()
 
             def _repair_active_items() -> None:
-                PortalRuntime.restore_live_portal_active_items()
                 for row in ended_rows:
                     payload = _active_payload(row)
                     active_item_id = str(row.get("active_item_id") or "")
@@ -8414,17 +8445,8 @@ class FastAPIPortalController:
             PortalRuntime.service.ensure_snapshot_loaded()
         except Exception:
             pass
-        if not _mock_external_enabled():
-            try:
-                PortalRuntime.service.start_repair_maintenance_async()
-            except Exception:
-                pass
         try:
             PortalRuntime.service.resume_repair_link_tasks_async()
-        except Exception:
-            pass
-        try:
-            PortalRuntime.service.start_daily_attachment_cache_refresh_async()
         except Exception:
             pass
         try:
@@ -10219,6 +10241,54 @@ class FastAPIPortalController:
             item.setdefault("origin", active_item.get("origin"))
             return item
 
+        identity_indexes: dict[str, dict[str, list[dict]]] | None = None
+        try:
+            identity_indexes = {
+                "target_record_id": {},
+                "source_record_id": {},
+                "active_item_id": {},
+            }
+            for identity in PortalRuntime.state_store.list_notice_identities(
+                include_deleted=False,
+                limit=5000,
+            ):
+                for field_name in identity_indexes:
+                    value = str(identity.get(field_name) or "").strip()
+                    if value:
+                        identity_indexes[field_name].setdefault(value, []).append(
+                            identity
+                        )
+        except Exception:
+            identity_indexes = None
+
+        def _resolve_identity(item: dict) -> dict | None:
+            work_type = str(item.get("work_type") or "").strip()
+            if identity_indexes is not None:
+                lookups = (
+                    ("target_record_id", str(item.get("target_record_id") or "").strip()),
+                    ("source_record_id", str(item.get("source_record_id") or "").strip()),
+                    ("active_item_id", str(item.get("active_item_id") or "").strip()),
+                )
+                for field_name, value in lookups:
+                    if not value or (
+                        field_name != "active_item_id" and is_local_record_id(value)
+                    ):
+                        continue
+                    for identity in identity_indexes[field_name].get(value, []):
+                        identity_work_type = str(identity.get("work_type") or "").strip()
+                        if not work_type or identity_work_type in {"", work_type}:
+                            return identity
+                return None
+            try:
+                return PortalRuntime.state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    active_item_id=str(item.get("active_item_id") or ""),
+                    source_record_id=str(item.get("source_record_id") or ""),
+                    target_record_id=str(item.get("target_record_id") or ""),
+                )
+            except Exception:
+                return None
+
         def _item_deleted_in_qt_store(item: dict) -> bool:
             return bool(_identity_keys(item) & deleted_qt_identity_keys)
 
@@ -10256,26 +10326,10 @@ class FastAPIPortalController:
             )
 
         try:
-            all_active_rows = PortalRuntime.state_store.list_qt_active_items(
-                include_deleted=True
-            )
-            active_rows = (
-                PortalRuntime.state_store.project_visible_qt_active_items(
-                    all_active_rows
-                )
-            )
+            active_rows = PortalRuntime.state_store.list_visible_qt_active_items()
             active_rows_loaded = True
-            for active_item in active_rows:
-                active_qt_identity_keys.update(_identity_keys(_row_payload(active_item)))
-            for active_item in all_active_rows:
-                if not isinstance(active_item, dict):
-                    continue
-                if active_item.get("deleted_at") is None:
-                    continue
-                deleted_qt_identity_keys.update(_identity_keys(_row_payload(active_item)))
-            deleted_qt_identity_keys.difference_update(active_qt_identity_keys)
         except Exception as exc:
-            warning = f"SQLite Qt 活动删除状态读取失败: {exc}"
+            warning = f"SQLite Qt 活动状态读取失败: {exc}"
             if not PortalRuntime.last_ongoing_error:
                 PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
@@ -10283,14 +10337,7 @@ class FastAPIPortalController:
         qt_projected_items: list[dict] = []
         try:
             if not active_rows_loaded:
-                all_active_rows = PortalRuntime.state_store.list_qt_active_items(
-                    include_deleted=True
-                )
-                active_rows = (
-                    PortalRuntime.state_store.project_visible_qt_active_items(
-                        all_active_rows
-                    )
-                )
+                active_rows = PortalRuntime.state_store.list_visible_qt_active_items()
                 active_rows_loaded = True
             for active_item in active_rows:
                 payload = _row_payload(active_item)
@@ -10318,15 +10365,7 @@ class FastAPIPortalController:
                 if mapped_work_type:
                     item["work_type"] = mapped_work_type
                     item["lan_work_type"] = mapped_work_type
-                try:
-                    identity = PortalRuntime.state_store.resolve_notice_identity(
-                        work_type=str(item.get("work_type") or ""),
-                        active_item_id=str(item.get("active_item_id") or ""),
-                        source_record_id=str(item.get("source_record_id") or ""),
-                        target_record_id=str(item.get("target_record_id") or ""),
-                    )
-                except Exception:
-                    identity = None
+                identity = _resolve_identity(item)
                 if isinstance(identity, dict):
                     source_only_authoritative = bool(
                         item.get("source_snapshot_authoritative")
@@ -10375,6 +10414,21 @@ class FastAPIPortalController:
                 PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
         try:
+            all_active_rows = PortalRuntime.state_store.list_qt_active_items(
+                include_deleted=True
+            )
+            for active_item in all_active_rows:
+                if not isinstance(active_item, dict):
+                    continue
+                if active_item.get("deleted_at") is None:
+                    active_qt_identity_keys.update(
+                        _identity_keys(_row_payload(active_item))
+                    )
+                else:
+                    deleted_qt_identity_keys.update(
+                        _identity_keys(_row_payload(active_item))
+                    )
+            deleted_qt_identity_keys.difference_update(active_qt_identity_keys)
             snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
                 PortalRuntime.last_ongoing_error = ""
@@ -11533,6 +11587,23 @@ class FastAPIPortalController:
                 upload_message=str(exc),
             )
 
+    def _run_deferred_startup_maintenance(self) -> None:
+        if self._shutdown_event.wait(8.0):
+            return
+        try:
+            PortalRuntime.restore_live_portal_active_items()
+        except Exception as exc:
+            log_warning(f"启动未结束通告恢复失败: {exc}")
+        if not _mock_external_enabled():
+            try:
+                PortalRuntime.service.start_repair_maintenance_async()
+            except Exception as exc:
+                log_warning(f"启动检修后台维护失败: {exc}")
+        try:
+            PortalRuntime.service.start_daily_attachment_cache_refresh_async()
+        except Exception as exc:
+            log_warning(f"启动附件缓存维护失败: {exc}")
+
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
             return
@@ -12086,12 +12157,16 @@ class FastAPIPortalController:
     def start(self) -> str:
         if self._server and self._thread and self._thread.is_alive():
             return self.get_url()
+        startup_started_at = time.perf_counter()
         try:
             import uvicorn
         except Exception as exc:
             raise RuntimeError(f"Uvicorn 不可用: {exc}") from exc
 
+        stage_started_at = time.perf_counter()
         self._initialize_portal_handler_state()
+        init_ms = (time.perf_counter() - stage_started_at) * 1000.0
+        stage_started_at = time.perf_counter()
         PortalRuntime.ensure_message_workers()
         PortalRuntime.ensure_action_worker()
         PortalRuntime.ensure_upload_wait_worker()
@@ -12099,6 +12174,7 @@ class FastAPIPortalController:
         PortalRuntime.ensure_event_repair_worker()
         for job_id in PortalRuntime.service.recoverable_action_job_ids():
             PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
+        workers_ms = (time.perf_counter() - stage_started_at) * 1000.0
 
         bound_port = find_available_port(self.host, self.preferred_port)
         if int(bound_port) != int(self.preferred_port):
@@ -12107,7 +12183,9 @@ class FastAPIPortalController:
                 "不会自动切换到其他端口。请关闭旧实例后重试。"
             )
         self.bound_port = bound_port
+        stage_started_at = time.perf_counter()
         self._app = self._build_app()
+        app_ms = (time.perf_counter() - stage_started_at) * 1000.0
         config = uvicorn.Config(
             self._app,
             host=self.host,
@@ -12130,14 +12208,22 @@ class FastAPIPortalController:
             daemon=True,
         )
         self._thread.start()
+        listen_started_at = time.perf_counter()
         if not _wait_until_listening(self.host, bound_port):
             log_warning(f"FastAPI门户端口监听确认超时: {self.get_url()}")
+        listen_ms = (time.perf_counter() - listen_started_at) * 1000.0
         self._submit_background(
-            "StartupPortalActiveRepair",
-            PortalRuntime.restore_live_portal_active_items,
+            "StartupDeferredMaintenance",
+            self._run_deferred_startup_maintenance,
         )
         self._start_scheduler()
-        log_info(f"FastAPI门户已启动: public={self.get_url()}")
+        log_info(
+            "FastAPI门户已启动: "
+            f"public={self.get_url()} "
+            f"total_ms={(time.perf_counter() - startup_started_at) * 1000.0:.1f} "
+            f"init_ms={init_ms:.1f} workers_ms={workers_ms:.1f} "
+            f"app_ms={app_ms:.1f} listen_ms={listen_ms:.1f}"
+        )
         return self.get_url()
 
     def stop(self) -> None:

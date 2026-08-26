@@ -335,6 +335,7 @@ class _NativeFastAPIRouteService:
         records_page_size=0,
         ongoing_page=1,
         ongoing_page_size=0,
+        ongoing_items_authoritative=False,
     ):
         return {
             "scope": scope,
@@ -9260,7 +9261,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
-    def test_qt_bootstrap_and_web_ongoing_do_not_wait_for_active_repair(self):
+    def test_qt_bootstrap_and_web_ongoing_do_not_start_active_repair(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_state_store = PortalRuntime.state_store
         temp_dir = tempfile.TemporaryDirectory()
@@ -9268,13 +9269,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             Path(temp_dir.name) / "state.sqlite3"
         )
         repair_started = threading.Event()
-        release_repair = threading.Event()
-        repair_finished = threading.Event()
 
         def blocked_repair():
             repair_started.set()
-            release_repair.wait(2)
-            repair_finished.set()
             return {"restored": 0, "items": []}
 
         client = TestClient(controller._build_app())
@@ -9289,16 +9286,34 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 bootstrap_elapsed = time.perf_counter() - started
                 self.assertEqual(response.status_code, 200)
                 self.assertLess(bootstrap_elapsed, 1)
-                self.assertTrue(repair_started.wait(1))
+                self.assertFalse(repair_started.wait(0.1))
 
                 started = time.perf_counter()
                 self.assertEqual(controller._get_ongoing("ALL"), [])
                 self.assertLess(time.perf_counter() - started, 1)
         finally:
-            release_repair.set()
-            repair_finished.wait(1)
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
+
+    def test_deferred_startup_maintenance_runs_active_repair_once(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        with (
+            patch.object(controller._shutdown_event, "wait", return_value=False),
+            patch.object(
+                PortalRuntime,
+                "restore_live_portal_active_items",
+                return_value={"restored": 0, "items": []},
+            ) as restore,
+            patch.object(
+                PortalRuntime.service,
+                "start_daily_attachment_cache_refresh_async",
+                return_value=None,
+            ),
+            patch("clipflow_backend.main._mock_external_enabled", return_value=True),
+        ):
+            controller._run_deferred_startup_maintenance()
+
+        restore.assert_called_once_with()
 
     def test_qt_shell_bootstrap_returns_all_cross_month_ongoing_items(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -16229,6 +16244,57 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertFalse(
                 bool(result["ongoing"][0].get("recovered_from_source"))
             )
+
+    def test_query_records_reuses_authoritative_inputs_and_building_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    f"source-change-{index}",
+                    building="C楼",
+                    progress="未开始",
+                    title=f"C楼性能回归变更{index}",
+                )
+                for index in range(2)
+            ]
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+            with (
+                patch.object(
+                    service._state_store,
+                    "get_source_scope_snapshot",
+                    wraps=service._state_store.get_source_scope_snapshot,
+                ) as snapshot_read,
+                patch.object(
+                    service._state_store,
+                    "list_visible_qt_active_items",
+                    wraps=service._state_store.list_visible_qt_active_items,
+                ) as active_read,
+                patch.object(
+                    service._state_store,
+                    "_connect",
+                    wraps=service._state_store._connect,
+                ) as sqlite_connect,
+                patch.object(
+                    service,
+                    "_load_building_memory_locked",
+                    wraps=service._load_building_memory_locked,
+                ) as memory_read,
+            ):
+                result = service.query_records(
+                    scope="C",
+                    work_type=WORK_TYPE_CHANGE,
+                    ongoing_items=[],
+                    ongoing_items_authoritative=True,
+                )
+
+            self.assertEqual(len(result["records"]), 2)
+            self.assertEqual(snapshot_read.call_count, 1)
+            self.assertEqual(active_read.call_count, 0)
+            self.assertEqual(memory_read.call_count, 1)
+            self.assertLessEqual(sqlite_connect.call_count, 12)
 
     def test_zhihang_change_records_filter_by_progress_and_title_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -23877,6 +23943,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(
                 {item["target_record_id"] for item in payload["ongoing"]},
                 {f"api-target-{index}" for index in range(1, 8)},
+            )
+            fragment_response = client.get(
+                "/api/workbench/lite-fragment?scope=C&work_type=maintenance",
+                headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+            )
+            self.assertEqual(
+                fragment_response.status_code,
+                200,
+                fragment_response.text,
+            )
+            timings = fragment_response.json()["data"]["timings"]
+            self.assertEqual(
+                set(timings),
+                {"ongoing_ms", "query_ms", "render_ms", "total_ms"},
             )
         finally:
             service._state_store.shutdown_write_worker()

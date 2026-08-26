@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QGraphicsOpacityEffect,
     QGraphicsDropShadowEffect,
-    QCheckBox,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -68,11 +67,7 @@ class MainWindowUiMixin:
         self.container.setObjectName("MainWindow")
         container_layout = QVBoxLayout(self.container)
 
-        # 事件中转状态栏
         status_layout = QHBoxLayout()
-        self.relay_status_label = QLabel("事件中转: 初始化中...")
-        self.relay_status_label.setStyleSheet("color: #F59E0B; font-size: 11px;")
-        status_layout.addWidget(self.relay_status_label)
         self.remote_update_status_label = QLabel("远程更新: 初始化中...")
         self.remote_update_status_label.setStyleSheet(
             "color: #F59E0B; font-size: 11px;"
@@ -81,11 +76,6 @@ class MainWindowUiMixin:
         self.version_label = QLabel(f"版本: {self._build_display_version()}")
         self.version_label.setStyleSheet("color: #94A3B8; font-size: 11px;")
         status_layout.addWidget(self.version_label)
-        self.clipboard_toggle = QCheckBox("暂停剪贴板监听")
-        self.clipboard_toggle.setStyleSheet("font-size: 11px;")
-        self.clipboard_toggle.setChecked(self._is_clipboard_listener_disabled())
-        self.clipboard_toggle.toggled.connect(self._on_clipboard_toggle_changed)
-        status_layout.addWidget(self.clipboard_toggle)
         self.clipboard_status_label = QLabel("剪贴板监听: 初始化中...")
         self.clipboard_status_label.setStyleSheet("color: #F59E0B; font-size: 11px;")
         status_layout.addWidget(self.clipboard_status_label)
@@ -242,14 +232,8 @@ class MainWindowUiMixin:
         self.settings_btn.setToolTip("配置接口地址")
         self.settings_btn.clicked.connect(self.open_settings)
 
-        self.ocr_install_btn = QPushButton("🔧 OCR修复")
-        self.ocr_install_btn.setObjectName("OcrInstallBtn")
-        self.ocr_install_btn.setFixedHeight(30)
-        self.ocr_install_btn.setToolTip("一键安装 Windows 中文 OCR 语言包")
-        self.ocr_install_btn.clicked.connect(self.install_ocr_lang_pack)
-
         self.lan_template_portal_btn = QPushButton("模板页面")
-        self.lan_template_portal_btn.setObjectName("OcrInstallBtn")
+        self.lan_template_portal_btn.setObjectName("SettingsBtn")
         self.lan_template_portal_btn.setFixedHeight(30)
         self.lan_template_portal_btn.setToolTip("打开局域网模板页面")
         self.lan_template_portal_btn.clicked.connect(self._open_lan_template_portal)
@@ -286,7 +270,6 @@ class MainWindowUiMixin:
             self.table_link_buttons.append((btn, attr))
 
         bottom_layout.addWidget(self.settings_btn)
-        bottom_layout.addWidget(self.ocr_install_btn)
         bottom_layout.addWidget(self.lan_template_portal_btn)
         bottom_layout.addWidget(self.table_link_widget)
         bottom_layout.addStretch()
@@ -1162,7 +1145,6 @@ class MainWindowUiMixin:
             shutdown_system_alert_worker(timeout=1.0)
         except Exception:
             pass
-        self._stop_event_relay_bridge()
         if self.clipboard_preview_dialog:
             self.clipboard_preview_dialog.hide()
         self._shutdown_clipboard_ipc(wait_ms=1500)
@@ -1201,7 +1183,6 @@ class MainWindowUiMixin:
             # 停止热重载管理器
             if hasattr(self, "hot_reload_manager"):
                 self.hot_reload_manager.stop()
-            self._stop_event_relay_bridge()
             self._shutdown_qt_backend_command_executor()
         except Exception as exc:
             log_error(f"关闭窗口清理失败: {exc}")

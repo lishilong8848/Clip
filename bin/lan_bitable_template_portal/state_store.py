@@ -8533,6 +8533,36 @@ class LanPortalStateStore:
         items = [self._qt_active_item_from_row(row) for row in rows]
         return items
 
+    def find_qt_active_items(
+        self, *, active_item_id: str = "", record_id: str = ""
+    ) -> list[dict[str, Any]]:
+        active_item_id = self._text(active_item_id)
+        record_id = self._text(record_id)
+        if not self.db_path.exists() or not (active_item_id or record_id):
+            return []
+        clauses: list[str] = []
+        params: list[str] = []
+        if active_item_id:
+            clauses.append("active_item_id = ?")
+            params.append(active_item_id)
+        if record_id:
+            clauses.append("record_id = ?")
+            params.append(record_id)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT active_item_id, record_id, notice_type, section, sort_order,
+                           origin, payload_json, updated_at, deleted_at
+                    FROM qt_active_items
+                    WHERE {' OR '.join(clauses)}
+                    ORDER BY updated_at DESC
+                    """,
+                    params,
+                ).fetchall()
+        return [self._qt_active_item_from_row(row) for row in rows]
+
     def project_visible_qt_active_items(
         self,
         rows: list[dict[str, Any]] | None,
@@ -9740,6 +9770,8 @@ class LanPortalStateStore:
         *,
         status: str = "available",
         scope: str = "",
+        action_type: str = "",
+        created_after: float = 0,
         include_expired: bool = False,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
@@ -9747,12 +9779,20 @@ class LanPortalStateStore:
             return []
         status = self._text(status) or "available"
         scope = self._text(scope)
+        action_type = self._text(action_type).lower()
+        created_after = max(0.0, float(created_after or 0))
         now = time.time()
         clauses = ["status = ?"]
         params: list[Any] = [status]
         if scope:
             clauses.append("(scope = ? OR scope = 'ALL' OR scope = '')")
             params.append(scope)
+        if action_type:
+            clauses.append("action_type = ?")
+            params.append(action_type)
+        if created_after:
+            clauses.append("created_at >= ?")
+            params.append(created_after)
         if not include_expired:
             clauses.append("expires_at > ?")
             params.append(now)

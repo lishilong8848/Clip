@@ -324,34 +324,6 @@ class MainWindowRuntimeMixin:
         )
         self._remove_clipboard_pending_entry(entry.get("entry_id", ""))
 
-    def _update_event_relay_status(self, status: str):
-        label = getattr(self, "relay_status_label", None)
-        if not label:
-            return
-        color = "#F59E0B"
-        if "已启动" in status or "运行中" in status:
-            color = "#10B981"
-        elif "已关闭" in status or "已停止" in status:
-            color = "#94A3B8"
-        elif "失败" in status or "不可用" in status:
-            color = "#EF4444"
-        label.setText(f"事件中转: {status}")
-        label.setStyleSheet(f"color: {color}; font-size: 11px;")
-
-    def _on_event_relay_received(self, content: str, status: str, notice_type: str):
-        if self.current_screenshot_record_id or self.screenshot_dialog.isVisible():
-            self._defer_event(
-                {
-                    "content": content,
-                    "status": status or "",
-                    "title": "",
-                    "notice_type": notice_type or "",
-                    "entry_id": "",
-                }
-            )
-            return
-        self._submit_notice_text_to_backend_projection(content, source="event_relay")
-
     def _submit_notice_text_to_backend_projection(
         self, content: str, *, source: str = "qt", target_record_id: str = ""
     ) -> dict:
@@ -630,10 +602,28 @@ class MainWindowRuntimeMixin:
         state_store = getattr(cache_store, "_state_store", None)
         if state_store is not None:
             try:
+                find_rows = (
+                    getattr(state_store, "find_qt_active_items", None)
+                    if str(data.get("notice_type") or "").strip() == "事件通告"
+                    else None
+                )
+                candidate_rows = (
+                    find_rows(
+                        active_item_id=active_item_id,
+                        record_id=record_id,
+                    )
+                    if callable(find_rows)
+                    else []
+                )
+                canonical_rows = (
+                    state_store.project_visible_qt_active_items(candidate_rows)
+                    if candidate_rows
+                    else state_store.list_visible_qt_active_items()
+                )
                 canonical_row = next(
                     (
                         row
-                        for row in state_store.list_visible_qt_active_items()
+                        for row in canonical_rows
                         if self._backend_active_identity_matches(
                             data,
                             self._backend_active_row_payload(row),
@@ -886,6 +876,16 @@ class MainWindowRuntimeMixin:
         if kind == "active_upsert":
             source = str((payload or {}).get("source") or "").strip()
             tag = "backend_active_sync" if source == "backend_active_sync" else "active_upsert"
+            if source == "backend_active_sync":
+                accepted = self._enqueue_ui_mutation(
+                    tag,
+                    lambda p=dict(payload or {}): self._apply_backend_active_upsert(p),
+                )
+                return {
+                    "ok": bool(accepted),
+                    "queued": bool(accepted),
+                    "error": "" if accepted else "Qt 实时更新队列已满，请稍后重试。",
+                }
             return self._enqueue_confirmed_active_mutation(
                 tag,
                 lambda: self._apply_backend_active_upsert(payload),
@@ -898,43 +898,6 @@ class MainWindowRuntimeMixin:
         if kind in {"history_append", "status_banner"}:
             return {"ok": True}
         return {"ok": True, "ignored": True}
-
-    def _stop_event_relay_bridge(self):
-        bridge = getattr(self, "_event_relay_bridge", None)
-        if not bridge:
-            return
-        try:
-            bridge.stop()
-        except Exception:
-            pass
-
-    def _is_event_relay_enabled(self) -> bool:
-        return bool(getattr(config, "relay_enabled", False))
-
-    def _apply_event_relay_setting(self, force_reload: bool = True):
-        if force_reload:
-            try:
-                config.load()
-            except Exception as exc:
-                log_error(f"事件中转设置加载失败: {exc}")
-        bridge = getattr(self, "_event_relay_bridge", None)
-        if not bridge:
-            return
-        if self._is_event_relay_enabled():
-            try:
-                bridge.start()
-            except Exception as exc:
-                log_error(f"事件中转启动失败: {exc}")
-                self._update_event_relay_status("启动失败")
-        else:
-            try:
-                bridge.stop()
-            except Exception:
-                pass
-            self._update_event_relay_status("已关闭")
-
-    def refresh_event_relay_setting(self):
-        self._apply_event_relay_setting(force_reload=True)
 
     def _init_hot_reload(self):
         try:
@@ -2533,85 +2496,6 @@ class MainWindowRuntimeMixin:
                 btn.setToolTip(url)
             else:
                 btn.setToolTip("未配置")
-
-    def _check_ocr_lang_pack(self):
-        """检测系统是否安装了中文 OCR 语言包，如果没装则弹窗引导安装"""
-        if self._closing:
-            return
-
-        def _do_check():
-            try:
-                from winocr import recognize_pil as _rp
-                from PIL import Image as _Img
-                import asyncio
-
-                test_img = _Img.new("RGB", (60, 20), "white")
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(_rp(test_img, "zh-Hans-CN"))
-                    return True  # 成功，说明已安装
-                except Exception:
-                    return False  # 失败，进行下一步提示
-                finally:
-                    loop.close()
-            except Exception:
-                return True  # 其他异常暂不打扰
-
-        def _on_check_result(is_installed):
-            if is_installed or self._closing:
-                return
-
-            reply = QMessageBox.question(
-                self,
-                "OCR 组件缺失",
-                "检测到您的系统缺少【中文 OCR 组件】，这将导致包含汉字的截屏日期无法被识别。\n\n是否立即自动下载并安装？（需要管理员权限，约需10~30秒）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.install_ocr_lang_pack()
-
-        import threading
-
-        def _worker():
-            res = _do_check()
-            QTimer.singleShot(0, lambda: _on_check_result(res))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def install_ocr_lang_pack(self):
-        """提权执行 PowerShell 安装中文 OCR 包"""
-        import ctypes
-
-        ps_script = (
-            "Write-Host '正在为您安装 Windows 中文 OCR 语言包，请稍候...' -ForegroundColor Cyan;"
-            "Add-WindowsCapability -Online -Name 'Language.OCR~~~zh-Hans~0.0.1.0';"
-            "Write-Host '安装流程结束！本窗口将在 3 秒后关闭。' -ForegroundColor Green;"
-            "Start-Sleep -Seconds 3"
-        )
-        ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", "powershell.exe", f'-Command "{ps_script}"', None, 1
-        )
-        if ret <= 32:
-            msg = QMessageBox(self)
-            msg.setWindowFlags(msg.windowFlags() | Qt.WindowType.FramelessWindowHint)
-            msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setWindowTitle("")
-            msg.setText("未能获取管理员权限 或 安装被取消。")
-            msg.exec()
-        else:
-            if hasattr(self, "_update_overlay") and self._update_overlay:
-                self._update_overlay.show()
-                self._update_overlay.set_blur_intensity(20)
-                self.repaint()
-
-            msg = QMessageBox(self)
-            msg.setWindowFlags(msg.windowFlags() | Qt.WindowType.FramelessWindowHint)
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.setWindowTitle("")
-            msg.setText(
-                "已请求管理员权限开始自动安装 OCR 组件。\n\n请等待弹出的黑色窗口跑完进度条自动关闭，即可正常使用截图识别功能。"
-            )
-            msg.exec()
 
     def _install_qt_message_handler(self):
         global _QT_MESSAGE_HANDLER_INSTALLED

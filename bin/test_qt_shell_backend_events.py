@@ -348,6 +348,23 @@ class QtShellBackendEventTests(unittest.TestCase):
 
         self.assertEqual(harness.executed, ["live"])
 
+    def test_backend_active_sync_enqueues_without_waiting_for_ui_apply(self):
+        harness = _PriorityMutationHarness()
+
+        result = harness.handle_qt_shell_event(
+            "active_upsert",
+            {
+                "source": "backend_active_sync",
+                "item": {"payload": {"text": "snapshot"}},
+            },
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(harness.executed, [])
+        harness._drain_ui_mutations()
+        self.assertEqual(harness.executed, ["active_upsert"])
+
     def test_full_live_mutation_queue_rejects_event_for_backend_retry(self):
         harness = _PriorityMutationHarness(priority_size=1)
         self.assertTrue(harness._enqueue_ui_mutation("active_upsert", lambda: None))
@@ -592,6 +609,55 @@ class QtShellBackendEventTests(unittest.TestCase):
             harness.added[0]["active_item_id"],
             "active-old-runtime",
         )
+
+    def test_event_active_upsert_uses_indexed_state_lookup(self):
+        target_record_id = "rec-event-indexed-upsert"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            canonical = {
+                "active_item_id": "active-event-indexed-upsert",
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "notice_type": "事件通告",
+                "work_type": "event",
+                "text": "【事件通告】状态：更新\n【标题】索引点查事件",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    canonical,
+                    section="event",
+                    origin="portal",
+                )
+            )
+            harness = _ActiveUpsertVisibilityHarness()
+            harness.cache_store = type(
+                "CacheStore",
+                (),
+                {"_state_store": store},
+            )()
+
+            with patch.object(
+                store,
+                "list_visible_qt_active_items",
+                side_effect=AssertionError("不得扫描全部活动通告"),
+            ):
+                result = harness._apply_backend_active_upsert(
+                    {
+                        "item": {
+                            "active_item_id": canonical["active_item_id"],
+                            "record_id": target_record_id,
+                            "payload": canonical,
+                        }
+                    }
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(harness.added), 1)
+            self.assertEqual(
+                harness.added[0]["target_record_id"],
+                target_record_id,
+            )
+            self.assertEqual(harness.added[0]["text"], canonical["text"])
 
     def test_stale_active_delete_keeps_live_canonical_target(self):
         target_record_id = "rec-canonical-after-stale-delete"

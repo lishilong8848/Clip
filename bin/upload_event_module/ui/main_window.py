@@ -21,7 +21,6 @@ from .main_window_records import MainWindowRecordsMixin
 from .main_window_workflow import MainWindowWorkflowMixin
 from .main_window_ui import MainWindowUiMixin
 from .main_window_runtime import MainWindowRuntimeMixin
-from .event_relay_bridge import EventRelayBridge
 from .active_cache_store import ActiveCacheStore
 from ..utils import ACTIVE_CACHE_FILE
 
@@ -109,9 +108,7 @@ class ClipboardTool(
         self.clipboard_event_file = get_user_data_dir() / "clipboard_events.jsonl"
         self._clipboard_apply_setting_pending = False
         self._clipboard_stopping = False
-        self._clipboard_desired_disabled = bool(
-            getattr(config, "disable_clipboard_listener", False)
-        )
+        self._clipboard_desired_disabled = False
         self._clipboard_effective_running = False
         self._clipboard_toggle_transition_in_progress = False
         self._clipboard_toggle_target_disabled = self._clipboard_desired_disabled
@@ -143,10 +140,10 @@ class ClipboardTool(
         self._lan_portal_jobs_by_active_item_id = {}
         try:
             qt_backend_command_workers = int(
-                os.environ.get("CLIPFLOW_QT_BACKEND_COMMAND_WORKERS", "2") or 2
+                os.environ.get("CLIPFLOW_QT_BACKEND_COMMAND_WORKERS", "8") or 8
             )
         except Exception:
-            qt_backend_command_workers = 2
+            qt_backend_command_workers = 8
         self._qt_backend_command_executor = ThreadPoolExecutor(
             max_workers=max(1, min(qt_backend_command_workers, 8)),
             thread_name_prefix="ClipFlowQtBackendCommand",
@@ -155,11 +152,6 @@ class ClipboardTool(
         self.current_theme = "dark"
         self.notice_tab = "event"
         self.connection_registry = ConnectionRegistry()
-        self._event_relay_bridge = EventRelayBridge(
-            self,
-            host="0.0.0.0",
-            port=62345,
-        )
         self._ui_signal_queue = queue.Queue(maxsize=500)
         self._ui_signal_max_per_tick = 3
         self._ui_signal_timer = QTimer(self)
@@ -247,12 +239,6 @@ class ClipboardTool(
             self.settings_dialog,
             "settings_saved",
             self.refresh_alert_setting,
-        )
-        self.connection_registry.connect(
-            "settings_dialog",
-            self.settings_dialog,
-            "settings_saved",
-            self.refresh_event_relay_setting,
         )
         self.connection_registry.connect(
             "settings_dialog",
@@ -447,28 +433,11 @@ class ClipboardTool(
             Qt.ConnectionType.QueuedConnection,
         )
 
-        # 初始化事件中转服务
-        self.connection_registry.connect(
-            "event_relay_bridge",
-            self._event_relay_bridge,
-            "event_received",
-            self._on_event_relay_received,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self.connection_registry.connect(
-            "event_relay_bridge",
-            self._event_relay_bridge,
-            "status_changed",
-            self._update_event_relay_status,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self._apply_event_relay_setting(force_reload=False)
         self._init_hot_reload()
         QTimer.singleShot(0, lambda: self._log_runtime_health_snapshot("startup"))
         QTimer.singleShot(0, self._refresh_lan_ongoing_snapshot_now)
         QTimer.singleShot(0, self._restore_update_overlay_state)
         QTimer.singleShot(600, self._close_restart_overlay_window)
-        QTimer.singleShot(1500, self._check_ocr_lang_pack)
         # 强制刷新和提升窗口，确保完全渲染
         QTimer.singleShot(0, self.repaint)
         QTimer.singleShot(0, self.raise_)

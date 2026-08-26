@@ -3898,6 +3898,7 @@ class PortalRuntime:
                         specialty=specialty,
                         scope=scope,
                         ongoing_items=ongoing,
+                        ongoing_items_authoritative=True,
                     ),
                 )
                 return self._send_json(
@@ -3950,6 +3951,7 @@ class PortalRuntime:
                         ongoing_items=ongoing,
                         work_type=work_type,
                         sections=sections,
+                        ongoing_items_authoritative=True,
                     ),
                 )
                 if work_type and isinstance(payload, dict):
@@ -3971,6 +3973,7 @@ class PortalRuntime:
                             ongoing_items=ongoing,
                             work_type="",
                             sections=sections,
+                            ongoing_items_authoritative=True,
                         )
                         if isinstance(broad_payload, dict):
                             payload["records"] = [

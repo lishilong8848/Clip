@@ -69,6 +69,72 @@ class NoticeUndoTests(unittest.TestCase):
             finally:
                 store.shutdown_write_worker(timeout=1.0)
 
+    def test_history_delete_list_filters_in_sql_and_reuses_identity_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(tmpdir)
+            store = service._state_store
+            now = time.time()
+            try:
+                recent_delete_ids = []
+                for index in range(3):
+                    recent_delete_ids.append(
+                        store.create_notice_undo_action(
+                            {
+                                "identity_key": f"maintenance:active:recent-{index}",
+                                "action_type": "delete",
+                                "scope": "A",
+                                "work_type": "maintenance",
+                                "notice_type": "维保通告",
+                                "active_item_id": f"recent-{index}",
+                                "target_record_id": f"rec-recent-{index}",
+                                "title": f"近期删除 {index}",
+                                "building": "A楼",
+                                "building_codes": ["A"],
+                                "created_at": now - index,
+                                "expires_at": now + 86400,
+                            }
+                        )
+                    )
+                store.create_notice_undo_action(
+                    {
+                        "identity_key": "maintenance:active:recent-update",
+                        "action_type": "update",
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "active_item_id": "recent-update",
+                        "target_record_id": "rec-recent-update",
+                        "title": "近期更新",
+                        "building_codes": ["A"],
+                        "created_at": now,
+                        "expires_at": now + 86400,
+                    }
+                )
+
+                with patch.object(
+                    store,
+                    "list_qt_active_items",
+                    wraps=store.list_qt_active_items,
+                ) as active_rows, patch.object(
+                    store,
+                    "list_notice_identities",
+                    wraps=store.list_notice_identities,
+                ) as identities:
+                    items = service.list_available_notice_undos(
+                        scope="ALL",
+                        action_type="delete",
+                        since_seconds=3 * 24 * 60 * 60,
+                    )
+
+                self.assertEqual(
+                    {item["undo_id"] for item in items},
+                    set(recent_delete_ids),
+                )
+                self.assertEqual(active_rows.call_count, 1)
+                self.assertEqual(identities.call_count, 1)
+            finally:
+                store.shutdown_write_worker(timeout=1.0)
+
     def test_backend_runtime_reuses_service_state_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             shared_store = LanPortalStateStore(Path(tmpdir) / "state.sqlite3")

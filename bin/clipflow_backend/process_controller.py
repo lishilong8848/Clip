@@ -16,7 +16,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from lan_bitable_template_portal.server import DEFAULT_HOST, DEFAULT_PORT
+from upload_event_module.config import (
+    DEFAULT_LAN_TEMPLATE_PORTAL_HOST as DEFAULT_HOST,
+    DEFAULT_LAN_TEMPLATE_PORTAL_PORT as DEFAULT_PORT,
+)
 from upload_event_module.logger import log_error, log_info, log_warning
 from upload_event_module.utils import get_data_file_path
 

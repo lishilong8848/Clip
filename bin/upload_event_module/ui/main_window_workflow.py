@@ -502,7 +502,7 @@ class MainWindowWorkflowMixin:
                 from concurrent.futures import ThreadPoolExecutor
 
                 executor = ThreadPoolExecutor(
-                    max_workers=2,
+                    max_workers=8,
                     thread_name_prefix="ClipFlowQtBackendCommandFallback",
                 )
                 self._qt_backend_command_executor = executor
@@ -993,20 +993,6 @@ class MainWindowWorkflowMixin:
         except Exception:
             pass
 
-    def _has_any_upload_in_progress(self) -> bool:
-        if getattr(self, "pending_action_record_ids", None):
-            return True
-
-        try:
-            active_snapshot = self._active_notice_store().data_snapshot()
-        except Exception:
-            active_snapshot = []
-        for data in active_snapshot:
-            if isinstance(data, dict) and data.get("_upload_in_progress"):
-                return True
-
-        return False
-
     def _resolve_default_robot_group_level(self, notice_type: str, payload: NoticePayload) -> str:
         if not notice_type:
             return ""
@@ -1312,9 +1298,6 @@ class MainWindowWorkflowMixin:
         if self.current_screenshot_record_id or self.screenshot_dialog.isVisible():
             self._schedule_pending_update_after_upload(500)
             return
-        if self._has_any_upload_in_progress():
-            self._schedule_pending_update_after_upload(500)
-            return
         for pending_key in list(self.pending_update_after_upload.keys()):
             target_record_id = pending_key
             list_widget, item = self._find_active_item_by_record_id(target_record_id)
@@ -1328,6 +1311,19 @@ class MainWindowWorkflowMixin:
                     continue
             data = item.data(Qt.ItemDataRole.UserRole) or {}
             if self._is_placeholder_record(data):
+                continue
+            candidate_ids = set(
+                self._upload_completion_record_id_candidates(pending_key)
+            )
+            candidate_ids.update(
+                self._upload_completion_record_id_candidates(target_record_id)
+            )
+            pending_ids = set(
+                getattr(self, "pending_action_record_ids", set()) or set()
+            )
+            if data.get("_upload_in_progress") or candidate_ids.intersection(
+                pending_ids
+            ):
                 continue
             request = self.pending_update_after_upload.pop(pending_key, {}) or {}
             payload_data = request.get("data") or data
@@ -1444,7 +1440,6 @@ class MainWindowWorkflowMixin:
                 ).strip()
                 or "auto",
             )
-            return
         if self.pending_update_after_upload:
             self._schedule_pending_update_after_upload(500)
 

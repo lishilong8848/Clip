@@ -90,7 +90,7 @@ class MainWindowClipboardMixin:
         return stats
 
     def _is_clipboard_listener_disabled(self) -> bool:
-        return bool(getattr(config, "disable_clipboard_listener", False))
+        return False
 
     def _is_manual_clipboard_resume_in_progress(self) -> bool:
         return bool(

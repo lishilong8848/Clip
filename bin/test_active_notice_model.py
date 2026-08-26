@@ -1271,6 +1271,78 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertNotIn("_queued_upload_requested", current)
         self.assertNotIn("_upload_operation_id", current)
 
+    def test_pending_event_dispatch_only_waits_for_the_same_event(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._pending_update_after_upload_scheduled = True
+        harness.pending_action_record_ids = {"rec-event-busy"}
+        harness.pending_action_types = {"rec-event-busy": "update"}
+        harness.current_screenshot_record_id = ""
+        harness.screenshot_dialog = type(
+            "HiddenDialog",
+            (),
+            {"isVisible": lambda self: False},
+        )()
+        pending = {}
+        for suffix in ("busy", "ready-a", "ready-b"):
+            record_id = f"rec-event-{suffix}"
+            item = QListWidgetItem(suffix)
+            harness.list_active_event.addItem(item)
+            text = (
+                "【事件通告】状态：更新\n"
+                f"【标题】{suffix}\n【来源】BMS\n"
+                "【时间】2026-08-26 15:00\n【概述】并发上传测试"
+            )
+            item.setData(
+                Qt.ItemDataRole.UserRole,
+                {
+                    "active_item_id": f"aid-event-{suffix}",
+                    "record_id": record_id,
+                    "target_record_id": record_id,
+                    "notice_type": "事件通告",
+                    "_is_placeholder_record": False,
+                    "_upload_in_progress": suffix == "busy",
+                    "text": text,
+                },
+            )
+            pending[record_id] = {
+                "data": dict(item.data(Qt.ItemDataRole.UserRole)),
+                "action_type": "update",
+                "event_level": "I3",
+                "event_source": "BMS",
+            }
+        harness.pending_update_after_upload = pending
+        harness._resolve_upload_fields_from_cache = (
+            lambda _data, _fields: {
+                "buildings": ["A楼"],
+                "specialty": "电气",
+                "level": "I3",
+                "event_source": "BMS",
+            }
+        )
+        dispatched = []
+        harness.do_feishu_upload = (
+            lambda data, _screenshot, _action, **_kwargs: dispatched.append(
+                data["record_id"]
+            )
+        )
+        scheduled = []
+        harness._schedule_pending_update_after_upload = (
+            lambda delay=300: scheduled.append(delay)
+        )
+
+        harness._try_process_pending_update_after_upload()
+
+        self.assertEqual(
+            dispatched,
+            ["rec-event-ready-a", "rec-event-ready-b"],
+        )
+        self.assertEqual(
+            set(harness.pending_update_after_upload),
+            {"rec-event-busy"},
+        )
+        self.assertEqual(scheduled, [500])
+
     def test_sparse_event_update_does_not_choose_between_two_active_items(self):
         harness = _ReplaceRecordIdHarness()
         for code in ("A", "B"):

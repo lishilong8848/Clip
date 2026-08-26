@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
 
     QWidget,
     QCheckBox,
-    QComboBox,
 )
 from PyQt6.QtCore import Qt
 
@@ -56,9 +55,6 @@ from ..config import (
     DEFAULT_DISABLE_HOT_RELOAD,
     DEFAULT_DISABLE_ALERTS,
     DEFAULT_DISABLE_SPEECH,
-    DEFAULT_RELAY_ENABLED,
-    DEFAULT_RELAY_WEBHOOK,
-    DEFAULT_RELAY_WEBHOOK_FORMAT,
 )
 from ..services.service_registry import resolve_bitable_app_token
 
@@ -75,7 +71,6 @@ class SettingsDialog(QDialog):
 
 
     settings_saved = pyqtSignal()
-    webhook_test_finished = pyqtSignal(bool, str)
 
 
     def __init__(self, parent=None):
@@ -290,58 +285,6 @@ class SettingsDialog(QDialog):
         self.disable_speech_checkbox = QCheckBox("禁用语音播报（默认开启）")
         form_layout.addWidget(self.disable_speech_checkbox)
 
-        # ========== 事件中转告警 ==========
-        relay_title = QLabel("事件中转告警")
-        relay_title.setStyleSheet("font-weight: bold; color: #0EA5E9; margin-top: 10px;")
-        form_layout.addWidget(relay_title)
-        self.relay_enabled_checkbox = QCheckBox("启用事件中转服务（关闭后不接收中转事件）")
-        form_layout.addWidget(self.relay_enabled_checkbox)
-
-        relay_card = QFrame()
-        relay_card.setObjectName("RelayCard")
-        relay_card.setStyleSheet(
-            "QFrame#RelayCard {"
-            "background: rgba(14, 165, 233, 0.08);"
-            "border: 1px solid rgba(14, 165, 233, 0.28);"
-            "border-radius: 10px;"
-            "}"
-            "QLabel#RelayHint { color: #4B5563; font-size: 12px; }"
-        )
-        relay_card_layout = QVBoxLayout(relay_card)
-        relay_card_layout.setContentsMargins(12, 10, 12, 10)
-        relay_card_layout.setSpacing(8)
-
-        relay_webhook_label = QLabel("告警 Webhook URL")
-        self.relay_webhook_input = QLineEdit()
-        self.relay_webhook_input.setPlaceholderText(
-            "https://open.feishu.cn/... 或 https://oapi.dingtalk.com/robot/send..."
-        )
-        self.relay_webhook_input.setMinimumHeight(34)
-        relay_card_layout.addWidget(relay_webhook_label)
-        relay_card_layout.addWidget(self.relay_webhook_input)
-
-        relay_bottom_layout = QHBoxLayout()
-        relay_bottom_layout.setSpacing(8)
-        relay_format_label = QLabel("类型")
-        self.relay_webhook_format_combo = QComboBox()
-        self.relay_webhook_format_combo.addItem("飞书机器人", "feishu")
-        self.relay_webhook_format_combo.addItem("钉钉机器人", "dingtalk")
-        self.relay_webhook_format_combo.setMinimumHeight(34)
-        self.relay_webhook_test_btn = QPushButton("测试 Webhook")
-        self.relay_webhook_test_btn.setObjectName("ConfirmBtn")
-        self.relay_webhook_test_btn.setMinimumHeight(34)
-        self.relay_webhook_test_btn.clicked.connect(self.test_relay_webhook)
-        relay_bottom_layout.addWidget(relay_format_label)
-        relay_bottom_layout.addWidget(self.relay_webhook_format_combo, 1)
-        relay_bottom_layout.addWidget(self.relay_webhook_test_btn)
-        relay_card_layout.addLayout(relay_bottom_layout)
-
-        relay_hint_label = QLabel("测试消息会包含安全词“事件通告”，用于验证机器人连通性。")
-        relay_hint_label.setObjectName("RelayHint")
-        relay_hint_label.setWordWrap(True)
-        relay_card_layout.addWidget(relay_hint_label)
-        form_layout.addWidget(relay_card)
-
         # ========== 局域网页面配置 ==========
         lan_portal_title = QLabel("局域网页面")
         lan_portal_title.setStyleSheet(
@@ -506,11 +449,6 @@ class SettingsDialog(QDialog):
 
 
         self.drag_position = None
-        self.webhook_test_finished.connect(self._on_webhook_test_finished)
-        self.relay_webhook_input.textChanged.connect(self._sync_relay_test_btn_state)
-        self._sync_relay_test_btn_state()
-
-
     def load_current_settings(self):
         """加载当前配置到输入框"""
         self.app_id_input.setText(config.app_id)
@@ -536,13 +474,6 @@ class SettingsDialog(QDialog):
         self.disable_speech_checkbox.setChecked(
             bool(getattr(config, "disable_speech", DEFAULT_DISABLE_SPEECH))
         )
-        self.relay_enabled_checkbox.setChecked(bool(getattr(config, "relay_enabled", False)))
-        self.relay_webhook_input.setText(getattr(config, "relay_webhook", ""))
-        fmt = getattr(config, "relay_webhook_format", "feishu")
-        idx = self.relay_webhook_format_combo.findData(fmt)
-        if idx >= 0:
-            self.relay_webhook_format_combo.setCurrentIndex(idx)
-        self._sync_relay_test_btn_state()
         self.group_name_change_i3_input.setText(config.group_name_change_i3)
         self.group_name_maintenance_input.setText(
             getattr(config, "group_name_maintenance", "")
@@ -613,11 +544,6 @@ class SettingsDialog(QDialog):
                 )
             )
 
-    def _sync_relay_test_btn_state(self):
-        webhook = self.relay_webhook_input.text().strip()
-        self.relay_webhook_test_btn.setEnabled(bool(webhook))
-
-
     def save_settings(self):
         """保存设置"""
         feishu_app_id = self.app_id_input.text().strip()
@@ -676,11 +602,6 @@ class SettingsDialog(QDialog):
         disable_hot_reload = self.disable_hot_reload_checkbox.isChecked()
         disable_alerts = self.disable_alerts_checkbox.isChecked()
         disable_speech = self.disable_speech_checkbox.isChecked()
-        relay_enabled = self.relay_enabled_checkbox.isChecked()
-        relay_webhook = self.relay_webhook_input.text().strip()
-        relay_webhook_format = self.relay_webhook_format_combo.currentData()
-
-
         resolved_token, replaced = resolve_bitable_app_token(
 
             feishu_app_id, feishu_app_secret, feishu_app_token
@@ -732,76 +653,11 @@ group_name_change_i3=group_name_change_i3,
             disable_hot_reload=disable_hot_reload,
             disable_alerts=disable_alerts,
             disable_speech=disable_speech,
-            relay_enabled=relay_enabled,
-            relay_webhook=relay_webhook,
-            relay_webhook_format=relay_webhook_format,
         ):
             show_toast_message(self, "✅ 设置已保存", duration_ms=1500)
             self.settings_saved.emit()
 
             self.hide()
-
-
-
-    def test_relay_webhook(self):
-        webhook = self.relay_webhook_input.text().strip()
-        webhook_format = self.relay_webhook_format_combo.currentData() or "feishu"
-        if not webhook:
-            show_toast_message(self, "❌ 请先填写 Webhook URL", duration_ms=1800)
-            return
-
-        self.relay_webhook_test_btn.setEnabled(False)
-        self.relay_webhook_test_btn.setText("测试发送中...")
-
-        def _worker():
-            import json
-            import urllib.error
-            import urllib.request
-
-            text = "事件通告 Webhook测试：这是一条连通性测试消息。"
-            if webhook_format == "dingtalk":
-                payload = {"msgtype": "text", "text": {"content": text}}
-            else:
-                payload = {"msg_type": "text", "content": {"text": text}}
-
-            ok = False
-            result = ""
-            try:
-                data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                req = urllib.request.Request(
-                    webhook,
-                    data=data,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    body = resp.read().decode("utf-8", errors="ignore")
-                    ok = 200 <= resp.status < 300
-                    result = f"HTTP {resp.status} {body[:120]}".strip()
-            except urllib.error.HTTPError as exc:
-                try:
-                    body = exc.read().decode("utf-8", errors="ignore")
-                except Exception:
-                    body = ""
-                result = f"HTTP {exc.code} {body[:120]}".strip()
-            except Exception as exc:
-                result = str(exc)
-
-            self.webhook_test_finished.emit(ok, result)
-
-        import threading
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_webhook_test_finished(self, ok: bool, result: str):
-        self.relay_webhook_test_btn.setText("测试 Webhook")
-        self._sync_relay_test_btn_state()
-        if ok:
-            show_toast_message(self, "✅ Webhook 测试发送成功", duration_ms=1800)
-        else:
-            show_toast_message(
-                self, f"❌ Webhook 测试失败: {result}", duration_ms=2600
-            )
 
     def reset_to_default(self):
         """恢复默认设置"""
@@ -830,12 +686,6 @@ group_name_change_i3=group_name_change_i3,
         self.disable_hot_reload_checkbox.setChecked(DEFAULT_DISABLE_HOT_RELOAD)
         self.disable_alerts_checkbox.setChecked(DEFAULT_DISABLE_ALERTS)
         self.disable_speech_checkbox.setChecked(DEFAULT_DISABLE_SPEECH)
-        self.relay_enabled_checkbox.setChecked(DEFAULT_RELAY_ENABLED)
-        self.relay_webhook_input.setText(DEFAULT_RELAY_WEBHOOK)
-        idx = self.relay_webhook_format_combo.findData(DEFAULT_RELAY_WEBHOOK_FORMAT)
-        if idx >= 0:
-            self.relay_webhook_format_combo.setCurrentIndex(idx)
-        self._sync_relay_test_btn_state()
         self.group_name_change_i3_input.setText(DEFAULT_GROUP_NAME_CHANGE_I3)
 
         self.group_name_maintenance_input.setText(DEFAULT_GROUP_NAME_MAINTENANCE)

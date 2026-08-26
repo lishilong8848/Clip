@@ -211,15 +211,76 @@ def main():
     if not server.listen(SINGLE_INSTANCE_KEY):
         print(f"[ClipFlow] 无法创建单实例锁: {server.errorString()}")
 
-    from upload_event_module.ui.main_window import ClipboardTool
+    portal_holder = {"controller": None, "error": ""}
+    portal_holder_lock = threading.Lock()
+    portal_ready = threading.Event()
+    portal_cancelled = threading.Event()
 
-    window = ClipboardTool()
+    def _start_portal_worker():
+        started_at = time.perf_counter()
+        controller = None
+        error = ""
+        try:
+            controller = PortalServerController(
+                host=getattr(config, "lan_template_portal_host", "0.0.0.0"),
+                port=int(getattr(config, "lan_template_portal_port", 18766) or 18766),
+            )
+            controller.start()
+            with portal_holder_lock:
+                should_stop = portal_cancelled.is_set()
+                if not should_stop:
+                    portal_holder["controller"] = controller
+            if should_stop:
+                controller.stop()
+                controller = None
+        except Exception as exc:
+            error = str(exc)
+        with portal_holder_lock:
+            portal_holder["controller"] = controller
+            portal_holder["error"] = error
+        portal_ready.set()
+        print(
+            "[ClipFlow] Portal startup elapsed: "
+            f"{(time.perf_counter() - started_at) * 1000:.1f} ms"
+        )
+
+    portal_thread = threading.Thread(
+        target=_start_portal_worker,
+        name="ClipFlowPortalStartup",
+        daemon=True,
+    )
+    portal_thread.start()
+
+    import_started_at = time.perf_counter()
+    try:
+        from upload_event_module.ui.main_window import ClipboardTool
+    except BaseException:
+        portal_cancelled.set()
+        portal_ready.wait(35.0)
+        raise
+    print(
+        "[ClipFlow] Qt window import elapsed: "
+        f"{(time.perf_counter() - import_started_at) * 1000:.1f} ms"
+    )
+
+    window_started_at = time.perf_counter()
+    try:
+        window = ClipboardTool()
+    except BaseException:
+        portal_cancelled.set()
+        portal_ready.wait(35.0)
+        raise
+    print(
+        "[ClipFlow] Qt window init elapsed: "
+        f"{(time.perf_counter() - window_started_at) * 1000:.1f} ms"
+    )
 
     portal_bridge = _PortalStartupBridge()
-    portal_holder = {"controller": None}
 
     def _stop_portal_if_started():
-        controller = portal_holder.get("controller")
+        portal_cancelled.set()
+        with portal_holder_lock:
+            controller = portal_holder.get("controller")
         if controller is None:
             return
         try:
@@ -324,24 +385,20 @@ def main():
     portal_bridge.finished.connect(_attach_portal_controller)
     window._portal_startup_bridge = portal_bridge
 
-    def _start_portal_worker():
-        try:
-            controller = PortalServerController(
-                host=getattr(config, "lan_template_portal_host", "0.0.0.0"),
-                port=int(getattr(config, "lan_template_portal_port", 18766) or 18766),
-            )
-            portal_holder["controller"] = controller
-            controller.start()
-            portal_bridge.finished.emit(controller, "")
-        except Exception as exc:
-            portal_bridge.finished.emit(None, str(exc))
+    def _relay_portal_startup_result():
+        portal_ready.wait()
+        portal_bridge.finished.emit(
+            portal_holder.get("controller"),
+            str(portal_holder.get("error") or ""),
+        )
 
-    portal_thread = threading.Thread(
-        target=_start_portal_worker,
-        name="ClipFlowPortalStartup",
+    portal_relay_thread = threading.Thread(
+        target=_relay_portal_startup_result,
+        name="ClipFlowPortalStartupRelay",
         daemon=True,
     )
     window._portal_startup_thread = portal_thread
+    window._portal_startup_relay_thread = portal_relay_thread
 
     # 设置初始位置 (添加空值检查防止访问违规)
     primary_screen = app.primaryScreen()
@@ -349,7 +406,7 @@ def main():
         screen = primary_screen.geometry()
         window.move(screen.width() - 600, screen.height() - 790)
     window.show()
-    portal_thread.start()
+    portal_relay_thread.start()
 
     sys.exit(app.exec())
 
