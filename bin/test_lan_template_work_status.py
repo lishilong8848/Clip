@@ -1881,6 +1881,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             previous_service = PortalRuntime.service
             PortalRuntime.state_store = store
             PortalRuntime.service = _TestMaintenancePortalService()
+            local_images = portal_server_module.LocalNoticeImageStore(store)
+            local_images.root = Path(temp_dir) / "notice_images"
             attachment = store.put_notice_upload_attachment(
                 open_id="operator",
                 file_name="ali.png",
@@ -1924,6 +1926,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             try:
                 with patch.object(
+                    PortalRuntime,
+                    "local_notice_images",
+                    return_value=local_images,
+                ), patch.object(
                     portal_server_module,
                     "query_record_by_id",
                     side_effect=[
@@ -1982,6 +1988,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(
                     projected["ali_confirmation_fresh_for_today"]
                 )
+                saved_images = local_images.list_for_target(
+                    "target-change-2", kind="ali", target_written=True
+                )
+                self.assertEqual(len(saved_images), 1)
+                self.assertTrue(saved_images[0]["preview_url"].startswith("/api/notice-images/"))
 
                 confirm_calls = []
                 with patch.object(
@@ -2015,6 +2026,208 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service
+
+    def test_change_confirmation_local_image_is_target_bound_and_deduplicated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            images = portal_server_module.LocalNoticeImageStore(store)
+            images.root = Path(temp_dir) / "notice_images"
+            first = images.save(
+                identity="change:target-local-image",
+                kind="ali",
+                content=b"same-image",
+                file_name="first.png",
+                mime_type="image/png",
+                owner_open_id="operator",
+                target_record_id="target-local-image",
+                work_type="change",
+                building_codes=["A", "B"],
+            )
+            second = images.save(
+                identity="change:target-local-image",
+                kind="ali",
+                content=b"same-image",
+                file_name="second.png",
+                mime_type="image/png",
+                owner_open_id="operator",
+                target_record_id="target-local-image",
+                work_type="change",
+                building_codes=["A", "B"],
+            )
+            self.assertEqual(first["local_image_id"], second["local_image_id"])
+            images.mark_feishu_uploaded(
+                first["local_image_id"],
+                file_token="local-token",
+                target_written=True,
+                target_record_id="target-local-image",
+                work_type="change",
+                building_codes=["A", "B"],
+            )
+            self.assertEqual(
+                len(
+                    images.list_for_target(
+                        "target-local-image", kind="ali", target_written=True
+                    )
+                ),
+                1,
+            )
+
+    def test_change_confirmation_reusing_written_local_image_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            images = portal_server_module.LocalNoticeImageStore(store)
+            images.root = Path(temp_dir) / "notice_images"
+            saved = images.save(
+                identity="change:target-reuse-image",
+                kind="ali",
+                content=b"same-image",
+                file_name="same.png",
+                mime_type="image/png",
+                owner_open_id="operator",
+                target_record_id="target-reuse-image",
+                work_type="change",
+                building_codes=["D"],
+            )
+            images.mark_feishu_uploaded(
+                saved["local_image_id"],
+                file_token="same-token",
+                target_written=True,
+                target_record_id="target-reuse-image",
+                work_type="change",
+                building_codes=["D"],
+            )
+            fields = {
+                "名称": "重复截图测试",
+                "楼栋": "D楼",
+                "变更状态": "开始",
+                "阿里确认截图": [{"file_token": "same-token"}],
+                "H楼确认": True,
+            }
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _TestMaintenancePortalService()
+            try:
+                with patch.object(
+                    PortalRuntime, "local_notice_images", return_value=images
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, {"fields": fields}),
+                ), patch.object(
+                    portal_server_module, "upload_media_to_feishu"
+                ) as upload, patch.object(
+                    portal_server_module, "update_bitable_record_fields"
+                ) as update:
+                    result = PortalRuntime.upload_change_confirmation_screenshot(
+                        "target-reuse-image",
+                        upload_id="",
+                        local_image_id=saved["local_image_id"],
+                        actor_open_id="operator",
+                        actor_name="操作人",
+                        allowed_scopes=["D"],
+                        privileged=False,
+                    )
+                upload.assert_not_called()
+                update.assert_not_called()
+                self.assertEqual(result["state"], "confirmed")
+                self.assertEqual(len(result["local_screenshot_items"]), 1)
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_fastapi_ongoing_projection_restores_target_bound_local_images(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            images = portal_server_module.LocalNoticeImageStore(store)
+            images.root = Path(temp_dir) / "notice_images"
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "target-local-projection",
+                    "target_record_id": "target-local-projection",
+                    "record_id": "target-local-projection",
+                    "work_type": "change",
+                    "notice_type": "变更通告",
+                    "status": "开始",
+                    "title": "本地图片投影测试",
+                    "building_codes": ["A", "B"],
+                },
+                section="change",
+                origin="test",
+            )
+            for kind, content in (("ali", b"ali-image"), ("site", b"site-image")):
+                saved = images.save(
+                    identity="change:target-local-projection",
+                    kind=kind,
+                    content=content,
+                    file_name=f"{kind}.png",
+                    mime_type="image/png",
+                    target_record_id="target-local-projection",
+                    work_type="change",
+                    building_codes=["A", "B"],
+                )
+                images.mark_feishu_uploaded(
+                    saved["local_image_id"],
+                    file_token=f"{kind}-token",
+                    target_written=True,
+                    target_record_id="target-local-projection",
+                    work_type="change",
+                    building_codes=["A", "B"],
+                )
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = store
+            try:
+                with patch.object(
+                    PortalRuntime, "local_notice_images", return_value=images
+                ):
+                    items = FastAPIPortalController._get_ongoing("A")
+                self.assertEqual(len(items), 1)
+                self.assertEqual(len(items[0]["local_ali_confirmation_images"]), 1)
+                self.assertEqual(len(items[0]["local_site_images"]), 1)
+                self.assertTrue(
+                    items[0]["local_ali_confirmation_images"][0][
+                        "preview_url"
+                    ].startswith("/api/notice-images/")
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_local_notice_image_access_supports_each_involved_building(self):
+        item = {
+            "kind": "ali",
+            "owner_open_id": "uploader",
+            "scope": "CAMPUS",
+            "building_codes": ["A", "B"],
+        }
+
+        def session(scope, open_id):
+            return {
+                "role": "building",
+                "allowed_scopes": [scope],
+                "user": {"open_id": open_id},
+            }
+
+        self.assertTrue(
+            FastAPIPortalController._local_notice_image_access_allowed(
+                session("A", "a-user"), item, user={"open_id": "a-user"}
+            )
+        )
+        self.assertTrue(
+            FastAPIPortalController._local_notice_image_access_allowed(
+                session("B", "b-user"), item, user={"open_id": "b-user"}
+            )
+        )
+        self.assertFalse(
+            FastAPIPortalController._local_notice_image_access_allowed(
+                session("C", "c-user"), item, user={"open_id": "c-user"}
+            )
+        )
+        h_open_id = portal_server_module.BUILDING_OPEN_ID_MAP["H"]
+        self.assertTrue(
+            FastAPIPortalController._local_notice_image_access_allowed(
+                session("H", h_open_id), item, user={"open_id": h_open_id}
+            )
+        )
 
     def test_change_confirmation_today_screenshot_consumption_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2809,11 +3022,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('id="lite-change-screenshot-preview"', admin_html)
         self.assertIn("change-confirmation-gallery", admin_html)
         self.assertIn("change-confirmation-thumb", admin_html)
-        self.assertIn("openChangeScreenshotPreview(url,label)", admin_html)
-        self.assertIn(
-            "/screenshot/preview?file_token=${encodeURIComponent(token)}",
-            admin_html,
-        )
+        self.assertIn("openChangeScreenshotPreview(url, label)", admin_html)
+        self.assertIn("local_screenshot_items", admin_html)
+        self.assertIn("data-change-confirmation-upload-zone", admin_html)
+        self.assertIn("stageChangeConfirmationFile", admin_html)
+        self.assertIn("本机无图片副本，可重新上传", admin_html)
+        self.assertNotIn("/screenshot/preview?file_token=${", admin_html)
         self.assertNotIn("点击 / Ctrl+V 粘贴阿里确认截图", admin_html)
         self.assertNotIn("新图追加保留", admin_html)
         self.assertNotIn("仅维保、变更、检修需要", admin_html)
@@ -2881,6 +3095,45 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertNotIn("remote-token-should-not-render", local_only_html)
         self.assertNotIn("remote-site-token-should-not-render", local_only_html)
+        local_preview_html = render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [
+                    {
+                        "active_item_id": "target-local-preview-ready",
+                        "target_record_id": "target-local-preview-ready",
+                        "record_id": "target-local-preview-ready",
+                        "work_type": "change",
+                        "notice_type": "变更通告",
+                        "title": "本地截图可见测试",
+                        "status": "开始",
+                        "local_site_images": [
+                            {
+                                "local_image_id": "local-site-ready",
+                                "preview_url": "/api/notice-images/local-site-ready",
+                                "file_name": "site.png",
+                                "target_written": True,
+                            }
+                        ],
+                        "local_ali_confirmation_images": [
+                            {
+                                "local_image_id": "local-ali-ready",
+                                "preview_url": "/api/notice-images/local-ali-ready",
+                                "file_name": "ali.png",
+                                "target_written": True,
+                            }
+                        ],
+                    }
+                ],
+            },
+            session={"role": "admin", "can_manage_change_confirmations": True},
+            scope="ALL",
+            work_type="change",
+            active_item_id="target-local-preview-ready",
+        )
+        self.assertIn("/api/notice-images/local-site-ready", local_preview_html)
+        self.assertIn("/api/notice-images/local-ali-ready", local_preview_html)
+        self.assertIn("site-photo-preview", local_preview_html)
 
     def test_change_confirmation_api_permissions(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -3046,6 +3299,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         finally:
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions = previous_sessions
+
+    def test_change_confirmation_dashboard_stages_target_bound_local_image_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            images = portal_server_module.LocalNoticeImageStore(store)
+            images.root = Path(temp_dir) / "notice_images"
+            previous_store = PortalRuntime.state_store
+            previous_sessions = dict(PortalRuntime.auth_manager._sessions)
+            PortalRuntime.state_store = store
+            store.put_document(
+                portal_server_module.CHANGE_CONFIRMATION_NAMESPACE,
+                "target-stage-local",
+                {
+                    "target_record_id": "target-stage-local",
+                    "state": "missing_screenshot",
+                    "building_codes": ["A", "B"],
+                },
+            )
+            now = time.time() + 3600
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = {
+                    "admin-local-image": {
+                        "session_id": "admin-local-image",
+                        "user": {
+                            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+                            "name": "管理员",
+                        },
+                        "role": "admin",
+                        "allowed_scopes": ["ALL"],
+                        "expires_at": now,
+                    }
+                }
+            controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+            client = TestClient(controller._build_app())
+            try:
+                with patch.object(
+                    PortalRuntime, "local_notice_images", return_value=images
+                ), patch.object(
+                    portal_server_module, "query_record_by_id"
+                ) as remote_read, patch.object(
+                    portal_server_module, "update_bitable_record_fields"
+                ) as remote_update:
+                    response = client.post(
+                        "/api/notice-attachments?file_name=stage.png"
+                        "&identity=wrong-current-form&kind=ali&scope=ALL"
+                        "&target_record_id=target-stage-local",
+                        content=b"local-image",
+                        headers={
+                            "Content-Type": "image/png",
+                            "Cookie": f"{AUTH_COOKIE_NAME}=admin-local-image",
+                        },
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()["data"]
+                local_item = images.get(data["local_image_id"])
+                self.assertEqual(local_item["identity"], "change:target-stage-local")
+                self.assertEqual(local_item["target_record_id"], "target-stage-local")
+                self.assertEqual(local_item["kind"], "ali")
+                self.assertEqual(local_item["building_codes"], ["A", "B"])
+                self.assertFalse(local_item["target_written"])
+                remote_read.assert_not_called()
+                remote_update.assert_not_called()
+            finally:
+                PortalRuntime.state_store = previous_store
+                with PortalRuntime.auth_manager._lock:
+                    PortalRuntime.auth_manager._sessions = previous_sessions
 
     def test_change_handler_writes_single_select_specialty_on_create_and_update(self):
         handler = ChangeNoticeHandler("变更通告")

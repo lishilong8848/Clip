@@ -1058,6 +1058,7 @@ POLLING_NOTICE_FIELDS = {
     "work_order_operator": "操作人",
     "work_order_reviewer": "现场复核人",
     "work_order_attachments": "工单附件",
+    "operation_photos": "操作照片",
 }
 
 POWER_NOTICE_FIELDS = {

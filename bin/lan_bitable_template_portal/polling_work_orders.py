@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime as dt
 import hashlib
 import hmac
+import io
+import math
 import os
 import re
 import secrets
@@ -12,6 +15,7 @@ import shutil
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -38,6 +42,12 @@ POLLING_SOP_MAX_FILE_BYTES = 20 * 1024 * 1024
 POLLING_SOP_MAX_FILES = 10
 POLLING_SOP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 POLLING_SOP_MAX_STEPS = 200
+POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
+POLLING_STEP_PHOTO_MAX_BYTES = 8 * 1024 * 1024
+POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
+POLLING_WORK_ORDER_OUTPUT_NAME = "轮巡操作流程.xlsx"
+POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v2.xlsx"
+POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
 
 
 class PollingWorkOrderTokenError(PortalError):
@@ -64,6 +74,11 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _excel_text(value: Any) -> str:
+    text = str(value or "")
+    return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+
 def _polling_unit_group(unit: str) -> tuple[str, ...]:
     return next((group for group in POLLING_UNIT_GROUPS if unit in group), ())
 
@@ -77,6 +92,11 @@ class PollingWorkOrderService:
         self.work_order_root = Path(
             get_data_file_path("polling_work_orders")
         ).resolve()
+        self.work_order_template_path = (
+            Path(__file__).resolve().parent
+            / "templates"
+            / POLLING_WORK_ORDER_TEMPLATE_NAME
+        )
 
     @staticmethod
     def _now_text() -> str:
@@ -147,6 +167,16 @@ class PollingWorkOrderService:
                 raise PortalError(
                     f"第 {index + 1} 个 SOP 步骤至少需要操作人或现场审核人确认。"
                 )
+            try:
+                time_limit_seconds = int(raw.get("time_limit_seconds") or 0)
+            except (TypeError, ValueError) as exc:
+                raise PortalError(
+                    f"第 {index + 1} 个 SOP 步骤时间限制必须为整数秒。"
+                ) from exc
+            if time_limit_seconds not in range(POLLING_STEP_MAX_SECONDS + 1):
+                raise PortalError(
+                    f"第 {index + 1} 个 SOP 步骤时间限制必须在 0–{POLLING_STEP_MAX_SECONDS} 秒之间。"
+                )
             steps.append(
                 {
                     "step_id": str(raw.get("step_id") or uuid.uuid4().hex),
@@ -154,6 +184,7 @@ class PollingWorkOrderService:
                     "content": content,
                     "operator_required": operator_required,
                     "reviewer_required": reviewer_required,
+                    "time_limit_seconds": time_limit_seconds,
                 }
             )
         return steps
@@ -530,6 +561,16 @@ class PollingWorkOrderService:
         ).strip():
             raise PollingWorkOrderTokenError("工单链接无效或已失效。")
 
+    def _group_directory(self, target_record_id: str) -> Path:
+        directory_name = hashlib.sha256(
+            str(target_record_id or "").strip().encode("utf-8")
+        ).hexdigest()[:24]
+        groups_root = (self.work_order_root / "groups").resolve()
+        directory = (groups_root / directory_name).resolve()
+        if directory == groups_root or not directory.is_relative_to(groups_root):
+            raise PortalError("工单附件路径无效。")
+        return directory
+
     def create_group(
         self,
         prepared: dict,
@@ -548,11 +589,7 @@ class PollingWorkOrderService:
             )
             if isinstance(existing, dict):
                 return self.group_with_links(existing, public_base_url)
-            directory_name = hashlib.sha256(target_record_id.encode("utf-8")).hexdigest()[:24]
-            directory = (self.work_order_root / "groups" / directory_name).resolve()
-            groups_root = (self.work_order_root / "groups").resolve()
-            if directory == groups_root or not directory.is_relative_to(groups_root):
-                raise PortalError("工单附件路径无效。")
+            directory = self._group_directory(target_record_id)
             directory.mkdir(parents=True, exist_ok=True)
             attachments: list[dict] = []
             seen_hashes: set[str] = set()
@@ -601,10 +638,17 @@ class PollingWorkOrderService:
                             "content": content,
                             "operator_required": bool(template_step.get("operator_required")),
                             "reviewer_required": bool(template_step.get("reviewer_required")),
+                            "time_limit_seconds": int(
+                                template_step.get("time_limit_seconds") or 0
+                            ),
+                            "activated_at_ts": 0.0,
+                            "photos": [],
                             "operator_confirmation": {},
                             "reviewer_confirmation": {},
                         }
                     )
+            if flattened:
+                flattened[0]["activated_at_ts"] = time.time()
             operator_token = self.role_token(target_record_id, "operator")
             reviewer_token = self.role_token(target_record_id, "reviewer")
             now = self._now_text()
@@ -662,15 +706,92 @@ class PollingWorkOrderService:
         result["position"] = "current" if index == current_index else "previous" if index < current_index else "next"
         result["operator_confirmed"] = bool(result.pop("operator_confirmation", {}))
         result["reviewer_confirmed"] = bool(result.pop("reviewer_confirmation", {}))
+        activated_at = float(result.get("activated_at_ts") or 0)
+        available_at = activated_at + int(result.get("time_limit_seconds") or 0)
+        result["confirm_available_at"] = available_at
+        result["remaining_seconds"] = max(
+            0, int(math.ceil(available_at - time.time()))
+        )
+        result["photos"] = [
+            {
+                key: value
+                for key, value in photo.items()
+                if key not in {"path"}
+            }
+            for photo in result.get("photos") or []
+            if isinstance(photo, dict)
+        ]
         return result
 
     def session(self, token: str) -> dict:
         group, role = self._resolve_token(token)
         steps = list(group.get("steps") or [])
-        current = min(int(group.get("current_index") or 0), max(0, len(steps) - 1))
-        visible_indexes = sorted(
-            {index for index in (current - 1, current, current + 1) if 0 <= index < len(steps)}
+        current_index = int(group.get("current_index") or 0)
+        current = min(current_index, max(0, len(steps) - 1))
+        current_run_index = (
+            int(steps[current].get("run_index") or 0)
+            if current_index < len(steps)
+            and str(group.get("state") or "") == "active"
+            else 0
         )
+        visible_indexes = sorted(
+            {
+                index
+                for index in (current - 1, current, current + 1)
+                if 0 <= index < len(steps)
+                and int(steps[index].get("run_index") or 0) == current_run_index
+            }
+        )
+        public_steps = [
+            self._step_public(
+                steps[index], int(group.get("current_index") or 0)
+            )
+            for index in visible_indexes
+        ]
+        for step in public_steps:
+            for photo in step.get("photos") or []:
+                photo["preview_url"] = (
+                    "/api/polling-work-orders/photos/"
+                    f"{quote(str(photo.get('photo_id') or ''), safe='')}"
+                    f"?token={quote(str(token or ''), safe='')}"
+                )
+        work_orders = []
+        for run_index, run in enumerate(group.get("runs") or [], start=1):
+            run_steps = [
+                step
+                for step in steps
+                if int(step.get("run_index") or 0) == run_index
+            ]
+            completed_steps = sum(
+                1
+                for step in run_steps
+                if (
+                    not step.get("operator_required")
+                    or bool(step.get("operator_confirmation"))
+                )
+                and (
+                    not step.get("reviewer_required")
+                    or bool(step.get("reviewer_confirmation"))
+                )
+            )
+            state = (
+                "completed"
+                if run_steps and completed_steps == len(run_steps)
+                else "active"
+                if run_index == current_run_index
+                else "locked"
+            )
+            work_orders.append(
+                {
+                    "run_index": run_index,
+                    "from_unit": str(run.get("from_unit") or ""),
+                    "to_unit": str(run.get("to_unit") or ""),
+                    "label": f"{run.get('from_unit')}→{run.get('to_unit')}",
+                    "step_count": len(run_steps),
+                    "completed_steps": completed_steps,
+                    "state": state,
+                }
+            )
         return {
             "group_id": str(group.get("group_id") or ""),
             "title": str(group.get("title") or ""),
@@ -680,9 +801,11 @@ class PollingWorkOrderService:
             "assigned_person": copy.deepcopy(group.get(role) or {}),
             "state": str(group.get("state") or ""),
             "version": int(group.get("version") or 0),
-            "current_index": int(group.get("current_index") or 0),
+            "current_index": current_index,
             "total_steps": len(steps),
-            "steps": [self._step_public(steps[index], int(group.get("current_index") or 0)) for index in visible_indexes],
+            "current_run_index": current_run_index,
+            "work_orders": work_orders,
+            "steps": public_steps,
             "last_error": str(group.get("last_error") or ""),
         }
 
@@ -710,6 +833,13 @@ class PollingWorkOrderService:
             step = steps[current_index]
             if str(step.get("step_key") or "") != str(step_key or ""):
                 raise PortalConflictError("只能确认当前步骤。")
+            available_at = float(step.get("activated_at_ts") or 0) + int(
+                step.get("time_limit_seconds") or 0
+            )
+            if time.time() < available_at:
+                raise PortalConflictError(
+                    f"当前步骤还需等待 {max(1, int(math.ceil(available_at - time.time())))} 秒。"
+                )
             if not bool(step.get(f"{role}_required")):
                 raise PortalConflictError("当前步骤不需要该角色确认。")
             if role == "reviewer" and step.get("operator_required") and not step.get("operator_confirmation"):
@@ -730,6 +860,10 @@ class PollingWorkOrderService:
                 group["current_index"] = current_index + 1
                 if int(group["current_index"]) >= len(steps):
                     group["state"] = "upload_pending"
+                else:
+                    steps[int(group["current_index"])]["activated_at_ts"] = (
+                        time.time()
+                    )
             group.update(
                 {
                     "steps": steps,
@@ -744,6 +878,341 @@ class PollingWorkOrderService:
                 group,
             )
         return self.session(token)
+
+    def add_step_photo(
+        self,
+        token: str,
+        *,
+        step_key: str,
+        expected_version: int,
+        file_name: str,
+        mime_type: str,
+        content: bytes,
+    ) -> dict:
+        content = bytes(content or b"")
+        if not content:
+            raise PortalError("操作照片内容为空。")
+        if len(content) > POLLING_STEP_PHOTO_MAX_BYTES:
+            raise PortalError("单张操作照片不能超过 8MB。")
+        if not str(mime_type or "").startswith("image/"):
+            raise PortalError("只能上传图片作为操作照片。")
+        with self._lock:
+            group, role = self._resolve_token(token)
+            if str(group.get("state") or "") != "active":
+                raise PortalConflictError("当前工单已不能上传步骤照片。")
+            if int(expected_version or 0) != int(group.get("version") or 0):
+                raise PortalConflictError("工单状态已更新，请刷新后重试。")
+            steps = list(group.get("steps") or [])
+            current_index = int(group.get("current_index") or 0)
+            if current_index >= len(steps):
+                raise PortalConflictError("当前工单步骤已完成。")
+            step = steps[current_index]
+            if str(step.get("step_key") or "") != str(step_key or ""):
+                raise PortalConflictError("只能给当前步骤拍照。")
+            digest = hashlib.sha256(content).hexdigest()
+            existing_photos = list(step.get("photos") or [])
+            if existing_photos and str(existing_photos[0].get("sha256") or "") == digest:
+                return self.session(token)
+            directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
+            group_directory = self._group_directory(
+                str(group.get("target_record_id") or "")
+            )
+            if not directory.is_relative_to(group_directory):
+                raise PortalError("操作照片路径无效。")
+            directory.mkdir(parents=True, exist_ok=True)
+            photo_id = uuid.uuid4().hex
+            safe_name = _safe_file_name(file_name or "step_photo.png")
+            path = (directory / f"{photo_id}_{safe_name}").resolve()
+            if not path.is_relative_to(directory):
+                raise PortalError("操作照片路径无效。")
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_bytes(content)
+            os.replace(temporary, path)
+            step["photos"] = [
+                {
+                    "photo_id": photo_id,
+                    "name": safe_name,
+                    "mime_type": str(mime_type or "image/png"),
+                    "size": len(content),
+                    "sha256": digest,
+                    "path": str(path),
+                    "uploaded_role": role,
+                    "uploaded_at": self._now_text(),
+                }
+            ]
+            group.update(
+                {
+                    "steps": steps,
+                    "version": int(group.get("version") or 0) + 1,
+                    "updated_at": self._now_text(),
+                    "last_error": "",
+                }
+            )
+            try:
+                self.state_store.put_document(
+                    POLLING_WORK_ORDER_NAMESPACE,
+                    str(group.get("target_record_id") or ""),
+                    group,
+                )
+            except Exception:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                raise
+            for photo in existing_photos:
+                old_path = Path(str(photo.get("path") or "")).resolve()
+                if old_path.is_file() and old_path.is_relative_to(directory):
+                    try:
+                        old_path.unlink()
+                    except OSError:
+                        pass
+        return self.session(token)
+
+    def step_photo_content(
+        self, token: str, *, photo_id: str
+    ) -> tuple[bytes, str, str]:
+        group, _role = self._resolve_token(token)
+        photo = next(
+            (
+                item
+                for step in group.get("steps") or []
+                for item in step.get("photos") or []
+                if str(item.get("photo_id") or "") == str(photo_id or "")
+            ),
+            None,
+        )
+        if not photo:
+            raise PortalNotFoundError("操作照片不存在。")
+        directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
+        path = Path(str(photo.get("path") or "")).resolve()
+        if not path.is_file() or not path.is_relative_to(directory):
+            raise PortalNotFoundError("操作照片文件不存在。")
+        return (
+            path.read_bytes(),
+            str(photo.get("mime_type") or "image/png"),
+            str(photo.get("name") or path.name),
+        )
+
+    def build_execution_workbook(self, target_record_id: str) -> dict:
+        group = self.get_group(target_record_id)
+        if str(group.get("state") or "") not in {"upload_pending", "completed"}:
+            raise PortalConflictError("工单步骤尚未全部完成。")
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.drawing.image import Image as ExcelImage
+            from PIL import Image as PillowImage
+            from PIL import ImageOps
+        except Exception as exc:
+            raise PortalError("缺少 openpyxl/Pillow，无法生成轮巡工单表格。") from exc
+        template_path = Path(self.work_order_template_path).resolve()
+        if not template_path.is_file():
+            raise PortalError("轮巡工单模板不存在。")
+        try:
+            with zipfile.ZipFile(template_path) as archive:
+                logo_bytes = archive.read("xl/media/image1.png")
+        except Exception as exc:
+            raise PortalError("轮巡工单模板中的Logo无法读取。") from exc
+        directory = self._group_directory(target_record_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = (directory / POLLING_WORK_ORDER_CACHE_NAME).resolve()
+        if path.is_file():
+            size = path.stat().st_size
+            if size > POLLING_WORK_ORDER_MAX_BYTES:
+                raise PortalError("轮巡工单Excel超过允许大小，已停止上传。")
+            return {
+                "name": POLLING_WORK_ORDER_OUTPUT_NAME,
+                "path": str(path),
+                "size": size,
+                "sha256": _file_sha256(path),
+            }
+        runs = [item for item in group.get("runs") or [] if isinstance(item, dict)]
+        if not runs:
+            raise PortalError("轮巡工单缺少设备指向。")
+        try:
+            workbook = load_workbook(
+                template_path,
+                data_only=False,
+                read_only=False,
+                keep_links=False,
+            )
+        except Exception as exc:
+            raise PortalError("轮巡工单模板无法打开。") from exc
+        template_sheet = workbook.active
+        sheets = [template_sheet]
+        for _ in runs[1:]:
+            sheets.append(workbook.copy_worksheet(template_sheet))
+        steps = [item for item in group.get("steps") or [] if isinstance(item, dict)]
+        photo_root = (directory / "photos").resolve()
+        image_handles: list[Any] = []
+        try:
+            for run_index, (run, sheet) in enumerate(zip(runs, sheets), start=1):
+                run_steps = [
+                    step
+                    for step in steps
+                    if int(step.get("run_index") or 0) == run_index
+                ]
+                if not run_steps:
+                    raise PortalError(f"工单{run_index}缺少操作步骤。")
+                from_unit = str(run.get("from_unit") or "")
+                to_unit = str(run.get("to_unit") or "")
+                run_label = f"{from_unit}→{to_unit}"
+                sheet.title = f"工单{run_index} {run_label}"[:31]
+                sheet["A1"] = None
+                sheet["C3"] = _excel_text((group.get("operator") or {}).get("name"))
+                sheet["D3"] = _excel_text((group.get("reviewer") or {}).get("name"))
+                confirmed_times = [
+                    str((step.get(key) or {}).get("confirmed_at") or "").strip()
+                    for step in run_steps
+                    for key in ("operator_confirmation", "reviewer_confirmation")
+                    if str((step.get(key) or {}).get("confirmed_at") or "").strip()
+                ]
+                completion_text = max(confirmed_times) if confirmed_times else str(
+                    group.get("updated_at") or self._now_text()
+                )
+                try:
+                    sheet["E3"] = dt.datetime.strptime(
+                        completion_text, "%Y-%m-%d %H:%M:%S"
+                    )
+                    sheet["E3"].number_format = "yyyy-mm-dd hh:mm:ss"
+                except ValueError:
+                    sheet["E3"] = _excel_text(completion_text)
+                sheet["B7"] = _excel_text(
+                    f"{group.get('sop_name') or '轮巡操作流程'} · {run_label}"
+                )
+
+                source_styles = [
+                    copy.copy(sheet.cell(row=10, column=column)._style)
+                    for column in range(1, 6)
+                ]
+                source_height = float(sheet.row_dimensions[10].height or 156.5)
+                for merged in list(sheet.merged_cells.ranges):
+                    if int(merged.min_row) >= 9:
+                        sheet.unmerge_cells(str(merged))
+                if len(run_steps) > 2:
+                    sheet.insert_rows(11, amount=len(run_steps) - 2)
+                elif len(run_steps) == 1:
+                    sheet.delete_rows(10, amount=1)
+
+                logo_buffer = io.BytesIO(logo_bytes)
+                logo = ExcelImage(logo_buffer)
+                logo.width = 163
+                logo.height = 59
+                sheet.add_image(logo, "A1")
+                image_handles.extend((logo_buffer, logo))
+
+                for step_offset, step in enumerate(run_steps):
+                    row_number = 9 + step_offset
+                    sheet.row_dimensions[row_number].height = source_height
+                    for column, style in enumerate(source_styles, start=1):
+                        sheet.cell(row=row_number, column=column)._style = copy.copy(
+                            style
+                        )
+                    sheet.merge_cells(
+                        start_row=row_number,
+                        start_column=1,
+                        end_row=row_number,
+                        end_column=2,
+                    )
+                    sheet.merge_cells(
+                        start_row=row_number,
+                        start_column=4,
+                        end_row=row_number,
+                        end_column=5,
+                    )
+                    sheet.cell(row=row_number, column=1).value = None
+                    sheet.cell(row=row_number, column=3).value = int(
+                        step.get("step_index") or step_offset + 1
+                    )
+                    sheet.cell(row=row_number, column=4).value = _excel_text(
+                        step.get("content")
+                    )
+                    photos = [
+                        item
+                        for item in step.get("photos") or []
+                        if isinstance(item, dict)
+                    ]
+                    if not photos:
+                        continue
+                    photo_path = Path(str(photos[0].get("path") or "")).resolve()
+                    if (
+                        not photo_path.is_file()
+                        or not photo_path.is_relative_to(photo_root)
+                    ):
+                        raise PortalError(
+                            f"工单{run_index}第{step_offset + 1}步的本地照片不存在。"
+                        )
+                    try:
+                        with PillowImage.open(photo_path) as source:
+                            normalized = ImageOps.exif_transpose(source)
+                            if "A" in normalized.getbands():
+                                prepared = PillowImage.new(
+                                    "RGB", normalized.size, "white"
+                                )
+                                prepared.paste(
+                                    normalized,
+                                    mask=normalized.getchannel("A"),
+                                )
+                            else:
+                                prepared = normalized.convert("RGB")
+                            width, height = prepared.size
+                            scale = min(
+                                1.0,
+                                230 / max(1, width),
+                                190 / max(1, height),
+                            )
+                            target_width = max(1, int(round(width * scale)))
+                            target_height = max(1, int(round(height * scale)))
+                            if (target_width, target_height) != prepared.size:
+                                prepared = prepared.resize(
+                                    (target_width, target_height),
+                                    getattr(
+                                        PillowImage, "Resampling", PillowImage
+                                    ).LANCZOS,
+                                )
+                            photo_buffer = io.BytesIO()
+                            prepared.save(photo_buffer, format="PNG", optimize=True)
+                    except Exception as exc:
+                        raise PortalError(
+                            f"工单{run_index}第{step_offset + 1}步的照片无法写入Excel。"
+                        ) from exc
+                    photo_buffer.seek(0)
+                    excel_photo = ExcelImage(photo_buffer)
+                    excel_photo.width = target_width
+                    excel_photo.height = target_height
+                    sheet.add_image(excel_photo, f"A{row_number}")
+                    image_handles.extend((photo_buffer, excel_photo))
+
+                last_row = 8 + len(run_steps)
+                sheet.print_area = f"A1:E{last_row}"
+                sheet.print_title_rows = "8:8"
+                sheet.page_setup.orientation = "portrait"
+                sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+                sheet.page_setup.scale = None
+                sheet.page_setup.fitToWidth = 1
+                sheet.page_setup.fitToHeight = 0
+                sheet.sheet_properties.pageSetUpPr.fitToPage = True
+                sheet.print_options.horizontalCentered = True
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            if temporary.is_file():
+                temporary.unlink()
+            workbook.save(temporary)
+            os.replace(temporary, path)
+            if path.stat().st_size > POLLING_WORK_ORDER_MAX_BYTES:
+                raise PortalError("轮巡工单Excel超过允许大小，已停止上传。")
+        except Exception:
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            if temporary.is_file():
+                temporary.unlink()
+            raise
+        finally:
+            workbook.close()
+        return {
+            "name": POLLING_WORK_ORDER_OUTPUT_NAME,
+            "path": str(path),
+            "size": path.stat().st_size,
+            "sha256": _file_sha256(path),
+        }
 
     def pending_upload_groups(self) -> list[dict]:
         return [
@@ -768,6 +1237,7 @@ class PollingWorkOrderService:
         *,
         success: bool,
         file_tokens: list[str] | None = None,
+        photo_file_tokens: list[str] | None = None,
         error: str = "",
     ) -> dict:
         with self._lock:
@@ -776,6 +1246,13 @@ class PollingWorkOrderService:
                 {
                     "state": "completed" if success else "upload_pending",
                     "uploaded_file_tokens": list(dict.fromkeys(file_tokens or group.get("uploaded_file_tokens") or [])),
+                    "uploaded_photo_file_tokens": list(
+                        dict.fromkeys(
+                            photo_file_tokens
+                            or group.get("uploaded_photo_file_tokens")
+                            or []
+                        )
+                    ),
                     "last_error": "" if success else str(error or "工单附件上传失败。"),
                     "upload_completed_at": self._now_text() if success else "",
                     "updated_at": self._now_text(),
@@ -790,6 +1267,7 @@ class PollingWorkOrderService:
         target_record_id: str,
         *,
         token_by_sha256: dict[str, str],
+        photo_token_by_sha256: dict[str, str] | None = None,
         error: str = "",
     ) -> dict:
         with self._lock:
@@ -799,6 +1277,12 @@ class PollingWorkOrderService:
                 for key, value in (token_by_sha256 or {}).items()
                 if str(key).strip() and str(value).strip()
             }
+            if photo_token_by_sha256 is not None:
+                group["uploaded_photo_by_sha256"] = {
+                    str(key): str(value)
+                    for key, value in photo_token_by_sha256.items()
+                    if str(key).strip() and str(value).strip()
+                }
             group["last_error"] = str(error or "")
             group["updated_at"] = self._now_text()
             self.state_store.put_document(

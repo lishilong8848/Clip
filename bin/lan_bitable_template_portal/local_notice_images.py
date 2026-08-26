@@ -44,7 +44,11 @@ class LocalNoticeImageStore:
         result.pop("feishu_file_token", None)
         return result
 
-    def save(
+    def save(self, **kwargs) -> dict:
+        with self._lock:
+            return self._save(**kwargs)
+
+    def _save(
         self,
         *,
         identity: str,
@@ -54,6 +58,9 @@ class LocalNoticeImageStore:
         mime_type: str,
         owner_open_id: str = "",
         scope: str = "",
+        target_record_id: str = "",
+        work_type: str = "",
+        building_codes: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         identity = str(identity or "").strip()[:500]
         kind = str(kind or "").strip()
@@ -66,6 +73,41 @@ class LocalNoticeImageStore:
             raise PortalError("图片内容为空。")
         if len(content) > 8 * 1024 * 1024:
             raise PortalError("单张图片不能超过 8MB。")
+        digest = hashlib.sha256(content).hexdigest()
+        target_record_id = str(target_record_id or "").strip()
+        normalized_buildings = list(
+            dict.fromkeys(
+                str(code or "").strip().upper()
+                for code in (building_codes or [])
+                if str(code or "").strip()
+            )
+        )
+        existing_items = (
+            self._items_for_target(target_record_id, kind=kind)
+            if target_record_id
+            else [
+                document.get("payload")
+                for document in self.state_store.list_documents(
+                    LOCAL_NOTICE_IMAGE_NAMESPACE
+                )
+                if isinstance(document.get("payload"), dict)
+                and str((document.get("payload") or {}).get("identity") or "")
+                == identity
+                and str((document.get("payload") or {}).get("kind") or "")
+                == kind
+            ]
+        )
+        for existing in existing_items:
+                if (
+                    str(existing.get("sha256") or "") == digest
+                    and Path(str(existing.get("path") or "")).is_file()
+                    and (
+                        bool(existing.get("target_written"))
+                        or str(existing.get("owner_open_id") or "")
+                        == str(owner_open_id or "")
+                    )
+                ):
+                    return self._public(existing)
         image_id = uuid.uuid4().hex
         identity_dir = (self.root / hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]).resolve()
         if identity_dir == self.root or not identity_dir.is_relative_to(self.root):
@@ -84,17 +126,75 @@ class LocalNoticeImageStore:
             "file_name": self._safe_name(file_name),
             "mime_type": str(mime_type or "image/png"),
             "size": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": digest,
             "path": str(path),
             "owner_open_id": str(owner_open_id or ""),
             "scope": str(scope or "").strip().upper(),
+            "target_record_id": target_record_id,
+            "work_type": str(work_type or "").strip(),
+            "building_codes": normalized_buildings,
             "feishu_file_token": "",
             "target_written": False,
             "created_at": time.time(),
             "updated_at": time.time(),
         }
         self.state_store.put_document(LOCAL_NOTICE_IMAGE_NAMESPACE, image_id, item)
+        if target_record_id:
+            for existing in existing_items:
+                if (
+                    not existing.get("target_written")
+                    and str(existing.get("owner_open_id") or "")
+                    == str(owner_open_id or "")
+                    and str(existing.get("local_image_id") or "") != image_id
+                ):
+                    self.delete(str(existing.get("local_image_id") or ""))
         return self._public(item)
+
+    def _items_for_target(self, target_record_id: str, *, kind: str = "") -> list[dict]:
+        target_record_id = str(target_record_id or "").strip()
+        kind = str(kind or "").strip()
+        return [
+            document.get("payload")
+            for document in self.state_store.list_documents(LOCAL_NOTICE_IMAGE_NAMESPACE)
+            if isinstance(document.get("payload"), dict)
+            and str((document.get("payload") or {}).get("target_record_id") or "").strip()
+            == target_record_id
+            and (not kind or str((document.get("payload") or {}).get("kind") or "") == kind)
+        ]
+
+    def list_for_target(
+        self,
+        target_record_id: str,
+        *,
+        kind: str = "",
+        target_written: bool | None = None,
+    ) -> list[dict]:
+        items = [
+            item
+            for item in self._items_for_target(target_record_id, kind=kind)
+            if target_written is None
+            or bool(item.get("target_written")) == bool(target_written)
+        ]
+        items.sort(key=lambda item: float(item.get("created_at") or 0))
+        return [self._public(item) for item in items]
+
+    def find_written_duplicate(
+        self,
+        target_record_id: str,
+        *,
+        kind: str,
+        sha256: str,
+        exclude_image_id: str = "",
+    ) -> dict:
+        for item in self._items_for_target(target_record_id, kind=kind):
+            if (
+                str(item.get("local_image_id") or "") != str(exclude_image_id or "")
+                and bool(item.get("target_written"))
+                and str(item.get("sha256") or "") == str(sha256 or "")
+                and str(item.get("feishu_file_token") or "").strip()
+            ):
+                return copy.deepcopy(item)
+        return {}
 
     def get(self, image_id: str) -> dict:
         item = self.state_store.get_document(
@@ -140,12 +240,27 @@ class LocalNoticeImageStore:
         *,
         file_token: str,
         target_written: bool | None = None,
+        target_record_id: str = "",
+        work_type: str = "",
+        building_codes: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         with self._lock:
             item = self.get(image_id)
             item["feishu_file_token"] = str(file_token or item.get("feishu_file_token") or "")
             if target_written is not None:
                 item["target_written"] = bool(target_written)
+            if str(target_record_id or "").strip():
+                item["target_record_id"] = str(target_record_id).strip()
+            if str(work_type or "").strip():
+                item["work_type"] = str(work_type).strip()
+            if building_codes is not None:
+                item["building_codes"] = list(
+                    dict.fromkeys(
+                        str(code or "").strip().upper()
+                        for code in building_codes
+                        if str(code or "").strip()
+                    )
+                )
             item["updated_at"] = time.time()
             self.state_store.put_document(LOCAL_NOTICE_IMAGE_NAMESPACE, image_id, item)
         return self._public(item)

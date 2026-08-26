@@ -148,6 +148,7 @@ from lan_bitable_template_portal.portal_service import (
     BINDABLE_NOTICE_TARGET_WORK_TYPES,
     BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
+    CHANGE_CONFIRMATION_NAMESPACE,
     CHANGE_SOURCE_APP_TOKEN,
     CHANGE_SOURCE_TABLE_ID,
     DEFAULT_APP_TOKEN,
@@ -5437,6 +5438,69 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.post("/api/polling-work-orders/photo")
+        async def polling_work_order_photo(request: Request):
+            try:
+                content_type = str(
+                    request.headers.get("content-type") or ""
+                ).split(";", 1)[0].strip()
+                if not content_type.startswith("image/"):
+                    raise PortalError("只能上传图片作为操作照片。")
+                try:
+                    raw_length = int(request.headers.get("content-length") or 0)
+                except ValueError as exc:
+                    raise PortalError("操作照片大小无效。") from exc
+                if raw_length > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("单张操作照片不能超过 8MB。")
+                content = await request.body()
+                if not content:
+                    raise PortalError("操作照片内容为空。")
+                if len(content) > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("单张操作照片不能超过 8MB。")
+                try:
+                    expected_version = int(
+                        request.query_params.get("expected_version") or 0
+                    )
+                except ValueError as exc:
+                    raise PortalError("工单版本号无效。") from exc
+                data = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().add_step_photo,
+                    str(request.query_params.get("token") or ""),
+                    step_key=str(request.query_params.get("step_key") or ""),
+                    expected_version=expected_version,
+                    file_name=str(
+                        request.query_params.get("file_name")
+                        or "step_photo.png"
+                    ),
+                    mime_type=content_type,
+                    content=content,
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/polling-work-orders/photos/{photo_id}")
+        async def polling_work_order_photo_preview(photo_id: str, request: Request):
+            try:
+                content, content_type, file_name = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().step_photo_content,
+                    str(request.query_params.get("token") or ""),
+                    photo_id=photo_id,
+                )
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "private, max-age=300",
+                        "Content-Disposition": (
+                            f"inline; filename*=UTF-8''{quote(file_name, safe='')}"
+                        ),
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
         @app.post("/api/polling-work-orders/confirm")
         async def polling_work_order_confirm(request: Request):
             try:
@@ -5462,10 +5526,17 @@ class FastAPIPortalController:
                 )
                 completion = {"ok": False, "state": data.get("state")}
                 if str(data.get("state") or "") == "upload_pending":
-                    completion = await asyncio.to_thread(
+                    target_record_id = str(data.get("group_id") or "").strip()
+                    queued = bool(target_record_id) and self._submit_background(
+                        "PollingWorkOrderFinalize",
                         PortalRuntime.finalize_polling_work_order_group,
-                        str(data.get("group_id") or ""),
+                        target_record_id,
                     )
+                    completion = {
+                        "ok": False,
+                        "state": "upload_pending",
+                        "queued": queued,
+                    }
                 return {"ok": True, "data": {"session": data, "completion": completion}}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -5686,12 +5757,51 @@ class FastAPIPortalController:
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 identity = str(request.query_params.get("identity") or "").strip()
                 kind = str(request.query_params.get("kind") or "site").strip()
+                target_record_id = str(
+                    request.query_params.get("target_record_id") or ""
+                ).strip()
+                local_work_type = ""
+                local_building_codes: list[str] = []
+                if target_record_id:
+                    if kind != "ali":
+                        raise PortalError("只有阿里确认截图支持直接绑定目标记录。")
+                    open_id = str(user.get("open_id") or "").strip()
+                    if not (
+                        PortalRuntime.auth_manager.is_admin(session)
+                        or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+                    ):
+                        raise PortalError("只有管理员或H楼账号可以从确认面板暂存截图。")
+                    confirmation_task = await asyncio.to_thread(
+                        PortalRuntime.state_store.get_document,
+                        CHANGE_CONFIRMATION_NAMESPACE,
+                        target_record_id,
+                    )
+                    if not isinstance(confirmation_task, dict) or str(
+                        confirmation_task.get("state") or ""
+                    ) == "stopped":
+                        raise PortalError("当前变更确认任务不存在或已停止。")
+                    local_building_codes = list(
+                        confirmation_task.get("building_codes") or []
+                    )
+                    identity = f"change:{target_record_id}"
+                    local_work_type = "change"
                 scope = ""
                 if identity:
-                    requested_scope = str(request.query_params.get("scope") or "").strip()
-                    if not requested_scope:
-                        raise PortalError("本地图片缺少楼栋范围。")
-                    scope = self._authorized_scope_or_error(session, requested_scope)
+                    if target_record_id:
+                        scope = (
+                            local_building_codes[0]
+                            if len(local_building_codes) == 1
+                            else "CAMPUS"
+                        )
+                    else:
+                        requested_scope = str(
+                            request.query_params.get("scope") or ""
+                        ).strip()
+                        if not requested_scope:
+                            raise PortalError("本地图片缺少楼栋范围。")
+                        scope = self._authorized_scope_or_error(
+                            session, requested_scope
+                        )
                 file_name = str(
                     request.query_params.get("file_name")
                     or f"site_photo_{uuid.uuid4().hex[:8]}.png"
@@ -5724,6 +5834,9 @@ class FastAPIPortalController:
                         mime_type=content_type,
                         owner_open_id=str(user.get("open_id") or ""),
                         scope=scope,
+                        target_record_id=target_record_id,
+                        work_type=local_work_type,
+                        building_codes=local_building_codes,
                     )
                 return self._json_ok(
                     request,
@@ -5826,14 +5939,9 @@ class FastAPIPortalController:
                 item = await asyncio.to_thread(
                     PortalRuntime.local_notice_images().get, image_id
                 )
-                item_scope = str(item.get("scope") or "").strip()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                if item_scope:
-                    self._authorized_scope_or_error(session, item_scope)
-                elif (
-                    str(item.get("owner_open_id") or "").strip()
-                    != str(user.get("open_id") or "").strip()
-                    and not PortalRuntime.auth_manager.is_admin(session)
+                if not self._local_notice_image_access_allowed(
+                    session, item, user=user
                 ):
                     raise PortalError("无权查看该本地图片。")
                 content, content_type, file_name = await asyncio.to_thread(
@@ -5863,14 +5971,9 @@ class FastAPIPortalController:
                 item = await asyncio.to_thread(
                     PortalRuntime.local_notice_images().get, image_id
                 )
-                item_scope = str(item.get("scope") or "").strip()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                if item_scope:
-                    self._authorized_scope_or_error(session, item_scope)
-                elif (
-                    str(item.get("owner_open_id") or "").strip()
-                    != str(user.get("open_id") or "").strip()
-                    and not PortalRuntime.auth_manager.is_admin(session)
+                if not self._local_notice_image_access_allowed(
+                    session, item, user=user
                 ):
                     raise PortalError("无权删除该本地图片。")
                 await asyncio.to_thread(
@@ -9557,6 +9660,44 @@ class FastAPIPortalController:
         return JSONResponse(payload, status_code=status)
 
     @staticmethod
+    def _local_notice_image_access_allowed(
+        session: dict,
+        item: dict,
+        *,
+        user: dict | None = None,
+    ) -> bool:
+        if PortalRuntime.auth_manager.is_admin(session):
+            return True
+        user = user if isinstance(user, dict) else {}
+        open_id = str(user.get("open_id") or "").strip()
+        if (
+            str(item.get("kind") or "") == "ali"
+            and open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
+        ):
+            return True
+        allowed = {
+            PortalRuntime.auth_manager.normalize_scope(scope)
+            for scope in PortalRuntime.auth_manager.session_scopes(session)
+            if str(scope or "").strip()
+        }
+        building_codes = {
+            PortalRuntime.auth_manager.normalize_scope(code)
+            for code in (item.get("building_codes") or [])
+            if str(code or "").strip()
+        }
+        if building_codes and allowed.intersection(building_codes):
+            return True
+        item_scope = str(item.get("scope") or "").strip()
+        if item_scope and PortalRuntime.auth_manager.scope_allowed(
+            session, PortalRuntime.auth_manager.normalize_scope(item_scope)
+        ):
+            return True
+        return bool(
+            open_id
+            and open_id == str(item.get("owner_open_id") or "").strip()
+        )
+
+    @staticmethod
     def _authorized_scope_or_error(session: dict, scope: str) -> str:
         normalized = PortalRuntime.auth_manager.normalize_scope(scope)
         if not PortalRuntime.auth_manager.scope_allowed(session, normalized):
@@ -10062,7 +10203,11 @@ class FastAPIPortalController:
             # row; deleted identity keys are only used by the legacy snapshot fallback.
             if not PortalRuntime.service._scope_matches_item(scope, item):
                 return
-            qt_projected_items.append(normalize_notice_identity_payload(dict(item)))
+            qt_projected_items.append(
+                PortalRuntime._with_local_notice_images(
+                    normalize_notice_identity_payload(dict(item))
+                )
+            )
 
         try:
             all_active_rows = PortalRuntime.state_store.list_qt_active_items(
@@ -10188,7 +10333,9 @@ class FastAPIPortalController:
             if snapshot.get("exists"):
                 PortalRuntime.last_ongoing_error = ""
                 return [
-                    normalize_notice_identity_payload(dict(item))
+                    PortalRuntime._with_local_notice_images(
+                        normalize_notice_identity_payload(dict(item))
+                    )
                     for item in snapshot.get("items", [])
                     if isinstance(item, dict)
                     and not _item_is_event(item)
