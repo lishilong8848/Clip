@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import datetime as dt
 import hashlib
 import io
@@ -51,6 +52,10 @@ from clipflow_backend.api_models import (
     CriticalGuardScopeTemplateRequest,
     CriticalGuardTaskRequest,
     CriticalGuardWeatherPauseRequest,
+    DrillConfigurationRequest,
+    DrillExecutionRequest,
+    DrillGenerateRequest,
+    DrillPublishRequest,
     EngineerMopBindRequest,
     EngineerMopFillRequest,
     EngineerMopResetRequest,
@@ -159,6 +164,7 @@ from lan_bitable_template_portal.portal_service import (
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_REPAIR,
     NOTICE_TYPE_BY_WORK_TYPE,
+    PortalConflictError,
     PortalError,
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
@@ -175,6 +181,10 @@ from lan_bitable_template_portal.portal_service import (
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
+from lan_bitable_template_portal.drill_management import (
+    DrillManagementService,
+    normalize_drill_signature_png,
+)
 from upload_event_module.config import config
 from upload_event_module.core.parser import extract_event_info
 from upload_event_module.services.service_registry import check_token_status
@@ -325,6 +335,9 @@ class FastAPIPortalController:
         self._scheduler = None
         self._shutdown_event = threading.Event()
         self._state_store = LanPortalStateStore()
+        self._drills = DrillManagementService(PortalRuntime.state_store)
+        self._drill_jobs_lock = threading.RLock()
+        self._drill_jobs: set[tuple[str, str]] = set()
         self.notice_callback = None
         self.ongoing_callback = None
         self.ongoing_delete_callback = None
@@ -382,6 +395,10 @@ class FastAPIPortalController:
                 _env_float("CLIPFLOW_BACKEND_BG_WORKERS", 6, minimum=2, maximum=24)
             ),
             thread_name_prefix="ClipFlowBackendBg",
+        )
+        self._drill_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="ClipFlowDrill",
         )
 
     def _submit_background(self, name: str, fn, *args) -> bool:
@@ -993,6 +1010,13 @@ class FastAPIPortalController:
         @app.get("/critical-guard")
         @app.get("/critical-guard/")
         async def critical_guard_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/drill-management")
+        @app.get("/drill-management/")
+        @app.get("/drill-management/print")
+        @app.get("/drill-management/print/")
+        async def drill_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/signature")
@@ -3425,6 +3449,476 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/drills/bootstrap")
+        async def drills_bootstrap(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope_codes = self._drill_session_scopes(session)
+                if not scope_codes:
+                    raise PortalError("当前飞书账号没有 A-E 楼演练管理权限。")
+                requested_scope = str(request.query_params.get("scope") or "").strip()
+                is_admin = PortalRuntime.auth_manager.is_admin(session)
+                if requested_scope:
+                    scope = self._authorized_drill_scope(session, requested_scope)
+                else:
+                    scope = "" if is_admin else scope_codes[0]
+                month = str(
+                    request.query_params.get("month")
+                    or dt.datetime.now().strftime("%Y-%m")
+                ).strip()
+                definitions = await asyncio.to_thread(
+                    self._drills.list_definitions,
+                    month,
+                    include_archived=False,
+                )
+                if requested_scope or not is_admin:
+                    definitions = [
+                        item
+                        for item in definitions
+                        if str(item.get("status") or "") == "published"
+                    ]
+                people = (
+                    await asyncio.to_thread(self._drill_people, scope)
+                    if scope
+                    else []
+                )
+                return self._drill_json_ok(
+                    request,
+                    session,
+                    {
+                        "scopes": [
+                            {
+                                "value": code,
+                                "scope": code,
+                                "label": f"{code}楼",
+                                "authorized": True,
+                                "pending": 0,
+                            }
+                            for code in scope_codes
+                        ],
+                        "default_scope": scope,
+                        "is_admin": is_admin,
+                        "month": month,
+                        "people": people,
+                        "drills": definitions,
+                    },
+                )
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=403)
+
+        @app.get("/api/drills")
+        async def drills_list(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                requested_scope = str(request.query_params.get("scope") or "").strip()
+                if requested_scope:
+                    scope = self._authorized_drill_scope(session, requested_scope)
+                elif PortalRuntime.auth_manager.is_admin(session):
+                    scope = ""
+                else:
+                    allowed_scopes = self._drill_session_scopes(session)
+                    if not allowed_scopes:
+                        raise PortalError("当前飞书账号没有 A-E 楼演练管理权限。")
+                    scope = allowed_scopes[0]
+                include_archived = str(
+                    request.query_params.get("include_archived") or ""
+                ).strip().lower() in {"1", "true", "yes"}
+                if include_archived and not PortalRuntime.auth_manager.is_admin(session):
+                    raise PortalError("只有管理员可以查看已归档演练。")
+                definitions = await asyncio.to_thread(
+                    self._drills.list_definitions,
+                    str(request.query_params.get("month") or "").strip(),
+                    include_archived=include_archived,
+                )
+                if requested_scope or not PortalRuntime.auth_manager.is_admin(session):
+                    definitions = [
+                        item
+                        for item in definitions
+                        if str(item.get("status") or "") == "published"
+                    ]
+                items: list[dict[str, Any]] = []
+                for definition in definitions:
+                    item = dict(definition)
+                    if scope:
+                        try:
+                            item["execution"] = await asyncio.to_thread(
+                                self._drills.get_execution,
+                                str(definition.get("drill_id") or ""),
+                                scope,
+                                create=False,
+                            )
+                        except Exception as exc:
+                            if int(getattr(exc, "status_code", 0) or 0) != 404:
+                                raise
+                            item["execution"] = None
+                    items.append(item)
+                return self._drill_json_ok(
+                    request, session, {"items": items, "scope": scope}
+                )
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=403)
+
+        @app.post("/api/drills")
+        async def drill_create(
+            request: Request,
+            file: UploadFile = File(...),
+            name: str = Form(""),
+            year: str = Form(""),
+            month: str = Form(""),
+        ):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                month_value = str(month or "").strip()
+                month_match = re.fullmatch(r"(\d{4})-(0?[1-9]|1[0-2])", month_value)
+                if month_match:
+                    month_year = int(month_match.group(1))
+                    month_number = int(month_match.group(2))
+                    year_digits = re.sub(r"[^0-9]", "", str(year or ""))
+                    if year_digits and int(year_digits) != month_year:
+                        raise PortalError("年份与所选月份不一致。")
+                    normalized_year = month_year
+                    normalized_month = month_number
+                else:
+                    year_digits = re.sub(r"[^0-9]", "", str(year or ""))
+                    month_digits = re.sub(r"[^0-9]", "", month_value)
+                    if len(year_digits) != 4 or not month_digits:
+                        raise PortalError("请选择有效的演练年份和月份。")
+                    normalized_year = int(year_digits)
+                    normalized_month = int(month_digits)
+                await file.seek(0)
+                data = await asyncio.to_thread(
+                    self._drills.create_definition,
+                    name=name,
+                    year=normalized_year,
+                    month=normalized_month,
+                    file_name=str(file.filename or ""),
+                    source=file.file,
+                    actor=str(user.get("name") or user.get("open_id") or ""),
+                )
+                return self._drill_json_ok(request, session, data)
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+            finally:
+                with suppress(Exception):
+                    await file.close()
+
+        @app.put("/api/drills/{drill_id}/configuration")
+        async def drill_configuration_save(drill_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, DrillConfigurationRequest)
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    self._drills.save_configuration,
+                    drill_id,
+                    dict(payload.get("configuration") or {}),
+                    expected_version=int(payload.get("expected_version") or 0),
+                    actor=str(user.get("name") or user.get("open_id") or ""),
+                )
+                return self._drill_json_ok(request, session, data)
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+
+        @app.post("/api/drills/{drill_id}/publish")
+        async def drill_publish(drill_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, DrillPublishRequest)
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    self._drills.publish,
+                    drill_id,
+                    expected_version=int(payload.get("expected_version") or 0),
+                    actor=str(user.get("name") or user.get("open_id") or ""),
+                )
+                return self._drill_json_ok(request, session, data)
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+
+        @app.delete("/api/drills/{drill_id}")
+        async def drill_delete(drill_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                expected_version = int(
+                    str(request.query_params.get("expected_version") or "0")
+                )
+                data = await asyncio.to_thread(
+                    self._drills.delete_definition,
+                    drill_id,
+                    expected_version=expected_version,
+                )
+                return self._drill_json_ok(request, session, data)
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+
+        @app.get("/api/drills/{drill_id}/execution")
+        async def drill_execution_get(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                definition = await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                execution = await asyncio.to_thread(
+                    self._drills.get_execution,
+                    drill_id,
+                    scope,
+                    create=True,
+                )
+                return self._drill_json_ok(
+                    request,
+                    session,
+                    {"drill": definition, "execution": execution},
+                )
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=403)
+
+        @app.put("/api/drills/{drill_id}/execution")
+        async def drill_execution_save(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                envelope = (
+                    await self._read_model_request(
+                        request,
+                        DrillExecutionRequest,
+                        max_bytes=2 * 1024 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                execution_payload = {
+                    key: value
+                    for key, value in envelope.items()
+                    if key != "expected_version"
+                }
+                definition = await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                self._validate_drill_people_payload(
+                    scope,
+                    definition,
+                    execution_payload,
+                    require_complete=False,
+                    require_signatures=False,
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    self._drills.save_execution,
+                    drill_id,
+                    scope,
+                    execution_payload,
+                    expected_version=int(envelope.get("expected_version") or 0),
+                    actor=str(user.get("name") or user.get("open_id") or ""),
+                )
+                return self._drill_json_ok(request, session, data)
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+
+        @app.get("/api/drills/{drill_id}/preview")
+        async def drill_preview(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                model = await asyncio.to_thread(
+                    self._drills.preview_model,
+                    drill_id,
+                    scope,
+                    str(request.query_params.get("sheet") or "record"),
+                )
+                model = await asyncio.to_thread(
+                    self._attach_drill_signature_composites,
+                    model,
+                    required=False,
+                )
+                return self._drill_json_ok(request, session, {"model": model})
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=403)
+
+        @app.get("/api/drills/{drill_id}/print-model")
+        async def drill_print_model(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                model = await asyncio.to_thread(
+                    self._drills.print_model,
+                    drill_id,
+                    scope,
+                    str(request.query_params.get("sheet") or "record"),
+                )
+                model = await asyncio.to_thread(
+                    self._attach_drill_signature_composites,
+                    model,
+                    required=True,
+                )
+                return self._drill_json_ok(request, session, {"model": model})
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=403)
+
+        @app.post("/api/drills/{drill_id}/generate")
+        async def drill_generate(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                generate_request = await self._read_model_request(
+                    request, DrillGenerateRequest
+                )
+                definition = await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                execution = await asyncio.to_thread(
+                    self._drills.get_execution, drill_id, scope, create=False
+                )
+                self._validate_drill_people_payload(
+                    scope,
+                    definition,
+                    execution,
+                    require_complete=True,
+                    require_signatures=True,
+                )
+                if int(execution.get("version") or 0) != int(
+                    generate_request.expected_version
+                ):
+                    raise PortalError("演练记录已被其他人修改，请刷新后重新生成。")
+                queued_execution = await asyncio.to_thread(
+                    self._drills.queue_generation,
+                    drill_id,
+                    scope,
+                    expected_version=int(generate_request.expected_version),
+                )
+                generation_queue = (
+                    queued_execution.get("generation_queue")
+                    if isinstance(queued_execution.get("generation_queue"), dict)
+                    else {}
+                )
+                self._queue_drill_job(
+                    drill_id,
+                    scope,
+                    generate=True,
+                    expected_execution_version=int(
+                        generation_queue.get("execution_version") or 0
+                    ),
+                )
+                payload = {
+                    "queued": True,
+                    "drill_id": drill_id,
+                    "scope": scope,
+                    "execution": queued_execution,
+                }
+                return self._drill_json_ok(
+                    request, session, payload, status_code=202
+                )
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+
+        @app.post("/api/drills/{drill_id}/retry-sync")
+        async def drill_retry_sync(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                if not self._queue_drill_job(drill_id, scope, generate=False):
+                    raise PortalError("演练文件正在生成或同步，请勿重复提交。")
+                execution = await asyncio.to_thread(
+                    self._drills.get_execution, drill_id, scope, create=False
+                )
+                return self._drill_json_ok(
+                    request,
+                    session,
+                    {"queued": True, "execution": execution},
+                    status_code=202,
+                )
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=400)
+
+        @app.get("/api/drills/{drill_id}/download")
+        async def drill_download(drill_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_drill_scope(
+                    session, str(request.query_params.get("scope") or "")
+                )
+                await asyncio.to_thread(
+                    self._require_drill_visible, session, drill_id
+                )
+                path, file_name = await asyncio.to_thread(
+                    self._drills.generated_file, drill_id, scope
+                )
+
+                def chunks():
+                    with Path(path).open("rb") as source:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                return
+                            yield chunk
+
+                return StreamingResponse(
+                    chunks(),
+                    media_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    headers={
+                        "Cache-Control": "private, no-store",
+                        "Content-Disposition": (
+                            "attachment; filename*=UTF-8''"
+                            f"{quote(str(file_name or Path(path).name), safe='')}"
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._drill_error_response(exc, default_status=404)
 
         @app.get("/api/critical-guard/bootstrap")
         async def critical_guard_bootstrap(request: Request):
@@ -9796,6 +10290,476 @@ class FastAPIPortalController:
         return JSONResponse(payload, status_code=status)
 
     @staticmethod
+    def _drill_error_response(exc: Exception, *, default_status: int) -> JSONResponse:
+        status = int(getattr(exc, "status_code", default_status) or default_status)
+        if status < 400 or status > 599:
+            status = default_status
+        if not isinstance(exc, PortalError) and not hasattr(exc, "status_code"):
+            logging.getLogger(__name__).exception(
+                "Drill API unexpected failure: %s", exc
+            )
+            status = 500
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
+
+    @classmethod
+    def _public_drill_payload(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [cls._public_drill_payload(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        hidden = {
+            "path",
+            "source_path",
+            "local_path",
+            "file_path",
+            "generated_path",
+            "output_path",
+            "file_token",
+            "signature_bytes",
+            "bytes",
+        }
+        return {
+            key: cls._public_drill_payload(item)
+            for key, item in value.items()
+            if str(key or "").strip().lower() not in hidden
+            and not str(key or "").strip().lower().endswith("_path")
+        }
+
+    def _drill_json_ok(
+        self,
+        request: Request,
+        session: dict,
+        payload: dict[str, Any],
+        *,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        public = self._public_drill_payload(payload)
+        return self._json_response(
+            request,
+            session,
+            {
+                "ok": True,
+                "data": self._with_auth_context(public, session, request),
+            },
+            status_code=status_code,
+        )
+
+    @staticmethod
+    def _drill_session_scopes(session: dict) -> list[str]:
+        if PortalRuntime.auth_manager.is_admin(session):
+            return ["A", "B", "C", "D", "E"]
+        allowed = {
+            PortalRuntime.auth_manager.normalize_scope(value)
+            for value in PortalRuntime.auth_manager.session_scopes(session)
+        }
+        return [code for code in ("A", "B", "C", "D", "E") if code in allowed]
+
+    @classmethod
+    def _authorized_drill_scope(cls, session: dict, scope: str) -> str:
+        normalized = PortalRuntime.auth_manager.normalize_scope(scope)
+        if normalized not in {"A", "B", "C", "D", "E"}:
+            raise PortalError("演练管理楼栋必须是 A-E。")
+        if normalized not in cls._drill_session_scopes(session):
+            raise PortalError(
+                f"当前飞书账号无权访问 {PortalRuntime.auth_manager.scope_label(normalized)}。"
+            )
+        return normalized
+
+    def _require_drill_visible(
+        self, session: dict, drill_id: str
+    ) -> dict[str, Any]:
+        definition = self._drills.get_definition(drill_id)
+        if (
+            not PortalRuntime.auth_manager.is_admin(session)
+            and str(definition.get("status") or "") != "published"
+        ):
+            raise PortalError("演练尚未发布或已归档。")
+        return definition
+
+    @staticmethod
+    def _drill_person_allowed(person: dict[str, Any], scope: str) -> bool:
+        building = str(
+            person.get("building") or person.get("scope_text") or ""
+        ).strip()
+        role_text = " ".join(
+            str(person.get(key) or "").strip()
+            for key in ("position", "role_name", "job_title")
+        ).upper()
+        codes = set(MaintenancePortalService._building_codes_from_value(building))
+        return bool(
+            scope in codes
+            or "H" in codes
+            or "ECC" in building.upper()
+            or "ECC" in role_text
+        )
+
+    def _drill_people(self, scope: str, *, refresh: bool = False) -> list[dict[str, Any]]:
+        payload = PortalRuntime.service.signature_people(
+            scope="ALL",
+            limit=500,
+            refresh=refresh,
+        )
+        people = [
+            dict(item)
+            for item in (payload.get("people") or [])
+            if isinstance(item, dict)
+        ]
+        if not scope:
+            return [
+                item
+                for item in people
+                if any(
+                    self._drill_person_allowed(item, code)
+                    for code in ("A", "B", "C", "D", "E")
+                )
+            ]
+        return [item for item in people if self._drill_person_allowed(item, scope)]
+
+    @staticmethod
+    def _drill_person_record_id(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("record_id") or value.get("id") or "").strip()
+        return str(value or "").strip()
+
+    def _validate_drill_people_payload(
+        self,
+        scope: str,
+        definition: dict[str, Any],
+        execution: dict[str, Any],
+        *,
+        require_complete: bool,
+        require_signatures: bool,
+    ) -> dict[str, dict[str, Any]]:
+        commander_id = self._drill_person_record_id(execution.get("commander"))
+        if require_complete and not commander_id:
+            raise PortalError("请选择一名演练指挥人。")
+        participant_ids = [
+            self._drill_person_record_id(item)
+            for item in (execution.get("participants") or [])
+        ]
+        participant_ids = [item for item in participant_ids if item]
+        participant_ids = list(
+            dict.fromkeys([item for item in [commander_id, *participant_ids] if item])
+        )
+        if len(participant_ids) > 10:
+            raise PortalError("演练参演人员最多 10 人（包含指挥人）。")
+
+        people = self._drill_people(scope, refresh=False)
+        people_by_id = {
+            str(item.get("record_id") or "").strip(): item
+            for item in people
+            if str(item.get("record_id") or "").strip()
+        }
+        required_ids = set(participant_ids)
+        raw_step_signers = execution.get("step_signers")
+        step_signers = raw_step_signers if isinstance(raw_step_signers, dict) else {}
+        for values in step_signers.values():
+            required_ids.update(
+                self._drill_person_record_id(item) for item in (values or [])
+            )
+        required_ids.discard("")
+        if not required_ids.issubset(people_by_id):
+            people = self._drill_people(scope, refresh=True)
+            people_by_id = {
+                str(item.get("record_id") or "").strip(): item
+                for item in people
+                if str(item.get("record_id") or "").strip()
+            }
+        missing = sorted(required_ids - set(people_by_id))
+        if missing:
+            raise PortalError(
+                "所选人员不存在、已离职或不属于当前楼栋/H楼："
+                + "、".join(missing[:5])
+            )
+
+        participant_set = set(participant_ids)
+        configuration = (
+            definition.get("configuration")
+            if isinstance(definition.get("configuration"), dict)
+            else {}
+        )
+        steps = [
+            item
+            for item in (configuration.get("steps") or [])
+            if isinstance(item, dict)
+        ]
+        normalized_step_signers: dict[str, list[str]] = {}
+        for step in steps:
+            row = str(step.get("row") or "").strip()
+            slots = int(step.get("signature_slots") or 0)
+            values = [
+                self._drill_person_record_id(item)
+                for item in (step_signers.get(row) or [])
+            ]
+            values = [item for item in values if item]
+            if require_complete and len(values) != slots:
+                raise PortalError(
+                    f"演练步骤第 {row or '?'} 行需要选择 {slots} 名执行人。"
+                )
+            if len(values) != len(set(values)):
+                raise PortalError(f"演练步骤第 {row or '?'} 行不能重复选择同一人。")
+            if any(item not in participant_set for item in values):
+                raise PortalError(
+                    f"演练步骤第 {row or '?'} 行执行人必须来自参演人员。"
+                )
+            if require_complete and "ECC" in str(step.get("location") or "").upper() and (
+                not values or values[0] != commander_id
+            ):
+                raise PortalError(
+                    f"演练步骤第 {row or '?'} 行位置包含 ECC，第一位必须是指挥人。"
+                )
+            normalized_step_signers[row] = values
+
+        if require_signatures:
+            unsigned = [
+                str(people_by_id[item].get("name") or item)
+                for item in required_ids
+                if not people_by_id[item].get("has_signature")
+            ]
+            if unsigned:
+                raise PortalError(
+                    "以下人员尚未保存可用签名，不能生成演练文件："
+                    + "、".join(unsigned)
+                )
+
+        execution["commander"] = (
+            {
+                "record_id": commander_id,
+                "name": str(people_by_id[commander_id].get("name") or ""),
+            }
+            if commander_id
+            else {}
+        )
+        execution["participants"] = [
+            {
+                "record_id": record_id,
+                "name": str(people_by_id[record_id].get("name") or ""),
+            }
+            for record_id in participant_ids
+        ]
+        execution["step_signers"] = normalized_step_signers
+        return people_by_id
+
+    @staticmethod
+    def _attach_drill_signature_composites(
+        model: dict[str, Any],
+        *,
+        required: bool,
+    ) -> dict[str, Any]:
+        from PIL import Image
+
+        result = dict(model or {})
+        cells = [
+            dict(item)
+            for item in (result.get("signature_cells") or [])
+            if isinstance(item, dict)
+        ]
+        for cell in cells:
+            signers = [
+                item for item in (cell.get("signers") or []) if isinstance(item, dict)
+            ]
+            if not signers:
+                continue
+            width = max(48, min(1600, int(cell.get("width_px") or 320)))
+            height = max(32, min(1000, int(cell.get("height_px") or 96)))
+            layout = str(cell.get("layout") or "grid").strip().lower()
+            if layout == "vertical":
+                columns, rows = 1, len(signers)
+            else:
+                columns = min(5, len(signers))
+                rows = max(1, (len(signers) + columns - 1) // columns)
+            canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+            slot_width = max(1, width // columns)
+            slot_height = max(1, height // rows)
+            for index, signer in enumerate(signers):
+                record_id = str(signer.get("record_id") or "").strip()
+                try:
+                    signature_bytes = PortalRuntime.service.signature_image_bytes(
+                        record_id=record_id
+                    )[0]
+                    signature_bytes = normalize_drill_signature_png(signature_bytes)
+                    with Image.open(io.BytesIO(signature_bytes)) as source:
+                        image = source.convert("RGBA")
+                        image.thumbnail(
+                            (max(1, slot_width - 8), max(1, slot_height - 8)),
+                            Image.Resampling.LANCZOS,
+                        )
+                        column = index % columns
+                        row = index // columns
+                        left = column * slot_width + max(0, (slot_width - image.width) // 2)
+                        top = row * slot_height + max(0, (slot_height - image.height) // 2)
+                        canvas.alpha_composite(image, (left, top))
+                except Exception as exc:
+                    if required:
+                        name = str(signer.get("name") or record_id or "未知人员")
+                        raise PortalError(f"无法读取{name}的签名：{exc}") from exc
+            output = io.BytesIO()
+            canvas.save(output, format="PNG", optimize=True)
+            cell["image_data_url"] = (
+                "data:image/png;base64,"
+                + base64.b64encode(output.getvalue()).decode("ascii")
+            )
+        result["signature_cells"] = cells
+        return result
+
+    def _queue_drill_job(
+        self,
+        drill_id: str,
+        scope: str,
+        *,
+        generate: bool,
+        expected_execution_version: int = 0,
+    ) -> bool:
+        key = (str(drill_id or "").strip(), str(scope or "").strip().upper())
+        if not all(key):
+            return False
+        with self._drill_jobs_lock:
+            if key in self._drill_jobs:
+                return False
+            self._drill_jobs.add(key)
+        if self._shutdown_event.is_set():
+            with self._drill_jobs_lock:
+                self._drill_jobs.discard(key)
+            return False
+        try:
+            self._drill_executor.submit(
+                self._run_drill_job,
+                key[0],
+                key[1],
+                generate,
+                int(expected_execution_version or 0),
+            )
+            return True
+        except RuntimeError as exc:
+            log_warning(f"演练后台任务提交失败: {key[0]}:{key[1]}: {exc}")
+        with self._drill_jobs_lock:
+            self._drill_jobs.discard(key)
+        return False
+
+    def _run_drill_job(
+        self,
+        drill_id: str,
+        scope: str,
+        generate: bool,
+        expected_execution_version: int = 0,
+    ) -> None:
+        key = (drill_id, scope)
+        try:
+            if generate:
+                definition = self._drills.get_definition(drill_id)
+                execution = self._drills.get_execution(
+                    drill_id, scope, create=False
+                )
+                self._validate_drill_people_payload(
+                    scope,
+                    definition,
+                    execution,
+                    require_complete=True,
+                    require_signatures=True,
+                )
+
+                def signature_resolver(record_id: str) -> bytes:
+                    return PortalRuntime.service.signature_image_bytes(
+                        record_id=record_id
+                    )[0]
+
+                self._drills.generate(
+                    drill_id,
+                    scope,
+                    signature_resolver=signature_resolver,
+                    expected_execution_version=int(expected_execution_version or 0),
+                )
+            self._sync_drill_output(drill_id, scope)
+        except Exception as exc:
+            log_warning(f"演练生成/同步失败: {drill_id}:{scope}: {exc}")
+        finally:
+            with self._drill_jobs_lock:
+                self._drill_jobs.discard(key)
+
+    def _sync_drill_output(self, drill_id: str, scope: str) -> dict[str, Any]:
+        definition = self._drills.get_definition(drill_id)
+        execution = self._drills.get_execution(drill_id, scope, create=False)
+        generated_version = int(execution.get("generated_version") or 0)
+        if generated_version <= 0:
+            raise PortalError("演练文件尚未生成，不能同步飞书。")
+        if generated_version != int(execution.get("execution_version") or 0):
+            raise PortalError("演练内容已修改，旧版本文件不再同步，请重新生成。")
+        path, file_name = self._drills.generated_file(drill_id, scope)
+        execution = self._drills.begin_sync(
+            drill_id,
+            scope,
+            generated_version=generated_version,
+        )
+        if _mock_external_enabled():
+            result = {
+                "record_id": f"mock-drill-{drill_id}-{scope}",
+                "file_token": f"mock-token-{drill_id}-{scope}-{generated_version}",
+                "generated_version": generated_version,
+            }
+        else:
+            try:
+                result = PortalRuntime.service.sync_drill_archive(
+                    drill_id=drill_id,
+                    scope=scope,
+                    year=definition.get("year") or "",
+                    month=definition.get("month") or "",
+                    generated_version=generated_version,
+                    file_path=path,
+                    file_name=file_name,
+                )
+            except Exception as exc:
+                current = self._drills.get_execution(drill_id, scope, create=False)
+                if int(current.get("execution_version") or 0) == generated_version:
+                    self._drills.mark_sync_result(
+                        drill_id,
+                        scope,
+                        generated_version=generated_version,
+                        error=str(exc),
+                        retryable=not isinstance(exc, PortalConflictError),
+                    )
+                raise
+        current = self._drills.get_execution(drill_id, scope, create=False)
+        if int(current.get("execution_version") or 0) != generated_version:
+            return current
+        return self._drills.mark_sync_result(
+            drill_id,
+            scope,
+            generated_version=generated_version,
+            record_id=str(result.get("record_id") or ""),
+            file_token=str(result.get("file_token") or ""),
+            error="",
+        )
+
+    def _resume_pending_drills(self) -> None:
+        try:
+            pending = self._drills.recover_pending()
+        except Exception as exc:
+            log_warning(f"读取待恢复演练任务失败: {exc}")
+            return
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            drill_id = str(item.get("drill_id") or "").strip()
+            scope = str(item.get("scope") or "").strip().upper()
+            status = str(item.get("status") or "").strip().lower()
+            if drill_id and scope in {"A", "B", "C", "D", "E"}:
+                generation_queue = (
+                    item.get("generation_queue")
+                    if isinstance(item.get("generation_queue"), dict)
+                    else {}
+                )
+                self._queue_drill_job(
+                    drill_id,
+                    scope,
+                    generate=status in {"queued", "generating"},
+                    expected_execution_version=int(
+                        generation_queue.get("execution_version")
+                        or item.get("execution_version")
+                        or 0
+                    ),
+                )
+
+    @staticmethod
     def _local_notice_image_access_allowed(
         session: dict,
         item: dict,
@@ -11514,6 +12478,9 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"轮巡工单附件重试失败: {exc}")
 
+    def _run_scheduled_drill_recovery(self) -> None:
+        self._resume_pending_drills()
+
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
             pressure = PortalRuntime.runtime_pressure()
@@ -11791,10 +12758,27 @@ class FastAPIPortalController:
             coalesce=True,
         )
         scheduler.add_job(
+            self._run_scheduled_drill_recovery,
+            "interval",
+            minutes=1,
+            id="drill_recovery",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
             id="job_cleanup_startup",
+            replace_existing=True,
+            max_instances=1,
+        )
+        scheduler.add_job(
+            self._run_scheduled_drill_recovery,
+            "date",
+            run_date=dt.datetime.now() + dt.timedelta(seconds=12),
+            id="drill_recovery_startup",
             replace_existing=True,
             max_instances=1,
         )
@@ -12332,6 +13316,8 @@ class FastAPIPortalController:
         PortalRuntime.ongoing_callback = None
         PortalRuntime.ongoing_delete_callback = None
         PortalRuntime.maintenance_action_callback = None
+        with suppress(Exception):
+            self._drill_executor.shutdown(wait=False, cancel_futures=True)
         with suppress(Exception):
             self._background_executor.shutdown(wait=False, cancel_futures=True)
         try:

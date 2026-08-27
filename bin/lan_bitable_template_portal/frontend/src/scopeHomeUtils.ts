@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "drill" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -126,8 +126,7 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     badge: "计划管理",
     title: "演练管理",
     tags: ["演练计划", "评估改进"],
-    disabled: true,
-    primaryAction: { key: "", label: "建设中", disabled: true },
+    primaryAction: { key: "drill", label: "进入演练管理", primary: true },
   },
 ];
 
@@ -182,6 +181,12 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     title: "重保管理",
     description: "",
     actionLabel: "进入重保管理",
+  },
+  drill: {
+    kicker: "演练管理",
+    title: "演练模板与执行记录",
+    description: "",
+    actionLabel: "进入演练管理",
   },
   tools: {
     kicker: "其他工具",

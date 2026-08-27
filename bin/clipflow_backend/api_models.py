@@ -251,6 +251,40 @@ class CriticalGuardScopeTemplateRequest(APIModel):
         extra = "forbid"
 
 
+class DrillConfigurationRequest(APIModel):
+    expected_version: int = Field(ge=0)
+    configuration: dict[str, Any] = Field(default_factory=dict)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class DrillPublishRequest(APIModel):
+    expected_version: int = Field(ge=0)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class DrillExecutionRequest(APIModel):
+    expected_version: int = Field(ge=0)
+    drill_date: str = Field(default="", max_length=32)
+    first_start_time: str = Field(default="", max_length=16)
+    commander: dict[str, Any] = Field(default_factory=dict)
+    participants: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
+    step_signers: dict[str, list[str]] = Field(default_factory=dict)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class DrillGenerateRequest(APIModel):
+    expected_version: int = Field(ge=0)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""

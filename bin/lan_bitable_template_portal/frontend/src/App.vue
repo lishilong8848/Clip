@@ -1,7 +1,7 @@
 <template>
-  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode }">
+  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage }">
     <AppTopbar
-      v-if="!signatureLinkMode"
+      v-if="!signatureLinkMode && !isDrillPrintPage"
       :brand-logo-src="brandLogoSrc"
       :header-subtitle="headerSubtitle"
       :auth="auth"
@@ -24,7 +24,7 @@
     />
 
     <AppStatusNotices
-      v-if="!signatureLinkMode || pageStatusText"
+      v-if="!isDrillPrintPage && (!signatureLinkMode || pageStatusText)"
       :connection-notice="signatureLinkMode ? null : connectionNotice"
       :page-status-text="pageStatusText"
     />
@@ -126,6 +126,18 @@
       @switch-scope="enterCriticalGuard"
     />
 
+    <DrillManagementPage
+      v-else-if="isDrillManagementPage"
+      :scope="drillScope"
+      :scope-options="visibleScopeOptions"
+      :is-admin="isAdmin"
+      :current-user="auth.user"
+      :admin-mode="routeParams.get('mode') === 'admin'"
+      :print-mode="isDrillPrintPage"
+      @status="syncText = $event"
+      @switch-scope="enterDrillManagement"
+    />
+
     <ScopeHome
       v-else
       :scope-options="visibleScopeOptions"
@@ -139,6 +151,7 @@
       @repair-management="enterRepairManagement"
       @water="enterWaterManagement"
       @critical-guard="enterCriticalGuard()"
+      @drill="enterDrillManagement()"
       @daily="enterDailyTasks"
       @request-permission="openAdditionalPermissionRequest"
       @dashboard-visible="scopeHomeDashboardVisible = $event"
@@ -178,6 +191,7 @@ const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
 const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
 const WaterManagementPage = asyncPage(() => import("./components/WaterManagementPage.vue"));
 const CriticalGuardPage = asyncPage(() => import("./components/CriticalGuardPage.vue"));
+const DrillManagementPage = asyncPage(() => import("./components/DrillManagementPage.vue"));
 
 type Dict = LooseDict;
 
@@ -253,6 +267,8 @@ const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCriticalGuardPage = computed(() => routePath.value === "/critical-guard");
+const isDrillManagementPage = computed(() => routePath.value === "/drill-management" || routePath.value === "/drill-management/print");
+const isDrillPrintPage = computed(() => routePath.value === "/drill-management/print");
 const isScopeHomeDashboard = computed(() => (
   routePath.value === "/"
   && !routeParams.value.get("mode")
@@ -265,6 +281,7 @@ const criticalGuardScope = computed(() => {
   const raw = String(routeParams.value.get("scope") || "").trim();
   return raw ? normalizeScopeValue(raw, "") : "";
 });
+const drillScope = computed(() => normalizeScopeValue(routeParams.value.get("scope") || "", ""));
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
@@ -312,6 +329,7 @@ const headerSubtitle = computed(() => {
   if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";
+  if (isDrillManagementPage.value) return routeParams.value.get("mode") === "admin" ? "演练管理 · 管理员" : drillScope.value ? `${scopeLabel(drillScope.value)} · 演练管理` : "演练管理 · 选择入口";
   if (authChecking.value) return "功能选择 · 正在检查登录";
   if (!auth.loggedIn) return "功能选择 · 请先登录";
   if (!auth.scopeOptions.length) return "功能选择 · 申请访问权限";
@@ -626,6 +644,16 @@ function enterCriticalGuard(scope = "", admin = false): void {
   navigate(url);
 }
 
+function enterDrillManagement(scope = "", admin = false): void {
+  const url = new URL("/drill-management", window.location.origin);
+  const normalized = scope ? normalizeScopeValue(scope, "") : "";
+  if (normalized) url.searchParams.set("scope", normalized);
+  if (admin) url.searchParams.set("mode", "admin");
+  const month = String(routeParams.value.get("month") || "").trim();
+  if (/^\d{4}-\d{2}$/.test(month)) url.searchParams.set("month", month);
+  navigate(url);
+}
+
 function enterDailyTasks(scope: string): void {
   const url = new URL("/daily-tasks", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope));
@@ -645,6 +673,8 @@ function switchScope(scope: string): void {
     enterWaterManagement(scope);
   } else if (isCriticalGuardPage.value) {
     enterCriticalGuard(scope);
+  } else if (isDrillManagementPage.value) {
+    enterDrillManagement(scope);
   }
 }
 
@@ -772,6 +802,11 @@ onBeforeUnmount(() => {
 .app-shell.signature-link-shell {
   min-height: 100dvh;
   overflow: hidden;
+}
+
+.app-shell.drill-print-shell {
+  min-height: 100vh;
+  background: #ffffff;
 }
 
 h2,

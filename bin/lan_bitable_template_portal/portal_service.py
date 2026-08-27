@@ -231,6 +231,18 @@ CRITICAL_GUARD_WEATHER_REMINDER_SECONDS = 20 * 60
 CRITICAL_GUARD_WEATHER_POLL_SECONDS = 10 * 60
 CRITICAL_GUARD_ARCHIVE_APP_TOKEN = "Tmn8bjGnpasbLTskafbcRijvnKe"
 CRITICAL_GUARD_ARCHIVE_TABLE_ID = "tblVFWuUbjo4GHOY"
+DRILL_ARCHIVE_APP_TOKEN = "D01TwFPyXiJBY6kCBDZcMCGLnSe"
+DRILL_ARCHIVE_TABLE_ID = "tbl4FVVllYjfheJ3"
+DRILL_ARCHIVE_SIMPLE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+DRILL_ARCHIVE_FIELD_TYPES = {
+    "楼栋": 3,
+    "月份": 3,
+    "年份": 3,
+    "演练文件名": 1,
+    "演练记录表": 17,
+    "本地演练ID": 1,
+    "生成版本": 2,
+}
 MEI_BINGBING_OPEN_ID = "ou_6e607320c167d816366acba893b339b1"
 CRITICAL_GUARD_COLOR_LABELS = {
     "red": "红色",
@@ -901,8 +913,8 @@ NOTICE_TEXT_TEMPLATES = {
             ("影响范围", "impact"),
             ("故障发现方式", "discovery"),
             ("故障现象", "symptom"),
-            ("故障原因（事件发生原因）", "reason"),
-            ("解决方案（事件解决措施）", "solution"),
+            ("故障原因", "reason"),
+            ("解决方案", "solution"),
             ("备件更换情况", "spare_parts"),
             ("完成情况", "progress"),
         ),
@@ -1422,6 +1434,9 @@ class MaintenancePortalService:
         self._critical_guard_weather_http_client = FeishuHttpClient(retries=0)
         self._critical_guard_weather_job_lock = threading.RLock()
         self._critical_guard_weather_running_job_id = ""
+        # ponytail: Feishu rejects concurrent writes to one table; split this
+        # lock only if drill archive throughput ever becomes measurable.
+        self._drill_archive_lock = threading.RLock()
         self._deletion_audit_schema_lock = threading.RLock()
         self._deletion_audit_schema_ready = False
         self._deletion_audit_flush_lock = threading.Lock()
@@ -34596,6 +34611,566 @@ class MaintenancePortalService:
             size=size,
             context="MOP 文件上传",
         )
+
+    def _upload_large_bitable_file(
+        self,
+        *,
+        file_path: str | Path,
+        file_name: str,
+        app_token: str,
+    ) -> str:
+        """Upload a Bitable attachment with Feishu's multipart media API."""
+
+        import zlib
+
+        import lark_oapi as lark
+        from lark_oapi.api.drive.v1 import (
+            MediaUploadInfo,
+            UploadFinishMediaRequest,
+            UploadFinishMediaRequestBody,
+            UploadPartMediaRequest,
+            UploadPartMediaRequestBody,
+            UploadPrepareMediaRequest,
+        )
+
+        path = Path(str(file_path or "")).resolve()
+        if not path.is_file():
+            raise PortalError("演练归档文件不存在。")
+        size = int(path.stat().st_size)
+        if size <= 0:
+            raise PortalError("演练归档文件为空。")
+        upload_name = str(file_name or path.name).strip() or path.name
+        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        if not token:
+            raise PortalError("未配置有效的飞书 user_token，无法上传演练文件。")
+        client = (
+            lark.Client.builder()
+            .enable_set_token(True)
+            .log_level(lark.LogLevel.ERROR)
+            .build()
+        )
+
+        def call(label: str, fn):
+            nonlocal token
+            last_message = ""
+            for attempt in range(3):
+                try:
+                    response = fn(token)
+                    if response.success():
+                        return response
+                    code = int(getattr(response, "code", 0) or 0)
+                    last_message = (
+                        f"code={code}, msg={getattr(response, 'msg', '') or 'unknown'}"
+                    )
+                    if code in TOKEN_ERROR_CODES:
+                        token = str(
+                            refresh_feishu_token() or config.user_token or ""
+                        ).strip()
+                        if not token:
+                            break
+                except Exception as exc:
+                    last_message = str(exc)
+                if attempt < 2:
+                    time.sleep(0.4 * (2**attempt))
+            raise PortalError(f"演练文件{label}失败：{last_message or 'unknown'}")
+
+        prepare_body = (
+            MediaUploadInfo.builder()
+            .file_name(upload_name)
+            .parent_type("bitable_file")
+            .parent_node(str(app_token or DRILL_ARCHIVE_APP_TOKEN))
+            .size(size)
+            .build()
+        )
+        prepare_request = (
+            UploadPrepareMediaRequest.builder().request_body(prepare_body).build()
+        )
+        prepare_response = call(
+            "准备",
+            lambda current_token: client.drive.v1.media.upload_prepare(
+                prepare_request,
+                lark.RequestOption.builder()
+                .user_access_token(current_token)
+                .build(),
+            ),
+        )
+        upload_id = str(getattr(prepare_response.data, "upload_id", "") or "").strip()
+        block_size = int(getattr(prepare_response.data, "block_size", 0) or 0)
+        block_num = int(getattr(prepare_response.data, "block_num", 0) or 0)
+        if not upload_id or block_size <= 0 or block_num <= 0:
+            raise PortalError("演练文件分片准备成功但未返回有效上传参数。")
+
+        with path.open("rb") as source:
+            for seq in range(block_num):
+                part = source.read(block_size)
+                if not part:
+                    raise PortalError(
+                        f"演练文件分片不足：预计 {block_num} 块，实际读取到 {seq} 块。"
+                    )
+
+                def upload_part(current_token: str, *, data: bytes = part, index: int = seq):
+                    body = (
+                        UploadPartMediaRequestBody.builder()
+                        .upload_id(upload_id)
+                        .seq(index)
+                        .size(len(data))
+                        .checksum(str(zlib.adler32(data) & 0xFFFFFFFF))
+                        .file(io.BytesIO(data))
+                        .build()
+                    )
+                    request = UploadPartMediaRequest.builder().request_body(body).build()
+                    option = (
+                        lark.RequestOption.builder()
+                        .user_access_token(current_token)
+                        .build()
+                    )
+                    return client.drive.v1.media.upload_part(request, option)
+
+                call(f"分片 {seq + 1}/{block_num} 上传", upload_part)
+            if source.read(1):
+                raise PortalError("演练文件分片参数小于实际文件大小，已停止提交。")
+
+        finish_body = (
+            UploadFinishMediaRequestBody.builder()
+            .upload_id(upload_id)
+            .block_num(block_num)
+            .build()
+        )
+        finish_request = (
+            UploadFinishMediaRequest.builder().request_body(finish_body).build()
+        )
+        finish_response = call(
+            "完成提交",
+            lambda current_token: client.drive.v1.media.upload_finish(
+                finish_request,
+                lark.RequestOption.builder()
+                .user_access_token(current_token)
+                .build(),
+            ),
+        )
+        file_token = str(
+            getattr(finish_response.data, "file_token", "") or ""
+        ).strip()
+        if not file_token:
+            raise PortalError("演练文件分片上传完成但未返回 file_token。")
+        return file_token
+
+    def _upload_drill_archive_file(
+        self,
+        *,
+        file_path: str | Path,
+        file_name: str,
+        parent_node: str = "",
+    ) -> str:
+        path = Path(str(file_path or "")).resolve()
+        if not path.is_file():
+            raise PortalError("演练归档文件不存在。")
+        upload_parent_node = str(parent_node or "").strip()
+        if not upload_parent_node:
+            upload_parent_node = self._canonical_bitable_app_token(
+                DRILL_ARCHIVE_APP_TOKEN
+            )
+        if path.stat().st_size <= DRILL_ARCHIVE_SIMPLE_UPLOAD_MAX_BYTES:
+            return self._upload_drive_media_file(
+                file_path=path,
+                file_name=file_name or path.name,
+                parent_type="bitable_file",
+                parent_node=upload_parent_node,
+                size=path.stat().st_size,
+                context="演练文件上传",
+            )
+        return self._upload_large_bitable_file(
+            file_path=path,
+            file_name=file_name or path.name,
+            app_token=upload_parent_node,
+        )
+
+    def _canonical_bitable_app_token(self, app_token: str) -> str:
+        requested = str(app_token or "").strip()
+        if not requested:
+            raise PortalError("演练归档缺少多维表格 token。")
+        cache = getattr(self, "_canonical_bitable_token_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._canonical_bitable_token_cache = cache
+        cached = str(cache.get(requested) or "").strip()
+        if cached:
+            return cached
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{requested}"
+
+        def load() -> dict[str, Any]:
+            return self._request_payload(
+                "GET",
+                url,
+                context="读取演练归档多维表格元数据",
+                headers=self._auth_headers(),
+                http_client=self._http_client,
+            )
+
+        payload = load()
+        code = int(payload.get("code") or 0)
+        if code in TOKEN_ERROR_CODES:
+            refresh_feishu_token()
+            payload = load()
+            code = int(payload.get("code") or 0)
+        if code != 0:
+            raise PortalError(
+                "读取演练归档多维表格元数据失败: "
+                f"code={code}, msg={payload.get('msg') or 'unknown'}"
+            )
+        canonical = str(
+            (((payload.get("data") or {}).get("app") or {}).get("app_token"))
+            or ""
+        ).strip()
+        if not canonical:
+            raise PortalError("演练归档多维表格未返回可用于附件上传的 app_token。")
+        cache[requested] = canonical
+        return canonical
+
+    def _ensure_drill_archive_schema(self, *, year: str) -> dict[str, FieldMeta]:
+        raw_fields = self._load_raw_table_fields(
+            app_token=DRILL_ARCHIVE_APP_TOKEN,
+            table_id=DRILL_ARCHIVE_TABLE_ID,
+        )
+        raw_by_name = {
+            str(item.get("field_name") or "").strip(): item
+            for item in raw_fields
+            if isinstance(item, dict)
+        }
+        for field_name, field_type in DRILL_ARCHIVE_FIELD_TYPES.items():
+            if field_name in raw_by_name:
+                continue
+            url = (
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                f"{DRILL_ARCHIVE_APP_TOKEN}/tables/{DRILL_ARCHIVE_TABLE_ID}/fields"
+            )
+            request_body: dict[str, Any] = {
+                "field_name": field_name,
+                "type": field_type,
+            }
+            if field_type == 3:
+                initial_options = {
+                    "楼栋": [f"{code}楼" for code in "ABCDE"],
+                    "月份": [f"{index}月" for index in range(1, 13)],
+                    "年份": [str(year or "").strip()],
+                }.get(field_name, [])
+                request_body["property"] = {
+                    "options": [
+                        {"name": option}
+                        for option in initial_options
+                        if str(option or "").strip()
+                    ]
+                }
+
+            def create_field(body: dict[str, Any] = request_body) -> dict[str, Any]:
+                return self._request_payload(
+                    "POST",
+                    url,
+                    context=f"演练归档字段创建({field_name})",
+                    headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    json_payload=body,
+                    http_client=self._write_http_client,
+                )
+
+            result = create_field()
+            if int(result.get("code") or 0) in TOKEN_ERROR_CODES:
+                refresh_feishu_token()
+                result = create_field()
+            if int(result.get("code") or 0) not in {0, 1254014}:
+                raise PortalError(
+                    f"创建演练归档字段【{field_name}】失败: "
+                    f"code={result.get('code')}, msg={result.get('msg') or 'unknown'}"
+                )
+
+        raw_fields = self._load_raw_table_fields(
+            app_token=DRILL_ARCHIVE_APP_TOKEN,
+            table_id=DRILL_ARCHIVE_TABLE_ID,
+        )
+        raw_by_name = {
+            str(item.get("field_name") or "").strip(): item
+            for item in raw_fields
+            if isinstance(item, dict)
+        }
+        for field_name, expected_type in DRILL_ARCHIVE_FIELD_TYPES.items():
+            item = raw_by_name.get(field_name)
+            if not item:
+                raise PortalError(f"演练归档表缺少字段【{field_name}】。")
+            actual_type = int(item.get("type") or 0)
+            if actual_type != expected_type:
+                raise PortalError(
+                    f"演练归档字段【{field_name}】类型错误："
+                    f"期望 {expected_type}，实际 {actual_type}。"
+                )
+
+        year_text = str(year or "").strip()
+        year_field = raw_by_name.get("年份") or {}
+        option_names = {
+            str(item.get("name") or "").strip()
+            for item in ((year_field.get("property") or {}).get("options") or [])
+            if isinstance(item, dict)
+        }
+        if year_text and year_text not in option_names:
+            property_payload = copy.deepcopy(year_field.get("property") or {})
+            options = list(property_payload.get("options") or [])
+            options.append({"name": year_text})
+            property_payload["options"] = options
+            field_id = str(year_field.get("field_id") or "").strip()
+            if not field_id:
+                raise PortalError("演练归档年份字段缺少 field_id。")
+            url = (
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                f"{DRILL_ARCHIVE_APP_TOKEN}/tables/{DRILL_ARCHIVE_TABLE_ID}/"
+                f"fields/{field_id}"
+            )
+            body = {
+                "field_name": "年份",
+                "type": 3,
+                "property": property_payload,
+            }
+            ui_type = str(year_field.get("ui_type") or "").strip()
+            if ui_type:
+                body["ui_type"] = ui_type
+            if isinstance(year_field.get("description"), str):
+                body["description"] = year_field["description"]
+
+            def update_year() -> dict[str, Any]:
+                return self._request_payload(
+                    "PUT",
+                    url,
+                    context="演练归档年份选项更新",
+                    headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    json_payload=body,
+                    http_client=self._write_http_client,
+                )
+
+            result = update_year()
+            if int(result.get("code") or 0) in TOKEN_ERROR_CODES:
+                refresh_feishu_token()
+                result = update_year()
+            if int(result.get("code") or 0) != 0:
+                raise PortalError(
+                    "补充演练归档年份选项失败: "
+                    f"code={result.get('code')}, msg={result.get('msg') or 'unknown'}"
+                )
+        return {
+            meta.field_name: meta
+            for meta in self._parse_field_metas(raw_fields)
+        }
+
+    def _find_drill_archive_records(self, local_drill_id: str) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        page_token = ""
+        seen_tokens: set[str] = set()
+        while True:
+            params: dict[str, Any] = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=DRILL_ARCHIVE_APP_TOKEN,
+                table_id=DRILL_ARCHIVE_TABLE_ID,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            for item in data.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                identity = self._repair_management_plain_text(
+                    fields.get("本地演练ID")
+                ).strip()
+                if identity == local_drill_id:
+                    matches.append(item)
+            next_token = self._next_record_page_token(
+                data,
+                current_token=page_token,
+                seen_tokens=seen_tokens,
+                context="演练归档记录读取",
+            )
+            if next_token is None:
+                break
+            page_token = next_token
+        return matches
+
+    def sync_drill_archive(
+        self,
+        *,
+        drill_id: str,
+        scope: str,
+        year: str | int,
+        month: str | int,
+        generated_version: int,
+        file_path: str | Path,
+        file_name: str,
+    ) -> dict[str, Any]:
+        drill_id = str(drill_id or "").strip()
+        scope_code = str(scope or "").strip().upper()
+        if not drill_id:
+            raise PortalError("演练归档缺少本地演练 ID。")
+        if scope_code not in {"A", "B", "C", "D", "E"}:
+            raise PortalError("演练归档楼栋必须是 A-E。")
+        year_text = re.sub(r"[^0-9]", "", str(year or ""))[:4]
+        if len(year_text) != 4:
+            raise PortalError("演练归档年份无效。")
+        month_match = re.search(r"(?:^|[-/年])\s*(1[0-2]|0?[1-9])", str(month or ""))
+        if not month_match:
+            month_match = re.search(r"(1[0-2]|0?[1-9])", str(month or ""))
+        if not month_match:
+            raise PortalError("演练归档月份无效。")
+        month_text = f"{int(month_match.group(1))}月"
+        version = int(generated_version or 0)
+        if version <= 0:
+            raise PortalError("演练归档生成版本无效。")
+        local_drill_id = f"{drill_id}:{scope_code}"
+
+        with self._drill_archive_lock:
+            self._ensure_drill_archive_schema(year=year_text)
+            matches = self._find_drill_archive_records(local_drill_id)
+            if len(matches) > 1:
+                raise PortalConflictError(
+                    f"演练归档表存在 {len(matches)} 条相同本地演练ID记录，请管理员先去重。"
+                )
+            remote_record_id = str(
+                (matches[0].get("record_id") if matches else "")
+                or ""
+            ).strip()
+            if matches:
+                existing_fields = (
+                    matches[0].get("fields")
+                    if isinstance(matches[0].get("fields"), dict)
+                    else {}
+                )
+                try:
+                    existing_version = int(
+                        float(
+                            self._repair_management_plain_text(
+                                existing_fields.get("生成版本")
+                            ).strip()
+                            or 0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    existing_version = 0
+                if existing_version > version:
+                    raise PortalConflictError(
+                        "飞书演练归档版本高于本机生成版本，已阻止旧版本覆盖。"
+                    )
+                existing_tokens = [
+                    str(item.get("file_token") or "").strip()
+                    for item in (existing_fields.get("演练记录表") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("file_token") or "").strip()
+                ]
+                existing_name = self._repair_management_plain_text(
+                    existing_fields.get("演练文件名")
+                ).strip()
+                if (
+                    existing_version == version
+                    and existing_name == str(file_name or Path(file_path).name)
+                    and existing_tokens
+                ):
+                    return {
+                        "synced": True,
+                        "record_id": remote_record_id,
+                        "file_token": existing_tokens[0],
+                        "local_drill_id": local_drill_id,
+                        "generated_version": version,
+                        "reused": True,
+                    }
+            canonical_app_token = self._canonical_bitable_app_token(
+                DRILL_ARCHIVE_APP_TOKEN
+            )
+            file_token = self._upload_drill_archive_file(
+                file_path=file_path,
+                file_name=file_name,
+                parent_node=canonical_app_token,
+            )
+            fields = {
+                "楼栋": f"{scope_code}楼",
+                "月份": month_text,
+                "年份": year_text,
+                "演练文件名": str(file_name or Path(file_path).name),
+                "演练记录表": [{"file_token": file_token}],
+                "本地演练ID": local_drill_id,
+                "生成版本": version,
+            }
+            if remote_record_id:
+                try:
+                    self._patch_record_fields_exact(
+                        app_token=DRILL_ARCHIVE_APP_TOKEN,
+                        table_id=DRILL_ARCHIVE_TABLE_ID,
+                        record_id=remote_record_id,
+                        fields=fields,
+                    )
+                except PortalError as exc:
+                    if "1254043" not in str(exc):
+                        raise
+                    matches = self._find_drill_archive_records(local_drill_id)
+                    if len(matches) > 1:
+                        raise PortalConflictError(
+                            "演练归档记录失效后发现重复本地演练ID，请管理员先去重。"
+                        ) from exc
+                    remote_record_id = str(
+                        matches[0].get("record_id") if matches else ""
+                    ).strip()
+                    if remote_record_id:
+                        self._patch_record_fields_exact(
+                            app_token=DRILL_ARCHIVE_APP_TOKEN,
+                            table_id=DRILL_ARCHIVE_TABLE_ID,
+                            record_id=remote_record_id,
+                            fields=fields,
+                        )
+                    else:
+                        remote_record_id = ""
+            if not remote_record_id:
+                created = self._create_record_fields(
+                    app_token=DRILL_ARCHIVE_APP_TOKEN,
+                    table_id=DRILL_ARCHIVE_TABLE_ID,
+                    fields=fields,
+                )
+                remote_record_id = self._created_record_id(created)
+                if not remote_record_id:
+                    matches = self._find_drill_archive_records(local_drill_id)
+                    if len(matches) != 1:
+                        raise PortalError("演练归档已提交但无法唯一确认远端记录。")
+                    remote_record_id = str(matches[0].get("record_id") or "").strip()
+
+            payload = self._request_json(
+                f"records/{remote_record_id}",
+                params={"user_id_type": "open_id"},
+                app_token=DRILL_ARCHIVE_APP_TOKEN,
+                table_id=DRILL_ARCHIVE_TABLE_ID,
+            )
+            record = (payload.get("data") or {}).get("record") or {}
+            saved_fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+            saved_identity = self._repair_management_plain_text(
+                saved_fields.get("本地演练ID")
+            ).strip()
+            saved_version = self._repair_management_plain_text(
+                saved_fields.get("生成版本")
+            ).strip()
+            try:
+                saved_version_number = int(float(saved_version or 0))
+            except (TypeError, ValueError):
+                saved_version_number = 0
+            saved_tokens = {
+                str(item.get("file_token") or "").strip()
+                for item in (saved_fields.get("演练记录表") or [])
+                if isinstance(item, dict)
+            }
+            if (
+                saved_identity != local_drill_id
+                or version != saved_version_number
+                or file_token not in saved_tokens
+            ):
+                raise PortalError("演练归档写入后回读校验失败，已保留本地文件等待重试。")
+            return {
+                "synced": True,
+                "record_id": remote_record_id,
+                "file_token": file_token,
+                "local_drill_id": local_drill_id,
+                "generated_version": version,
+            }
 
     def _load_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
         now = time.time()

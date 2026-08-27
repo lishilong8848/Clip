@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build && node scripts/prune-dist-assets.mjs",
+    "check:drill": "node scripts/check-drill-management.mjs",
     "smoke": "python ../../tools/frontend_runtime_smoke.py",
     "typecheck": "vue-tsc --noEmit"
   },
