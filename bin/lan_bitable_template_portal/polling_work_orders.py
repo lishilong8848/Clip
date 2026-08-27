@@ -41,11 +41,13 @@ POLLING_H_DUTY_RECORD_ID = "h_duty_account"
 POLLING_SOP_MAX_FILE_BYTES = 20 * 1024 * 1024
 POLLING_SOP_MAX_FILES = 10
 POLLING_SOP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
-POLLING_SOP_MAX_STEPS = 200
+POLLING_SOP_MAX_STEPS = 30
 POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
 POLLING_STEP_PHOTO_MAX_BYTES = 8 * 1024 * 1024
+POLLING_STEP_MAX_PHOTOS = 5
+POLLING_WORK_ORDER_MAX_PHOTOS = 100
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
-POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v2.xlsx"
+POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v3.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -1302,11 +1304,28 @@ class PollingWorkOrderService:
             if str(step.get("step_key") or "") != str(step_key or ""):
                 raise PortalConflictError("只能给当前步骤拍照。")
             if step.get("operator_confirmation") or step.get("reviewer_confirmation"):
-                raise PortalConflictError("当前步骤已有确认，不能再更换操作照片。")
+                raise PortalConflictError("当前步骤已有确认，不能再添加操作照片。")
             digest = hashlib.sha256(content).hexdigest()
             existing_photos = list(step.get("photos") or [])
-            if existing_photos and str(existing_photos[0].get("sha256") or "") == digest:
+            if any(
+                str(photo.get("sha256") or "") == digest
+                for photo in existing_photos
+                if isinstance(photo, dict)
+            ):
                 return self.session(token)
+            if len(existing_photos) >= POLLING_STEP_MAX_PHOTOS:
+                raise PortalError(
+                    f"每个步骤最多上传 {POLLING_STEP_MAX_PHOTOS} 张操作照片。"
+                )
+            total_photos = sum(
+                len(item.get("photos") or [])
+                for item in steps
+                if isinstance(item, dict)
+            )
+            if total_photos >= POLLING_WORK_ORDER_MAX_PHOTOS:
+                raise PortalError(
+                    f"整个工单组最多上传 {POLLING_WORK_ORDER_MAX_PHOTOS} 张操作照片。"
+                )
             directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
             group_directory = self._group_directory(
                 str(group.get("target_record_id") or "")
@@ -1322,7 +1341,7 @@ class PollingWorkOrderService:
             temporary = path.with_suffix(path.suffix + ".tmp")
             temporary.write_bytes(content)
             os.replace(temporary, path)
-            step["photos"] = [
+            step["photos"] = existing_photos + [
                 {
                     "photo_id": photo_id,
                     "name": safe_name,
@@ -1354,13 +1373,6 @@ class PollingWorkOrderService:
                 except OSError:
                     pass
                 raise
-            for photo in existing_photos:
-                old_path = Path(str(photo.get("path") or "")).resolve()
-                if old_path.is_file() and old_path.is_relative_to(directory):
-                    try:
-                        old_path.unlink()
-                    except OSError:
-                        pass
         return self.session(token)
 
     def step_photo_content(
@@ -1395,6 +1407,7 @@ class PollingWorkOrderService:
         try:
             from openpyxl import load_workbook
             from openpyxl.drawing.image import Image as ExcelImage
+            from openpyxl.utils import get_column_letter
             from PIL import Image as PillowImage
             from PIL import ImageOps
         except Exception as exc:
@@ -1494,6 +1507,12 @@ class PollingWorkOrderService:
                 logo.height = 59
                 sheet.add_image(logo, "A1")
                 image_handles.extend((logo_buffer, logo))
+                max_photo_count = max(
+                    len(step.get("photos") or []) for step in run_steps
+                )
+                last_column = 5 + max(0, max_photo_count - 1)
+                for column in range(6, last_column + 1):
+                    sheet.column_dimensions[get_column_letter(column)].width = 34
 
                 for step_offset, step in enumerate(run_steps):
                     row_number = 9 + step_offset
@@ -1501,6 +1520,10 @@ class PollingWorkOrderService:
                     for column, style in enumerate(source_styles, start=1):
                         sheet.cell(row=row_number, column=column)._style = copy.copy(
                             style
+                        )
+                    for column in range(6, last_column + 1):
+                        sheet.cell(row=row_number, column=column)._style = copy.copy(
+                            source_styles[2]
                         )
                     sheet.merge_cells(
                         start_row=row_number,
@@ -1530,57 +1553,59 @@ class PollingWorkOrderService:
                         raise PortalError(
                             f"工单{run_index}第{step_offset + 1}步缺少操作照片。"
                         )
-                    photo_path = Path(str(photos[0].get("path") or "")).resolve()
-                    if (
-                        not photo_path.is_file()
-                        or not photo_path.is_relative_to(photo_root)
-                    ):
-                        raise PortalError(
-                            f"工单{run_index}第{step_offset + 1}步的本地照片不存在。"
-                        )
-                    try:
-                        with PillowImage.open(photo_path) as source:
-                            normalized = ImageOps.exif_transpose(source)
-                            if "A" in normalized.getbands():
-                                prepared = PillowImage.new(
-                                    "RGB", normalized.size, "white"
-                                )
-                                prepared.paste(
-                                    normalized,
-                                    mask=normalized.getchannel("A"),
-                                )
-                            else:
-                                prepared = normalized.convert("RGB")
-                            width, height = prepared.size
-                            scale = min(
-                                1.0,
-                                230 / max(1, width),
-                                190 / max(1, height),
+                    for photo_index, photo in enumerate(photos):
+                        photo_path = Path(str(photo.get("path") or "")).resolve()
+                        if (
+                            not photo_path.is_file()
+                            or not photo_path.is_relative_to(photo_root)
+                        ):
+                            raise PortalError(
+                                f"工单{run_index}第{step_offset + 1}步的本地照片不存在。"
                             )
-                            target_width = max(1, int(round(width * scale)))
-                            target_height = max(1, int(round(height * scale)))
-                            if (target_width, target_height) != prepared.size:
-                                prepared = prepared.resize(
-                                    (target_width, target_height),
-                                    getattr(
-                                        PillowImage, "Resampling", PillowImage
-                                    ).LANCZOS,
+                        try:
+                            with PillowImage.open(photo_path) as source:
+                                normalized = ImageOps.exif_transpose(source)
+                                if "A" in normalized.getbands():
+                                    prepared = PillowImage.new(
+                                        "RGB", normalized.size, "white"
+                                    )
+                                    prepared.paste(
+                                        normalized,
+                                        mask=normalized.getchannel("A"),
+                                    )
+                                else:
+                                    prepared = normalized.convert("RGB")
+                                width, height = prepared.size
+                                scale = min(
+                                    1.0,
+                                    230 / max(1, width),
+                                    190 / max(1, height),
                                 )
-                            photo_buffer = io.BytesIO()
-                            prepared.save(photo_buffer, format="PNG", optimize=True)
-                    except Exception as exc:
-                        raise PortalError(
-                            f"工单{run_index}第{step_offset + 1}步的照片无法写入Excel。"
-                        ) from exc
-                    photo_buffer.seek(0)
-                    excel_photo = ExcelImage(photo_buffer)
-                    excel_photo.width = target_width
-                    excel_photo.height = target_height
-                    sheet.add_image(excel_photo, f"A{row_number}")
-                    image_handles.extend((photo_buffer, excel_photo))
+                                target_width = max(1, int(round(width * scale)))
+                                target_height = max(1, int(round(height * scale)))
+                                if (target_width, target_height) != prepared.size:
+                                    prepared = prepared.resize(
+                                        (target_width, target_height),
+                                        getattr(
+                                            PillowImage, "Resampling", PillowImage
+                                        ).LANCZOS,
+                                    )
+                                photo_buffer = io.BytesIO()
+                                prepared.save(photo_buffer, format="PNG", optimize=True)
+                        except Exception as exc:
+                            raise PortalError(
+                                f"工单{run_index}第{step_offset + 1}步的照片无法写入Excel。"
+                            ) from exc
+                        photo_buffer.seek(0)
+                        excel_photo = ExcelImage(photo_buffer)
+                        excel_photo.width = target_width
+                        excel_photo.height = target_height
+                        anchor_column = "A" if photo_index == 0 else get_column_letter(5 + photo_index)
+                        sheet.add_image(excel_photo, f"{anchor_column}{row_number}")
+                        image_handles.extend((photo_buffer, excel_photo))
 
                 last_row = 8 + len(run_steps)
-                sheet.print_area = f"A1:E{last_row}"
+                sheet.print_area = f"A1:{get_column_letter(last_column)}{last_row}"
                 sheet.print_title_rows = "8:8"
                 sheet.page_setup.orientation = "portrait"
                 sheet.page_setup.paperSize = sheet.PAPERSIZE_A4

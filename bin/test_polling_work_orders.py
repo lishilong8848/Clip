@@ -47,6 +47,18 @@ def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> by
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_polling_sop_rejects_more_than_thirty_steps(self) -> None:
+        with self.assertRaisesRegex(Exception, "SOP 步骤不能超过 30 条"):
+            PollingWorkOrderService._normalized_steps(
+                [
+                    {
+                        "content": f"步骤{index + 1}",
+                        "operator_required": True,
+                    }
+                    for index in range(31)
+                ]
+            )
+
     def test_attachment_result_keeps_unsaved_sop_name_and_steps(self) -> None:
         node = shutil.which("node")
         if not node:
@@ -119,9 +131,13 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("退出当前工单并重新选择", steps)
         self.assertIn("浏览器返回不会取消当前选择", steps)
         self.assertIn("拍照/上传操作照片", steps)
+        self.assertIn("继续添加照片", steps)
+        self.assertIn("操作照片 ${photoCount} 张", steps)
         self.assertIn("操作照片待拍", steps)
         self.assertIn("回退上一步", steps)
         self.assertIn("/api/polling-work-orders/rollback", steps)
+        self.assertIn("上一步需重新倒计时、拍照并确认", steps)
+        self.assertIn("busy=false;if(current&&!navigating)render(current)", steps)
         self.assertIn("capture','environment", steps)
         self.assertIn("image.loading='eager'", steps)
         self.assertIn("缩略图加载失败", steps)
@@ -1143,13 +1159,56 @@ class PollingWorkOrderTests(unittest.TestCase):
             stored_photo = service.get_group("recTimerPhoto")["steps"][0]["photos"][0]
             self.assertEqual(stored_photo["photo_id"], photo["photo_id"])
             self.assertEqual(set(photo_directory.iterdir()), files_before_failed_replace)
+            multi_photo_session = service.add_step_photo(
+                operator_token,
+                step_key="1:1",
+                expected_version=photo_session["version"],
+                file_name="补充照片.png",
+                mime_type="image/png",
+                content=_png_bytes("#ff0000"),
+            )
+            self.assertEqual(len(multi_photo_session["steps"][0]["photos"]), 2)
+            self.assertTrue(Path(stored_photo["path"]).is_file())
+            duplicate_session = service.add_step_photo(
+                operator_token,
+                step_key="1:1",
+                expected_version=multi_photo_session["version"],
+                file_name="重复照片.png",
+                mime_type="image/png",
+                content=photo_bytes,
+            )
+            self.assertEqual(len(duplicate_session["steps"][0]["photos"]), 2)
+            with patch(
+                "lan_bitable_template_portal.polling_work_orders.POLLING_STEP_MAX_PHOTOS",
+                2,
+            ), self.assertRaisesRegex(Exception, "最多上传 2 张"):
+                service.add_step_photo(
+                    operator_token,
+                    step_key="1:1",
+                    expected_version=multi_photo_session["version"],
+                    file_name="超限照片.png",
+                    mime_type="image/png",
+                    content=_png_bytes("#00ff00"),
+                )
+            with patch(
+                "lan_bitable_template_portal.polling_work_orders.POLLING_WORK_ORDER_MAX_PHOTOS",
+                2,
+            ), self.assertRaisesRegex(Exception, "整个工单组最多上传 2 张"):
+                service.add_step_photo(
+                    operator_token,
+                    step_key="1:1",
+                    expected_version=multi_photo_session["version"],
+                    file_name="工单总量超限照片.png",
+                    mime_type="image/png",
+                    content=_png_bytes("#00ff00"),
+                )
             group = service.get_group("recTimerPhoto")
             group["steps"][0]["activated_at_ts"] = time.time() - 3
             store.put_document("polling_work_order", "recTimerPhoto", group)
             operator_confirmed_session = service.confirm(
                 operator_token,
                 step_key="1:1",
-                expected_version=photo_session["version"],
+                expected_version=multi_photo_session["version"],
             )
             with self.assertRaisesRegex(Exception, "已有确认"):
                 service.add_step_photo(
@@ -1176,7 +1235,9 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertIsNotNone(sheet["E3"].value)
             self.assertEqual(sheet["C9"].value, 1)
             self.assertEqual(sheet["D9"].value, "将1#切换到2#")
-            self.assertEqual(len(sheet._images), 2)
+            self.assertEqual(len(sheet._images), 3)
+            self.assertIn(5, [image.anchor._from.col for image in sheet._images])
+            self.assertIn("$A$1:$F$9", str(sheet.print_area))
             workbook.close()
             self.assertIn("倒计时拍照 SOP · 1#→2#", values)
             self.assertIn("将1#切换到2#", values)
