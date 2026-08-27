@@ -31082,7 +31082,7 @@ class MaintenancePortalService:
         work_type: str,
         scope: str,
         action: str = "update",
-        recent_finished_days: int = 0,
+        include_current_month_finished: bool = False,
         allow_unscoped_target: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
@@ -31111,9 +31111,8 @@ class MaintenancePortalService:
                     )
                 )
         candidates: list[dict[str, Any]] = []
-        recent_finished_days = max(0, int(recent_finished_days or 0))
         today = dt.date.today()
-        recent_cutoff = today - dt.timedelta(days=recent_finished_days - 1)
+        month_start = today.replace(day=1)
         for target in target_records:
             fields = target.get("display_fields") or {}
             lifecycle = self._target_record_lifecycle(
@@ -31132,12 +31131,12 @@ class MaintenancePortalService:
                 if target_finished
                 else ""
             )
-            if target_finished and recent_finished_days:
-                recent_dt = self._parse_notice_datetime(recent_at)
+            if target_finished and include_current_month_finished:
+                finished_dt = self._parse_notice_datetime(recent_at)
                 if (
-                    recent_dt is None
-                    or recent_dt.date() < recent_cutoff
-                    or recent_dt.date() > today
+                    finished_dt is None
+                    or finished_dt.date() < month_start
+                    or finished_dt.date() > today
                 ):
                     continue
             elif target_finished or not target_active:
@@ -31203,7 +31202,7 @@ class MaintenancePortalService:
                     "business_text_matched": False,
                     "business_match_count": 0,
                     "match_reason": (
-                        "目标多维近7天已结束"
+                        "目标多维本月已结束"
                         if target_finished
                         else "目标多维已开始未结束"
                     ),
@@ -31496,7 +31495,7 @@ class MaintenancePortalService:
         limit: int = 30,
         all_active: bool = False,
         all_ongoing: bool = False,
-        recent_finished_days: int = 0,
+        include_current_month_finished: bool = False,
         allow_unscoped_target: bool = False,
     ) -> dict[str, Any]:
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
@@ -31538,7 +31537,7 @@ class MaintenancePortalService:
                 work_type=work_type,
                 scope=scope,
                 action=action,
-                recent_finished_days=recent_finished_days,
+                include_current_month_finished=include_current_month_finished,
                 allow_unscoped_target=allow_unscoped_target,
             )
         if work_type == WORK_TYPE_CHANGE:

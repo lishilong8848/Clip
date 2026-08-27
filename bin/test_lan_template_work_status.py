@@ -13068,13 +13068,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     )["target_active"]
                 )
 
-    def test_planned_target_lookup_includes_recent_finished_after_all_active(self):
+    def test_planned_target_lookup_includes_current_month_finished_after_all_active(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             today = dt.date.today()
+            month_start = today.replace(day=1)
+            previous_month_end = month_start - dt.timedelta(days=1)
 
             def day_text(days_ago: int, hour: int = 9) -> str:
                 value = today - dt.timedelta(days=days_ago)
+                return f"{value.isoformat()} {hour:02d}:00"
+
+            def date_text(value: dt.date, hour: int = 9) -> str:
                 return f"{value.isoformat()} {hour:02d}:00"
 
             target_records = [
@@ -13088,16 +13093,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     },
                 },
                 {
-                    "record_id": "ended-recent",
+                    "record_id": "ended-current-month",
                     "display_fields": {
-                        "名称": "A楼近7天已结束变更",
+                        "名称": "A楼本月已结束变更",
                         "楼栋": "A楼",
                         "变更状态": "已结束",
-                        "变更结束时间": day_text(2, 18),
+                        "变更结束时间": date_text(month_start, 18),
                     },
                 },
                 {
-                    "record_id": "ended-recent-fallback",
+                    "record_id": "ended-current-month-fallback",
                     "last_modified_time": str(
                         int(
                             dt.datetime.combine(
@@ -13113,12 +13118,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     },
                 },
                 {
-                    "record_id": "ended-too-old",
+                    "record_id": "ended-previous-month",
                     "display_fields": {
-                        "名称": "A楼超过7天已结束变更",
+                        "名称": "A楼上月已结束变更",
                         "楼栋": "A楼",
                         "变更状态": "已结束",
-                        "变更结束时间": day_text(7, 18),
+                        "变更结束时间": date_text(previous_month_end, 18),
                     },
                 },
                 {
@@ -13141,13 +13146,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scope="A",
                     title="",
                     all_active=True,
-                    recent_finished_days=7,
+                    include_current_month_finished=True,
                 )
 
             candidates = result["candidates"]
             self.assertEqual(
                 [item["target_record_id"] for item in candidates],
-                ["active-old", "ended-recent-fallback", "ended-recent"],
+                [
+                    "active-old",
+                    "ended-current-month-fallback",
+                    "ended-current-month",
+                ],
             )
             self.assertFalse(candidates[0]["target_finished"])
             self.assertTrue(all(item["target_finished"] for item in candidates[1:]))
@@ -13297,8 +13306,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200, response.text)
                     self.assertEqual(service.calls[-1]["scope"], expected_scope)
                     self.assertEqual(
-                        service.calls[-1]["recent_finished_days"],
-                        7 if context == "planned_target_table" else 0,
+                        service.calls[-1]["include_current_month_finished"],
+                        context == "planned_target_table",
                     )
         finally:
             PortalRuntime.service = previous_service

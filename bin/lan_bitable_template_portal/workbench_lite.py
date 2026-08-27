@@ -6167,7 +6167,7 @@ def render_workbench_lite(
       if (!liteTargetCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '未找到可关联的未结束或近7天已结束目标记录。可以先发送开始通告，由后端创建新的目标记录。';
+        empty.textContent = '未找到可关联的未结束或本月已结束目标记录。可以先发送开始通告，由后端创建新的目标记录。';
         list.replaceChildren(empty);
         return;
       }}

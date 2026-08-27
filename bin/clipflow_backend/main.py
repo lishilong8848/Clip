@@ -6691,8 +6691,8 @@ class FastAPIPortalController:
                     text=payload.get("text") or "",
                     all_active=lookup_context != "ongoing_list",
                     all_ongoing=lookup_context == "ongoing_list",
-                    recent_finished_days=(
-                        7 if lookup_context == "planned_target_table" else 0
+                    include_current_month_finished=(
+                        lookup_context == "planned_target_table"
                     ),
                     allow_unscoped_target=PortalRuntime.auth_manager.is_admin(
                         session
