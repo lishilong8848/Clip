@@ -291,17 +291,26 @@
                 @input="markDrawerDirty"
               />
             </label>
-            <label class="wide-field">
-              <span>当期耗水量（修正）</span>
-              <input
-                v-model="form.correctedUsage"
-                type="number"
-                step="any"
-                placeholder="选填，留空使用公式结果"
-                :disabled="recordEditingLocked"
-                @input="markDrawerDirty"
-              />
-            </label>
+            <details class="wide-field corrected-usage-field">
+              <summary>
+                <span>当期耗水量（修正）</span>
+                <span class="corrected-usage-field__action">
+                  展开填写
+                  <ChevronRight :size="16" aria-hidden="true" />
+                </span>
+              </summary>
+              <label>
+                <span class="sr-only">当期耗水量（修正）</span>
+                <input
+                  v-model="form.correctedUsage"
+                  type="number"
+                  step="any"
+                  placeholder="选填，留空使用公式结果"
+                  :disabled="recordEditingLocked"
+                  @input="markDrawerDirty"
+                />
+              </label>
+            </details>
           </div>
 
           <section v-if="editingRecordId" class="readonly-grid">
@@ -2123,6 +2132,51 @@ th {
 
 .wide-field {
   grid-column: 1 / -1;
+}
+
+.corrected-usage-field {
+  overflow: hidden;
+  border: 1px solid #d8e5f7;
+  border-radius: 9px;
+  background: #f8fbff;
+}
+
+.corrected-usage-field > summary {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px;
+  color: #334155;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.corrected-usage-field > summary::-webkit-details-marker {
+  display: none;
+}
+
+.corrected-usage-field__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.corrected-usage-field__action svg {
+  transition: transform 0.16s ease;
+}
+
+.corrected-usage-field[open] .corrected-usage-field__action svg {
+  transform: rotate(90deg);
+}
+
+.corrected-usage-field > label {
+  padding: 0 10px 10px;
 }
 
 .readonly-grid {
