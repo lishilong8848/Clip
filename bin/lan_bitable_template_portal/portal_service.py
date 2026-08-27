@@ -33082,11 +33082,7 @@ class MaintenancePortalService:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
-        if work_type not in {
-            WORK_TYPE_MAINTENANCE,
-            WORK_TYPE_CHANGE,
-            WORK_TYPE_REPAIR,
-        }:
+        if work_type not in BINDABLE_NOTICE_TARGET_WORK_TYPES:
             return []
         records = [
             record
@@ -33128,9 +33124,12 @@ class MaintenancePortalService:
             elif work_type == WORK_TYPE_REPAIR:
                 title = self._repair_title(record)
                 specialty = self._repair_specialty(record)
-            else:
+            elif work_type == WORK_TYPE_MAINTENANCE:
                 title = self._maintenance_title(record)
                 specialty = str(fields.get("专业类别") or fields.get("专业") or "").strip()
+            else:
+                title = str(serialized.get("title") or "").strip()
+                specialty = str(serialized.get("specialty") or "").strip()
             items.append(
                 {
                     "source_record_id": source_record_id,
@@ -33158,10 +33157,30 @@ class MaintenancePortalService:
         source_record_id: str,
         month: str = "",
         ongoing_items: list[dict[str, Any]] | None = None,
+        target_record_id: str = "",
+        active_item_id: str = "",
     ) -> dict[str, Any]:
         source_record_id = str(source_record_id or "").strip()
         if not source_record_id:
             raise PortalError("请选择要绑定的计划通告。")
+        target_record_id = str(target_record_id or "").strip()
+        active_item_id = str(active_item_id or "").strip()
+        for ongoing in ongoing_items or []:
+            if canonical_source_record_id(ongoing) != source_record_id:
+                continue
+            if (
+                target_record_id
+                and canonical_target_record_id(ongoing) == target_record_id
+            ) or (
+                active_item_id
+                and str(ongoing.get("active_item_id") or "").strip()
+                == active_item_id
+            ):
+                return {
+                    "source_record_id": source_record_id,
+                    "work_type": self._item_work_type(ongoing),
+                    "title": str(ongoing.get("title") or source_record_id),
+                }
         items = self.list_bindable_source_items(
             scope=scope,
             work_type=work_type,
@@ -39023,7 +39042,13 @@ class MaintenancePortalService:
         manual_binding_required = self._truthy_flag(
             payload.get("manual_binding_required")
         ) or self._truthy_flag(patch.get("manual_binding_required"))
-        manual_source_binding = bool(manual and manual_binding_choice == "bind")
+        source_binding_required = bool(
+            manual_binding_required
+            or action == "start" and active_item_id
+        )
+        manual_source_binding = bool(
+            source_binding_required and manual_binding_choice == "bind"
+        )
         manual_source_defaults: dict[str, Any] = {}
         raw_record_id = str(payload.get("record_id") or patch.get("record_id") or "").strip()
         source_record_id = str(payload.get("source_record_id") or patch.get("source_record_id") or "").strip()
@@ -39037,9 +39062,9 @@ class MaintenancePortalService:
             or patch.get("source_month")
             or ""
         ).strip()
-        if manual and action == "start" and manual_binding_required:
+        if action == "start" and source_binding_required:
             if manual_binding_choice not in {"bind", "unbound"}:
-                raise PortalError("纯手填通告必须选择绑定计划通告或不绑定。")
+                raise PortalError("发送开始前必须选择绑定计划通告或不绑定。")
             if manual_source_binding:
                 self.validate_manual_source_binding(
                     scope=scope,

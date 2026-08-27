@@ -13323,6 +13323,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.source_sync_calls = 0
                 self.source_sync_ok = True
                 self.visibility_restores = []
+                self.source_candidate_calls = []
+
+            def validate_manual_source_binding(self, **kwargs):
+                self.source_candidate_calls.append(dict(kwargs))
+                return {"source_record_id": kwargs.get("source_record_id")}
 
             def validate_notice_identity_binding(self, **kwargs):
                 work_type = str(kwargs.get("work_type") or "maintenance")
@@ -13345,6 +13350,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "target_status": "开始" if self.target_active else "已结束",
                     "source_found": bool(kwargs.get("source_record_id")),
                     "source_work_type": work_type,
+                    "source_app_token": "app-source-binding",
+                    "source_table_id": "table-source-binding",
                     "_target_active_payload": (
                         {
                             "active_item_id": active_item_id,
@@ -13450,6 +13457,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     PortalRuntime.auth_manager,
                     "role_for_open_id",
                     return_value="admin",
+                ), patch.object(
+                    FastAPIPortalController,
+                    "_get_ongoing",
+                    return_value=[],
                 ):
                     response = client.post(
                         "/api/notice-identity/bind",
@@ -13487,6 +13498,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     active_payload["source_record_id"],
                     "rec-source-binding",
                 )
+                self.assertEqual(active_payload["source_work_type"], "maintenance")
+                self.assertEqual(active_payload["source_app_token"], "app-source-binding")
+                self.assertEqual(active_payload["source_table_id"], "table-source-binding")
+                self.assertEqual(active_payload["source_progress"], "进行中")
                 identity = store.resolve_notice_identity(
                     work_type="maintenance",
                     source_record_id="rec-source-binding",
@@ -13494,6 +13509,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(
                     identity["target_record_id"],
                     "rec-target-binding",
+                )
+                with patch.object(
+                    PortalRuntime.auth_manager,
+                    "scopes_for_open_id",
+                    return_value=["A"],
+                ), patch.object(
+                    PortalRuntime.auth_manager,
+                    "role_for_open_id",
+                    return_value="admin",
+                ), patch.object(
+                    FastAPIPortalController, "_get_ongoing", return_value=[]
+                ):
+                    source_only_response = client.post(
+                        "/api/notice-identity/bind",
+                        json={
+                            "scope": "A",
+                            "binding_context": "ongoing",
+                            "work_type": "maintenance",
+                            "notice_type": "维保通告",
+                            "active_item_id": "target-maintenance-rec-target-binding",
+                            "source_record_id": "rec-source-binding",
+                            "source_month": "8月",
+                            "source_binding_only": True,
+                            "target_record_id": "rec-target-binding",
+                        },
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=bind-session"},
+                    )
+                self.assertEqual(
+                    source_only_response.status_code,
+                    200,
+                    source_only_response.text,
+                )
+                self.assertEqual(
+                    binding_service.source_candidate_calls[-1]["source_record_id"],
+                    "rec-source-binding",
                 )
                 outbox = store.list_outbox_events("qt_action", limit=20)
                 self.assertTrue(outbox)
@@ -26633,6 +26683,51 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("绑定计划通告", html)
         self.assertIn("不绑定", html)
 
+    def test_workbench_ongoing_without_source_requires_choice_before_start(self):
+        from lan_bitable_template_portal.workbench_lite import _detail_form
+
+        html = _detail_form(
+            record=None,
+            ongoing_item={
+                "active_item_id": "active-unbound-maintenance",
+                "record_id": "manual:maintenance:unbound",
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "E楼未上传维保",
+                "building": "E楼",
+                "building_codes": ["E"],
+            },
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+        )
+
+        self.assertIn('data-detail-mode="ongoing"', html)
+        self.assertIn('name="manual_binding_required" value="1"', html)
+        self.assertIn("绑定计划通告", html)
+        self.assertIn("不绑定", html)
+        self.assertIn('name="submit_action" value="start"', html)
+
+        uploaded_html = _detail_form(
+            record=None,
+            ongoing_item={
+                "active_item_id": "active-uploaded-maintenance",
+                "record_id": "rec_target_maintenance",
+                "target_record_id": "rec_target_maintenance",
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "E楼已上传维保",
+                "building": "E楼",
+                "building_codes": ["E"],
+            },
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+        )
+        self.assertIn('name="manual_binding_required" value="1"', uploaded_html)
+        self.assertIn('name="submit_action" value="update"', uploaded_html)
+        self.assertIn('name="submit_action" value="end"', uploaded_html)
+
     def test_workbench_source_ongoing_row_is_startable_until_active_item_exists(self):
         from lan_bitable_template_portal.workbench_lite import _record_rows
 
@@ -26887,6 +26982,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("applyRepairNoticeDraft(form, draft)", handler)
         self.assertIn("'repair_management_record_id',", handler)
         self.assertIn("await confirmManualSourceCandidate()", source)
+        self.assertIn("async function bindExistingOngoingSource", source)
+        binding_handler = source.split(
+            "async function bindExistingOngoingSource", 1
+        )[1].split("async function confirmManualSourceCandidate", 1)[0]
+        self.assertIn("source_binding_only: true", binding_handler)
+        self.assertIn("applyIdentityBindingToInbox(form, result, targetRecordId)", binding_handler)
+        self.assertIn("await refreshTaskInboxAfterIdentityBinding()", binding_handler)
+        self.assertLess(
+            binding_handler.index("setManualBindingChoice(form, 'bind', candidate)"),
+            binding_handler.index(
+                "setLiteFormDirty(formChangedWhileSaving ? true : wasDirtyAtStart)"
+            ),
+        )
+        self.assertIn("/api/notice-identity/bind", source)
+        self.assertIn("这里只显示未开始或进行中的可绑定事项", source)
 
     def test_workbench_lite_repair_management_prefill_keeps_ids_distinct(self):
         from lan_bitable_template_portal.workbench_lite import _detail_form
@@ -27535,6 +27645,82 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertFalse(expanded_bound.get("target_record_id"))
         self.assertEqual(expanded_bound["manual_binding_choice"], "bind")
+
+    def test_ongoing_unuploaded_notice_requires_source_binding_choice(self):
+        service = _TestMaintenancePortalService()
+        ongoing = {
+            "active_item_id": "active-unbound-maintenance",
+            "record_id": "manual:maintenance:unbound",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "title": "E楼未上传维保",
+            "building": "E楼",
+            "building_codes": ["E"],
+        }
+        payload = {
+            "command_format": "notice_command",
+            "action": "start",
+            "scope": "E",
+            "work_type": "maintenance",
+            "active_item_id": "active-unbound-maintenance",
+            "patch": {
+                "action": "start",
+                "scope": "E",
+                "work_type": "maintenance",
+                "title": "E楼未上传维保",
+            },
+        }
+
+        with self.assertRaisesRegex(PortalError, "发送开始前必须选择"):
+            service.expand_workbench_action_command(
+                payload,
+                scope="E",
+                ongoing_items=[ongoing],
+            )
+
+        unbound = json.loads(json.dumps(payload))
+        unbound["patch"]["manual_binding_choice"] = "unbound"
+        expanded_unbound = service.expand_workbench_action_command(
+            unbound,
+            scope="E",
+            ongoing_items=[ongoing],
+        )
+        self.assertFalse(expanded_unbound.get("source_record_id"))
+
+        bound = json.loads(json.dumps(payload))
+        bound["source_record_id"] = "rec_maintenance_source"
+        bound["patch"]["source_record_id"] = "rec_maintenance_source"
+        bound["patch"]["manual_binding_choice"] = "bind"
+        with patch.object(
+            service,
+            "validate_manual_source_binding",
+            return_value={"source_record_id": "rec_maintenance_source"},
+        ) as validate_binding:
+            expanded_bound = service.expand_workbench_action_command(
+                bound,
+                scope="E",
+                ongoing_items=[ongoing],
+            )
+        validate_binding.assert_called_once()
+        self.assertEqual(
+            expanded_bound.get("source_record_id"), "rec_maintenance_source"
+        )
+        idempotent = service.validate_manual_source_binding(
+            scope="E",
+            work_type="maintenance",
+            source_record_id="rec_maintenance_source",
+            target_record_id="rec_target_maintenance",
+            ongoing_items=[
+                {
+                    "active_item_id": "active-bound-maintenance",
+                    "source_record_id": "rec_maintenance_source",
+                    "target_record_id": "rec_target_maintenance",
+                    "work_type": "maintenance",
+                    "title": "E楼已绑定维保",
+                }
+            ],
+        )
+        self.assertEqual(idempotent["source_record_id"], "rec_maintenance_source")
 
     def test_repair_notice_command_recovers_management_relation_from_ongoing(self):
         service = _TestMaintenancePortalService()

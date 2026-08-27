@@ -2268,7 +2268,13 @@ def _detail_form(
     )
     mop_status = _mop_status_text(source, work)
     require_manual_binding = bool(
-        effective_manual and not parsed_draft and not prefill_draft
+        not source_record_id
+        and not parsed_draft
+        and not prefill_draft
+        and (
+            effective_manual
+            or ongoing_item and work in BINDABLE_TARGET_WORK_TYPES
+        )
     )
     source_link_html = (
         _manual_source_binding_panel()
@@ -5302,7 +5308,7 @@ def render_workbench_lite(
       return missing;
     }}
     function manualBindingIssue(form) {{
-      if (!form || previewValue(form, 'manual') !== '1' || previewValue(form, 'manual_binding_required') !== '1') return '';
+      if (!form || previewValue(form, 'manual_binding_required') !== '1' || String(form.dataset.action || '') !== 'start') return '';
       const choice = previewValue(form, 'manual_binding_choice');
       if (!choice) return '请选择绑定计划通告或不绑定';
       if (choice === 'bind' && !previewValue(form, 'source_record_id')) return '请选择要绑定的计划通告';
@@ -5448,14 +5454,17 @@ def render_workbench_lite(
       setFormValue(form, 'manual_binding_choice', normalized);
       const sourceId = normalized === 'bind' ? String(candidate?.source_record_id || '').trim() : '';
       setFormValue(form, 'source_record_id', sourceId);
-      setFormValue(form, 'record_id', sourceId);
+      const targetId = previewValue(form, 'target_record_id');
+      if (targetId) setFormValue(form, 'record_id', targetId);
+      else if (normalized === 'bind') setFormValue(form, 'record_id', sourceId);
+      else if (form.dataset.detailMode !== 'ongoing') setFormValue(form, 'record_id', '');
       const workType = previewValue(form, 'work_type') || form.dataset.workType || '';
       setFormValue(
         form,
         'repair_management_record_id',
         normalized === 'bind' && workType === 'repair' ? sourceId : ''
       );
-      if (workType === 'repair') {{
+      if (workType === 'repair' && !(targetId && form.dataset.detailMode === 'ongoing')) {{
         resetRepairEventSelection(
           form,
           normalized === 'bind' && Boolean(sourceId),
@@ -5486,7 +5495,7 @@ def render_workbench_lite(
       if (!liteManualSourceCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '没有可绑定的计划通告。未结束和已结束通告不会出现在这里。';
+        empty.textContent = '没有可绑定的计划通告。这里只显示未开始或进行中的可绑定事项。';
         list.replaceChildren(empty);
         return;
       }}
@@ -5568,11 +5577,66 @@ def render_workbench_lite(
       }}
       return filledCount;
     }}
+    async function bindExistingOngoingSource(form, candidate) {{
+      const sourceRecordId = String(candidate?.source_record_id || '').trim();
+      const targetRecordId = previewValue(form, 'target_record_id');
+      if (!sourceRecordId || !targetRecordId) return false;
+      const wasDirtyAtStart = liteFormDirty;
+      const formValuesAtStart = JSON.stringify(captureNoticeFormValues(form));
+      const response = await fetch('/api/notice-identity/bind', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        credentials: 'same-origin',
+        body: JSON.stringify({{
+          scope: previewValue(form, 'scope') || getCurrentScope(),
+          binding_context: 'ongoing',
+          work_type: previewValue(form, 'work_type') || form.dataset.workType || 'maintenance',
+          notice_type: previewValue(form, 'notice_type'),
+          active_item_id: previewValue(form, 'active_item_id'),
+          source_record_id: sourceRecordId,
+          source_month: previewValue(form, 'source_month'),
+          source_binding_only: true,
+          target_record_id: targetRecordId,
+          title: previewValue(form, 'title'),
+          reason: previewValue(form, 'reason'),
+          start_time: previewValue(form, 'start_time'),
+          end_time: previewValue(form, 'end_time'),
+        }}),
+      }});
+      const data = await response.json().catch(() => ({{}}));
+      if (handleLiteAuthRequired(response, data)) return false;
+      if (!response.ok || data.ok === false) throw new Error(data.error || '源表绑定失败');
+      const result = data.data || data;
+      const formChangedWhileSaving = (
+        JSON.stringify(captureNoticeFormValues(form)) !== formValuesAtStart
+      );
+      setManualBindingChoice(form, 'bind', candidate);
+      applyIdentityBindingToInbox(form, result, targetRecordId);
+      setSourceLinkDisplay(form, sourceRecordId, candidate?.title || '已关联');
+      // Binding is persisted independently; only genuine form edits stay dirty.
+      setLiteFormDirty(formChangedWhileSaving ? true : wasDirtyAtStart);
+      closeManualSourceCandidates();
+      await refreshTaskInboxAfterIdentityBinding();
+      return true;
+    }}
     async function confirmManualSourceCandidate() {{
       const candidate = liteManualSourceCandidates[liteSelectedManualSourceIndex];
       const form = document.getElementById('lite-notice-form');
       if (!candidate || !form) return;
       const workType = previewValue(form, 'work_type') || form.dataset.workType || '';
+      if (form.dataset.detailMode === 'ongoing' && previewValue(form, 'target_record_id')) {{
+        const confirmButton = document.getElementById('lite-manual-source-confirm');
+        setButtonBusy(confirmButton, true);
+        try {{
+          await bindExistingOngoingSource(form, candidate);
+          setLiteStatus('已绑定计划通告');
+        }} catch (error) {{
+          showLiteError(error && error.message ? error.message : '源表绑定失败');
+        }} finally {{
+          setButtonBusy(confirmButton, false);
+        }}
+        return;
+      }}
       if (workType !== 'repair') {{
         setManualBindingChoice(form, 'bind', candidate);
         closeManualSourceCandidates();

@@ -467,6 +467,8 @@ class NoticeIdentityBindRequest(APIModel):
     notice_type: str = ""
     active_item_id: str = ""
     source_record_id: str = ""
+    source_month: str = ""
+    source_binding_only: bool = False
     target_record_id: str = ""
     record_id: str = ""
     title: str = ""

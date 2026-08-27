@@ -6726,6 +6726,7 @@ class FastAPIPortalController:
                     or ""
                 ).strip()
                 source_record_id = str(payload.get("source_record_id") or "").strip()
+                source_binding_only = bool(payload.get("source_binding_only"))
                 target_record_id = str(
                     payload.get("target_record_id") or payload.get("record_id") or ""
                 ).strip()
@@ -6734,6 +6735,20 @@ class FastAPIPortalController:
                     target_record_id = ""
                 if not (source_record_id or target_record_id or active_item_id):
                     raise PortalError("缺少可绑定的源表记录、目标记录或本地进行中条目。")
+                if source_binding_only:
+                    if not (source_record_id and target_record_id):
+                        raise PortalError("源表绑定缺少源表或目标记录。")
+                    ongoing = await asyncio.to_thread(self._get_ongoing, scope)
+                    await asyncio.to_thread(
+                        PortalRuntime.service.validate_manual_source_binding,
+                        scope=scope,
+                        work_type=work_type,
+                        source_record_id=source_record_id,
+                        month=str(payload.get("source_month") or ""),
+                        ongoing_items=ongoing,
+                        target_record_id=target_record_id,
+                        active_item_id=active_item_id,
+                    )
                 validation = await asyncio.to_thread(
                     PortalRuntime.service.validate_notice_identity_binding,
                     scope=scope,
@@ -6917,25 +6932,26 @@ class FastAPIPortalController:
                         if repair_projection_qt_event_ids
                         else 0
                     )
-                    if target_record_id and binding_row is None:
-                        matched_row: dict[str, Any] = {}
-                        for row in state_store.list_qt_active_items(
-                            include_deleted=False
-                        ):
-                            row_payload = (
-                                row.get("payload")
-                                if isinstance(row.get("payload"), dict)
-                                else {}
-                            )
-                            if (
-                                active_item_id
-                                and str(row.get("active_item_id") or "")
-                                == active_item_id
-                            ) or canonical_target_record_id(
-                                row_payload
-                            ) == target_record_id:
-                                matched_row = row
-                                break
+                    if target_record_id:
+                        matched_row: dict[str, Any] = binding_row or {}
+                        if not matched_row:
+                            for row in state_store.list_qt_active_items(
+                                include_deleted=False
+                            ):
+                                row_payload = (
+                                    row.get("payload")
+                                    if isinstance(row.get("payload"), dict)
+                                    else {}
+                                )
+                                if (
+                                    active_item_id
+                                    and str(row.get("active_item_id") or "")
+                                    == active_item_id
+                                ) or canonical_target_record_id(
+                                    row_payload
+                                ) == target_record_id:
+                                    matched_row = row
+                                    break
                         row_payload = (
                             matched_row.get("payload")
                             if isinstance(matched_row.get("payload"), dict)
@@ -6958,6 +6974,21 @@ class FastAPIPortalController:
                                 "work_type": work_type,
                                 "notice_type": notice_type,
                                 "source_record_id": source_record_id,
+                                "source_work_type": str(
+                                    validation.get("source_work_type") or work_type
+                                ).strip(),
+                                "source_app_token": str(
+                                    validation.get("source_app_token")
+                                    or merged.get("source_app_token")
+                                    or ""
+                                ).strip(),
+                                "source_table_id": str(
+                                    validation.get("source_table_id")
+                                    or merged.get("source_table_id")
+                                    or ""
+                                ).strip(),
+                                "source_progress": "进行中",
+                                "source_status": "进行中",
                                 "target_record_id": target_record_id,
                                 "record_id": target_record_id,
                             }
