@@ -542,6 +542,8 @@ class QtClipboardEventRequest(APIModel):
     ts: int | float | None = None
     source: str = "clipboard"
     target_record_id: str = ""
+    qt_active_item_id: str = ""
+    qt_upload_in_progress: bool = False
 
 
 class QtOngoingSnapshotRequest(APIModel):

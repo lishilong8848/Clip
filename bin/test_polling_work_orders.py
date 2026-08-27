@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -118,6 +119,9 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("退出当前工单并重新选择", steps)
         self.assertIn("浏览器返回不会取消当前选择", steps)
         self.assertIn("拍照/上传操作照片", steps)
+        self.assertIn("操作照片待拍", steps)
+        self.assertIn("回退上一步", steps)
+        self.assertIn("/api/polling-work-orders/rollback", steps)
         self.assertIn("capture','environment", steps)
         self.assertIn("image.loading='eager'", steps)
         self.assertIn("缩略图加载失败", steps)
@@ -218,6 +222,99 @@ class PollingWorkOrderTests(unittest.TestCase):
         finalize.assert_not_called()
         self.assertEqual(submit.call_args.args[0], "PollingWorkOrderFinalize")
         self.assertEqual(submit.call_args.args[2], "recQueued")
+
+    def test_polling_work_order_rollback_api_uses_reviewer_token(self) -> None:
+        manager = MagicMock()
+        manager.rollback_previous.return_value = {
+            "version": 3,
+            "current_index": 0,
+            "can_rollback_previous": False,
+        }
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        with patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            response = client.post(
+                "/api/polling-work-orders/rollback",
+                json={"token": "r" * 32, "step_key": "1:2", "expected_version": 2},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["data"]["current_index"], 0)
+        self.assertEqual(manager.rollback_previous.call_args.kwargs["step_key"], "1:2")
+
+    def test_reviewer_can_rollback_repeatedly_and_operator_session_tracks_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            service.work_order_root = Path(temp) / "orders"
+            target_record_id = "recRepeatedRollback"
+            photo_root = service._group_directory(target_record_id) / "photos"
+            photo_root.mkdir(parents=True)
+            steps = []
+            for index in range(3):
+                photo_path = photo_root / f"step-{index + 1}.png"
+                photo_path.write_bytes(_png_bytes())
+                done = index < 2
+                steps.append(
+                    {
+                        "step_key": f"1:{index + 1}",
+                        "global_index": index,
+                        "run_index": 1,
+                        "step_index": index + 1,
+                        "content": f"步骤{index + 1}",
+                        "operator_required": True,
+                        "reviewer_required": True,
+                        "activated_at_ts": time.time(),
+                        "photos": [{"photo_id": str(index), "path": str(photo_path)}],
+                        "operator_confirmation": {"confirmed_at": "2026-08-27 09:00:00"} if done else {},
+                        "reviewer_confirmation": {"confirmed_at": "2026-08-27 09:01:00"} if done else {},
+                    }
+                )
+            operator_token = service.role_token(target_record_id, "operator")
+            reviewer_token = service.role_token(target_record_id, "reviewer")
+            store.put_document(
+                "polling_work_order",
+                target_record_id,
+                {
+                    "group_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "state": "active",
+                    "version": 1,
+                    "current_index": 2,
+                    "selected_run_index": 1,
+                    "selected_by_role": "reviewer",
+                    "runs": [{"from_unit": "1#", "to_unit": "2#"}],
+                    "steps": steps,
+                    "operator": {"name": "操作员"},
+                    "reviewer": {"name": "审核员"},
+                    "token_hashes": {
+                        "operator": hashlib.sha256(operator_token.encode()).hexdigest(),
+                        "reviewer": hashlib.sha256(reviewer_token.encode()).hexdigest(),
+                    },
+                },
+            )
+
+            reviewer_session = service.rollback_previous(
+                reviewer_token,
+                step_key="1:3",
+                expected_version=1,
+            )
+            self.assertEqual(reviewer_session["current_index"], 1)
+            self.assertTrue(reviewer_session["can_rollback_previous"])
+            operator_session = service.session(operator_token)
+            self.assertEqual(operator_session["current_index"], 1)
+            self.assertEqual(operator_session["version"], reviewer_session["version"])
+
+            reviewer_session = service.rollback_previous(
+                reviewer_token,
+                step_key="1:2",
+                expected_version=reviewer_session["version"],
+            )
+            self.assertEqual(reviewer_session["current_index"], 0)
+            self.assertFalse(reviewer_session["can_rollback_previous"])
+            operator_session = service.session(operator_token)
+            self.assertEqual(operator_session["current_index"], 0)
+            self.assertEqual(operator_session["version"], reviewer_session["version"])
 
     def test_notice_content_prefills_polling_runs(self) -> None:
         node = shutil.which("node")
@@ -667,6 +764,14 @@ class PollingWorkOrderTests(unittest.TestCase):
                     step_key="1:1",
                     expected_version=session["version"],
                 )
+            session = service.add_step_photo(
+                operator_token,
+                step_key="1:1",
+                expected_version=session["version"],
+                file_name="第一步.png",
+                mime_type="image/png",
+                content=_png_bytes(),
+            )
             session = service.confirm(
                 operator_token,
                 step_key="1:1",
@@ -674,6 +779,51 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
             session = service.confirm(reviewer_token, step_key="1:1", expected_version=session["version"])
             self.assertEqual(session["current_index"], 1)
+            first_photo_path = Path(
+                service.get_group("recTarget1")["steps"][0]["photos"][0]["path"]
+            )
+            with self.assertRaisesRegex(Exception, "只有现场审核人"):
+                service.rollback_previous(
+                    operator_token,
+                    step_key="1:2",
+                    expected_version=session["version"],
+                )
+            session = service.rollback_previous(
+                reviewer_token,
+                step_key="1:2",
+                expected_version=session["version"],
+            )
+            self.assertEqual(session["current_index"], 0)
+            self.assertFalse(first_photo_path.exists())
+            self.assertFalse(service.get_group("recTarget1")["steps"][0]["photos"])
+            session = service.add_step_photo(
+                operator_token,
+                step_key="1:1",
+                expected_version=session["version"],
+                file_name="第一步重做.png",
+                mime_type="image/png",
+                content=_png_bytes("#ff8a00"),
+            )
+            session = service.confirm(
+                operator_token, step_key="1:1", expected_version=session["version"]
+            )
+            session = service.confirm(
+                reviewer_token, step_key="1:1", expected_version=session["version"]
+            )
+            with self.assertRaisesRegex(Exception, "拍摄并上传"):
+                service.confirm(
+                    reviewer_token,
+                    step_key="1:2",
+                    expected_version=session["version"],
+                )
+            session = service.add_step_photo(
+                reviewer_token,
+                step_key="1:2",
+                expected_version=session["version"],
+                file_name="第二步.png",
+                mime_type="image/png",
+                content=_png_bytes("#12a150"),
+            )
             session = service.confirm(reviewer_token, step_key="1:2", expected_version=session["version"])
             self.assertEqual(session["state"], "upload_pending")
             service.mark_upload_result("recTarget1", success=True, file_tokens=["file-token"])
@@ -786,11 +936,27 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertTrue(
                 all(step["run_index"] == 2 for step in first_run["steps"])
             )
+            first_run = service.add_step_photo(
+                operator_two,
+                step_key="2:1",
+                expected_version=first_run["version"],
+                file_name="工单2第一步.png",
+                mime_type="image/png",
+                content=_png_bytes(),
+            )
             first_run = service.confirm(
                 operator_two, step_key="2:1", expected_version=first_run["version"]
             )
             first_run = service.confirm(
                 reviewer_two, step_key="2:1", expected_version=first_run["version"]
+            )
+            first_run = service.add_step_photo(
+                reviewer_two,
+                step_key="2:2",
+                expected_version=first_run["version"],
+                file_name="工单2第二步.png",
+                mime_type="image/png",
+                content=_png_bytes("#12a150"),
             )
             second_run = service.confirm(
                 reviewer_two, step_key="2:2", expected_version=first_run["version"]
@@ -1014,7 +1180,10 @@ class PollingWorkOrderTests(unittest.TestCase):
             workbook.close()
             self.assertIn("倒计时拍照 SOP · 1#→2#", values)
             self.assertIn("将1#切换到2#", values)
-            self.assertEqual(workbook_info["name"], "轮巡操作流程.xlsx")
+            self.assertRegex(
+                workbook_info["name"],
+                r"^A楼\d{4}年\d{1,2}月\d{1,2}日-倒计时拍照 SOP-1#轮巡至2#-操作人-操作员-审核人-审核员-操作记录\.xlsx$",
+            )
             with patch(
                 "lan_bitable_template_portal.polling_work_orders.POLLING_WORK_ORDER_MAX_BYTES",
                 1,
@@ -1045,13 +1214,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                         if run_index == 1 and step_index == 1
                         else f"{label}操作步骤{step_index}"
                     )
-                    photo_path = (
-                        first_photo
-                        if run_index == 1 and step_index == 1
-                        else second_photo
-                        if run_index == 2 and step_index == 1
-                        else None
-                    )
+                    photo_path = first_photo if run_index == 1 else second_photo
                     steps.append(
                         {
                             "step_key": f"{run_index}:{step_index}",
@@ -1087,6 +1250,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                     "group_id": target_record_id,
                     "target_record_id": target_record_id,
                     "state": "upload_pending",
+                    "scope": "A",
                     "title": "双工单模板测试",
                     "sop_name": "冷机切换SOP",
                     "operator": {"name": "操作员甲"},
@@ -1105,6 +1269,10 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(
                 workbook.sheetnames,
                 ["工单1 1#→2#", "工单2 4#→5#"],
+            )
+            self.assertEqual(
+                workbook_info["name"],
+                "A楼2026年8月26日-冷机切换SOP-1#4#轮巡至2#5#-操作人-操作员甲-审核人-审核员乙-操作记录.xlsx",
             )
             first_sheet, second_sheet = workbook.worksheets
             self.assertEqual(first_sheet.max_row, 10)
@@ -1128,8 +1296,11 @@ class PollingWorkOrderTests(unittest.TestCase):
                 second_sheet.row_dimensions[10].height,
                 second_sheet.row_dimensions[11].height,
             )
-            for sheet, last_row in ((first_sheet, 10), (second_sheet, 11)):
-                self.assertEqual(len(sheet._images), 2)
+            for sheet, last_row, image_count in (
+                (first_sheet, 10, 3),
+                (second_sheet, 11, 4),
+            ):
+                self.assertEqual(len(sheet._images), image_count)
                 self.assertIn(f"$A$1:$E${last_row}", str(sheet.print_area))
                 self.assertEqual(sheet.print_title_rows, "$8:$8")
             self.assertEqual(first_sheet["C3"].value, "操作员甲")
@@ -1266,6 +1437,9 @@ class PollingWorkOrderTests(unittest.TestCase):
                 "recFinalize",
                 token_by_sha256={"old-workbook-digest": "old-workbook-token"},
             )
+            expected_workbook_name = service.build_execution_workbook("recFinalize")[
+                "name"
+            ]
             uploaded_names = []
             patches = []
 
@@ -1313,7 +1487,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                     "recFinalize"
                 )
             self.assertTrue(result["ok"], result)
-            self.assertEqual(uploaded_names, ["轮巡操作流程.xlsx"])
+            self.assertEqual(uploaded_names, [expected_workbook_name])
             self.assertEqual(
                 patches[0]["工单附件"],
                 [

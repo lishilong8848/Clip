@@ -1207,17 +1207,23 @@ class PortalRuntime:
                 if str(token or "").strip()
             }
             workbook_digest = str(workbook.get("sha256") or "").strip()
-            workbook_token = str(uploaded_by_hash.get(workbook_digest) or "").strip()
+            workbook_name = str(workbook.get("name") or "轮巡操作流程.xlsx")
+            workbook_token = (
+                str(uploaded_by_hash.get(workbook_digest) or "").strip()
+                if str(group.get("uploaded_workbook_name") or "") == workbook_name
+                else ""
+            )
             if not workbook_token:
                 workbook_token = cls.service._upload_bitable_file(
                     file_path=str(workbook.get("path") or ""),
-                    file_name=str(workbook.get("name") or "轮巡操作流程.xlsx"),
+                    file_name=workbook_name,
                     app_token=str(config.app_token or ""),
                 )
                 uploaded_by_hash[workbook_digest] = workbook_token
                 manager.mark_upload_progress(
                     target_record_id,
                     token_by_sha256=uploaded_by_hash,
+                    workbook_name=workbook_name,
                 )
             new_tokens = [workbook_token]
             existing_tokens = cls._change_confirmation_attachment_tokens(

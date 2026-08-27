@@ -1036,10 +1036,12 @@ class MainWindowClipboardMixin:
                 if controller is None or not hasattr(controller, "post_local_clipboard_event"):
                     break
                 try:
+                    upload_context = self._clipboard_event_upload_context(content)
                     result = controller.post_local_clipboard_event(
                         content,
                         ts=int(data.get("ts") or time.time() * 1000),
                         source="clipboard_sqlite_fallback",
+                        **upload_context,
                     )
                     if isinstance(result, dict) and hasattr(
                         self, "_apply_clipboard_projection_result"
@@ -1161,9 +1163,11 @@ class MainWindowClipboardMixin:
                 self._clipboard_pending_lines.insert(0, text)
                 return
             try:
+                upload_context = self._clipboard_event_upload_context(text)
                 result = controller.post_local_clipboard_event(
                     text,
                     ts=int(time.time() * 1000),
+                    **upload_context,
                 )
                 if not isinstance(result, dict) or not result.get("ok", True):
                     error = (
@@ -1200,6 +1204,37 @@ class MainWindowClipboardMixin:
             f"{entry.get('notice_type', '')}|{entry.get('title', '')}"
         )
         return hashlib.md5(key.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _clipboard_event_upload_context(self, content: str) -> dict:
+        info = extract_event_info(content) or {}
+        if str(info.get("notice_type") or "").strip() != "事件通告":
+            return {}
+        find_item = getattr(self, "_find_active_item_by_content_or_title", None)
+        if not callable(find_item):
+            return {}
+        try:
+            _list_widget, item = find_item(
+                content,
+                str(info.get("title") or ""),
+                "事件通告",
+                str(info.get("unique_key") or ""),
+            )
+            if not item or not self._is_valid_list_item(item):
+                return {}
+            data = item.data(Qt.ItemDataRole.UserRole) or {}
+            active_item_id = str(data.get("active_item_id") or "").strip()
+            record_id = str(data.get("record_id") or "").strip()
+            candidate_ids = self._upload_completion_record_id_candidates(record_id)
+            upload_in_progress = bool(data.get("_upload_in_progress")) or any(
+                candidate_id in self.pending_action_record_ids
+                for candidate_id in candidate_ids
+            )
+            return {
+                "qt_active_item_id": active_item_id,
+                "qt_upload_in_progress": upload_in_progress,
+            }
+        except Exception:
+            return {}
 
     def _prune_recent_clipboard_entries(self, now: float):
         window = float(self._clipboard_entry_dedupe_window_seconds or 0.0)

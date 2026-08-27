@@ -1326,12 +1326,16 @@ class BackendProcessPortalController:
         ts: int | None = None,
         source: str = "clipboard",
         target_record_id: str = "",
+        qt_active_item_id: str = "",
+        qt_upload_in_progress: bool = False,
     ) -> dict:
         payload = {
             "content": str(content or "").strip(),
             "ts": int(ts or time.time() * 1000),
             "source": str(source or "clipboard"),
             "target_record_id": str(target_record_id or "").strip(),
+            "qt_active_item_id": str(qt_active_item_id or "").strip(),
+            "qt_upload_in_progress": bool(qt_upload_in_progress),
         }
         result = self._request_json(
             "POST",

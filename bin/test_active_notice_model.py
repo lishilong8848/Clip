@@ -1045,6 +1045,89 @@ class ActiveNoticeModelTests(unittest.TestCase):
             old_text,
         )
 
+    def test_recreated_event_start_upload_queues_latest_end_generation(self):
+        harness = _ReplaceRecordIdHarness()
+        record_id = "local_recreated_event"
+        harness.pending_action_record_ids = {record_id}
+        harness.pending_action_types = {record_id: "upload"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        harness._pending_update_after_upload_scheduled = False
+        item = QListWidgetItem("recreated-event")
+        harness.list_active_event.addItem(item)
+        start_text = (
+            "【事件通告】状态：新增\n【标题】E楼事件\n"
+            "【来源】BMS\n【时间】2026-08-26 17:00\n【概述】重新新增"
+        )
+        update_text = start_text.replace("状态：新增", "状态：更新").replace(
+            "重新新增", "正在处理"
+        )
+        end_text = start_text.replace("状态：新增", "状态：结束").replace(
+            "重新新增", "工作已完成"
+        )
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "active-recreated-event",
+                "record_id": record_id,
+                "target_record_id": "",
+                "notice_type": "事件通告",
+                "origin": "clipboard_recreated_after_delete",
+                "_is_placeholder_record": True,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": "qt_notice:recreated-start",
+                "text": start_text,
+            },
+        )
+
+        queued = harness._queue_pending_content(
+            record_id,
+            update_text,
+            "更新",
+            active_item_id="active-recreated-event",
+        )
+        self.assertTrue(queued)
+        self.assertTrue(
+            harness._queue_confirmed_upload_if_busy(
+                item.data(Qt.ItemDataRole.UserRole),
+                screenshot_bytes=b"update-image",
+                action_type="update",
+                response_time="",
+                buildings=["E楼"],
+                extra_images=[],
+                specialty="电气",
+                change_level="",
+                event_level="I3",
+                event_source="BMS",
+                recover_selected=False,
+                robot_group_choice="auto",
+            )
+        )
+        queued = harness._queue_pending_content(
+            record_id,
+            end_text,
+            "结束",
+            active_item_id="active-recreated-event",
+        )
+        data = item.data(Qt.ItemDataRole.UserRole)
+
+        self.assertTrue(queued)
+        self.assertEqual(data["text"], end_text)
+        self.assertEqual(data["_queued_action"], "end")
+        self.assertTrue(data["_queued_after_upload"])
+        self.assertTrue(data["_queued_upload_requested"])
+        pending = harness.pending_update_after_upload[record_id]
+        self.assertEqual(pending["action_type"], "end")
+        self.assertEqual(pending["data"]["text"], end_text)
+        self.assertEqual(
+            harness.pending_upload_rollback_by_record_id[record_id]["old_data"][
+                "text"
+            ],
+            start_text,
+        )
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "已排队")
+
     def test_queued_event_upload_success_keeps_next_text_and_dispatch_request(self):
         harness = _ReplaceRecordIdHarness()
         harness._closing = False

@@ -45,7 +45,6 @@ POLLING_SOP_MAX_STEPS = 200
 POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
 POLLING_STEP_PHOTO_MAX_BYTES = 8 * 1024 * 1024
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
-POLLING_WORK_ORDER_OUTPUT_NAME = "轮巡操作流程.xlsx"
 POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v2.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
 
@@ -540,6 +539,7 @@ class PollingWorkOrderService:
                 "sop_id": str(sop.get("sop_id") or ""),
                 "sop_version": int(sop.get("version") or 0),
                 "sop_name": str(sop.get("name") or ""),
+                "scope": request_scope,
                 "steps": copy.deepcopy(sop.get("steps") or []),
                 "attachments": snapshot_attachments,
                 "runs": normalized_runs,
@@ -707,6 +707,7 @@ class PollingWorkOrderService:
                 "sop_id": str(spec.get("sop_id") or ""),
                 "sop_version": int(spec.get("sop_version") or 0),
                 "sop_name": str(spec.get("sop_name") or ""),
+                "scope": str(spec.get("scope") or "").strip().upper(),
                 "runs": runs,
                 "steps": flattened,
                 "attachments": attachments,
@@ -788,6 +789,63 @@ class PollingWorkOrderService:
             not step.get("reviewer_required")
             or bool(step.get("reviewer_confirmation"))
         )
+
+    def _step_has_local_photo(self, group: dict, step: dict) -> bool:
+        photo_root = (
+            self._group_directory(str(group.get("target_record_id") or ""))
+            / "photos"
+        ).resolve()
+        return any(
+            path.is_file() and path.is_relative_to(photo_root)
+            for photo in step.get("photos") or []
+            if isinstance(photo, dict)
+            for path in [Path(str(photo.get("path") or "")).resolve()]
+        )
+
+    @staticmethod
+    def _workbook_output_name(group: dict) -> str:
+        scope = str(group.get("scope") or "").strip().upper()
+        if scope == "110":
+            building = "110站"
+        elif scope in POLLING_SOP_SCOPES:
+            building = f"{scope}楼"
+        else:
+            match = re.search(r"(110站|[ABCDEH]楼)", str(group.get("title") or ""))
+            building = match.group(1) if match else "园区"
+        confirmed_times = [
+            str((step.get(key) or {}).get("confirmed_at") or "").strip()
+            for step in group.get("steps") or []
+            if isinstance(step, dict)
+            for key in ("operator_confirmation", "reviewer_confirmation")
+            if str((step.get(key) or {}).get("confirmed_at") or "").strip()
+        ]
+        date_text = (max(confirmed_times) if confirmed_times else str(group.get("updated_at") or ""))[:10]
+        try:
+            completed_date = dt.date.fromisoformat(date_text)
+        except ValueError:
+            completed_date = dt.date.today()
+        runs = [item for item in group.get("runs") or [] if isinstance(item, dict)]
+        if len(runs) == 1:
+            direction = f"{runs[0].get('from_unit') or ''}轮巡至{runs[0].get('to_unit') or ''}"
+        else:
+            direction = (
+                "".join(str(item.get("from_unit") or "") for item in runs)
+                + "轮巡至"
+                + "".join(str(item.get("to_unit") or "") for item in runs)
+            )
+        prefix = (
+            f"{building}{completed_date.year}年{completed_date.month}月"
+            f"{completed_date.day}日-"
+        )
+        tail = (
+            f"-{direction}-操作人-"
+            f"{_safe_file_name((group.get('operator') or {}).get('name') or '未填写')[:32]}-"
+            f"审核人-{_safe_file_name((group.get('reviewer') or {}).get('name') or '未填写')[:32]}-"
+            "操作记录"
+        )
+        sop_name = _safe_file_name(group.get("sop_name") or "轮巡SOP")
+        sop_name = sop_name[: max(1, 155 - len(prefix) - len(tail))]
+        return f"{prefix}{sop_name}{tail}.xlsx"
 
     @classmethod
     def _selected_run_index(cls, group: dict, steps: list[dict]) -> int:
@@ -886,6 +944,16 @@ class PollingWorkOrderService:
                 for step in selected_steps
             )
         )
+        can_rollback_previous = bool(
+            role == "reviewer"
+            and str(group.get("state") or "") == "active"
+            and selected_run_index
+            and current_index > 0
+            and current_index < len(steps)
+            and int(steps[current_index - 1].get("run_index") or 0)
+            == selected_run_index
+            and self._step_done(steps[current_index - 1])
+        )
         return {
             "group_id": str(group.get("group_id") or ""),
             "title": str(group.get("title") or ""),
@@ -899,6 +967,7 @@ class PollingWorkOrderService:
             "total_steps": len(steps),
             "current_run_index": selected_run_index,
             "can_release_selection": can_release_selection,
+            "can_rollback_previous": can_rollback_previous,
             "work_orders": work_orders,
             "steps": public_steps,
             "last_error": str(group.get("last_error") or ""),
@@ -1060,6 +1129,8 @@ class PollingWorkOrderService:
                 raise PortalConflictError("当前步骤不需要该角色确认。")
             if role == "reviewer" and step.get("operator_required") and not step.get("operator_confirmation"):
                 raise PortalConflictError("请先等待操作人确认。")
+            if not self._step_has_local_photo(group, step):
+                raise PortalConflictError("请先拍摄并上传当前步骤照片。")
             if not step.get(f"{role}_confirmation"):
                 step[f"{role}_confirmation"] = {
                     "assigned_record_id": str((group.get(role) or {}).get("record_id") or ""),
@@ -1107,6 +1178,81 @@ class PollingWorkOrderService:
                 str(group.get("target_record_id") or ""),
                 group,
             )
+        return self.session(token)
+
+    def rollback_previous(
+        self,
+        token: str,
+        *,
+        step_key: str,
+        expected_version: int,
+        actual_open_id: str = "",
+        actual_name: str = "",
+    ) -> dict:
+        with self._lock:
+            group, role = self._resolve_token(token)
+            if role != "reviewer":
+                raise PortalConflictError("只有现场审核人可以回退上一步。")
+            if str(group.get("state") or "") != "active":
+                raise PortalConflictError("当前工单已不能回退步骤。")
+            if int(expected_version or 0) != int(group.get("version") or 0):
+                raise PortalConflictError("工单状态已更新，请刷新后重试。")
+            steps = list(group.get("steps") or [])
+            current_index = int(group.get("current_index") or 0)
+            selected_run_index = self._selected_run_index(group, steps)
+            if not selected_run_index or not 0 < current_index < len(steps):
+                raise PortalConflictError("当前没有可回退的上一步。")
+            current = steps[current_index]
+            previous = steps[current_index - 1]
+            if str(current.get("step_key") or "") != str(step_key or ""):
+                raise PortalConflictError("当前步骤已变化，请刷新后重试。")
+            if int(previous.get("run_index") or 0) != selected_run_index:
+                raise PortalConflictError("当前工单没有可回退的上一步。")
+            if not self._step_done(previous):
+                raise PortalConflictError("上一步尚未完成，无需回退。")
+            photo_root = (
+                self._group_directory(str(group.get("target_record_id") or ""))
+                / "photos"
+            ).resolve()
+            discarded_paths: list[Path] = []
+            for index in (current_index - 1, current_index):
+                item = steps[index]
+                discarded_paths.extend(
+                    Path(str(photo.get("path") or "")).resolve()
+                    for photo in item.get("photos") or []
+                    if isinstance(photo, dict)
+                )
+                item["photos"] = []
+                item["operator_confirmation"] = {}
+                item["reviewer_confirmation"] = {}
+                item["activated_at_ts"] = time.time() if index == current_index - 1 else 0.0
+            group.update(
+                {
+                    "steps": steps,
+                    "current_index": current_index - 1,
+                    "version": int(group.get("version") or 0) + 1,
+                    "updated_at": self._now_text(),
+                    "last_error": "",
+                    "last_rollback": {
+                        "from_step_key": str(current.get("step_key") or ""),
+                        "to_step_key": str(previous.get("step_key") or ""),
+                        "actual_open_id": str(actual_open_id or ""),
+                        "actual_name": str(actual_name or ""),
+                        "rolled_back_at": self._now_text(),
+                    },
+                }
+            )
+            self.state_store.put_document(
+                POLLING_WORK_ORDER_NAMESPACE,
+                str(group.get("target_record_id") or ""),
+                group,
+            )
+            for path in discarded_paths:
+                if path.is_file() and path.is_relative_to(photo_root):
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
         return self.session(token)
 
     def add_step_photo(
@@ -1269,7 +1415,7 @@ class PollingWorkOrderService:
             if size > POLLING_WORK_ORDER_MAX_BYTES:
                 raise PortalError("轮巡工单Excel超过允许大小，已停止上传。")
             return {
-                "name": POLLING_WORK_ORDER_OUTPUT_NAME,
+                "name": self._workbook_output_name(group),
                 "path": str(path),
                 "size": size,
                 "sha256": _file_sha256(path),
@@ -1381,7 +1527,9 @@ class PollingWorkOrderService:
                         if isinstance(item, dict)
                     ]
                     if not photos:
-                        continue
+                        raise PortalError(
+                            f"工单{run_index}第{step_offset + 1}步缺少操作照片。"
+                        )
                     photo_path = Path(str(photos[0].get("path") or "")).resolve()
                     if (
                         not photo_path.is_file()
@@ -1456,7 +1604,7 @@ class PollingWorkOrderService:
         finally:
             workbook.close()
         return {
-            "name": POLLING_WORK_ORDER_OUTPUT_NAME,
+            "name": self._workbook_output_name(group),
             "path": str(path),
             "size": path.stat().st_size,
             "sha256": _file_sha256(path),
@@ -1515,6 +1663,7 @@ class PollingWorkOrderService:
         target_record_id: str,
         *,
         token_by_sha256: dict[str, str],
+        workbook_name: str = "",
         photo_token_by_sha256: dict[str, str] | None = None,
         error: str = "",
     ) -> dict:
@@ -1525,6 +1674,8 @@ class PollingWorkOrderService:
                 for key, value in (token_by_sha256 or {}).items()
                 if str(key).strip() and str(value).strip()
             }
+            if workbook_name:
+                group["uploaded_workbook_name"] = str(workbook_name)
             if photo_token_by_sha256 is not None:
                 group["uploaded_photo_by_sha256"] = {
                     str(key): str(value)

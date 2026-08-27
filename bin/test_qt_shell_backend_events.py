@@ -35,7 +35,14 @@ class _Controller:
         return {"candidate_id": candidate_id}
 
     def post_local_clipboard_event(
-        self, content, *, ts=None, source="clipboard", target_record_id=""
+        self,
+        content,
+        *,
+        ts=None,
+        source="clipboard",
+        target_record_id="",
+        qt_active_item_id="",
+        qt_upload_in_progress=False,
     ):
         if content in self.fail_contents:
             raise RuntimeError("mock projection failed")
@@ -45,6 +52,8 @@ class _Controller:
                 "ts": ts,
                 "source": source,
                 "target_record_id": target_record_id,
+                "qt_active_item_id": qt_active_item_id,
+                "qt_upload_in_progress": qt_upload_in_progress,
             }
         )
         return {
@@ -275,6 +284,49 @@ class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_clipboard_event_upload_context_is_scoped_to_matching_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            harness = _ClipboardHarness(
+                LanPortalStateStore(Path(tmp) / "state.sqlite3"),
+                Path(tmp) / "clipboard.jsonl",
+            )
+            data = {
+                "active_item_id": "active-recreated-busy",
+                "record_id": "local_recreated_busy",
+                "notice_type": "事件通告",
+                "_upload_in_progress": False,
+            }
+
+            class Item:
+                @staticmethod
+                def data(_role):
+                    return data
+
+            harness._find_active_item_by_content_or_title = (
+                lambda *_args, **_kwargs: ("event-list", Item())
+            )
+            harness._is_valid_list_item = lambda _item: True
+            harness._upload_completion_record_id_candidates = (
+                lambda record_id: [record_id]
+            )
+            harness.pending_action_record_ids = {"local_recreated_busy"}
+            text = (
+                "【事件通告】状态：更新\n"
+                "【标题】E楼事件\n【来源】BMS\n"
+                "【时间】2026-08-26 17:00\n【概述】处理中"
+            )
+
+            context = harness._clipboard_event_upload_context(text)
+
+            self.assertEqual(
+                context,
+                {
+                    "qt_active_item_id": "active-recreated-busy",
+                    "qt_upload_in_progress": True,
+                },
+            )
+            harness._clipboard_state_store.shutdown_write_worker(timeout=1.0)
+
     def test_qt_local_event_match_normalizes_iso_time_and_building_code(self):
         harness = _RecordsHarness()
         update_text = (
@@ -1335,7 +1387,7 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
-    def test_deleted_clipboard_event_can_be_recreated_from_changed_copy(self):
+    def test_deleted_clipboard_event_recreates_on_new_then_accepts_busy_update(self):
         first_text = (
             "【事件通告】状态：新增\n"
             "【标题】EA118机房C楼I3级事件通报\n"
@@ -1344,8 +1396,9 @@ class QtShellBackendEventTests(unittest.TestCase):
             "【概述】C楼空调间漏水告警\n"
             "【进展】首次内容"
         )
-        update_text = first_text.replace("状态：新增", "状态：更新")
-        changed_text = update_text.replace("首次内容", "重新复制后的新内容")
+        changed_text = first_text.replace("状态：新增", "状态：更新").replace(
+            "首次内容", "重新复制后的新内容"
+        )
         with tempfile.TemporaryDirectory() as tmp:
             original_store = PortalRuntime.state_store
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
@@ -1354,72 +1407,52 @@ class QtShellBackendEventTests(unittest.TestCase):
                 first_entry = FastAPIPortalController._clipboard_entry_from_content(
                     first_text
                 )
-                update_entry = FastAPIPortalController._clipboard_entry_from_content(
-                    update_text
-                )
                 changed_entry = FastAPIPortalController._clipboard_entry_from_content(
                     changed_text
                 )
-                self.assertEqual(update_entry["entry_id"], changed_entry["entry_id"])
 
                 first = FastAPIPortalController._project_clipboard_entry_to_active(
                     first_entry
                 )
-                updated = FastAPIPortalController._project_clipboard_entry_to_active(
-                    update_entry
-                )
-                self.assertEqual(updated["active_item_id"], first["active_item_id"])
-                legacy_base = {**updated["item"]["payload"]}
-                legacy_base.pop("event_identity_key", None)
-                legacy_base.pop("event_match_fields", None)
-                store.upsert_qt_active_item(
-                    legacy_base,
-                    section="event",
-                    origin="clipboard",
-                )
                 removed = PortalRuntime.execute_local_remove_active_item(
                     {
-                        "active_item_id": updated["active_item_id"],
-                        "record_id": updated["record_id"],
+                        "active_item_id": first["active_item_id"],
+                        "record_id": first["record_id"],
                         "notice_type": "事件通告",
                         "work_type": "event",
                     }
                 )
                 self.assertTrue(removed["ok"])
-                legacy_payload = {
-                    **legacy_base,
-                    "active_item_id": "legacy-event-alias",
-                    "record_id": "local_legacy-event-alias",
-                    "target_record_id": "",
-                    "_is_placeholder_record": True,
-                }
-                store.upsert_qt_active_item(
-                    legacy_payload,
-                    section="event",
-                    origin="clipboard",
+                early_update = FastAPIPortalController._project_clipboard_entry_to_active(
+                    changed_entry
                 )
-                self.assertTrue(
-                    PortalRuntime.execute_local_remove_active_item(legacy_payload)["ok"]
-                )
-                replayed = FastAPIPortalController._project_clipboard_entry_to_active(
-                    update_entry
-                )
-                self.assertTrue(replayed.get("ignored"))
+                self.assertTrue(early_update.get("ignored"))
                 self.assertEqual(store.list_visible_qt_active_items(), [])
 
                 recreated = FastAPIPortalController._project_clipboard_entry_to_active(
+                    first_entry
+                )
+                self.assertTrue(recreated["ok"])
+                self.assertEqual(recreated["active_item_id"], first["active_item_id"])
+
+                changed_entry["qt_upload_in_progress"] = True
+                changed_entry["qt_active_item_id"] = recreated["active_item_id"]
+                queued = FastAPIPortalController._project_clipboard_entry_to_active(
                     changed_entry
                 )
 
-                self.assertTrue(recreated["ok"])
+                self.assertTrue(queued["ok"])
                 visible = store.list_visible_qt_active_items()
                 self.assertEqual(len(visible), 1)
-                self.assertEqual(visible[0]["active_item_id"], "legacy-event-alias")
+                self.assertEqual(
+                    visible[0]["active_item_id"],
+                    recreated["active_item_id"],
+                )
                 self.assertIn("重新复制后的新内容", visible[0]["payload"]["text"])
             finally:
                 PortalRuntime.state_store = original_store
 
-    def test_deleted_clipboard_event_identical_replay_is_not_reported_success(self):
+    def test_deleted_clipboard_event_identical_new_recreates_local_item(self):
         text = (
             "【事件通告】状态：新增\n"
             "【标题】EA118机房D楼I3级事件通报\n"
@@ -1449,23 +1482,67 @@ class QtShellBackendEventTests(unittest.TestCase):
                 )
 
                 self.assertTrue(removed["ok"])
-                self.assertTrue(replayed.get("ignored"))
-                self.assertIn("未写入共享列表", replayed.get("reason", ""))
-                self.assertEqual(store.list_visible_qt_active_items(), [])
+                self.assertTrue(replayed["ok"])
+                self.assertFalse(replayed.get("ignored", False))
+                self.assertEqual(replayed["active_item_id"], first["active_item_id"])
+                visible = store.list_visible_qt_active_items()
+                self.assertEqual(len(visible), 1)
+                payload = visible[0]["payload"]
+                self.assertTrue(payload["_is_placeholder_record"])
+                self.assertFalse(payload.get("target_record_id"))
+                self.assertTrue(str(payload["record_id"]).startswith("local_"))
+            finally:
+                PortalRuntime.state_store = original_store
 
-                manual_entry = FastAPIPortalController._clipboard_entry_from_content(
-                    text,
-                    source="manual_clipboard",
-                )
-                manually_replayed = (
-                    FastAPIPortalController._project_clipboard_entry_to_active(
-                        manual_entry
+    def test_deleted_uploaded_event_new_does_not_reuse_old_target(self):
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【来源】BMS发现\n"
+            "【时间】2026-08-15 11:00\n"
+            "【概述】E楼冷机故障"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                first = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+                old_target = "rec-deleted-uploaded-event"
+                bound = {
+                    **first["item"]["payload"],
+                    "record_id": old_target,
+                    "target_record_id": old_target,
+                    "record_version": "old-version",
+                    "expected_record_version": "old-version",
+                    "binding_status": "bound",
+                    "_is_placeholder_record": False,
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        bound,
+                        section="event",
+                        origin="qt_upload",
                     )
                 )
+                removed = PortalRuntime.execute_local_remove_active_item(bound)
+                self.assertTrue(removed["ok"])
 
-                self.assertTrue(manually_replayed["ok"])
-                self.assertFalse(manually_replayed.get("ignored", False))
-                self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+                recreated = FastAPIPortalController._project_clipboard_entry_to_active(
+                    entry
+                )
+
+                self.assertTrue(recreated["ok"])
+                payload = recreated["item"]["payload"]
+                self.assertEqual(recreated["active_item_id"], first["active_item_id"])
+                self.assertNotEqual(recreated["record_id"], old_target)
+                self.assertTrue(str(recreated["record_id"]).startswith("local_"))
+                self.assertFalse(payload.get("target_record_id"))
+                self.assertTrue(payload["_is_placeholder_record"])
+                self.assertNotIn("record_version", payload)
+                self.assertNotIn("expected_record_version", payload)
+                self.assertNotIn("binding_status", payload)
             finally:
                 PortalRuntime.state_store = original_store
 

@@ -5583,6 +5583,33 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.post("/api/polling-work-orders/rollback")
+        async def polling_work_order_rollback(request: Request):
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PollingWorkOrderConfirmRequest
+                    )
+                ).to_payload()
+                session = self._current_session(request)
+                user = (
+                    session.get("user")
+                    if isinstance(session, dict)
+                    and isinstance(session.get("user"), dict)
+                    else {}
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().rollback_previous,
+                    str(payload.get("token") or ""),
+                    step_key=str(payload.get("step_key") or ""),
+                    expected_version=int(payload.get("expected_version") or 0),
+                    actual_open_id=str(user.get("open_id") or ""),
+                    actual_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.post("/api/polling-work-orders/activate")
         async def polling_work_order_activate(request: Request):
             try:
@@ -8317,6 +8344,12 @@ class FastAPIPortalController:
                 "ts": payload.get("ts") or int(time.time() * 1000),
                 "source": str(payload.get("source") or "clipboard"),
                 "target_record_id": str(payload.get("target_record_id") or "").strip(),
+                "qt_active_item_id": str(
+                    payload.get("qt_active_item_id") or ""
+                ).strip(),
+                "qt_upload_in_progress": bool(
+                    payload.get("qt_upload_in_progress")
+                ),
             }
             event_id = PortalRuntime.state_store.append_event(
                 "clipboard",
@@ -8338,6 +8371,10 @@ class FastAPIPortalController:
                 }
             candidate_id = str(entry.get("entry_id") or "").strip()
             entry["target_record_id"] = event_payload["target_record_id"]
+            entry["qt_active_item_id"] = event_payload["qt_active_item_id"]
+            entry["qt_upload_in_progress"] = event_payload[
+                "qt_upload_in_progress"
+            ]
             PortalRuntime.state_store.upsert_clipboard_candidate(
                 candidate_id,
                 content=content,
@@ -10573,7 +10610,7 @@ class FastAPIPortalController:
 
     @classmethod
     def _find_qt_active_item_for_clipboard_entry(
-        cls, entry: dict, *, include_deleted_local: bool = False
+        cls, entry: dict, *, include_deleted_event: bool = False
     ) -> dict | None:
         notice_type = str(entry.get("notice_type") or "").strip()
         unique_key = str(entry.get("unique_key") or "").strip()
@@ -10602,20 +10639,13 @@ class FastAPIPortalController:
             except Exception:
                 incoming_event_identity_key = ""
         stored_items = PortalRuntime.state_store.list_qt_active_items(
-            include_deleted=include_deleted_local
+            include_deleted=include_deleted_event
         )
-        if include_deleted_local:
+        if include_deleted_event:
             stored_items = [
                 item
                 for item in stored_items
                 if item.get("deleted_at") is not None
-                and not canonical_target_record_id(
-                    item.get("payload") if isinstance(item.get("payload"), dict) else {}
-                )
-                and (
-                    not str(item.get("record_id") or "").strip()
-                    or is_local_record_id(str(item.get("record_id") or "").strip())
-                )
             ]
         for item in stored_items:
             payload = item.get("payload") if isinstance(item, dict) else {}
@@ -10684,7 +10714,7 @@ class FastAPIPortalController:
                     unique.setdefault(key, item)
             return list(unique.values())
 
-        def _preferred_deleted_local_match(items: list[dict]) -> dict:
+        def _preferred_deleted_event_match(items: list[dict]) -> dict:
             entry_id = str(entry.get("entry_id") or "").strip()
             same_id_match = next(
                 (
@@ -10703,16 +10733,16 @@ class FastAPIPortalController:
             if len(exact_matches) == 1:
                 return exact_matches[0]
             if len(exact_matches) > 1:
-                if include_deleted_local:
-                    return _preferred_deleted_local_match(exact_matches)
+                if include_deleted_event:
+                    return _preferred_deleted_event_match(exact_matches)
                 log_warning("事件剪贴板严格身份匹配到多条活动记录，已阻止自动绑定。")
                 return None
             partial_matches = _unique_event_matches(event_partial_matches)
             if len(partial_matches) == 1:
                 return partial_matches[0]
             if len(partial_matches) > 1:
-                if include_deleted_local:
-                    return _preferred_deleted_local_match(partial_matches)
+                if include_deleted_event:
+                    return _preferred_deleted_event_match(partial_matches)
                 log_warning(
                     "事件剪贴板更新匹配到多条活动记录，已阻止自动绑定: "
                     f"fields={PortalRuntime._resolved_event_match_fields(incoming_event_data)}"
@@ -10981,32 +11011,21 @@ class FastAPIPortalController:
                         "reason": "目标记录已绑定其他通告类型，已忽略本次剪贴板投影。",
                     }
         existing = cls._find_qt_active_item_for_clipboard_entry(entry)
-        revive_deleted_local_event = False
+        recreate_deleted_event = False
         if (
             existing is None
             and notice_type == "事件通告"
-            and (projected_action in {"start", "update"} or not status)
+            and (projected_action == "start" or not status)
         ):
             deleted_match = cls._find_qt_active_item_for_clipboard_entry(
-                entry, include_deleted_local=True
-            )
-            deleted_payload = (
-                deleted_match.get("payload")
-                if isinstance(deleted_match, dict)
-                and isinstance(deleted_match.get("payload"), dict)
-                else {}
+                entry, include_deleted_event=True
             )
             if (
                 deleted_match
                 and deleted_match.get("deleted_at") is not None
-                and not canonical_target_record_id(deleted_payload)
-                and (
-                    str(deleted_payload.get("text") or "").strip() != content
-                    or str(entry.get("origin") or "").strip() == "manual_clipboard"
-                )
             ):
                 existing = deleted_match
-                revive_deleted_local_event = True
+                recreate_deleted_event = True
         active_item_id = ""
         if existing and isinstance(existing.get("payload"), dict):
             data = dict(existing.get("payload") or {})
@@ -11040,6 +11059,25 @@ class FastAPIPortalController:
                 }
         else:
             data = {}
+        if recreate_deleted_event:
+            data = {"active_item_id": active_item_id}
+        if (
+            notice_type == "事件通告"
+            and projected_action in {"update", "end"}
+            and bool(data.get("_is_placeholder_record"))
+            and str(data.get("origin") or "").strip()
+            == "clipboard_recreated_after_delete"
+            and not (
+                bool(entry.get("qt_upload_in_progress"))
+                and str(entry.get("qt_active_item_id") or "").strip()
+                == str(data.get("active_item_id") or active_item_id or "").strip()
+            )
+        ):
+            return {
+                "ok": True,
+                "ignored": True,
+                "reason": "重新新增尚未发送开始，已忽略提前复制的更新/结束。",
+            }
         if status not in {"", "开始", "新增"} and not data and not entry_target_record_id:
             if notice_type == "事件通告":
                 projected_for_lookup = cls._projected_notice_fields_from_text(
@@ -11072,6 +11110,11 @@ class FastAPIPortalController:
                 return {"ok": True, "ignored": True, "reason": "未找到可更新的活动条目。"}
         if not active_item_id:
             active_item_id = str(entry.get("entry_id") or "").strip() or uuid.uuid4().hex
+        projection_origin = (
+            "clipboard_recreated_after_delete"
+            if recreate_deleted_event
+            else "clipboard"
+        )
         record_id = str(
             entry_target_record_id
             or data.get("target_record_id")
@@ -11138,7 +11181,7 @@ class FastAPIPortalController:
                 ),
                 "time_str": data.get("time_str") or entry.get("time_str") or "",
                 "reason": data.get("reason") or entry.get("reason") or "",
-                "origin": data.get("origin") or "clipboard",
+                "origin": data.get("origin") or projection_origin,
                 "building_codes": building_codes,
                 "work_type": work_type,
                 "lan_work_type": work_type,
@@ -11151,10 +11194,12 @@ class FastAPIPortalController:
             else:
                 data.pop("event_source", None)
             data.update(PortalRuntime._event_identity_payload_patch(data))
-            recovered_target_record_id = (
-                PortalRuntime._event_target_from_identity_map(data)
-                or PortalRuntime._event_target_from_partial_identity_map(data)
-            )
+            recovered_target_record_id = ""
+            if not recreate_deleted_event:
+                recovered_target_record_id = (
+                    PortalRuntime._event_target_from_identity_map(data)
+                    or PortalRuntime._event_target_from_partial_identity_map(data)
+                )
             current_target_record_id = str(data.get("target_record_id") or "").strip()
             if (
                 recovered_target_record_id
@@ -11178,15 +11223,15 @@ class FastAPIPortalController:
             "notice_type": notice_type,
             "section": section,
             "sort_order": 0,
-            "origin": "clipboard",
+            "origin": projection_origin,
             "payload": data,
         }
         persisted = PortalRuntime.state_store.upsert_qt_active_item(
             data,
             section=section,
             sort_order=0,
-            origin="clipboard",
-            allow_revive=revive_deleted_local_event,
+            origin=projection_origin,
+            allow_revive=recreate_deleted_event,
         )
         if not persisted and not any(
             str(item.get("active_item_id") or "").strip() == active_item_id
