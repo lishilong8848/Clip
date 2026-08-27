@@ -8036,12 +8036,14 @@ class PortalRuntime:
         if not str(prepared.get("reason") or "").strip():
             prepared["reason"] = (
                 str(parsed.get("reason") or "").strip()
-                or section_value("原因", "故障原因")
+                or section_value("原因", "故障原因（事件发生原因）", "故障原因")
             )
         if not str(prepared.get("impact") or "").strip():
             prepared["impact"] = section_value("影响", "影响范围")
         if not str(prepared.get("progress") or "").strip():
-            prepared["progress"] = section_value("进度", "完成情况", "解决方案")
+            prepared["progress"] = section_value(
+                "进度", "完成情况", "解决方案（事件解决措施）", "解决方案"
+            )
         return prepared
 
     @classmethod

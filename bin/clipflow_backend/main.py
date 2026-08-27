@@ -10886,7 +10886,9 @@ class FastAPIPortalController:
             "specialty": value(["专业", "专业类别", "所属专业"]),
             "location": value(["地点", "位置"]),
             "content": value(["内容"]),
-            "reason": value(["原因", "故障原因", "故障维修原因"]),
+            "reason": value(
+                ["原因", "故障原因（事件发生原因）", "故障原因", "故障维修原因"]
+            ),
             "impact": value(["影响", "影响范围"]),
             "progress": value(["进度", "完成情况"]),
             "start_time": start_time,
@@ -10898,7 +10900,7 @@ class FastAPIPortalController:
             "repair_mode": value(["维修方式"]),
             "discovery": value(["故障发现方式"]),
             "symptom": value(["故障现象"]),
-            "solution": value(["解决方案"]),
+            "solution": value(["解决方案（事件解决措施）", "解决方案"]),
             "spare_parts": value(["备件更换情况", "备件使用情况"]),
             "device": value(["设备"]),
             "cabinet": value(["柜号"]),

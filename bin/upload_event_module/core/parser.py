@@ -36,7 +36,10 @@ PATTERN_EVENT_TITLE = re.compile(r"【(?:告警描述|概述)】(.*?)(?:【|$)",
 PATTERN_TIME = re.compile(r"【(?:时间|事件发生时间|发生时间)】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_LOCATION = re.compile(r"【位置】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_LEVEL = re.compile(r"【等级】(.*?)(?:【|$)", re.DOTALL)  # 变更通告特有
-PATTERN_REASON = re.compile(r"【(?:原因|故障原因|故障维修原因)】(.*?)(?:【|$)", re.DOTALL)
+PATTERN_REASON = re.compile(
+    r"【(?:原因|故障原因(?:（事件发生原因）)?|故障维修原因)】(.*?)(?:【|$)",
+    re.DOTALL,
+)
 
 
 def _clean_section_value(value: str, *, single_line: bool = False) -> str:

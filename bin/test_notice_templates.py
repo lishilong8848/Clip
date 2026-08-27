@@ -23,7 +23,7 @@ from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 from upload_event_module.config import SPECIALTY_FIRE  # noqa: E402
 from upload_event_module.services.feishu_service import _send_robot_message  # noqa: E402
-from upload_event_module.services.handlers import NoticePayload  # noqa: E402
+from upload_event_module.services.handlers import NoticePayload, get_notice_handler  # noqa: E402
 
 
 class NoticeTemplateTests(unittest.TestCase):
@@ -204,14 +204,19 @@ class NoticeTemplateTests(unittest.TestCase):
                 "【影响范围】无业务影响",
                 "【故障发现方式】巡检发现",
                 "【故障现象】加湿异常",
-                "【故障原因】循环泵故障",
-                "【解决方案】更换循环泵",
+                "【故障原因（事件发生原因）】循环泵故障",
+                "【解决方案（事件解决措施）】更换循环泵",
                 "【备件更换情况】无",
                 "【完成情况】设备恢复正常",
             ],
         )
         for internal_key in ("fault_type", "repair_mode", "discovery", "symptom"):
             self.assertNotIn(internal_key, text)
+        fields = get_notice_handler("设备检修").build_update_fields(
+            NoticePayload(text=text)
+        )
+        self.assertEqual(fields["故障原因"], "循环泵故障")
+        self.assertEqual(fields["解决方案"], "更换循环泵")
 
     def test_change_qt_upload_payload_defaults_to_i3_when_level_missing(self):
         payload = PortalRuntime._prepared_to_notice_payload(

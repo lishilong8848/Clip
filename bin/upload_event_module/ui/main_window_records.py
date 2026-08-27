@@ -1264,8 +1264,15 @@ class MainWindowRecordsMixin:
             _add("维修方式", _section(("维修方式",)))
             _add("故障发现方式", _section(("故障发现方式",)))
             _add("故障现象", _section(("故障现象", "故障发生现象描述")))
-            _add("故障原因", resolved_reason or _section(("故障原因", "原因", "故障维修原因")))
-            _add("解决方案", _section(("解决方案",)))
+            _add(
+                "故障原因（事件发生原因）",
+                resolved_reason
+                or _section(("故障原因（事件发生原因）", "故障原因", "原因", "故障维修原因")),
+            )
+            _add(
+                "解决方案（事件解决措施）",
+                _section(("解决方案（事件解决措施）", "解决方案")),
+            )
             return components
 
         if notice_type in {"上电通告", "下电通告", "上下电通告"}:

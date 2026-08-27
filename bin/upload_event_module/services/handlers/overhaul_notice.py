@@ -80,11 +80,15 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
         if symptom:
             fields[OVERHAUL_NOTICE_FIELDS["symptom"]] = symptom
 
-        reason = self._extract_section(payload.text, "故障原因")
+        reason = self._extract_section(
+            payload.text, "故障原因（事件发生原因）"
+        ) or self._extract_section(payload.text, "故障原因")
         if reason:
             fields[OVERHAUL_NOTICE_FIELDS["reason"]] = reason
 
-        solution = self._extract_section(payload.text, "解决方案")
+        solution = self._extract_section(
+            payload.text, "解决方案（事件解决措施）"
+        ) or self._extract_section(payload.text, "解决方案")
         if solution:
             fields[OVERHAUL_NOTICE_FIELDS["solution"]] = solution
 
@@ -194,11 +198,15 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
         if symptom:
             fields[OVERHAUL_NOTICE_FIELDS["symptom"]] = symptom
 
-        reason = self._extract_section(payload.text, "故障原因")
+        reason = self._extract_section(
+            payload.text, "故障原因（事件发生原因）"
+        ) or self._extract_section(payload.text, "故障原因")
         if reason:
             fields[OVERHAUL_NOTICE_FIELDS["reason"]] = reason
 
-        solution = self._extract_section(payload.text, "解决方案")
+        solution = self._extract_section(
+            payload.text, "解决方案（事件解决措施）"
+        ) or self._extract_section(payload.text, "解决方案")
         if solution:
             fields[OVERHAUL_NOTICE_FIELDS["solution"]] = solution
 

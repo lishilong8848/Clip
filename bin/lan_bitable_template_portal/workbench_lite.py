@@ -1265,7 +1265,9 @@ def parse_pasted_notice_to_draft(
         "end_time": end_time,
         "location": _section_value(sections, "位置", "地点"),
         "content": _section_value(sections, "内容"),
-        "reason": _section_value(sections, "原因", "故障原因"),
+        "reason": _section_value(
+            sections, "原因", "故障原因（事件发生原因）", "故障原因"
+        ),
         "impact": _section_value(sections, "影响", "影响范围"),
         "progress": _section_value(sections, "进度", "完成情况"),
         "specialty": _section_value(sections, "专业"),
@@ -1275,7 +1277,9 @@ def parse_pasted_notice_to_draft(
         "repair_mode": _section_value(sections, "维修方式"),
         "discovery": _section_value(sections, "故障发现方式"),
         "symptom": _section_value(sections, "故障现象"),
-        "solution": _section_value(sections, "解决方案"),
+        "solution": _section_value(
+            sections, "解决方案（事件解决措施）", "解决方案"
+        ),
         "spare_parts": _section_value(sections, "备件更换情况"),
         "device": _section_value(sections, "设备"),
         "cabinet": _section_value(sections, "柜号"),
@@ -1531,7 +1535,7 @@ def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
         notice_fields.extend([
             field("location", "位置" if work_type != "repair" else "地点", draft.get("location")),
             field("content", "内容", draft.get("content"), textarea=True),
-            field("reason", "原因" if work_type != "repair" else "故障原因", draft.get("reason"), textarea=True),
+            field("reason", "原因" if work_type != "repair" else "故障原因（事件发生原因）", draft.get("reason"), textarea=True),
             field("impact", "影响" if work_type != "repair" else "影响范围", draft.get("impact"), textarea=True),
         ])
     if work_type == "repair":
@@ -1542,7 +1546,7 @@ def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
             field("repair_mode", "维修方式", draft.get("repair_mode")),
             field("discovery", "故障发现方式", draft.get("discovery")),
             field("symptom", "故障现象", draft.get("symptom")),
-            field("solution", "解决方案", draft.get("solution"), textarea=True),
+            field("solution", "解决方案（事件解决措施）", draft.get("solution"), textarea=True),
             field("spare_parts", "备件更换情况", draft.get("spare_parts"), textarea=True),
         ])
     if work_type == "power":
@@ -5199,7 +5203,7 @@ def render_workbench_lite(
           ['发现故障时间', 'end_time'], ['期望完成时间', 'start_time'],
           ['维修设备', 'repair_device'], ['维修故障', 'repair_fault'], ['故障类型', 'fault_type'],
           ['维修方式', 'repair_mode'], ['影响范围', 'impact'], ['故障发现方式', 'discovery'],
-          ['故障现象', 'symptom'], ['故障原因', 'reason'], ['解决方案', 'solution'],
+          ['故障现象', 'symptom'], ['故障原因（事件发生原因）', 'reason'], ['解决方案（事件解决措施）', 'solution'],
           ['备件更换情况', 'spare_parts'], ['完成情况', 'progress']
         ]
       }},
@@ -5264,7 +5268,7 @@ def render_workbench_lite(
         ['end_time', '发现故障时间'], ['start_time', '期望完成时间'],
         ['repair_device', '维修设备'], ['repair_fault', '维修故障'], ['fault_type', '故障类型'],
         ['repair_mode', '维修方式'], ['impact', '影响范围'], ['discovery', '故障发现方式'],
-        ['symptom', '故障现象'], ['reason', '故障原因'], ['solution', '解决方案'], ['progress', '完成情况']
+        ['symptom', '故障现象'], ['reason', '故障原因（事件发生原因）'], ['solution', '解决方案（事件解决措施）'], ['progress', '完成情况']
       ],
       power: [
         ['title', '名称'], ['start_time', '开始时间'], ['end_time', '结束时间'],

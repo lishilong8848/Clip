@@ -901,8 +901,8 @@ NOTICE_TEXT_TEMPLATES = {
             ("影响范围", "impact"),
             ("故障发现方式", "discovery"),
             ("故障现象", "symptom"),
-            ("故障原因", "reason"),
-            ("解决方案", "solution"),
+            ("故障原因（事件发生原因）", "reason"),
+            ("解决方案（事件解决措施）", "solution"),
             ("备件更换情况", "spare_parts"),
             ("完成情况", "progress"),
         ),
@@ -26289,7 +26289,8 @@ class MaintenancePortalService:
         if "【事件通告】" in raw:
             return WORK_TYPE_EVENT
         if "【设备检修】" in raw or cls._notice_section_value(
-            sections, ["维修设备", "维修故障", "故障现象", "解决方案"]
+            sections,
+            ["维修设备", "维修故障", "故障现象", "解决方案（事件解决措施）", "解决方案"],
         ):
             return WORK_TYPE_REPAIR
         if "【上电通告】" in raw or "【下电通告】" in raw or "【上下电通告】" in raw or cls._notice_section_value(
@@ -26381,7 +26382,9 @@ class MaintenancePortalService:
         specialty = self._notice_section_value(sections, ["专业", "专业类别", "所属专业"])
         level = self._notice_section_value(sections, ["等级", "变更等级", "紧急程度"])
         content = self._notice_section_value(sections, ["内容"], title)
-        reason = self._notice_section_value(sections, ["原因", "故障原因"])
+        reason = self._notice_section_value(
+            sections, ["原因", "故障原因（事件发生原因）", "故障原因"]
+        )
         impact = self._notice_section_value(sections, ["影响", "影响范围"])
         maintenance_cycle = self._notice_section_value(sections, ["维保周期", "维护周期"])
         if work_type == WORK_TYPE_MAINTENANCE:
@@ -26485,7 +26488,9 @@ class MaintenancePortalService:
                 "repair_mode": self._notice_section_value(sections, ["维修方式"]),
                 "discovery": self._notice_section_value(sections, ["故障发现方式"]),
                 "symptom": self._notice_section_value(sections, ["故障现象"]),
-                "solution": self._notice_section_value(sections, ["解决方案"]),
+                "solution": self._notice_section_value(
+                    sections, ["解决方案（事件解决措施）", "解决方案"]
+                ),
                 "spare_parts": self._notice_section_value(
                     sections, ["备件更换情况", "备件使用情况"]
                 ),
@@ -28059,7 +28064,10 @@ class MaintenancePortalService:
         set_text_if_missing(
             "reason",
             qt_payload.get("reason"),
-            self._notice_section_value(qt_sections, ["原因", "故障原因", "故障维修原因"]),
+            self._notice_section_value(
+                qt_sections,
+                ["原因", "故障原因（事件发生原因）", "故障原因", "故障维修原因"],
+            ),
         )
         set_text_if_missing("building", qt_payload.get("building"))
         set_text_if_missing("building_code", qt_payload.get("building_code"))

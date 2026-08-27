@@ -1097,7 +1097,10 @@ class MainWindowRuntimeMixin:
             "specialty": self._extract_section_text(text, ("专业", "专业类别")),
             "location": self._extract_section_text(text, ("位置", "地点")),
             "content": self._extract_section_text(text, ("内容",)),
-            "reason": self._extract_section_text(text, ("原因", "故障原因", "故障维修原因")),
+            "reason": self._extract_section_text(
+                text,
+                ("原因", "故障原因（事件发生原因）", "故障原因", "故障维修原因"),
+            ),
             "impact": self._extract_section_text(text, ("影响", "影响范围")),
             "progress": self._extract_section_text(text, ("进度", "完成情况")),
             "repair_device": self._extract_section_text(text, ("维修设备",)),
@@ -1106,7 +1109,9 @@ class MainWindowRuntimeMixin:
             "repair_mode": self._extract_section_text(text, ("维修方式",)),
             "discovery": self._extract_section_text(text, ("故障发现方式",)),
             "symptom": self._extract_section_text(text, ("故障现象", "故障发生现象描述")),
-            "solution": self._extract_section_text(text, ("解决方案",)),
+            "solution": self._extract_section_text(
+                text, ("解决方案（事件解决措施）", "解决方案")
+            ),
             "fault_time": self._extract_section_text(text, ("发现故障时间", "故障发生时间")),
             "expected_time": self._extract_section_text(text, ("期望完成时间",)),
             "device": self._extract_section_text(text, ("设备", "设备名称", "巡检设备")),

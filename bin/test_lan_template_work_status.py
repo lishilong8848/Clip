@@ -14967,7 +14967,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【维修方式】厂家", prepared["text"])
             self.assertIn("【故障发现方式】巡检发现", prepared["text"])
             self.assertIn("【故障现象】加湿异常", prepared["text"])
-            self.assertIn("【解决方案】更换循环泵", prepared["text"])
+            self.assertIn("【故障原因（事件发生原因）】测试故障原因", prepared["text"])
+            self.assertIn("【解决方案（事件解决措施）】更换循环泵", prepared["text"])
             self.assertIn("【完成情况】", prepared["text"])
             self.assertNotIn("【内容】", prepared["text"])
             self.assertEqual(prepared["location"], "")
@@ -15022,7 +15023,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【标题】D楼UPS检修", prepared["text"])
             self.assertIn("【地点】D-UPS间", prepared["text"])
             self.assertIn("【维修设备】UPS-01", prepared["text"])
-            self.assertIn("【解决方案】更换模块", prepared["text"])
+            self.assertIn("【故障原因（事件发生原因）】测试故障原因", prepared["text"])
+            self.assertIn("【解决方案（事件解决措施）】更换模块", prepared["text"])
 
     def test_repair_defaults_use_notice_title_formula_level_and_source(self):
         with tempfile.TemporaryDirectory() as tmp:
