@@ -1875,6 +1875,69 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service
 
+    def test_change_confirmation_ignores_one_stale_empty_screenshot_read(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _TestMaintenancePortalService()
+            screenshot_record = {
+                "record_id": "target-change-stale-read",
+                "fields": {
+                    "名称": "已上传截图的变更",
+                    "楼栋": ["E楼"],
+                    "变更状态": "开始",
+                    "阿里确认截图": [{"file_token": "ali-token"}],
+                    "H楼确认": False,
+                },
+            }
+            stale_record = copy.deepcopy(screenshot_record)
+            stale_record["fields"]["阿里确认截图"] = []
+            sent = []
+            try:
+                task = PortalRuntime._change_confirmation_task_from_record(
+                    "target-change-stale-read",
+                    screenshot_record,
+                    now=1000,
+                )
+                task["screenshot_uploaded_at"] = 1000
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, stale_record),
+                ), patch.object(
+                    portal_server_module,
+                    "_send_text_to_open_ids_guarded",
+                    side_effect=lambda text, recipients: (
+                        sent.append((text, list(recipients))) or (True, "ok", [])
+                    ),
+                ):
+                    refreshed = PortalRuntime._process_change_confirmation_task(
+                        task,
+                        now=1600,
+                    )
+                self.assertEqual(refreshed["state"], "awaiting_confirmation")
+                self.assertEqual(refreshed["screenshot_count"], 1)
+                self.assertEqual(refreshed["empty_remote_screenshot_reads"], 1)
+                self.assertEqual(
+                    sent[0][1],
+                    [portal_server_module.BUILDING_OPEN_ID_MAP["H"]],
+                )
+                self.assertIn("无需重复上传", sent[0][0])
+                self.assertNotIn("待上传", sent[0][0])
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_change_confirmation_upload_shows_explicit_success_feedback(self):
+        source = (
+            BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("data-ali-upload-result", source)
+        self.assertIn("上传成功：截图已保存", source)
+        self.assertIn("function showLiteSuccess", source)
+
     def test_change_confirmation_upload_appends_screenshot_and_confirm_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")

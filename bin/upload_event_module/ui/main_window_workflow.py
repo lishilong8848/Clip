@@ -2466,6 +2466,12 @@ class MainWindowWorkflowMixin:
             list_widget = None
         if list_widget is not None and item is not None:
             old_data = item.data(Qt.ItemDataRole.UserRole) or {}
+            info = extract_event_info(new_content) or {}
+            cleaned_content = info.get("content") or new_content
+            if re.sub(r"\s+", "", str(old_data.get("text") or "")) == re.sub(
+                r"\s+", "", str(cleaned_content or "")
+            ):
+                return False
             if record_id not in self.pending_upload_rollback_by_record_id:
                 try:
                     rollback_snapshot = copy.deepcopy(old_data)
@@ -2474,9 +2480,6 @@ class MainWindowWorkflowMixin:
                 self.pending_upload_rollback_by_record_id[record_id] = {
                     "old_data": rollback_snapshot
                 }
-
-            info = extract_event_info(new_content) or {}
-            cleaned_content = info.get("content") or new_content
             new_data = dict(old_data)
             new_data["text"] = cleaned_content
             self._apply_detected_notice_fields(new_data, info)

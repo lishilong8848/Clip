@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -47,6 +48,18 @@ def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> by
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_polling_step_photo_rejects_oversized_dimensions_before_storage(self) -> None:
+        service = object.__new__(PollingWorkOrderService)
+        with self.assertRaisesRegex(Exception, "像素或尺寸超过限制"):
+            service.add_step_photo(
+                "unused-token",
+                step_key="1:1",
+                expected_version=1,
+                file_name="too-wide.png",
+                mime_type="image/png",
+                content=_png_bytes(size=(12001, 1)),
+            )
+
     def test_polling_sop_rejects_more_than_thirty_steps(self) -> None:
         with self.assertRaisesRegex(Exception, "SOP 步骤不能超过 30 条"):
             PollingWorkOrderService._normalized_steps(
@@ -485,6 +498,49 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("尚未全部完成", message)
 
+    def test_polling_end_requires_completed_local_group_and_exact_attachment(self) -> None:
+        prepared = {
+            "action": "end",
+            "work_type": "polling",
+            "notice_type": "设备轮巡",
+            "record_id": "recTargetExact",
+            "target_record_id": "recTargetExact",
+            "text": "【设备轮巡】状态：结束\n【标题】轮巡测试",
+        }
+        manager = MagicMock()
+        manager.get_group.return_value = {
+            "state": "completed",
+            "uploaded_file_tokens": ["expected-workbook-token"],
+        }
+        with patch.object(
+            portal_server,
+            "external_real_write_guard",
+            return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
+        ), patch.object(
+            portal_server,
+            "query_record_by_id",
+            return_value=(
+                True,
+                {
+                    "fields": {
+                        "是否涉及重要操作": True,
+                        "操作人": "操作员",
+                        "现场复核人": "审核员",
+                        "工单附件": [{"file_token": "manual-file-token"}],
+                    }
+                },
+            ),
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_orders",
+            return_value=manager,
+        ):
+            ok, message, _record_id = PortalRuntime._execute_backend_prepared_upload(
+                prepared
+            )
+        self.assertFalse(ok)
+        self.assertIn("与本次完成记录不一致", message)
+
     def test_exempt_polling_start_clears_stale_work_order_fields(self) -> None:
         prepared = {
             "action": "start",
@@ -605,6 +661,197 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(
             notifications["operator"]["recipient_open_id"], "ou_current"
         )
+
+    def test_failed_work_order_link_notifications_are_throttled(self) -> None:
+        manager = MagicMock()
+        manager.group_with_links.side_effect = lambda group, _base: group
+        manager.update_notifications.side_effect = lambda _record_id, data: data
+        group = {
+            "target_record_id": "recNotifyThrottle",
+            "title": "轮巡测试",
+            "sop_name": "SOP",
+            "runs": [{}],
+            "operator": {"name": "操作员", "open_id": "ou_op"},
+            "reviewer": {"name": "审核员", "open_id": "ou_re"},
+            "initiator_open_id": "ou_sender",
+            "operator_link": "https://relay.example/op",
+            "reviewer_link": "https://relay.example/re",
+        }
+        with patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            portal_server,
+            "_send_text_to_open_ids_guarded",
+            return_value=(False, "network down", []),
+        ) as send:
+            notifications = PortalRuntime._send_polling_work_order_links(group)
+            PortalRuntime._send_polling_work_order_links(
+                {**group, "notifications": notifications}
+            )
+        self.assertEqual(send.call_count, 4)
+        self.assertGreater(notifications["operator"]["next_retry_at"], time.time())
+
+    def test_polling_start_creates_lan_group_and_sends_lan_links(self) -> None:
+        manager = MagicMock()
+        group = {"target_record_id": "recLanStart", "state": "active"}
+        manager.create_group.return_value = group
+        prepared = {
+            "work_type": "polling",
+            "action": "start",
+            "polling_work_order_required": True,
+            "title": "局域网轮巡测试",
+        }
+        with patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            PortalRuntime,
+            "_polling_work_order_public_base_url",
+            return_value="http://192.168.1.10:18766",
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_order_public_relay_enabled",
+            return_value=False,
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_order_relay",
+        ) as relay_connector, patch.object(
+            PortalRuntime, "_send_polling_work_order_links"
+        ) as send_links, patch.dict(
+            os.environ,
+            {"CLIPFLOW_POLLING_RELAY_URL": "https://relay.example"},
+        ):
+            result = PortalRuntime._create_polling_work_order_group(
+                prepared, "recLanStart"
+            )
+        self.assertEqual(result, group)
+        self.assertEqual(
+            manager.create_group.call_args.kwargs["public_base_url"],
+            "http://192.168.1.10:18766",
+        )
+        self.assertNotIn("public_relay", manager.create_group.call_args.kwargs)
+        relay_connector.assert_not_called()
+        send_links.assert_called_once_with(group)
+
+    def test_polling_start_can_use_preserved_public_relay_path(self) -> None:
+        manager = MagicMock()
+        relay = MagicMock(enabled=True)
+        group = {"target_record_id": "recPublicStart", "state": "active"}
+        manager.create_group.return_value = group
+        prepared = {
+            "work_type": "polling",
+            "action": "start",
+            "polling_work_order_required": True,
+            "title": "公网轮巡测试",
+        }
+        with patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_order_public_relay_enabled",
+            return_value=True,
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_order_relay",
+            return_value=relay,
+        ), patch.object(
+            PortalRuntime, "_send_polling_work_order_links"
+        ) as send_links:
+            result = PortalRuntime._create_polling_work_order_group(
+                prepared, "recPublicStart"
+            )
+        self.assertEqual(result, group)
+        self.assertEqual(manager.create_group.call_args.kwargs["public_base_url"], "")
+        self.assertTrue(manager.create_group.call_args.kwargs["public_relay"])
+        send_links.assert_not_called()
+
+    def test_existing_public_group_is_migrated_to_lan_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = store
+            manager = MagicMock()
+            group = {
+                "target_record_id": "recLegacyRelay",
+                "state": "active",
+                "relay": {"mode": "public_relay"},
+            }
+            store.put_document("polling_work_order", "recLegacyRelay", group)
+            manager.open_groups.return_value = [group]
+            try:
+                with patch.object(
+                    PortalRuntime, "polling_work_orders", return_value=manager
+                ), patch.object(
+                    PortalRuntime, "_send_polling_work_order_links"
+                ) as send_links, patch.object(
+                    portal_server,
+                    "query_record_by_id",
+                    return_value=(True, {"fields": {}}),
+                ), patch.object(
+                    PortalRuntime.service,
+                    "_target_record_lifecycle",
+                    return_value={"active": True, "finished": False},
+                ):
+                    PortalRuntime.process_polling_work_order_uploads()
+                migrated = store.get_document(
+                    "polling_work_order", "recLegacyRelay"
+                )
+                self.assertNotIn("relay", migrated)
+                send_links.assert_called_once()
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_resend_links_checks_scope_and_never_returns_capabilities(self) -> None:
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        manager = MagicMock()
+        manager.get_group.return_value = {
+            "target_record_id": "recRelaySafe",
+            "scope": "E",
+        }
+        sensitive_group = {
+            "notifications": {
+                "operator": {"sent": True, "fallback": False},
+                "reviewer": {"sent": True, "fallback": True},
+            },
+            "operator_link": "https://relay.example/#secret",
+            "reviewer_link": "https://relay.example/#secret2",
+            "attachments": [{"path": "D:/private/file.xlsx"}],
+        }
+        with patch.object(
+            controller, "_current_session", return_value={"user": {"open_id": "ou_a"}}
+        ), patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            controller,
+            "_authorized_scope_or_error",
+            side_effect=portal_server.PortalError("无权访问 E 楼"),
+        ), patch.object(
+            PortalRuntime, "_send_polling_work_order_links"
+        ) as denied_send:
+            denied = client.post(
+                "/api/polling-work-orders/recRelaySafe/resend-links"
+            )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        denied_send.assert_not_called()
+        with patch.object(
+            controller, "_current_session", return_value={"user": {"open_id": "ou_a"}}
+        ), patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            controller, "_authorized_scope_or_error", return_value="E"
+        ), patch.object(
+            PortalRuntime,
+            "_send_polling_work_order_links",
+            return_value=sensitive_group,
+        ):
+            response = client.post(
+                "/api/polling-work-orders/recRelaySafe/resend-links"
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        response_text = response.text
+        self.assertNotIn("operator_link", response_text)
+        self.assertNotIn("reviewer_link", response_text)
+        self.assertNotIn("D:/private", response_text)
 
     def test_sop_snapshot_and_serial_role_confirmations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

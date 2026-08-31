@@ -857,6 +857,7 @@ def _change_confirmation_uploader(
               {upload_now}
             </div>
           </div>
+          <div class="ali-upload-result" data-ali-upload-result role="status" aria-live="assertive" hidden></div>
         </section>
     """
 
@@ -2910,6 +2911,12 @@ def render_workbench_lite(
     .local-event-text {{ margin:0; max-height:360px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; border:1px solid #d8e5f7; border-radius:10px; padding:10px 12px; color:#18345f; background:#fff; font:12px/1.65 "Microsoft YaHei",Arial,sans-serif; }}
     .current-notice-empty {{ min-height:180px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
+    .ali-upload-result {{ border-radius:12px; padding:9px 11px; font-size:12px; font-weight:900; line-height:1.45; }}
+    .ali-upload-result[hidden] {{ display:none; }}
+    .ali-upload-result.working {{ color:#075bd8; background:#eaf3ff; }}
+    .ali-upload-result.success {{ color:#087443; background:#e8fff3; }}
+    .ali-upload-result.warn {{ color:#8a4b00; background:#fff4d6; }}
+    .ali-upload-result.failed {{ color:#b42318; background:#fff1f0; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
     .site-photo-head strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.25; }}
     .site-photo-head span {{ display:block; margin-top:2px; color:#64748b; font-size:11px; line-height:1.35; }}
@@ -3002,6 +3009,8 @@ def render_workbench_lite(
     .actual-action-time input {{ min-height:26px; border:0; border-radius:8px; padding:0; color:#0c244d; background:transparent; font-size:12px; font-weight:900; box-shadow:none; }}
     .actual-action-time input:focus {{ outline:2px solid rgba(31,99,255,.16); outline-offset:2px; }}
     .job-status {{ color:#64748b; font-size:12px; font-weight:800; }}
+    .job-status.success {{ border-radius:999px; padding:5px 9px; color:#087443; background:#e8fff3; }}
+    .job-status.failed {{ border-radius:999px; padding:5px 9px; color:#b42318; background:#fff1f0; }}
     .form-actions .job-status {{ margin-right:auto; }}
     .action-reason {{ max-width:190px; border-radius:999px; padding:4px 7px; color:#64748b; background:#f1f6fd; font-size:11px; font-weight:900; line-height:1.25; }}
     .action-reason.warn {{ color:#8a4b00; background:#fff4d6; }}
@@ -3107,6 +3116,8 @@ def render_workbench_lite(
     .undo-confirm-copy strong {{ color:#0c244d; font-size:15px; line-height:1.45; overflow-wrap:anywhere; }}
     .undo-confirm-copy span {{ color:#64748b; font-size:12px; line-height:1.5; }}
     body.has-dirty-lite-form .job-status {{ color:#b15d00; }}
+    body.has-dirty-lite-form .job-status.success {{ color:#087443; }}
+    body.has-dirty-lite-form .job-status.failed {{ color:#b42318; }}
     .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
     @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} }}
@@ -3537,6 +3548,14 @@ def render_workbench_lite(
       const pageStatus = document.getElementById('lite-page-status');
       if (pageStatus) pageStatus.textContent = text;
     }}
+    function showLiteSuccess(message) {{
+      setLiteStatus(message);
+      const box = statusBox();
+      if (!box) return;
+      box.classList.remove('failed');
+      box.classList.add('success');
+      window.setTimeout(() => box.classList.remove('success'), 4200);
+    }}
     function friendlyLiteMessage(message) {{
       const raw = String(message || '').trim();
       if (!raw) return '操作失败';
@@ -3556,6 +3575,7 @@ def render_workbench_lite(
       setLiteStatus(text);
       const box = statusBox();
       if (box) {{
+        box.classList.remove('success');
         box.classList.add('failed');
         window.setTimeout(() => box.classList.remove('failed'), 3200);
       }}
@@ -4859,6 +4879,13 @@ def render_workbench_lite(
         size: Number(liteAliConfirmationImage.size || 0),
       }}].filter(item => item.upload_id || item.local_image_id || item.file_token);
     }}
+    function showAliConfirmationResult(form, message = '', tone = 'success') {{
+      const box = form?.querySelector('[data-ali-upload-result]');
+      if (!box) return;
+      box.textContent = String(message || '');
+      box.className = `ali-upload-result ${{tone || 'success'}}`;
+      box.hidden = !message;
+    }}
     function updateAliConfirmationUi(form) {{
       const panel = form?.querySelector('[data-ali-confirmation-panel]');
       const hidden = form?.querySelector('[name="ali_confirmation_images_json"]');
@@ -4938,6 +4965,7 @@ def render_workbench_lite(
           staged: false,
           remote_uploaded: false,
         }};
+        showAliConfirmationResult(form, '');
         updateAliConfirmationUi(form);
       }} catch (error) {{
         const message = error && error.message ? error.message : '阿里确认截图上传失败';
@@ -4959,6 +4987,7 @@ def render_workbench_lite(
       invalidateLocalNoticeImageLoad();
       setButtonBusy(button, true);
       panel.classList.add('uploading');
+      showAliConfirmationResult(form, '正在上传并校验阿里确认截图...', 'working');
       updateAliConfirmationUi(form);
       try {{
         if (!liteAliConfirmationImage.upload_id && !liteAliConfirmationImage.local_image_id) {{
@@ -4969,7 +4998,8 @@ def render_workbench_lite(
         if (!targetRecordId) {{
           liteAliConfirmationImage.staged = true;
           updateAliConfirmationUi(form);
-          setLiteStatus('阿里确认截图已暂存，将随开始通告上传');
+          showAliConfirmationResult(form, '截图已在本机暂存，发送开始通告时将一并上传。', 'success');
+          showLiteSuccess('阿里确认截图已暂存');
           return;
         }}
         const item = aliConfirmationPayload(form)[0];
@@ -5011,11 +5041,15 @@ def render_workbench_lite(
         panel.dataset.existingImages = JSON.stringify(screenshotItems);
         persistAliImageOnRows(targetRecordId, screenshotItems, freshForToday);
         updateAliConfirmationUi(form);
-        setLiteStatus(result.last_error
-          ? `阿里确认截图已上传，H楼通知等待重试：${{result.last_error}}`
-          : '阿里确认截图已上传，已通知H楼确认');
+        const successMessage = result.last_error
+          ? `上传成功：截图已保存；H楼通知暂未发出，后台将重试。${{result.last_error}}`
+          : '上传成功：截图已保存，关闭页面不影响，当前等待H楼确认。';
+        showAliConfirmationResult(form, successMessage, result.last_error ? 'warn' : 'success');
+        showLiteSuccess(successMessage);
       }} catch (error) {{
-        showLiteError(error && error.message ? error.message : '阿里确认截图写入失败');
+        const message = error && error.message ? error.message : '阿里确认截图写入失败';
+        showAliConfirmationResult(form, message, 'failed');
+        showLiteError(message);
       }} finally {{
         panel.classList.remove('uploading');
         setButtonBusy(button, false);
@@ -7064,7 +7098,7 @@ def render_workbench_lite(
         const result = data.data || data;
         liteChangeConfirmationDrafts.delete(recordId);
         applyChangeConfirmationLocalImages(result);
-        setLiteStatus(result.last_error
+        showLiteSuccess(result.last_error
           ? `阿里确认截图已上传，H楼通知等待重试：${{result.last_error}}`
           : '阿里确认截图已上传，已通知H楼确认');
         await loadChangeConfirmations();

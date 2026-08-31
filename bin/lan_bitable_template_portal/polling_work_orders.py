@@ -46,6 +46,12 @@ POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
 POLLING_STEP_PHOTO_MAX_BYTES = 8 * 1024 * 1024
 POLLING_STEP_MAX_PHOTOS = 5
 POLLING_WORK_ORDER_MAX_PHOTOS = 100
+POLLING_WORK_ORDER_MAX_PHOTO_BYTES = 200 * 1024 * 1024
+POLLING_STEP_PHOTO_MAX_PIXELS = 40_000_000
+POLLING_STEP_PHOTO_MAX_DIMENSION = 12_000
+POLLING_STEP_PHOTO_MIME_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/webp"}
+)
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
 POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v3.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
@@ -629,6 +635,7 @@ class PollingWorkOrderService:
         target_record_id: str,
         title: str,
         public_base_url: str,
+        public_relay: bool = False,
     ) -> dict:
         target_record_id = str(target_record_id or "").strip()
         spec = prepared.get("polling_work_order_spec")
@@ -732,6 +739,11 @@ class PollingWorkOrderService:
                 "created_at": now,
                 "updated_at": now,
             }
+            if public_relay:
+                group["relay"] = {
+                    "mode": "public_relay",
+                    "registration_state": "registration_pending",
+                }
             self.state_store.put_document(
                 POLLING_WORK_ORDER_NAMESPACE, target_record_id, group
             )
@@ -742,6 +754,15 @@ class PollingWorkOrderService:
 
     def group_with_links(self, group: dict, public_base_url: str) -> dict:
         result = copy.deepcopy(group or {})
+        relay = result.get("relay") if isinstance(result.get("relay"), dict) else {}
+        if str(relay.get("mode") or "") == "public_relay":
+            if str(relay.get("registration_state") or "") == "registered":
+                result["operator_link"] = str(relay.get("operator_link") or "")
+                result["reviewer_link"] = str(relay.get("reviewer_link") or "")
+            else:
+                result["operator_link"] = ""
+                result["reviewer_link"] = ""
+            return result
         base = str(public_base_url or "").rstrip("/")
         if base:
             result["operator_link"] = (
@@ -1279,9 +1300,20 @@ class PollingWorkOrderService:
 
             with Image.open(io.BytesIO(content)) as image:
                 detected_mime_type = str(Image.MIME.get(image.format) or "")
+                width, height = image.size
+                if (
+                    width <= 0
+                    or height <= 0
+                    or width > POLLING_STEP_PHOTO_MAX_DIMENSION
+                    or height > POLLING_STEP_PHOTO_MAX_DIMENSION
+                    or width * height > POLLING_STEP_PHOTO_MAX_PIXELS
+                ):
+                    raise PortalError("操作照片像素或尺寸超过限制。")
                 image.verify()
-            if not detected_mime_type.startswith("image/"):
+            if detected_mime_type not in POLLING_STEP_PHOTO_MIME_TYPES:
                 raise ValueError("unsupported image format")
+        except PortalError:
+            raise
         except Exception as exc:
             raise PortalError("操作照片内容损坏，无法保存。") from exc
         mime_type = detected_mime_type
@@ -1303,7 +1335,9 @@ class PollingWorkOrderService:
                 raise PortalConflictError("当前工单选择已变化，请刷新后重试。")
             if str(step.get("step_key") or "") != str(step_key or ""):
                 raise PortalConflictError("只能给当前步骤拍照。")
-            if step.get("operator_confirmation") or step.get("reviewer_confirmation"):
+            if step.get("reviewer_confirmation") or (
+                role == "operator" and step.get("operator_confirmation")
+            ):
                 raise PortalConflictError("当前步骤已有确认，不能再添加操作照片。")
             digest = hashlib.sha256(content).hexdigest()
             existing_photos = list(step.get("photos") or [])
@@ -1326,6 +1360,15 @@ class PollingWorkOrderService:
                 raise PortalError(
                     f"整个工单组最多上传 {POLLING_WORK_ORDER_MAX_PHOTOS} 张操作照片。"
                 )
+            total_photo_bytes = sum(
+                int(photo.get("size") or 0)
+                for item in steps
+                if isinstance(item, dict)
+                for photo in item.get("photos") or []
+                if isinstance(photo, dict)
+            )
+            if total_photo_bytes + len(content) > POLLING_WORK_ORDER_MAX_PHOTO_BYTES:
+                raise PortalError("整个工单组操作照片总大小不能超过 200MB。")
             directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
             group_directory = self._group_directory(
                 str(group.get("target_record_id") or "")

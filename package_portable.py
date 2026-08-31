@@ -1368,6 +1368,8 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
         PROJECT_ROOT / "bin" / "test_critical_guard.py",
@@ -1385,6 +1387,9 @@ def _run_packaging_preflight_tests() -> None:
         sorted(
             (PROJECT_ROOT / "bin" / "upload_event_module" / "ui").rglob("*.py")
         )
+    )
+    py_targets.extend(
+        sorted((PROJECT_ROOT / "bin" / "public_polling_relay").glob("*.py"))
     )
 
     py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))

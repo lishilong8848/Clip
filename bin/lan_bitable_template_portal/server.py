@@ -88,6 +88,10 @@ DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 MAX_JSON_BODY_BYTES = 512 * 1024
 CHANGE_CONFIRMATION_REMINDER_SECONDS = 10 * 60
+CHANGE_CONFIRMATION_EMPTY_READS_BEFORE_RESET = 2
+# Dormant by default: change to True only after the public relay is deployed.
+# CLIPFLOW_POLLING_RELAY_URL is still required when enabled.
+POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED = False
 
 
 def portal_frontend_dist_enabled() -> bool:
@@ -153,10 +157,36 @@ class PortalRuntime:
     service = MaintenancePortalService(enable_repair_snapshots=True)
     auth_manager = PortalAuthManager()
     state_store = LanPortalStateStore()
+    _polling_relay_connector: Any = None
 
     @classmethod
     def polling_work_orders(cls) -> PollingWorkOrderService:
         return PollingWorkOrderService(cls.state_store)
+
+    @classmethod
+    def polling_work_order_public_relay_enabled(cls) -> bool:
+        return POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED
+
+    @classmethod
+    def polling_work_order_relay(cls):
+        if not cls.polling_work_order_public_relay_enabled():
+            raise PortalError("公网轮巡工单当前未启用。")
+        if (
+            cls._polling_relay_connector is None
+            or cls._polling_relay_connector.state_store is not cls.state_store
+        ):
+            from .polling_work_order_relay import (
+                PollingRelayConfig,
+                PollingWorkOrderRelayConnector,
+            )
+
+            cls._polling_relay_connector = PollingWorkOrderRelayConnector(
+                cls.state_store,
+                cls.polling_work_orders(),
+                config=PollingRelayConfig.from_env(),
+                finalize_callback=cls.finalize_polling_work_order_group,
+            )
+        return cls._polling_relay_connector
 
     @classmethod
     def local_notice_images(cls) -> LocalNoticeImageStore:
@@ -505,6 +535,7 @@ class PortalRuntime:
         *,
         existing: dict | None = None,
         now: float | None = None,
+        preserve_verified_screenshot_on_empty: bool = True,
     ) -> dict:
         now = float(now or time.time())
         existing = dict(existing or {})
@@ -521,6 +552,23 @@ class PortalRuntime:
         screenshot_count = cls._change_confirmation_attachment_count(screenshot)
         screenshot_tokens = cls._change_confirmation_attachment_tokens(screenshot)
         screenshot_fingerprint = cls._change_confirmation_fingerprint(screenshot)
+        empty_remote_reads = 0
+        if (
+            preserve_verified_screenshot_on_empty
+            and not screenshot_count
+            and int(existing.get("screenshot_count") or 0) > 0
+            and str(existing.get("screenshot_fingerprint") or "").strip()
+        ):
+            empty_remote_reads = int(
+                existing.get("empty_remote_screenshot_reads") or 0
+            ) + 1
+            if empty_remote_reads < CHANGE_CONFIRMATION_EMPTY_READS_BEFORE_RESET:
+                screenshot_count = int(existing.get("screenshot_count") or 0)
+                screenshot_tokens = list(existing.get("screenshot_tokens") or [])
+                screenshot_fingerprint = str(
+                    existing.get("screenshot_fingerprint") or ""
+                ).strip()
+                screenshot = copy.deepcopy(existing.get("screenshot_items") or [])
         previous_fingerprint = str(existing.get("screenshot_fingerprint") or "")
         if (
             screenshot_fingerprint
@@ -542,6 +590,8 @@ class PortalRuntime:
         confirmed = cls._change_confirmation_checked(
             fields.get(CHANGE_NOTICE_FIELDS["h_confirmation"])
         )
+        if screenshot_count and empty_remote_reads:
+            confirmed = bool(existing.get("h_confirmed")) or confirmed
         active = bool(lifecycle.get("active") and not lifecycle.get("finished"))
         state = (
             "stopped"
@@ -582,6 +632,11 @@ class PortalRuntime:
                 copy.deepcopy(screenshot) if isinstance(screenshot, list) else []
             ),
             "screenshot_fingerprint": screenshot_fingerprint,
+            "empty_remote_screenshot_reads": (
+                empty_remote_reads if not cls._change_confirmation_attachment_count(
+                    fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+                ) else 0
+            ),
             "h_confirmed": confirmed,
             "state": state,
             "created_at": created_at,
@@ -1021,7 +1076,7 @@ class PortalRuntime:
                         "【变更阿里确认截图待确认】",
                         f"名称：{task.get('title') or target_record_id}",
                         f"楼栋：{task.get('building') or '未识别'}",
-                        "截图已上传，请在变更确认面板点击确认。",
+                        "截图已上传，无需重复上传。请H楼在变更确认面板点击确认。",
                         link,
                     )
                 ).strip()
@@ -1083,19 +1138,47 @@ class PortalRuntime:
         force: bool = False,
     ) -> dict:
         manager = cls.polling_work_orders()
+        relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
+        if str(relay_state.get("mode") or "") == "public_relay":
+            if cls.polling_work_order_public_relay_enabled():
+                connector = cls.polling_work_order_relay()
+                if connector.enabled and str(
+                    relay_state.get("registration_state") or ""
+                ) != "registered":
+                    raise PortalConflictError("公网工单正在注册，请稍后重试发送链接。")
+            else:
+                group = copy.deepcopy(group)
+                group.pop("relay", None)
         group = manager.group_with_links(
             group,
             cls._polling_work_order_public_base_url(),
         )
         notifications = dict(group.get("notifications") or {})
         initiator_open_id = str(group.get("initiator_open_id") or "").strip()
+        changed = False
         for role, label in (("operator", "操作人"), ("reviewer", "现场审核人")):
             previous = notifications.get(role) if isinstance(notifications.get(role), dict) else {}
-            if not force and previous.get("sent"):
-                continue
             person = group.get(role) if isinstance(group.get(role), dict) else {}
             assigned_open_id = str(person.get("open_id") or "").strip()
             link = str(group.get(f"{role}_link") or "").strip()
+            link_fingerprint = (
+                hashlib.sha256(link.encode("utf-8")).hexdigest() if link else ""
+            )
+            same_link = (
+                str(previous.get("link_fingerprint") or "") == link_fingerprint
+            )
+            if (
+                not force
+                and previous.get("sent")
+                and same_link
+            ):
+                continue
+            if (
+                not force
+                and same_link
+                and float(previous.get("next_retry_at") or 0) > time.time()
+            ):
+                continue
             text = "\n".join(
                 (
                     "【轮巡工单待确认】",
@@ -1125,13 +1208,26 @@ class PortalRuntime:
                 )
                 if ok_send:
                     recipient = initiator_open_id
+            attempts = (
+                int(previous.get("attempts") or 0) + 1 if same_link else 1
+            )
             notifications[role] = {
                 "sent": bool(ok_send),
                 "recipient_open_id": recipient,
                 "fallback": fallback or not bool(assigned_open_id),
+                "link_fingerprint": link_fingerprint,
+                "attempts": attempts,
+                "next_retry_at": (
+                    0
+                    if ok_send
+                    else time.time() + min(300, 30 * (2 ** min(attempts - 1, 4)))
+                ),
                 "message": str(message or ""),
                 "updated_at": time.time(),
             }
+            changed = True
+        if not changed:
+            return group
         return manager.update_notifications(
             str(group.get("target_record_id") or ""),
             notifications,
@@ -1149,14 +1245,30 @@ class PortalRuntime:
             or not prepared.get("polling_work_order_required")
         ):
             return {}
+        relay = (
+            cls.polling_work_order_relay()
+            if cls.polling_work_order_public_relay_enabled()
+            else None
+        )
+        use_public_relay = bool(relay and relay.enabled)
+        create_kwargs = {
+            "target_record_id": target_record_id,
+            "title": str(prepared.get("title") or ""),
+            "public_base_url": (
+                ""
+                if use_public_relay
+                else cls._polling_work_order_public_base_url()
+            ),
+        }
+        if use_public_relay:
+            create_kwargs["public_relay"] = True
         group = cls.polling_work_orders().create_group(
             prepared,
-            target_record_id=target_record_id,
-            title=str(prepared.get("title") or ""),
-            public_base_url=cls._polling_work_order_public_base_url(),
+            **create_kwargs,
         )
         if group:
-            cls._send_polling_work_order_links(group)
+            if not use_public_relay:
+                cls._send_polling_work_order_links(group)
             prepared["polling_work_order_group_id"] = target_record_id
         return group
 
@@ -1180,24 +1292,40 @@ class PortalRuntime:
             }
         try:
             group = manager.get_group(target_record_id)
-            if str(group.get("state") or "") == "completed":
-                return {"ok": True, "state": "completed", "group": group}
-            if str(group.get("state") or "") != "upload_pending":
+            group_state = str(group.get("state") or "")
+            if group_state not in {"upload_pending", "completed"}:
                 return {"ok": False, "state": str(group.get("state") or ""), "error": "工单步骤尚未全部完成。"}
             ok_read, record = query_record_by_id(target_record_id, NOTICE_TYPE_POLLING)
             if not ok_read:
                 if cls._remote_record_not_found(record):
-                    manager.cancel_group(target_record_id, reason="target_not_found")
+                    manager.cancel_group(
+                        target_record_id, reason="target_not_found"
+                    )
                     return {"ok": False, "state": "cancelled", "error": "轮巡目标记录不存在。"}
                 raise PortalExternalError(str(record or "轮巡目标记录读取失败。"))
             fields = cls._change_confirmation_fields(record)
+            if group_state == "completed":
+                remote_tokens = set(
+                    cls._change_confirmation_attachment_tokens(
+                        fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                    )
+                )
+                completed_tokens = {
+                    str(token or "").strip()
+                    for token in group.get("uploaded_file_tokens") or []
+                    if str(token or "").strip()
+                }
+                if completed_tokens and completed_tokens.issubset(remote_tokens):
+                    return {"ok": True, "state": "completed", "group": group}
             lifecycle = cls.service._target_record_lifecycle(
                 work_type=WORK_TYPE_POLLING,
                 notice_type=NOTICE_TYPE_POLLING,
                 target_record={"record_id": target_record_id, "display_fields": fields},
             )
             if lifecycle.get("finished") or not lifecycle.get("active"):
-                manager.cancel_group(target_record_id, reason="target_terminal")
+                manager.cancel_group(
+                    target_record_id, reason="target_terminal"
+                )
                 return {"ok": False, "state": "cancelled", "error": "轮巡通告已结束，工单已停止。"}
             workbook = manager.build_execution_workbook(target_record_id)
             uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
@@ -1292,12 +1420,26 @@ class PortalRuntime:
         manager = cls.polling_work_orders()
         for group in manager.open_groups():
             target_record_id = str(group.get("target_record_id") or "").strip()
+            relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
+            if (
+                str(relay_state.get("mode") or "") == "public_relay"
+                and not cls.polling_work_order_public_relay_enabled()
+            ):
+                group = copy.deepcopy(group)
+                group.pop("relay", None)
+                cls.state_store.put_document(
+                    "polling_work_order", target_record_id, group
+                )
+                with suppress(Exception):
+                    cls._send_polling_work_order_links(group)
             if str(group.get("state") or "") in {"active", "completed"}:
                 ok_read, record = query_record_by_id(
                     target_record_id, NOTICE_TYPE_POLLING
                 )
                 if not ok_read and cls._remote_record_not_found(record):
-                    manager.cancel_group(target_record_id, reason="target_not_found")
+                    manager.cancel_group(
+                        target_record_id, reason="target_not_found"
+                    )
                 elif ok_read:
                     fields = cls._change_confirmation_fields(record)
                     lifecycle = cls.service._target_record_lifecycle(
@@ -1792,6 +1934,7 @@ class PortalRuntime:
                 record,
                 existing=existing,
                 now=now,
+                preserve_verified_screenshot_on_empty=False,
             )
             task.update(
                 {
@@ -7695,7 +7838,8 @@ class PortalRuntime:
                 if (
                     bool(current.get("_has_unuploaded_changes"))
                     and current_text
-                    and current_text != uploaded_text
+                    and re.sub(r"\s+", "", current_text)
+                    != re.sub(r"\s+", "", uploaded_text)
                 ):
                     queued_payload = current
                 break
@@ -9306,9 +9450,19 @@ class PortalRuntime:
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
         if action == "end" and notice_type == NOTICE_TYPE_POLLING:
-            work_order_required = cls._change_confirmation_checked(
+            remote_work_order_required = cls._change_confirmation_checked(
                 fields.get(POLLING_NOTICE_FIELDS["work_order_required"])
             )
+            try:
+                work_order_group = cls.polling_work_orders().get_group(record_id)
+            except Exception:
+                work_order_group = None
+            local_work_order_required = bool(
+                isinstance(work_order_group, dict)
+                and str(work_order_group.get("state") or "")
+                in {"active", "upload_pending", "completed"}
+            )
+            work_order_required = remote_work_order_required or local_work_order_required
             if work_order_required:
                 operator_name = str(
                     fields.get(POLLING_NOTICE_FIELDS["work_order_operator"]) or ""
@@ -9318,10 +9472,27 @@ class PortalRuntime:
                 ).strip()
                 if not operator_name or not reviewer_name:
                     return False, "轮巡工单缺少操作人或现场审核人，不能发送结束。", record_id
-                if not cls._change_confirmation_attachment_count(
-                    fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
-                ):
+                remote_work_order_tokens = set(
+                    cls._change_confirmation_attachment_tokens(
+                        fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                    )
+                )
+                if not remote_work_order_tokens:
                     return False, "轮巡工单尚未全部完成或附件尚未上传，不能发送结束。", record_id
+                if not isinstance(work_order_group, dict):
+                    return False, "无法核验轮巡工单完成状态，不能发送结束。", record_id
+                if str(work_order_group.get("state") or "") != "completed":
+                    return False, "轮巡工单尚未完成，不能发送结束。", record_id
+                expected_work_order_tokens = {
+                    str(token or "").strip()
+                    for token in work_order_group.get("uploaded_file_tokens") or []
+                    if str(token or "").strip()
+                }
+                if (
+                    not expected_work_order_tokens
+                    or not expected_work_order_tokens.issubset(remote_work_order_tokens)
+                ):
+                    return False, "轮巡工单附件与本次完成记录不一致，不能发送结束。", record_id
         if (
             prepared.get("web_today_screenshot_required")
             and prepared.get("ali_confirmation_source") == "standalone"

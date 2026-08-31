@@ -621,6 +621,50 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertIn("状态：更新", records[0]["text"])
         self.assertIn("现场正在处理积水中", records[0]["text"])
 
+    def test_stale_delete_cannot_remove_recreated_event_with_new_target(self):
+        current = {
+            "active_item_id": "stable-recreated-event",
+            "record_id": "rec-new-event-target",
+            "target_record_id": "rec-new-event-target",
+            "notice_type": "事件通告",
+            "work_type": "event",
+            "_is_placeholder_record": False,
+            "text": "【事件通告】状态：新增\n【标题】E楼重新新增事件",
+        }
+        canonical_row = {
+            "active_item_id": current["active_item_id"],
+            "record_id": current["record_id"],
+            "notice_type": current["notice_type"],
+            "payload": dict(current),
+        }
+
+        class StateStore:
+            @staticmethod
+            def list_visible_qt_active_items():
+                return [canonical_row]
+
+        harness = _RuntimeActiveUpsertHarness(current)
+        harness.cache_store = type(
+            "CacheStore", (), {"_state_store": StateStore()}
+        )()
+
+        result = harness._apply_backend_active_delete(
+            {
+                "active_item_id": current["active_item_id"],
+                "record_id": "rec-deleted-old-target",
+                "target_record_id": "rec-deleted-old-target",
+                "notice_type": "事件通告",
+                "work_type": "event",
+                "source": "remote_delete_finalize",
+            }
+        )
+
+        records = harness._active_notice_event_model.records()
+        self.assertTrue(result["stale"])
+        self.assertFalse(result["deleted"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["target_record_id"], "rec-new-event-target")
+
     def test_runtime_upsert_routes_new_event_text_to_serial_queue_while_uploading(self):
         old_text = (
             "【事件通告】状态：更新\n【标题】EA118机房A楼I3级事件通报\n"
@@ -1044,6 +1088,41 @@ class ActiveNoticeModelTests(unittest.TestCase):
             ]["old_data"]["text"],
             old_text,
         )
+
+    def test_same_event_text_is_not_queued_again_while_uploading(self):
+        harness = _ReplaceRecordIdHarness()
+        harness.pending_action_record_ids = {"rec-event-same"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【来源】BMS\n【概述】冷机故障"
+        )
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-same",
+                "record_id": "rec-event-same",
+                "target_record_id": "rec-event-same",
+                "notice_type": "事件通告",
+                "_upload_in_progress": True,
+                "text": text,
+            },
+        )
+
+        queued = harness._queue_pending_content(
+            "rec-event-same",
+            text.replace("\n", "\r\n "),
+            "新增",
+        )
+
+        data = item.data(Qt.ItemDataRole.UserRole)
+        self.assertFalse(queued)
+        self.assertNotIn("_queued_after_upload", data)
+        self.assertFalse(harness.pending_upload_rollback_by_record_id)
 
     def test_recreated_event_start_upload_queues_latest_end_generation(self):
         harness = _ReplaceRecordIdHarness()

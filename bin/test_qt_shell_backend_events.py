@@ -2230,6 +2230,55 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_event_upload_does_not_queue_whitespace_only_self_projection(self):
+        uploaded_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【来源】BMS\n【概述】冷机故障"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "event-self-projection",
+                        "record_id": "local_event_self_projection",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "_is_placeholder_record": True,
+                        "_has_unuploaded_changes": True,
+                        "text": uploaded_text.replace("\n", "\r\n "),
+                    },
+                    section="event",
+                    origin="clipboard",
+                )
+
+                with patch(
+                    "lan_bitable_template_portal.server.external_real_write_guard",
+                    return_value={"mock_external": True},
+                ):
+                    PortalRuntime._remember_local_upload_target(
+                        {
+                            "active_item_id": "event-self-projection",
+                            "record_id": "local_event_self_projection",
+                            "notice_type": "事件通告",
+                            "work_type": "event",
+                            "_is_placeholder_record": True,
+                            "text": uploaded_text,
+                        },
+                        notice_type="事件通告",
+                        target_record_id="rec-event-self-projection",
+                        action="start",
+                    )
+
+                payload = store.list_visible_qt_active_items()[0]["payload"]
+                self.assertFalse(payload["_has_unuploaded_changes"])
+                self.assertNotIn("_queued_after_upload", payload)
+            finally:
+                PortalRuntime.state_store = original_store
+
     def test_event_clipboard_projection_recovers_target_from_identity_map(self):
         current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (

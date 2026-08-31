@@ -18,6 +18,7 @@ from ..services.system_alert_webhook import send_system_alert
 from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
 from ..time_parser import parse_time_range
+from lan_bitable_template_portal.identity_utils import canonical_target_record_id
 
 _QT_MESSAGE_HANDLER_INSTALLED = False
 DEFAULT_DISPLAY_VERSION = "V1.0.20260210"
@@ -770,8 +771,21 @@ class MainWindowRuntimeMixin:
         state_store = getattr(cache_store, "_state_store", None)
         if state_store is not None:
             try:
+                incoming_target_id = canonical_target_record_id(payload)
                 for canonical_row in state_store.list_visible_qt_active_items():
                     canonical_data = self._backend_active_row_payload(canonical_row)
+                    canonical_active_id = str(
+                        canonical_data.get("active_item_id") or ""
+                    ).strip()
+                    canonical_target_id = canonical_target_record_id(canonical_data)
+                    if (
+                        active_item_id
+                        and canonical_active_id == active_item_id
+                        and incoming_target_id
+                        and incoming_target_id != canonical_target_id
+                    ):
+                        self._apply_backend_active_upsert({"item": canonical_row})
+                        return {"ok": True, "stale": True, "deleted": False}
                     if not self._backend_active_identity_matches(
                         {
                             **payload,

@@ -334,6 +334,8 @@ class FastAPIPortalController:
         self._thread: threading.Thread | None = None
         self._scheduler = None
         self._shutdown_event = threading.Event()
+        self._polling_relay_stop = threading.Event()
+        self._polling_relay_thread: threading.Thread | None = None
         self._state_store = LanPortalStateStore()
         self._drills = DrillManagementService(PortalRuntime.state_store)
         self._drill_jobs_lock = threading.RLock()
@@ -6143,6 +6145,13 @@ class FastAPIPortalController:
         @app.post("/api/polling-work-orders/{group_id}/retry-upload")
         async def polling_work_order_retry_upload(group_id: str, request: Request):
             session = self._current_session(request)
+            try:
+                group = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_group,
+                    group_id,
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
             if session is None:
                 try:
                     await asyncio.to_thread(
@@ -6152,15 +6161,29 @@ class FastAPIPortalController:
                     )
                 except Exception as exc:
                     return self._portal_error_response(exc, default_status=403)
+            else:
+                try:
+                    self._authorized_scope_or_error(
+                        session, str(group.get("scope") or "")
+                    )
+                except Exception as exc:
+                    return JSONResponse(
+                        {"ok": False, "error": str(exc)}, status_code=403
+                    )
             try:
                 data = await asyncio.to_thread(
                     PortalRuntime.finalize_polling_work_order_group,
                     group_id,
                 )
+                safe_data = {
+                    key: data.get(key)
+                    for key in ("ok", "state", "error")
+                    if key in data
+                }
                 return (
-                    self._json_ok(request, session, data)
+                    self._json_ok(request, session, safe_data)
                     if session is not None
-                    else {"ok": True, "data": data}
+                    else {"ok": True, "data": safe_data}
                 )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -6175,12 +6198,43 @@ class FastAPIPortalController:
                     PortalRuntime.polling_work_orders().get_group,
                     group_id,
                 )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+            try:
+                self._authorized_scope_or_error(
+                    session, str(group.get("scope") or "")
+                )
+            except Exception as exc:
+                return JSONResponse(
+                    {"ok": False, "error": str(exc)}, status_code=403
+                )
+            try:
                 data = await asyncio.to_thread(
                     PortalRuntime._send_polling_work_order_links,
                     group,
                     force=True,
                 )
-                return self._json_ok(request, session, data)
+                notifications = data.get("notifications")
+                notifications = notifications if isinstance(notifications, dict) else {}
+                safe_roles = {}
+                for role in ("operator", "reviewer"):
+                    item = notifications.get(role)
+                    item = item if isinstance(item, dict) else {}
+                    safe_roles[role] = {
+                        "sent": bool(item.get("sent")),
+                        "fallback": bool(item.get("fallback")),
+                    }
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "sent": all(
+                            safe_roles[role]["sent"]
+                            for role in ("operator", "reviewer")
+                        ),
+                        "roles": safe_roles,
+                    },
+                )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
@@ -12478,6 +12532,60 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"轮巡工单附件重试失败: {exc}")
 
+    def _run_scheduled_polling_relay(self) -> None:
+        relay = PortalRuntime.polling_work_order_relay()
+        relay.run_once()
+        manager = PortalRuntime.polling_work_orders()
+        for group in manager.open_groups():
+            projected = manager.group_with_links(group, "")
+            if str(projected.get("operator_link") or "") and str(
+                projected.get("reviewer_link") or ""
+            ):
+                PortalRuntime._send_polling_work_order_links(projected)
+
+    def _start_polling_relay_worker(self) -> None:
+        if not PortalRuntime.polling_work_order_public_relay_enabled():
+            return
+        try:
+            relay = PortalRuntime.polling_work_order_relay()
+        except Exception as exc:
+            log_warning(f"轮巡公网工单配置无效，已停用公网连接器: {exc}")
+            return
+        if not relay.enabled or (
+            self._polling_relay_thread and self._polling_relay_thread.is_alive()
+        ):
+            return
+        stop_event = threading.Event()
+        self._polling_relay_stop = stop_event
+
+        def run() -> None:
+            delay = 2.0
+            while not stop_event.is_set():
+                try:
+                    self._run_scheduled_polling_relay()
+                    delay = 2.0
+                except Exception as exc:
+                    log_warning(f"轮巡公网工单同步失败，将自动重试: {exc}")
+                    delay = min(30.0, delay * 2.0)
+                stop_event.wait(delay)
+
+        self._polling_relay_thread = threading.Thread(
+            target=run,
+            name="ClipFlowPollingRelay",
+            daemon=True,
+        )
+        self._polling_relay_thread.start()
+
+    def _stop_polling_relay_worker(self) -> None:
+        self._polling_relay_stop.set()
+        thread = self._polling_relay_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=45.0)
+        if not thread or not thread.is_alive():
+            self._polling_relay_thread = None
+        else:
+            log_warning("轮巡公网工单同步线程仍在收尾，已阻止重复启动。")
+
     def _run_scheduled_drill_recovery(self) -> None:
         self._resume_pending_drills()
 
@@ -13279,6 +13387,7 @@ class FastAPIPortalController:
             self._run_deferred_startup_maintenance,
         )
         self._start_scheduler()
+        self._start_polling_relay_worker()
         log_info(
             "FastAPI门户已启动: "
             f"public={self.get_url()} "
@@ -13289,6 +13398,7 @@ class FastAPIPortalController:
         return self.get_url()
 
     def stop(self) -> None:
+        self._stop_polling_relay_worker()
         self._stop_scheduler()
         try:
             PortalRuntime.stop_source_refresh_worker()
