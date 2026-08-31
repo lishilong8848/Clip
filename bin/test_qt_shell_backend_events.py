@@ -196,6 +196,43 @@ class _RecordsHarness(MainWindowRecordsMixin):
     pass
 
 
+class _OperationItem:
+    def __init__(self, data):
+        self.payload = dict(data)
+
+    def data(self, _role):
+        return dict(self.payload)
+
+
+class _DuplicateEventDeleteHarness(_ImmediateDeleteHarness):
+    def __init__(self):
+        super().__init__(remote_deleted=True)
+        self.backend_calls = 0
+        self.pending_action_record_ids = {"rec-shared-event"}
+        self.pending_action_types = {"rec-shared-event": "update"}
+        self.current = {
+            "active_item_id": "active-uploading",
+            "record_id": "rec-shared-event",
+            "target_record_id": "rec-shared-event",
+            "notice_type": "事件通告",
+            "_upload_in_progress": True,
+        }
+
+    def _active_notice_store(self):
+        current = dict(self.current)
+
+        class Store:
+            @staticmethod
+            def entries():
+                return [("event-list", "uploading-item", current)]
+
+        return Store()
+
+    def _submit_delete_active_item_to_backend(self, _data_dict):
+        self.backend_calls += 1
+        return False, "不应删除共享远端目标", {}
+
+
 class _PriorityMutationHarness(MainWindowRuntimeMixin):
     def __init__(self, *, priority_size: int = 2):
         self._closing = False
@@ -284,6 +321,63 @@ class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_upload_operation_lookup_skips_wrong_duplicate_record_row(self):
+        harness = _RecordsHarness()
+        wrong = _OperationItem(
+            {"record_id": "rec-shared", "_upload_operation_id": "other-op"}
+        )
+        right = _OperationItem(
+            {
+                "record_id": "rec-shared",
+                "_upload_operation_id": "wanted-op",
+                "_upload_in_progress": True,
+            }
+        )
+        harness._find_active_item_by_upload_completion_id = (
+            lambda _record_id: ("event-list", wrong, "rec-shared")
+        )
+        harness._is_valid_list_item = lambda _item: True
+
+        class Store:
+            @staticmethod
+            def entries():
+                return [
+                    ("event-list", wrong, wrong.payload),
+                    ("event-list", right, right.payload),
+                ]
+
+        harness._active_notice_store = lambda: Store()
+        harness.pending_action_record_ids = set()
+
+        self.assertTrue(
+            harness._is_current_upload_operation("rec-shared", "wanted-op")
+        )
+        list_widget, item = harness._find_active_item_by_upload_operation(
+            "wanted-op"
+        )
+        self.assertEqual(list_widget, "event-list")
+        self.assertIs(item, right)
+
+    def test_deleting_duplicate_event_keeps_sibling_upload_slot_and_remote_target(self):
+        harness = _DuplicateEventDeleteHarness()
+        duplicate = {
+            "active_item_id": "active-duplicate",
+            "record_id": "rec-shared-event",
+            "target_record_id": "rec-shared-event",
+            "notice_type": "事件通告",
+            "_upload_in_progress": False,
+        }
+
+        harness._delete_active_item(duplicate)
+        self.assertTrue(harness.backend_finished.wait(1.0))
+
+        self.assertEqual(harness.backend_calls, 0)
+        self.assertIn("rec-shared-event", harness.pending_action_record_ids)
+        self.assertEqual(
+            harness.pending_action_types["rec-shared-event"], "update"
+        )
+        self.assertEqual(harness.cache_delete_count, 1)
+
     def test_clipboard_event_upload_context_is_scoped_to_matching_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             harness = _ClipboardHarness(

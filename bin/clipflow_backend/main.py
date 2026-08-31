@@ -5765,9 +5765,13 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or ""
                 )
+                work_type = str(
+                    request.query_params.get("work_type") or "polling"
+                ).strip()
                 items = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().list_sops,
                     scope,
+                    work_type,
                 )
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
@@ -5813,6 +5817,9 @@ class FastAPIPortalController:
                     session, existing_sop.get("scope") or ""
                 )
                 payload["sop_id"] = sop_id
+                payload["work_type"] = str(
+                    existing_sop.get("work_type") or "polling"
+                ).strip()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().save_sop,

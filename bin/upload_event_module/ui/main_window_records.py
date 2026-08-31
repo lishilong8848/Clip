@@ -3247,16 +3247,41 @@ class MainWindowRecordsMixin:
                 return list_widget, item, next(iter(matched))
         return None, None, ""
 
+    def _find_active_item_by_upload_operation(self, operation_id: str):
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            return None, None
+        fallback = (None, None)
+        try:
+            entries = self._active_notice_store().entries()
+        except Exception:
+            entries = []
+        for list_widget, item, data in entries:
+            if not self._is_valid_list_item(item) or not isinstance(data, dict):
+                continue
+            if str(data.get("_upload_operation_id") or "").strip() != operation_id:
+                continue
+            if bool(data.get("_upload_in_progress")):
+                return list_widget, item
+            if fallback == (None, None):
+                fallback = (list_widget, item)
+        return fallback
+
     def _is_current_upload_operation(self, record_id: str, operation_id: str) -> bool:
         operation_id = str(operation_id or "").strip()
         if not operation_id:
             return True
+        candidate_ids = set(self._upload_completion_record_id_candidates(record_id))
+        observed_newer_operation = False
         _list_widget, item, _matched = self._find_active_item_by_upload_completion_id(
             record_id
         )
         if item and self._is_valid_list_item(item):
             data = item.data(Qt.ItemDataRole.UserRole) or {}
-            return str(data.get("_upload_operation_id") or "").strip() == operation_id
+            stored_operation = str(data.get("_upload_operation_id") or "").strip()
+            if stored_operation == operation_id:
+                return True
+            observed_newer_operation = bool(stored_operation)
         try:
             entries = self._active_notice_store().entries()
         except Exception:
@@ -3264,12 +3289,21 @@ class MainWindowRecordsMixin:
         for _list_widget, candidate, data in entries:
             if not self._is_valid_list_item(candidate) or not isinstance(data, dict):
                 continue
-            if str(data.get("_upload_operation_id") or "").strip() == operation_id:
+            stored_operation = str(data.get("_upload_operation_id") or "").strip()
+            if stored_operation == operation_id:
                 return True
+            values = {
+                str(data.get("record_id") or "").strip(),
+                str(data.get("target_record_id") or "").strip(),
+            }
+            if stored_operation and values.intersection(candidate_ids):
+                observed_newer_operation = True
+        if observed_newer_operation:
+            return False
         pending_ids = set(getattr(self, "pending_action_record_ids", set()) or set())
         return any(
             candidate_id in pending_ids
-            for candidate_id in self._upload_completion_record_id_candidates(record_id)
+            for candidate_id in candidate_ids
         )
 
     def _update_active_item_data(self, record_id, data_dict, *, persist_cache=True):
@@ -4119,7 +4153,14 @@ class MainWindowRecordsMixin:
         except Exception:
             return
 
-    def restore_button_state(self, success=False, name=None, record_id=None, mark_failed=True):
+    def restore_button_state(
+        self,
+        success=False,
+        name=None,
+        record_id=None,
+        mark_failed=True,
+        operation_id="",
+    ):
         self._set_last_ui_op(
             "restore_button_state",
             success=success,
@@ -4148,9 +4189,14 @@ class MainWindowRecordsMixin:
                 for candidate_id in candidate_ids:
                     pending_updates.pop(candidate_id, None)
                     pending_new.pop(candidate_id, None)
-            list_widget, item, matched_record_id = self._find_active_item_by_upload_completion_id(
-                record_id
+            list_widget, item = self._find_active_item_by_upload_operation(
+                operation_id
             )
+            matched_record_id = ""
+            if item is None:
+                list_widget, item, matched_record_id = (
+                    self._find_active_item_by_upload_completion_id(record_id)
+                )
             if item and not self._is_valid_list_item(item):
                 item = None
                 list_widget = None
@@ -4186,6 +4232,10 @@ class MainWindowRecordsMixin:
                 observed_version = str(data.get("record_version") or "").strip()
                 if observed_version:
                     data["expected_record_version"] = observed_version
+                if not success:
+                    data.pop("_queued_after_upload", None)
+                    data.pop("_queued_action", None)
+                    data.pop("_queued_upload_requested", None)
                 queued_after_upload = bool(data.get("_queued_after_upload"))
                 if not success:
                     data["_has_unuploaded_changes"] = True

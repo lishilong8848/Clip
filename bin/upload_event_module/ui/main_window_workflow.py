@@ -2271,12 +2271,58 @@ class MainWindowWorkflowMixin:
         self.request_active_cache_save()
         return True, ""
 
+    def _event_delete_live_sibling(self, data_dict: dict) -> dict:
+        data_dict = data_dict if isinstance(data_dict, dict) else {}
+        if str(data_dict.get("notice_type") or "").strip() != "事件通告":
+            return {}
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
+        target_record_id = str(
+            data_dict.get("target_record_id") or data_dict.get("record_id") or ""
+        ).strip()
+        try:
+            entries = self._active_notice_store().entries()
+        except Exception:
+            return {}
+        for _list_widget, _item, candidate in entries:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_active_id = str(candidate.get("active_item_id") or "").strip()
+            if active_item_id and candidate_active_id == active_item_id:
+                continue
+            if str(candidate.get("notice_type") or "").strip() != "事件通告":
+                continue
+            candidate_target_id = str(
+                candidate.get("target_record_id") or candidate.get("record_id") or ""
+            ).strip()
+            same_target = bool(
+                target_record_id
+                and candidate_target_id
+                and target_record_id == candidate_target_id
+            )
+            try:
+                same_event = self._event_sparse_identity_matches(
+                    data_dict,
+                    candidate,
+                )
+            except Exception:
+                same_event = False
+            if same_target or same_event:
+                return dict(candidate)
+        return {}
+
     def _delete_active_item(self, data_dict):
         """删除活动列表项；未上传条目只移除本地显示。"""
         data_dict = dict(data_dict or {})
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
         if self._is_screenshot_dialog_active():
             record_id = (data_dict or {}).get("record_id")
-            list_widget, item = self._find_active_item_by_record_id(record_id)
+            list_widget, item = (
+                self._find_active_item_by_active_item_id(active_item_id)
+                if active_item_id
+                else (None, None)
+            )
+            if not item or not self._is_valid_list_item(item):
+                list_widget, item = self._find_active_item_by_record_id(record_id)
             widget = self._safe_item_widget(list_widget, item)
             if widget and hasattr(widget, "cancel_delete_visual"):
                 try:
@@ -2285,8 +2331,17 @@ class MainWindowWorkflowMixin:
                     pass
             self.show_message("截图上传进行中，暂时不能删除条目。")
             return
+        if bool(data_dict.get("_upload_in_progress")):
+            self.show_message("该通告正在上传，完成后才可删除。")
+            return
         record_id = str((data_dict or {}).get("record_id") or "").strip()
-        list_widget, item = self._find_active_item_by_record_id(record_id)
+        list_widget, item = (
+            self._find_active_item_by_active_item_id(active_item_id)
+            if active_item_id
+            else (None, None)
+        )
+        if not item or not self._is_valid_list_item(item):
+            list_widget, item = self._find_active_item_by_record_id(record_id)
         widget = self._safe_item_widget(list_widget, item)
         delete_operation_id = str(data_dict.get("_delete_operation_id") or "").strip()
         if not delete_operation_id:
@@ -2300,30 +2355,41 @@ class MainWindowWorkflowMixin:
         if item and self._is_valid_list_item(item):
             item.setData(Qt.ItemDataRole.UserRole, dict(data_dict))
 
-        local_only_remove = not bool(canonical_target_record_id(data_dict))
+        live_event_sibling = self._event_delete_live_sibling(data_dict)
+        preserve_sibling_upload = bool(live_event_sibling)
+        local_only_remove = preserve_sibling_upload or not bool(
+            canonical_target_record_id(data_dict)
+        )
 
         def _remove_from_qt() -> None:
-            active_item_id = str((data_dict or {}).get("active_item_id") or "").strip()
-            self._clear_upload_queue(record_id)
-            self._today_in_progress_pending_record_ids.discard(record_id)
-            self._today_in_progress_synced_record_ids.discard(record_id)
-            self.pending_new_by_record_id.pop(record_id, None)
-            self.pending_replace_by_record_id.pop(record_id, None)
-            self.pending_update_after_upload.pop(record_id, None)
-            self.pending_action_record_ids.discard(record_id)
-            self.pending_action_types.pop(record_id, None)
-            if hasattr(self, "_pop_lan_portal_upload_job"):
-                try:
-                    self._pop_lan_portal_upload_job(
-                        record_id=record_id,
-                        active_item_id=active_item_id,
-                    )
-                except Exception:
-                    pass
-            list_widget_now, item_now = self._find_active_item_by_record_id(record_id)
-            if (not item_now or not self._is_valid_list_item(item_now)) and active_item_id:
-                list_widget_now, item_now = self._find_active_item_by_active_item_id(
-                    active_item_id
+            if preserve_sibling_upload:
+                if bool(data_dict.get("_queued_upload_requested")):
+                    self.pending_update_after_upload.pop(record_id, None)
+            else:
+                self._clear_upload_queue(record_id)
+                self._today_in_progress_pending_record_ids.discard(record_id)
+                self._today_in_progress_synced_record_ids.discard(record_id)
+                self.pending_new_by_record_id.pop(record_id, None)
+                self.pending_replace_by_record_id.pop(record_id, None)
+                self.pending_update_after_upload.pop(record_id, None)
+                self.pending_action_record_ids.discard(record_id)
+                self.pending_action_types.pop(record_id, None)
+                if hasattr(self, "_pop_lan_portal_upload_job"):
+                    try:
+                        self._pop_lan_portal_upload_job(
+                            record_id=record_id,
+                            active_item_id=active_item_id,
+                        )
+                    except Exception:
+                        pass
+            list_widget_now, item_now = (
+                self._find_active_item_by_active_item_id(active_item_id)
+                if active_item_id
+                else (None, None)
+            )
+            if not item_now or not self._is_valid_list_item(item_now):
+                list_widget_now, item_now = self._find_active_item_by_record_id(
+                    record_id
                 )
             if item_now and self._is_valid_list_item(item_now):
                 self._remove_active_item_widget_only(list_widget_now, item_now)
@@ -2362,7 +2428,10 @@ class MainWindowWorkflowMixin:
                 log_info(f"UI操作: 移除未上传本地事件, Record ID: {record_id}")
 
         def _worker() -> None:
-            success, error, result = self._submit_delete_active_item_to_backend(data_dict)
+            if preserve_sibling_upload:
+                success, error, result = True, "", {"remote_deleted": False}
+            else:
+                success, error, result = self._submit_delete_active_item_to_backend(data_dict)
             enqueue = getattr(self, "_enqueue_ui_mutation", None)
             if callable(enqueue):
                 enqueue(
@@ -3214,6 +3283,7 @@ class MainWindowWorkflowMixin:
                         name=name,
                         record_id=record_id,
                         mark_failed=True,
+                        operation_id=operation_id,
                     )
                     self.show_message(f"「{name}」失败\n{msg}")
                     self._notify_lan_portal_upload_result(
@@ -3223,7 +3293,12 @@ class MainWindowWorkflowMixin:
                     return
 
                 # 恢复按钮状态
-                self.restore_button_state(success, name, record_id)
+                self.restore_button_state(
+                    success,
+                    name,
+                    record_id,
+                    operation_id=operation_id,
+                )
 
                 if success:
                     if name in ["上传", "更新", "归档"]:

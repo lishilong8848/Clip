@@ -1439,6 +1439,8 @@ class MaintenancePortalService:
         self._drill_archive_lock = threading.RLock()
         self._deletion_audit_schema_lock = threading.RLock()
         self._deletion_audit_schema_ready = False
+        self._maintenance_work_order_schema_lock = threading.RLock()
+        self._maintenance_work_order_schema_ready = False
         self._deletion_audit_flush_lock = threading.Lock()
         self._deletion_audit_worker_lock = threading.RLock()
         self._deletion_audit_worker_running = False
@@ -2867,6 +2869,86 @@ class MaintenancePortalService:
             return {
                 "ok": True,
                 "created_fields": created,
+                "field_count": len(by_name),
+            }
+
+    def ensure_maintenance_work_order_schema(self) -> dict[str, Any]:
+        """Ensure the maintenance target can persist work-order completion."""
+
+        expected_types = {
+            MAINTENANCE_NOTICE_FIELDS["work_order_required"]: 7,
+            MAINTENANCE_NOTICE_FIELDS["work_order_operator"]: 1,
+            MAINTENANCE_NOTICE_FIELDS["work_order_reviewer"]: 1,
+            MAINTENANCE_NOTICE_FIELDS["work_order_attachments"]: 17,
+        }
+        app_token = str(config.app_token or "").strip()
+        table_id = str(config.table_id_weibao or "").strip()
+        if not app_token or not table_id:
+            raise PortalError("维保目标表未配置，无法启用工单。")
+        with self._maintenance_work_order_schema_lock:
+            if self._maintenance_work_order_schema_ready:
+                return {"ok": True, "created_fields": [], "cached": True}
+
+            def load_by_name() -> dict[str, dict[str, Any]]:
+                return {
+                    str(item.get("field_name") or "").strip(): item
+                    for item in self._load_raw_table_fields(
+                        app_token=app_token,
+                        table_id=table_id,
+                        http_client=self._write_http_client,
+                    )
+                    if isinstance(item, dict)
+                }
+
+            by_name = load_by_name()
+            attachment_name = MAINTENANCE_NOTICE_FIELDS["work_order_attachments"]
+            created_attachment = False
+            if attachment_name not in by_name:
+                url = (
+                    "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                    f"{app_token}/tables/{table_id}/fields"
+                )
+
+                def create_attachment_field() -> dict[str, Any]:
+                    return self._request_payload(
+                        "POST",
+                        url,
+                        context="维保工单附件字段创建",
+                        headers={
+                            **self._auth_headers(),
+                            "Content-Type": "application/json",
+                        },
+                        json_payload={"field_name": attachment_name, "type": 17},
+                        http_client=self._write_http_client,
+                    )
+
+                result = create_attachment_field()
+                if int(result.get("code") or 0) in TOKEN_ERROR_CODES:
+                    refresh_feishu_token()
+                    result = create_attachment_field()
+                by_name = load_by_name()
+                if attachment_name not in by_name:
+                    raise PortalError(
+                        "创建维保目标表“工单附件”字段失败: "
+                        f"code={int(result.get('code') or 0)}, "
+                        f"msg={result.get('msg') or 'unknown'}"
+                    )
+                created_attachment = True
+
+            for field_name, expected_type in expected_types.items():
+                field = by_name.get(field_name)
+                if not isinstance(field, dict):
+                    raise PortalError(f"维保目标表缺少“{field_name}”字段。")
+                actual_type = int(field.get("type") or 0)
+                if actual_type != expected_type:
+                    raise PortalError(
+                        f"维保目标表“{field_name}”字段类型错误，"
+                        f"应为 {expected_type}，实际为 {actual_type}。"
+                    )
+            self._maintenance_work_order_schema_ready = True
+            return {
+                "ok": True,
+                "created_fields": [attachment_name] if created_attachment else [],
                 "field_count": len(by_name),
             }
 
@@ -40684,7 +40766,7 @@ class MaintenancePortalService:
             )
         else:
             prepared = self.prepare_maintenance_action(request_payload, job_id=job_id)
-        if work_type == WORK_TYPE_POLLING:
+        if work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}:
             from .polling_work_orders import PollingWorkOrderService
 
             prepared.update(

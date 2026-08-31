@@ -30,6 +30,7 @@ from .portal_service import (
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
     NOTICE_TYPE_CHANGE,
+    NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_POLLING,
     PortalConflictError,
     PortalError,
@@ -58,6 +59,7 @@ from .local_notice_images import LocalNoticeImageStore
 from upload_event_module.config import (
     CHANGE_NOTICE_FIELDS,
     EVENT_NOTICE_FIELDS,
+    MAINTENANCE_NOTICE_FIELDS,
     POLLING_NOTICE_FIELDS,
     SPECIALTY_FIRE,
     config,
@@ -1155,6 +1157,7 @@ class PortalRuntime:
         )
         notifications = dict(group.get("notifications") or {})
         initiator_open_id = str(group.get("initiator_open_id") or "").strip()
+        work_order_label = cls._work_order_label(group)
         changed = False
         for role, label in (("operator", "操作人"), ("reviewer", "现场审核人")):
             previous = notifications.get(role) if isinstance(notifications.get(role), dict) else {}
@@ -1181,7 +1184,7 @@ class PortalRuntime:
                 continue
             text = "\n".join(
                 (
-                    "【轮巡工单待确认】",
+                    f"【{work_order_label}工单待确认】",
                     f"通告：{group.get('title') or group.get('target_record_id') or '-'}",
                     f"SOP：{group.get('sop_name') or '-'}",
                     f"角色：{label} {person.get('name') or ''}",
@@ -1240,7 +1243,8 @@ class PortalRuntime:
         target_record_id: str,
     ) -> dict:
         if (
-            str(prepared.get("work_type") or "") != WORK_TYPE_POLLING
+            str(prepared.get("work_type") or "")
+            not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}
             or str(prepared.get("action") or "").lower() != "start"
             or not prepared.get("polling_work_order_required")
         ):
@@ -1275,10 +1279,18 @@ class PortalRuntime:
     @classmethod
     def finalize_polling_work_order_group(cls, target_record_id: str) -> dict:
         manager = cls.polling_work_orders()
+        try:
+            group = manager.get_group(target_record_id)
+        except Exception as exc:
+            return {"ok": False, "state": "missing", "error": str(exc)}
+        work_type = str(group.get("work_type") or WORK_TYPE_POLLING).strip()
+        notice_type = cls._work_order_notice_type(group)
+        field_config = cls._work_order_field_config(group)
+        label = cls._work_order_label(group)
         lock_key, lock_owner, lock_error = cls._acquire_event_operation_lock(
             {
-                "work_type": WORK_TYPE_POLLING,
-                "notice_type": NOTICE_TYPE_POLLING,
+                "work_type": work_type,
+                "notice_type": notice_type,
                 "target_record_id": target_record_id,
             },
             action_type="polling_work_order_finalize",
@@ -1291,23 +1303,22 @@ class PortalRuntime:
                 "error": "工单附件正在上传，请稍后刷新。",
             }
         try:
-            group = manager.get_group(target_record_id)
             group_state = str(group.get("state") or "")
             if group_state not in {"upload_pending", "completed"}:
                 return {"ok": False, "state": str(group.get("state") or ""), "error": "工单步骤尚未全部完成。"}
-            ok_read, record = query_record_by_id(target_record_id, NOTICE_TYPE_POLLING)
+            ok_read, record = query_record_by_id(target_record_id, notice_type)
             if not ok_read:
                 if cls._remote_record_not_found(record):
                     manager.cancel_group(
                         target_record_id, reason="target_not_found"
                     )
-                    return {"ok": False, "state": "cancelled", "error": "轮巡目标记录不存在。"}
-                raise PortalExternalError(str(record or "轮巡目标记录读取失败。"))
+                    return {"ok": False, "state": "cancelled", "error": f"{label}目标记录不存在。"}
+                raise PortalExternalError(str(record or f"{label}目标记录读取失败。"))
             fields = cls._change_confirmation_fields(record)
             if group_state == "completed":
                 remote_tokens = set(
                     cls._change_confirmation_attachment_tokens(
-                        fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                        fields.get(field_config["work_order_attachments"])
                     )
                 )
                 completed_tokens = {
@@ -1318,15 +1329,15 @@ class PortalRuntime:
                 if completed_tokens and completed_tokens.issubset(remote_tokens):
                     return {"ok": True, "state": "completed", "group": group}
             lifecycle = cls.service._target_record_lifecycle(
-                work_type=WORK_TYPE_POLLING,
-                notice_type=NOTICE_TYPE_POLLING,
+                work_type=work_type,
+                notice_type=notice_type,
                 target_record={"record_id": target_record_id, "display_fields": fields},
             )
             if lifecycle.get("finished") or not lifecycle.get("active"):
                 manager.cancel_group(
                     target_record_id, reason="target_terminal"
                 )
-                return {"ok": False, "state": "cancelled", "error": "轮巡通告已结束，工单已停止。"}
+                return {"ok": False, "state": "cancelled", "error": f"{label}通告已结束，工单已停止。"}
             workbook = manager.build_execution_workbook(target_record_id)
             uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
             previous_generated_tokens = {
@@ -1355,7 +1366,7 @@ class PortalRuntime:
                 )
             new_tokens = [workbook_token]
             existing_tokens = cls._change_confirmation_attachment_tokens(
-                fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                fields.get(field_config["work_order_attachments"])
             )
             expected_tokens = list(
                 dict.fromkeys(
@@ -1368,13 +1379,13 @@ class PortalRuntime:
                 )
             )
             patch_fields = {
-                POLLING_NOTICE_FIELDS["work_order_attachments"]: [
+                field_config["work_order_attachments"]: [
                     {"file_token": token} for token in expected_tokens
                 ]
             }
             ok_patch, patch_result = update_bitable_record_fields(
                 target_record_id,
-                NOTICE_TYPE_POLLING,
+                notice_type,
                 patch_fields,
             )
             if not ok_patch:
@@ -1382,11 +1393,11 @@ class PortalRuntime:
             verified = False
             for attempt in range(3):
                 ok_verify, verify_record = query_record_by_id(
-                    target_record_id, NOTICE_TYPE_POLLING
+                    target_record_id, notice_type
                 )
                 verify_fields = cls._change_confirmation_fields(verify_record)
                 actual_tokens = cls._change_confirmation_attachment_tokens(
-                    verify_fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
+                    verify_fields.get(field_config["work_order_attachments"])
                 )
                 if ok_verify and set(new_tokens).issubset(actual_tokens):
                     verified = True
@@ -1420,6 +1431,8 @@ class PortalRuntime:
         manager = cls.polling_work_orders()
         for group in manager.open_groups():
             target_record_id = str(group.get("target_record_id") or "").strip()
+            work_type = str(group.get("work_type") or WORK_TYPE_POLLING).strip()
+            notice_type = cls._work_order_notice_type(group)
             relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
             if (
                 str(relay_state.get("mode") or "") == "public_relay"
@@ -1434,7 +1447,7 @@ class PortalRuntime:
                     cls._send_polling_work_order_links(group)
             if str(group.get("state") or "") in {"active", "completed"}:
                 ok_read, record = query_record_by_id(
-                    target_record_id, NOTICE_TYPE_POLLING
+                    target_record_id, notice_type
                 )
                 if not ok_read and cls._remote_record_not_found(record):
                     manager.cancel_group(
@@ -1443,8 +1456,8 @@ class PortalRuntime:
                 elif ok_read:
                     fields = cls._change_confirmation_fields(record)
                     lifecycle = cls.service._target_record_lifecycle(
-                        work_type=WORK_TYPE_POLLING,
-                        notice_type=NOTICE_TYPE_POLLING,
+                        work_type=work_type,
+                        notice_type=notice_type,
                         target_record={
                             "record_id": target_record_id,
                             "display_fields": fields,
@@ -6843,19 +6856,102 @@ class PortalRuntime:
     def _polling_work_order_remote_fields_match(
         cls, fields: dict, prepared: dict
     ) -> bool:
+        field_config = cls._work_order_field_config(prepared)
         return bool(
             cls._change_confirmation_checked(
-                fields.get(POLLING_NOTICE_FIELDS["work_order_required"])
+                fields.get(field_config["work_order_required"])
             )
             and str(
-                fields.get(POLLING_NOTICE_FIELDS["work_order_operator"]) or ""
+                fields.get(field_config["work_order_operator"]) or ""
             ).strip()
             == str(prepared.get("polling_operator_name") or "").strip()
             and str(
-                fields.get(POLLING_NOTICE_FIELDS["work_order_reviewer"]) or ""
+                fields.get(field_config["work_order_reviewer"]) or ""
             ).strip()
             == str(prepared.get("polling_reviewer_name") or "").strip()
         )
+
+    @staticmethod
+    def _work_order_field_config(payload: dict) -> dict[str, str]:
+        work_type = str((payload or {}).get("work_type") or "polling").strip()
+        return (
+            MAINTENANCE_NOTICE_FIELDS
+            if work_type == WORK_TYPE_MAINTENANCE
+            else POLLING_NOTICE_FIELDS
+        )
+
+    @staticmethod
+    def _work_order_notice_type(payload: dict) -> str:
+        return (
+            NOTICE_TYPE_MAINTENANCE
+            if str((payload or {}).get("work_type") or "polling").strip()
+            == WORK_TYPE_MAINTENANCE
+            else NOTICE_TYPE_POLLING
+        )
+
+    @staticmethod
+    def _work_order_label(payload: dict) -> str:
+        return (
+            "维保"
+            if str((payload or {}).get("work_type") or "polling").strip()
+            == WORK_TYPE_MAINTENANCE
+            else "轮巡"
+        )
+
+    @classmethod
+    def _work_order_end_error(
+        cls,
+        *,
+        target_record_id: str,
+        work_type: str,
+        fields: dict,
+    ) -> str:
+        context = {"work_type": str(work_type or WORK_TYPE_POLLING).strip()}
+        field_config = cls._work_order_field_config(context)
+        label = cls._work_order_label(context)
+        remote_required = cls._change_confirmation_checked(
+            (fields or {}).get(field_config["work_order_required"])
+        )
+        try:
+            group = cls.polling_work_orders().get_group(target_record_id)
+        except Exception:
+            group = None
+        local_required = bool(
+            isinstance(group, dict)
+            and str(group.get("state") or "")
+            in {"active", "upload_pending", "completed"}
+            and str(group.get("work_type") or WORK_TYPE_POLLING).strip()
+            == context["work_type"]
+        )
+        if not (remote_required or local_required):
+            return ""
+        operator_name = str(
+            (fields or {}).get(field_config["work_order_operator"]) or ""
+        ).strip()
+        reviewer_name = str(
+            (fields or {}).get(field_config["work_order_reviewer"]) or ""
+        ).strip()
+        if not operator_name or not reviewer_name:
+            return f"{label}工单缺少操作人或现场审核人，不能发送结束。"
+        remote_tokens = set(
+            cls._change_confirmation_attachment_tokens(
+                (fields or {}).get(field_config["work_order_attachments"])
+            )
+        )
+        if not remote_tokens:
+            return f"{label}工单尚未全部完成或附件尚未上传，不能发送结束。"
+        if not isinstance(group, dict):
+            return f"无法核验{label}工单完成状态，不能发送结束。"
+        if str(group.get("state") or "") != "completed":
+            return f"{label}工单尚未完成，不能发送结束。"
+        expected_tokens = {
+            str(token or "").strip()
+            for token in group.get("uploaded_file_tokens") or []
+            if str(token or "").strip()
+        }
+        if not expected_tokens or not expected_tokens.issubset(remote_tokens):
+            return f"{label}工单附件与本次完成记录不一致，不能发送结束。"
+        return ""
 
     @staticmethod
     def _remote_record_not_found(message: object) -> bool:
@@ -9010,6 +9106,21 @@ class PortalRuntime:
             return True, record_id, record_id
         if not guard["real_write_allowed"]:
             return False, str(guard["reason"] or "真实外部写入未确认。"), ""
+        work_order_notice = notice_type in {
+            NOTICE_TYPE_MAINTENANCE,
+            NOTICE_TYPE_POLLING,
+        }
+        work_order_fields = cls._work_order_field_config(prepared)
+        work_order_label = cls._work_order_label(prepared)
+        if (
+            action == "start"
+            and notice_type == NOTICE_TYPE_MAINTENANCE
+            and prepared.get("polling_work_order_required")
+        ):
+            try:
+                cls.service.ensure_maintenance_work_order_schema()
+            except Exception as exc:
+                return False, str(exc), ""
         if action == "start":
             existing_target = cls._existing_target_for_prepared_start(
                 prepared,
@@ -9161,27 +9272,27 @@ class PortalRuntime:
                     for upload_id in ali_upload_ids:
                         cls.state_store.mark_notice_upload_attachment_used(upload_id)
                 if (
-                    notice_type == NOTICE_TYPE_POLLING
+                    work_order_notice
                     and prepared.get("polling_work_order_required")
                 ):
-                    work_order_fields = {
-                        POLLING_NOTICE_FIELDS["work_order_required"]: True,
-                        POLLING_NOTICE_FIELDS["work_order_operator"]: str(
+                    work_order_patch = {
+                        work_order_fields["work_order_required"]: True,
+                        work_order_fields["work_order_operator"]: str(
                             prepared.get("polling_operator_name") or ""
                         ).strip(),
-                        POLLING_NOTICE_FIELDS["work_order_reviewer"]: str(
+                        work_order_fields["work_order_reviewer"]: str(
                             prepared.get("polling_reviewer_name") or ""
                         ).strip(),
                     }
                     ok_patch, patch_result = update_bitable_record_fields(
                         existing_target,
                         notice_type,
-                        work_order_fields,
+                        work_order_patch,
                     )
                     if not ok_patch:
                         return (
                             False,
-                            str(patch_result or "轮巡工单人员写入失败。"),
+                            str(patch_result or f"{work_order_label}工单人员写入失败。"),
                             existing_target,
                         )
                     verified_work_order = False
@@ -9205,17 +9316,17 @@ class PortalRuntime:
                     if not verified_work_order:
                         return (
                             False,
-                            "轮巡工单人员已提交，但目标表尚未确认写入。",
+                            f"{work_order_label}工单人员已提交，但目标表尚未确认写入。",
                             existing_target,
                         )
                 elif (
-                    notice_type == NOTICE_TYPE_POLLING
+                    work_order_notice
                     and prepared.get("polling_work_order_exempt")
                 ):
                     cleared_work_order_fields = {
-                        POLLING_NOTICE_FIELDS["work_order_required"]: False,
-                        POLLING_NOTICE_FIELDS["work_order_operator"]: "",
-                        POLLING_NOTICE_FIELDS["work_order_reviewer"]: "",
+                        work_order_fields["work_order_required"]: False,
+                        work_order_fields["work_order_operator"]: "",
+                        work_order_fields["work_order_reviewer"]: "",
                     }
                     ok_patch, patch_result = update_bitable_record_fields(
                         existing_target,
@@ -9240,18 +9351,18 @@ class PortalRuntime:
                             ok_verify
                             and not cls._change_confirmation_checked(
                                 verify_fields.get(
-                                    POLLING_NOTICE_FIELDS["work_order_required"]
+                                    work_order_fields["work_order_required"]
                                 )
                             )
                             and not str(
                                 verify_fields.get(
-                                    POLLING_NOTICE_FIELDS["work_order_operator"]
+                                    work_order_fields["work_order_operator"]
                                 )
                                 or ""
                             ).strip()
                             and not str(
                                 verify_fields.get(
-                                    POLLING_NOTICE_FIELDS["work_order_reviewer"]
+                                    work_order_fields["work_order_reviewer"]
                                 )
                                 or ""
                             ).strip()
@@ -9263,7 +9374,7 @@ class PortalRuntime:
                     if not cleared_verified:
                         return (
                             False,
-                            "轮巡工单标记已提交，但目标表尚未确认清除。",
+                            f"{work_order_label}工单标记已提交，但目标表尚未确认清除。",
                             existing_target,
                         )
                     try:
@@ -9362,7 +9473,7 @@ class PortalRuntime:
                         created_result.get("last_modified_time") or ""
                     ).strip()
                 if (
-                    notice_type == NOTICE_TYPE_POLLING
+                    work_order_notice
                     and prepared.get("polling_work_order_required")
                 ):
                     work_order_verified = bool(
@@ -9390,7 +9501,7 @@ class PortalRuntime:
                     if not work_order_verified:
                         return (
                             False,
-                            "轮巡工单记录已创建，但人员字段尚未确认写入。",
+                            f"{work_order_label}工单记录已创建，但人员字段尚未确认写入。",
                             record_id,
                         )
                 if ali_tokens:
@@ -9449,50 +9560,14 @@ class PortalRuntime:
             current_record_version or expected_record_version,
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
-        if action == "end" and notice_type == NOTICE_TYPE_POLLING:
-            remote_work_order_required = cls._change_confirmation_checked(
-                fields.get(POLLING_NOTICE_FIELDS["work_order_required"])
+        if action == "end" and work_order_notice:
+            end_error = cls._work_order_end_error(
+                target_record_id=record_id,
+                work_type=str(prepared.get("work_type") or "").strip(),
+                fields=fields,
             )
-            try:
-                work_order_group = cls.polling_work_orders().get_group(record_id)
-            except Exception:
-                work_order_group = None
-            local_work_order_required = bool(
-                isinstance(work_order_group, dict)
-                and str(work_order_group.get("state") or "")
-                in {"active", "upload_pending", "completed"}
-            )
-            work_order_required = remote_work_order_required or local_work_order_required
-            if work_order_required:
-                operator_name = str(
-                    fields.get(POLLING_NOTICE_FIELDS["work_order_operator"]) or ""
-                ).strip()
-                reviewer_name = str(
-                    fields.get(POLLING_NOTICE_FIELDS["work_order_reviewer"]) or ""
-                ).strip()
-                if not operator_name or not reviewer_name:
-                    return False, "轮巡工单缺少操作人或现场审核人，不能发送结束。", record_id
-                remote_work_order_tokens = set(
-                    cls._change_confirmation_attachment_tokens(
-                        fields.get(POLLING_NOTICE_FIELDS["work_order_attachments"])
-                    )
-                )
-                if not remote_work_order_tokens:
-                    return False, "轮巡工单尚未全部完成或附件尚未上传，不能发送结束。", record_id
-                if not isinstance(work_order_group, dict):
-                    return False, "无法核验轮巡工单完成状态，不能发送结束。", record_id
-                if str(work_order_group.get("state") or "") != "completed":
-                    return False, "轮巡工单尚未完成，不能发送结束。", record_id
-                expected_work_order_tokens = {
-                    str(token or "").strip()
-                    for token in work_order_group.get("uploaded_file_tokens") or []
-                    if str(token or "").strip()
-                }
-                if (
-                    not expected_work_order_tokens
-                    or not expected_work_order_tokens.issubset(remote_work_order_tokens)
-                ):
-                    return False, "轮巡工单附件与本次完成记录不一致，不能发送结束。", record_id
+            if end_error:
+                return False, end_error, record_id
         if (
             prepared.get("web_today_screenshot_required")
             and prepared.get("ali_confirmation_source") == "standalone"
@@ -10241,9 +10316,10 @@ class PortalRuntime:
                 reason="target_terminal",
             )
         if (
-            str(prepared.get("work_type") or "").strip() == WORK_TYPE_POLLING
+            str(prepared.get("work_type") or "").strip()
+            in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}
             or str(prepared.get("notice_type") or "").strip()
-            == NOTICE_TYPE_POLLING
+            in {NOTICE_TYPE_MAINTENANCE, NOTICE_TYPE_POLLING}
         ):
             cls.polling_work_orders().cancel_group(
                 target_record_id,
@@ -10397,6 +10473,34 @@ class PortalRuntime:
                 data,
                 current_record_version or expected_record_version,
             )
+
+        if action_type == "end" and notice_type in {
+            NOTICE_TYPE_MAINTENANCE,
+            NOTICE_TYPE_POLLING,
+        }:
+            end_fields = (
+                prequery_result.get("fields")
+                if isinstance(prequery_result, dict)
+                and isinstance(prequery_result.get("fields"), dict)
+                else {}
+            )
+            end_error = cls._work_order_end_error(
+                target_record_id=query_record_id_for_action,
+                work_type=str(
+                    data.get("work_type")
+                    or cls._notice_work_type_from_notice_type(notice_type)
+                    or ""
+                ).strip(),
+                fields=end_fields,
+            )
+            if end_error:
+                return {
+                    "ok": False,
+                    "name": "结束",
+                    "message": end_error,
+                    "record_id": query_record_id_for_action,
+                    "real_record_id": "",
+                }
 
         today_in_progress_state = cls._apply_change_today_in_progress_state(
             data,
@@ -11420,7 +11524,7 @@ class PortalRuntime:
                     target_record_id,
                     reason="target_deleted",
                 )
-            if work_type == WORK_TYPE_POLLING:
+            if work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}:
                 cls.polling_work_orders().cancel_group(
                     target_record_id,
                     reason="target_deleted",

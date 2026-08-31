@@ -57,6 +57,18 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
             fields[MAINTENANCE_NOTICE_FIELDS["involves_change"]] = bool(
                 payload.involves_change
             )
+        if payload.polling_work_order_required:
+            fields.update(
+                {
+                    MAINTENANCE_NOTICE_FIELDS["work_order_required"]: True,
+                    MAINTENANCE_NOTICE_FIELDS["work_order_operator"]: str(
+                        payload.polling_operator_name or ""
+                    ).strip(),
+                    MAINTENANCE_NOTICE_FIELDS["work_order_reviewer"]: str(
+                        payload.polling_reviewer_name or ""
+                    ).strip(),
+                }
+            )
 
         content = self._extract_section(payload.text, "内容")
         if content:

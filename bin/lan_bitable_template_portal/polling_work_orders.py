@@ -55,6 +55,7 @@ POLLING_STEP_PHOTO_MIME_TYPES = frozenset(
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
 POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v3.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
+WORK_ORDER_TYPES = frozenset({"polling", "maintenance"})
 
 
 class PollingWorkOrderTokenError(PortalError):
@@ -88,6 +89,24 @@ def _excel_text(value: Any) -> str:
 
 def _polling_unit_group(unit: str) -> tuple[str, ...]:
     return next((group for group in POLLING_UNIT_GROUPS if unit in group), ())
+
+
+def _work_order_type(value: Any) -> str:
+    normalized = str(value or "polling").strip().lower()
+    if normalized not in WORK_ORDER_TYPES:
+        raise PortalError("工单类型必须是 maintenance 或 polling。")
+    return normalized
+
+
+def _stored_work_order_type(payload: dict | None) -> str:
+    normalized = str((payload or {}).get("work_type") or "polling").strip().lower()
+    return normalized if normalized in WORK_ORDER_TYPES else "polling"
+
+
+def _run_label(work_type: str, run: dict) -> str:
+    if work_type == "maintenance":
+        return "维保作业"
+    return f"{run.get('from_unit') or ''}→{run.get('to_unit') or ''}"
 
 
 class PollingWorkOrderService:
@@ -127,10 +146,11 @@ class PollingWorkOrderService:
         result["ready"] = bool(result.get("steps") and result.get("attachments"))
         return result
 
-    def list_sops(self, scope: str) -> list[dict]:
+    def list_sops(self, scope: str, work_type: str = "polling") -> list[dict]:
         scope = str(scope or "").strip().upper()
+        work_type = _work_order_type(work_type)
         if scope not in POLLING_SOP_SCOPES:
-            raise PortalError("请在明确的单楼页面读取轮巡 SOP。")
+            raise PortalError("请在明确的单楼页面读取 SOP。")
         items = [
             self._public_sop(document.get("payload") or {})
             for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE)
@@ -139,6 +159,7 @@ class PollingWorkOrderService:
                 str((document.get("payload") or {}).get("scope") or "").strip().upper()
                 == scope
             )
+            and _stored_work_order_type(document.get("payload") or {}) == work_type
         ]
         return sorted(items, key=lambda item: str(item.get("name") or "").casefold())
 
@@ -150,7 +171,8 @@ class PollingWorkOrderService:
         return self._public_sop(sop) if public else copy.deepcopy(sop)
 
     @staticmethod
-    def _normalized_steps(value: Any) -> list[dict]:
+    def _normalized_steps(value: Any, *, work_type: str = "polling") -> list[dict]:
+        work_type = _work_order_type(work_type)
         raw_steps = value if isinstance(value, list) else []
         if len(raw_steps) > POLLING_SOP_MAX_STEPS:
             raise PortalError(f"SOP 步骤不能超过 {POLLING_SOP_MAX_STEPS} 条。")
@@ -165,6 +187,12 @@ class PollingWorkOrderService:
                 raise PortalError(
                     f"第 {index + 1} 个 SOP 步骤占位符必须使用 "
                     "{{from}}、{{to}}、{{other}}。"
+                )
+            if work_type == "maintenance" and re.search(
+                r"\{\{(?:from|to|other)\}\}", content
+            ):
+                raise PortalError(
+                    f"第 {index + 1} 个维保 SOP 步骤不能使用设备指向占位符。"
                 )
             if len(content) > 5000:
                 raise PortalError(f"第 {index + 1} 个 SOP 步骤内容过长。")
@@ -198,13 +226,14 @@ class PollingWorkOrderService:
 
     def save_sop(self, payload: dict, *, actor_open_id: str = "") -> dict:
         payload = payload if isinstance(payload, dict) else {}
+        work_type = _work_order_type(payload.get("work_type"))
         name = str(payload.get("name") or "").strip()
         scope = str(payload.get("scope") or "").strip().upper()
         if scope not in POLLING_SOP_SCOPES:
-            raise PortalError("请在明确的单楼页面维护轮巡 SOP。")
+            raise PortalError("请在明确的单楼页面维护 SOP。")
         if not name or len(name) > 160:
             raise PortalError("SOP 名称不能为空且不能超过 160 个字符。")
-        steps = self._normalized_steps(payload.get("steps"))
+        steps = self._normalized_steps(payload.get("steps"), work_type=work_type)
         sop_id = str(payload.get("sop_id") or "").strip() or uuid.uuid4().hex
         expected_version = int(payload.get("expected_version") or 0)
         with self._lock:
@@ -214,18 +243,21 @@ class PollingWorkOrderService:
             if not existing and expected_version:
                 raise PortalConflictError("SOP 版本已失效，请刷新后重试。")
             if existing and str(existing.get("scope") or "").strip().upper() not in {"", scope}:
-                raise PortalConflictError("轮巡 SOP 不能跨楼栋修改。")
-            for item in self.list_sops(scope):
+                raise PortalConflictError("SOP 不能跨楼栋修改。")
+            if existing and _stored_work_order_type(existing) != work_type:
+                raise PortalConflictError("SOP 不能跨通告类型修改。")
+            for item in self.list_sops(scope, work_type):
                 if (
                     str(item.get("sop_id") or "") != sop_id
                     and str(item.get("scope") or "").strip().upper() == scope
                     and str(item.get("name") or "").strip().casefold() == name.casefold()
                 ):
-                    raise PortalConflictError("已存在同名轮巡 SOP。")
+                    raise PortalConflictError("当前楼栋已存在同名 SOP。")
             now = self._now_text()
             sop = {
                 **(existing or {}),
                 "sop_id": sop_id,
+                "work_type": work_type,
                 "scope": scope,
                 "name": name,
                 "steps": steps,
@@ -447,8 +479,9 @@ class PollingWorkOrderService:
         job_id: str,
         people: list[dict],
     ) -> dict:
+        work_type = str(request_payload.get("work_type") or "").strip().lower()
         if (
-            str(request_payload.get("work_type") or "").strip() != "polling"
+            work_type not in WORK_ORDER_TYPES
             or str(request_payload.get("action") or "").strip().lower() != "start"
             or not _flag(request_payload.get("_web_action_request"))
         ):
@@ -460,52 +493,56 @@ class PollingWorkOrderService:
         if request_scope not in POLLING_SOP_SCOPES or str(
             sop.get("scope") or ""
         ).strip().upper() != request_scope:
-            raise PortalError("所选轮巡 SOP 不属于当前楼栋，请重新选择。")
+            raise PortalError("所选 SOP 不属于当前楼栋，请重新选择。")
+        if _stored_work_order_type(sop) != work_type:
+            raise PortalError("所选 SOP 不属于当前通告类型，请重新选择。")
         expected_version = int(request_payload.get("polling_sop_version") or 0)
         if expected_version != int(sop.get("version") or 0):
             raise PortalConflictError("所选 SOP 已修改，请重新选择。")
         if not sop.get("steps") or not sop.get("attachments"):
             raise PortalError("所选 SOP 缺少步骤或附件，不能用于发送开始。")
-        runs = request_payload.get("polling_runs")
-        runs = runs if isinstance(runs, list) else []
-        run_count = int(request_payload.get("polling_run_count") or 0)
-        if run_count not in range(1, 3) or len(runs) != run_count:
-            raise PortalError("轮巡次数必须为 1–2 且与轮巡组合数量一致。")
-        normalized_runs: list[dict] = []
-        seen_pairs: set[tuple[str, str]] = set()
-        used_units: set[str] = set()
-        for index, item in enumerate(runs):
-            item = item if isinstance(item, dict) else {}
-            from_unit = str(item.get("from_unit") or "").strip()
-            to_unit = str(item.get("to_unit") or "").strip()
-            if from_unit not in POLLING_UNITS or to_unit not in POLLING_UNITS:
-                raise PortalError(f"第 {index + 1} 次轮巡设备必须从 1#–6# 中选择。")
-            if from_unit == to_unit:
-                raise PortalError(f"第 {index + 1} 次轮巡的起点和终点不能相同。")
-            group = _polling_unit_group(from_unit)
-            if not group or to_unit not in group:
-                raise PortalError(
-                    f"第 {index + 1} 次轮巡不能跨越 1#–3# 与 4#–6# 分组。"
+        normalized_runs: list[dict] = [{"run_index": 1, "label": "维保作业"}]
+        if work_type == "polling":
+            runs = request_payload.get("polling_runs")
+            runs = runs if isinstance(runs, list) else []
+            run_count = int(request_payload.get("polling_run_count") or 0)
+            if run_count not in range(1, 3) or len(runs) != run_count:
+                raise PortalError("轮巡次数必须为 1–2 且与轮巡组合数量一致。")
+            normalized_runs = []
+            seen_pairs: set[tuple[str, str]] = set()
+            used_units: set[str] = set()
+            for index, item in enumerate(runs):
+                item = item if isinstance(item, dict) else {}
+                from_unit = str(item.get("from_unit") or "").strip()
+                to_unit = str(item.get("to_unit") or "").strip()
+                if from_unit not in POLLING_UNITS or to_unit not in POLLING_UNITS:
+                    raise PortalError(f"第 {index + 1} 次轮巡设备必须从 1#–6# 中选择。")
+                if from_unit == to_unit:
+                    raise PortalError(f"第 {index + 1} 次轮巡的起点和终点不能相同。")
+                group = _polling_unit_group(from_unit)
+                if not group or to_unit not in group:
+                    raise PortalError(
+                        f"第 {index + 1} 次轮巡不能跨越 1#–3# 与 4#–6# 分组。"
+                    )
+                if from_unit in used_units or to_unit in used_units:
+                    raise PortalError(
+                        f"第 {index + 1} 次轮巡使用了前序工单已选择的设备编号。"
+                    )
+                pair = (from_unit, to_unit)
+                if pair in seen_pairs:
+                    raise PortalError("轮巡组合不能重复。")
+                seen_pairs.add(pair)
+                used_units.update((from_unit, to_unit))
+                normalized_runs.append(
+                    {
+                        "run_index": index + 1,
+                        "from_unit": from_unit,
+                        "to_unit": to_unit,
+                        "other_unit": next(
+                            unit for unit in group if unit not in {from_unit, to_unit}
+                        ),
+                    }
                 )
-            if from_unit in used_units or to_unit in used_units:
-                raise PortalError(
-                    f"第 {index + 1} 次轮巡使用了前序工单已选择的设备编号。"
-                )
-            pair = (from_unit, to_unit)
-            if pair in seen_pairs:
-                raise PortalError("轮巡组合不能重复。")
-            seen_pairs.add(pair)
-            used_units.update((from_unit, to_unit))
-            normalized_runs.append(
-                {
-                    "run_index": index + 1,
-                    "from_unit": from_unit,
-                    "to_unit": to_unit,
-                    "other_unit": next(
-                        unit for unit in group if unit not in {from_unit, to_unit}
-                    ),
-                }
-            )
         operator = self._person_by_id(
             people,
             str(request_payload.get("polling_operator_record_id") or ""),
@@ -544,6 +581,7 @@ class PollingWorkOrderService:
         return {
             "polling_work_order_required": True,
             "polling_work_order_spec": {
+                "work_type": work_type,
                 "sop_id": str(sop.get("sop_id") or ""),
                 "sop_version": int(sop.get("version") or 0),
                 "sop_name": str(sop.get("name") or ""),
@@ -608,7 +646,7 @@ class PollingWorkOrderService:
             str(target_record_id or "").strip(),
         )
         if not isinstance(group, dict):
-            raise PortalNotFoundError("轮巡工单不存在。")
+            raise PortalNotFoundError("工单不存在。")
         return copy.deepcopy(group)
 
     def validate_group_token(self, token: str, target_record_id: str) -> None:
@@ -641,6 +679,7 @@ class PollingWorkOrderService:
         spec = prepared.get("polling_work_order_spec")
         if not prepared.get("polling_work_order_required") or not isinstance(spec, dict):
             return {}
+        work_type = _work_order_type(spec.get("work_type"))
         with self._lock:
             existing = self.state_store.get_document(
                 POLLING_WORK_ORDER_NAMESPACE, target_record_id
@@ -679,6 +718,7 @@ class PollingWorkOrderService:
             flattened: list[dict] = []
             runs = list(spec.get("runs") or [])
             for run_index, run in enumerate(runs, start=1):
+                run_label = _run_label(work_type, run)
                 for step_index, template_step in enumerate(spec.get("steps") or [], start=1):
                     content = str(template_step.get("content") or "")
                     content = content.replace("{{from}}", str(run.get("from_unit") or ""))
@@ -691,7 +731,7 @@ class PollingWorkOrderService:
                             "global_index": len(flattened),
                             "run_index": run_index,
                             "run_count": len(runs),
-                            "run_label": f"{run.get('from_unit')}→{run.get('to_unit')}",
+                            "run_label": run_label,
                             "step_index": step_index,
                             "step_count": len(spec.get("steps") or []),
                             "content": content,
@@ -712,6 +752,8 @@ class PollingWorkOrderService:
             group = {
                 "group_id": target_record_id,
                 "target_record_id": target_record_id,
+                "work_type": work_type,
+                "notice_type": "维保通告" if work_type == "maintenance" else "设备轮巡",
                 "title": str(title or target_record_id),
                 "sop_id": str(spec.get("sop_id") or ""),
                 "sop_version": int(spec.get("sop_version") or 0),
@@ -827,6 +869,7 @@ class PollingWorkOrderService:
 
     @staticmethod
     def _workbook_output_name(group: dict) -> str:
+        work_type = _stored_work_order_type(group)
         scope = str(group.get("scope") or "").strip().upper()
         if scope == "110":
             building = "110站"
@@ -847,26 +890,32 @@ class PollingWorkOrderService:
             completed_date = dt.date.fromisoformat(date_text)
         except ValueError:
             completed_date = dt.date.today()
-        runs = [item for item in group.get("runs") or [] if isinstance(item, dict)]
-        if len(runs) == 1:
-            direction = f"{runs[0].get('from_unit') or ''}轮巡至{runs[0].get('to_unit') or ''}"
-        else:
-            direction = (
-                "".join(str(item.get("from_unit") or "") for item in runs)
-                + "轮巡至"
-                + "".join(str(item.get("to_unit") or "") for item in runs)
-            )
         prefix = (
             f"{building}{completed_date.year}年{completed_date.month}月"
             f"{completed_date.day}日-"
         )
+        direction = ""
+        if work_type == "polling":
+            runs = [item for item in group.get("runs") or [] if isinstance(item, dict)]
+            if len(runs) == 1:
+                direction = f"{runs[0].get('from_unit') or ''}轮巡至{runs[0].get('to_unit') or ''}"
+            else:
+                direction = (
+                    "".join(str(item.get("from_unit") or "") for item in runs)
+                    + "轮巡至"
+                    + "".join(str(item.get("to_unit") or "") for item in runs)
+                )
         tail = (
-            f"-{direction}-操作人-"
+            (f"-{direction}" if direction else "")
+            + "-操作人-"
             f"{_safe_file_name((group.get('operator') or {}).get('name') or '未填写')[:32]}-"
             f"审核人-{_safe_file_name((group.get('reviewer') or {}).get('name') or '未填写')[:32]}-"
             "操作记录"
         )
-        sop_name = _safe_file_name(group.get("sop_name") or "轮巡SOP")
+        sop_name = _safe_file_name(
+            group.get("sop_name")
+            or ("维保SOP" if work_type == "maintenance" else "轮巡SOP")
+        )
         sop_name = sop_name[: max(1, 155 - len(prefix) - len(tail))]
         return f"{prefix}{sop_name}{tail}.xlsx"
 
@@ -944,7 +993,7 @@ class PollingWorkOrderService:
                     "run_index": run_index,
                     "from_unit": str(run.get("from_unit") or ""),
                     "to_unit": str(run.get("to_unit") or ""),
-                    "label": f"{run.get('from_unit')}→{run.get('to_unit')}",
+                    "label": _run_label(_stored_work_order_type(group), run),
                     "step_count": len(run_steps),
                     "completed_steps": completed_steps,
                     "state": state,
@@ -980,6 +1029,7 @@ class PollingWorkOrderService:
         return {
             "group_id": str(group.get("group_id") or ""),
             "title": str(group.get("title") or ""),
+            "work_type": _stored_work_order_type(group),
             "sop_name": str(group.get("sop_name") or ""),
             "role": role,
             "role_label": "操作人" if role == "operator" else "现场审核人",
@@ -1445,6 +1495,7 @@ class PollingWorkOrderService:
 
     def build_execution_workbook(self, target_record_id: str) -> dict:
         group = self.get_group(target_record_id)
+        work_type = _stored_work_order_type(group)
         if str(group.get("state") or "") not in {"upload_pending", "completed"}:
             raise PortalConflictError("工单步骤尚未全部完成。")
         try:
@@ -1454,22 +1505,22 @@ class PollingWorkOrderService:
             from PIL import Image as PillowImage
             from PIL import ImageOps
         except Exception as exc:
-            raise PortalError("缺少 openpyxl/Pillow，无法生成轮巡工单表格。") from exc
+            raise PortalError("缺少 openpyxl/Pillow，无法生成工单表格。") from exc
         template_path = Path(self.work_order_template_path).resolve()
         if not template_path.is_file():
-            raise PortalError("轮巡工单模板不存在。")
+            raise PortalError("工单模板不存在。")
         try:
             with zipfile.ZipFile(template_path) as archive:
                 logo_bytes = archive.read("xl/media/image1.png")
         except Exception as exc:
-            raise PortalError("轮巡工单模板中的Logo无法读取。") from exc
+            raise PortalError("工单模板中的Logo无法读取。") from exc
         directory = self._group_directory(target_record_id)
         directory.mkdir(parents=True, exist_ok=True)
         path = (directory / POLLING_WORK_ORDER_CACHE_NAME).resolve()
         if path.is_file():
             size = path.stat().st_size
             if size > POLLING_WORK_ORDER_MAX_BYTES:
-                raise PortalError("轮巡工单Excel超过允许大小，已停止上传。")
+                raise PortalError("工单Excel超过允许大小，已停止上传。")
             return {
                 "name": self._workbook_output_name(group),
                 "path": str(path),
@@ -1478,7 +1529,7 @@ class PollingWorkOrderService:
             }
         runs = [item for item in group.get("runs") or [] if isinstance(item, dict)]
         if not runs:
-            raise PortalError("轮巡工单缺少设备指向。")
+            raise PortalError("工单缺少执行项。")
         try:
             workbook = load_workbook(
                 template_path,
@@ -1487,7 +1538,7 @@ class PollingWorkOrderService:
                 keep_links=False,
             )
         except Exception as exc:
-            raise PortalError("轮巡工单模板无法打开。") from exc
+            raise PortalError("工单模板无法打开。") from exc
         template_sheet = workbook.active
         sheets = [template_sheet]
         for _ in runs[1:]:
@@ -1504,9 +1555,7 @@ class PollingWorkOrderService:
                 ]
                 if not run_steps:
                     raise PortalError(f"工单{run_index}缺少操作步骤。")
-                from_unit = str(run.get("from_unit") or "")
-                to_unit = str(run.get("to_unit") or "")
-                run_label = f"{from_unit}→{to_unit}"
+                run_label = _run_label(work_type, run)
                 sheet.title = f"工单{run_index} {run_label}"[:31]
                 sheet["A1"] = None
                 sheet["C3"] = _excel_text((group.get("operator") or {}).get("name"))
@@ -1528,7 +1577,7 @@ class PollingWorkOrderService:
                 except ValueError:
                     sheet["E3"] = _excel_text(completion_text)
                 sheet["B7"] = _excel_text(
-                    f"{group.get('sop_name') or '轮巡操作流程'} · {run_label}"
+                    f"{group.get('sop_name') or (('维保' if work_type == 'maintenance' else '轮巡') + '操作流程')} · {run_label}"
                 )
 
                 source_styles = [
@@ -1663,7 +1712,7 @@ class PollingWorkOrderService:
             workbook.save(temporary)
             os.replace(temporary, path)
             if path.stat().st_size > POLLING_WORK_ORDER_MAX_BYTES:
-                raise PortalError("轮巡工单Excel超过允许大小，已停止上传。")
+                raise PortalError("工单Excel超过允许大小，已停止上传。")
         except Exception:
             temporary = path.with_suffix(path.suffix + ".tmp")
             if temporary.is_file():

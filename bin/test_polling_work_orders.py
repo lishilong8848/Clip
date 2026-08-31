@@ -28,6 +28,7 @@ from lan_bitable_template_portal.polling_work_orders import (
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 import lan_bitable_template_portal.server as portal_server
 from lan_bitable_template_portal.server import PortalRuntime
+from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from clipflow_backend.main import FastAPIPortalController
 from fastapi.testclient import TestClient
 from lan_bitable_template_portal.workbench_lite import (
@@ -37,6 +38,7 @@ from lan_bitable_template_portal.workbench_lite import (
 )
 from upload_event_module.services.handlers.base import NoticePayload
 from upload_event_module.services.handlers.polling_notice import PollingNoticeHandler
+from upload_event_module.services.handlers.maintenance_notice import MaintenanceNoticeHandler
 
 
 def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> bytes:
@@ -48,6 +50,328 @@ def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> by
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_maintenance_sop_is_isolated_and_builds_one_generic_work_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            service = PollingWorkOrderService(
+                LanPortalStateStore(root / "state.sqlite3")
+            )
+            service.sop_root = root / "sops"
+            service.work_order_root = root / "orders"
+            polling = service.save_sop(
+                {
+                    "work_type": "polling",
+                    "scope": "A",
+                    "name": "同名SOP",
+                    "steps": [
+                        {
+                            "content": "切换{{from}}至{{to}}",
+                            "operator_required": True,
+                        }
+                    ],
+                }
+            )
+            maintenance = service.save_sop(
+                {
+                    "work_type": "maintenance",
+                    "scope": "A",
+                    "name": "同名SOP",
+                    "steps": [
+                        {
+                            "content": "检查设备运行状态",
+                            "operator_required": True,
+                            "reviewer_required": True,
+                            "time_limit_seconds": 0,
+                        }
+                    ],
+                }
+            )
+            self.assertEqual(
+                [item["sop_id"] for item in service.list_sops("A", "polling")],
+                [polling["sop_id"]],
+            )
+            self.assertEqual(
+                [item["sop_id"] for item in service.list_sops("A", "maintenance")],
+                [maintenance["sop_id"]],
+            )
+            maintenance = service.save_sop(
+                {
+                    "sop_id": maintenance["sop_id"],
+                    "work_type": "maintenance",
+                    "scope": "A",
+                    "name": "同名SOP",
+                    "expected_version": maintenance["version"],
+                    "steps": [
+                        {
+                            "content": "检查并记录设备运行状态",
+                            "operator_required": True,
+                            "reviewer_required": True,
+                            "time_limit_seconds": 0,
+                        }
+                    ],
+                }
+            )
+            self.assertEqual(
+                maintenance["steps"][0]["content"],
+                "检查并记录设备运行状态",
+            )
+            with self.assertRaisesRegex(Exception, "不能使用设备指向占位符"):
+                service.save_sop(
+                    {
+                        "work_type": "maintenance",
+                        "scope": "A",
+                        "name": "错误维保SOP",
+                        "steps": [
+                            {
+                                "content": "检查{{from}}",
+                                "operator_required": True,
+                            }
+                        ],
+                    }
+                )
+            maintenance = service.add_sop_attachment(
+                maintenance["sop_id"],
+                file_name="维保说明.txt",
+                content=b"maintenance",
+                expected_version=maintenance["version"],
+            )
+            prepared = service.prepare_start(
+                {
+                    "work_type": "maintenance",
+                    "scope": "A",
+                    "action": "start",
+                    "_web_action_request": True,
+                    "polling_sop_id": maintenance["sop_id"],
+                    "polling_sop_version": maintenance["version"],
+                    "polling_operator_record_id": "operator",
+                    "polling_reviewer_record_id": "reviewer",
+                },
+                job_id="maintenance-job",
+                people=[
+                    {"record_id": "operator", "name": "操作员"},
+                    {"record_id": "reviewer", "name": "审核员"},
+                ],
+            )
+            group = service.create_group(
+                prepared,
+                target_record_id="recMaintenance",
+                title="维保测试",
+                public_base_url="http://127.0.0.1:18766",
+            )
+            self.assertEqual(group["work_type"], "maintenance")
+            self.assertEqual(group["notice_type"], "维保通告")
+            self.assertEqual(group["runs"], [{"run_index": 1, "label": "维保作业"}])
+            self.assertEqual(group["steps"][0]["run_label"], "维保作业")
+            self.assertEqual(
+                group["steps"][0]["content"],
+                "检查并记录设备运行状态",
+            )
+            output_name = service._workbook_output_name(group)
+            self.assertIn("同名SOP-操作人-操作员-审核人-审核员-操作记录", output_name)
+            self.assertNotIn("轮巡至", output_name)
+            operator_token = service.role_token("recMaintenance", "operator")
+            reviewer_token = service.role_token("recMaintenance", "reviewer")
+            session = service.activate(
+                operator_token,
+                run_index=1,
+                expected_version=group["version"],
+            )
+            session = service.add_step_photo(
+                operator_token,
+                step_key="1:1",
+                expected_version=session["version"],
+                file_name="维保步骤.png",
+                mime_type="image/png",
+                content=_png_bytes(),
+            )
+            session = service.confirm(
+                operator_token,
+                step_key="1:1",
+                expected_version=session["version"],
+            )
+            session = service.confirm(
+                reviewer_token,
+                step_key="1:1",
+                expected_version=session["version"],
+            )
+            self.assertEqual(session["state"], "upload_pending")
+            workbook = service.build_execution_workbook("recMaintenance")
+            self.assertEqual(workbook["name"], output_name)
+            from openpyxl import load_workbook
+
+            generated = load_workbook(workbook["path"], read_only=True)
+            try:
+                self.assertEqual(generated.sheetnames, ["工单1 维保作业"])
+                self.assertEqual(generated.active["B7"].value, "同名SOP · 维保作业")
+            finally:
+                generated.close()
+            deleted = service.delete_sop(
+                maintenance["sop_id"],
+                expected_version=maintenance["version"],
+            )
+            self.assertTrue(deleted["deleted"])
+            self.assertEqual(service.list_sops("A", "maintenance"), [])
+            self.assertEqual(
+                [item["sop_id"] for item in service.list_sops("A", "polling")],
+                [polling["sop_id"]],
+            )
+
+    def test_maintenance_workbench_uses_generic_work_order_selector(self) -> None:
+        html = render_workbench_lite(
+            payload={"records": [], "ongoing": []},
+            session={"role": "admin"},
+            scope="A",
+            work_type="maintenance",
+        )
+        polling_html = render_workbench_lite(
+            payload={"records": [], "ongoing": []},
+            session={"role": "admin"},
+            scope="A",
+            work_type="polling",
+        )
+        self.assertIn("维保工单", html)
+        self.assertIn("本次维保不使用工单", html)
+        self.assertIn("work_type=${encodeURIComponent(pollingSopWorkType())}", html)
+        self.assertIn("countLabel.hidden=maintenance", html)
+        self.assertIn("directionTitle.hidden=maintenance", html)
+        self.assertIn("if(pollingSopWorkType()==='polling')for", html)
+        self.assertIn("['maintenance', 'polling'].includes(patch.work_type)", html)
+        button_pattern = re.compile(
+            r'<h2 class="inbox-title"><span>通告处理</span>'
+            r'(<button class="btn ghost" id="lite-polling-sop-open".*?</button>)'
+            r'</h2>'
+        )
+        maintenance_button = button_pattern.search(html)
+        polling_button = button_pattern.search(polling_html)
+        self.assertIsNotNone(maintenance_button)
+        self.assertIsNotNone(polling_button)
+        self.assertEqual(
+            maintenance_button.group(1),
+            polling_button.group(1),
+        )
+        self.assertEqual(html.count('id="lite-polling-sop-modal"'), 1)
+        self.assertEqual(polling_html.count('id="lite-polling-sop-modal"'), 1)
+
+    def test_maintenance_handler_writes_work_order_fields(self) -> None:
+        fields = MaintenanceNoticeHandler().build_create_fields(
+            NoticePayload(
+                text=(
+                    "【维保通告】状态：开始\n"
+                    "【名称】维保测试\n"
+                    "【时间】2026-08-31 09:00~2026-08-31 18:00"
+                ),
+                polling_work_order_required=True,
+                polling_operator_name="操作员",
+                polling_reviewer_name="审核员",
+            )
+        )
+        self.assertTrue(fields["是否涉及重要操作"])
+        self.assertEqual(fields["操作人"], "操作员")
+        self.assertEqual(fields["现场复核人"], "审核员")
+
+    def test_maintenance_end_uses_same_exact_attachment_guard(self) -> None:
+        prepared = {
+            "action": "end",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "record_id": "recMaintenanceEnd",
+            "target_record_id": "recMaintenanceEnd",
+            "site_photo_count": 1,
+            "text": "【维保通告】状态：结束\n【名称】维保测试",
+        }
+        manager = MagicMock()
+        manager.get_group.return_value = {
+            "work_type": "maintenance",
+            "state": "completed",
+            "uploaded_file_tokens": ["expected-token"],
+        }
+        with patch.object(
+            portal_server,
+            "external_real_write_guard",
+            return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
+        ), patch.object(
+            portal_server,
+            "query_record_by_id",
+            return_value=(
+                True,
+                {
+                    "fields": {
+                        "是否涉及重要操作": True,
+                        "操作人": "操作员",
+                        "现场复核人": "审核员",
+                        "工单附件": [{"file_token": "other-token"}],
+                    }
+                },
+            ),
+        ), patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            ok, message, _record_id = PortalRuntime._execute_backend_prepared_upload(
+                prepared
+            )
+        self.assertFalse(ok)
+        self.assertIn("维保工单附件与本次完成记录不一致", message)
+
+    def test_qt_maintenance_end_is_blocked_by_shared_work_order_guard(self) -> None:
+        manager = MagicMock()
+        manager.get_group.return_value = {
+            "work_type": "maintenance",
+            "state": "active",
+            "uploaded_file_tokens": [],
+        }
+        with patch.object(
+            portal_server,
+            "query_record_by_id",
+            return_value=(
+                True,
+                {
+                    "record_version": "1",
+                    "fields": {
+                        "是否涉及重要操作": True,
+                        "操作人": "操作员",
+                        "现场复核人": "审核员",
+                        "工单附件": [],
+                    },
+                },
+            ),
+        ), patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            result = PortalRuntime.execute_local_notice_upload(
+                {
+                    "action_type": "end",
+                    "data_dict": {
+                        "active_item_id": "active-maintenance-end",
+                        "record_id": "recMaintenanceQtEnd",
+                        "target_record_id": "recMaintenanceQtEnd",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "text": "【维保通告】状态：结束\n【名称】维保测试",
+                    },
+                }
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("维保工单尚未全部完成", result["message"])
+
+    def test_maintenance_work_order_schema_creates_attachment_once(self) -> None:
+        service = object.__new__(MaintenancePortalService)
+        service._maintenance_work_order_schema_lock = __import__("threading").RLock()
+        service._maintenance_work_order_schema_ready = False
+        service._write_http_client = MagicMock()
+        before = [
+            {"field_name": "是否涉及重要操作", "type": 7},
+            {"field_name": "操作人", "type": 1},
+            {"field_name": "现场复核人", "type": 1},
+        ]
+        after = [*before, {"field_name": "工单附件", "type": 17}]
+        with patch.object(
+            service, "_load_raw_table_fields", side_effect=[before, after]
+        ), patch.object(
+            service, "_request_payload", return_value={"code": 0, "msg": "ok"}
+        ) as create, patch.object(service, "_auth_headers", return_value={}):
+            first = service.ensure_maintenance_work_order_schema()
+            second = service.ensure_maintenance_work_order_schema()
+        self.assertEqual(first["created_fields"], ["工单附件"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(create.call_args.kwargs["json_payload"]["type"], 17)
+
     def test_polling_step_photo_rejects_oversized_dimensions_before_storage(self) -> None:
         service = object.__new__(PollingWorkOrderService)
         with self.assertRaisesRegex(Exception, "像素或尺寸超过限制"):

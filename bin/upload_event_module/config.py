@@ -1014,6 +1014,10 @@ MAINTENANCE_NOTICE_FIELDS = {
     "site_images": "过程现场图片",
     "executor": "执行方",
     "involves_change": "涉及变更",
+    "work_order_required": "是否涉及重要操作",
+    "work_order_operator": "操作人",
+    "work_order_reviewer": "现场复核人",
+    "work_order_attachments": "工单附件",
 }
 
 OVERHAUL_NOTICE_FIELDS = {
