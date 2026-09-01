@@ -316,6 +316,8 @@ def _queue_stats() -> dict:
 class FastAPIPortalController:
     """FastAPI/Uvicorn front controller for the production portal."""
 
+    _qt_event_reconcile_lock = threading.Lock()
+
     def __init__(
         self,
         *,
@@ -419,6 +421,155 @@ class FastAPIPortalController:
         except RuntimeError as exc:
             log_warning(f"后端后台任务提交失败: {name}: {exc}")
             return False
+
+    @classmethod
+    def _reconcile_finished_qt_event_items(cls, rows: list[dict]) -> dict[str, int]:
+        """Remove cached Qt events only after their target lifecycle is authoritative."""
+        if not cls._qt_event_reconcile_lock.acquire(blocking=False):
+            return {
+                "checked": 0,
+                "removed": 0,
+                "missing": 0,
+                "failed": 0,
+                "skipped_inflight": 1,
+            }
+        try:
+            return cls._reconcile_finished_qt_event_items_once(rows)
+        finally:
+            cls._qt_event_reconcile_lock.release()
+
+    @classmethod
+    def _reconcile_finished_qt_event_items_once(
+        cls, rows: list[dict]
+    ) -> dict[str, int]:
+        rows_by_target: dict[str, list[dict]] = {}
+        for row in rows or []:
+            if not isinstance(row, dict) or row.get("deleted_at") is not None:
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else row
+            if str(payload.get("notice_type") or row.get("notice_type") or "").strip() != "事件通告":
+                continue
+            target_record_id = canonical_target_record_id(payload) or str(
+                row.get("record_id") or ""
+            ).strip()
+            if not target_record_id or is_local_record_id(target_record_id):
+                continue
+            rows_by_target.setdefault(target_record_id, []).append(row)
+
+        stats = {"checked": 0, "removed": 0, "missing": 0, "failed": 0}
+        for target_record_id, target_rows in rows_by_target.items():
+            stats["checked"] += 1
+            try:
+                ok, result = query_record_by_id(target_record_id, "事件通告")
+            except Exception as exc:
+                stats["failed"] += 1
+                log_warning(
+                    "Qt 启动事件生命周期核验异常，已保留本地条目: "
+                    f"record_id={target_record_id}, error={exc}"
+                )
+                continue
+            missing = not ok and (
+                PortalRuntime._remote_record_not_found(result)
+                or "1254006" in str(result or "")
+            )
+            fields = result.get("fields", {}) if ok and isinstance(result, dict) else {}
+            try:
+                lifecycle = (
+                    PortalRuntime.service._target_record_lifecycle(
+                        work_type="event",
+                        notice_type="事件通告",
+                        target_record={
+                            "record_id": target_record_id,
+                            "display_fields": fields,
+                        },
+                    )
+                    if ok and isinstance(fields, dict)
+                    else {}
+                )
+            except Exception as exc:
+                stats["failed"] += 1
+                log_warning(
+                    "Qt 启动事件生命周期解析失败，已保留本地条目: "
+                    f"record_id={target_record_id}, error={exc}"
+                )
+                continue
+            finished = bool(lifecycle.get("finished"))
+            if not finished and not missing:
+                if not ok:
+                    stats["failed"] += 1
+                    log_warning(
+                        "Qt 启动事件生命周期核验失败，已保留本地条目: "
+                        f"record_id={target_record_id}, error={result}"
+                    )
+                continue
+            if missing:
+                stats["missing"] += 1
+
+            for row in target_rows:
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else row
+                active_item_id = str(
+                    payload.get("active_item_id") or row.get("active_item_id") or ""
+                ).strip()
+                current_rows = PortalRuntime.state_store.find_qt_active_items(
+                    active_item_id=active_item_id,
+                    record_id=target_record_id,
+                )
+                still_same_target = any(
+                    (
+                        canonical_target_record_id(
+                            current.get("payload")
+                            if isinstance(current.get("payload"), dict)
+                            else current
+                        )
+                        or str(current.get("record_id") or "").strip()
+                    )
+                    == target_record_id
+                    and current.get("deleted_at") is None
+                    for current in current_rows
+                )
+                if not still_same_target:
+                    continue
+                if missing:
+                    PortalRuntime.state_store.mark_notice_identity_deleted(
+                        work_type="event",
+                        active_item_id=active_item_id,
+                        target_record_id=target_record_id,
+                    )
+                else:
+                    PortalRuntime.state_store.upsert_notice_identity(
+                        {
+                            **payload,
+                            "active_item_id": active_item_id,
+                            "record_id": target_record_id,
+                            "target_record_id": target_record_id,
+                            "notice_type": "事件通告",
+                            "work_type": "event",
+                            "status": "已结束",
+                            "action": "end",
+                        },
+                        origin="qt_shell_bootstrap_target_finished",
+                    )
+                deleted, _event_id = PortalRuntime.state_store.delete_qt_active_item_and_enqueue(
+                    active_item_id=active_item_id,
+                    record_id=target_record_id,
+                    channel="qt_action",
+                    payload={
+                        "kind": "active_delete",
+                        "payload": {
+                            "active_item_id": active_item_id,
+                            "record_id": target_record_id,
+                            "target_record_id": target_record_id,
+                            "notice_type": "事件通告",
+                            "source": (
+                                "qt_shell_bootstrap_target_missing"
+                                if missing
+                                else "qt_shell_bootstrap_target_finished"
+                            ),
+                        },
+                    },
+                )
+                stats["removed"] += int(bool(deleted))
+        return stats
 
     @staticmethod
     def _deletion_record_name(payload: dict[str, Any] | None) -> str:
@@ -8078,6 +8229,7 @@ class FastAPIPortalController:
 
             reconcile_items: list[dict] = []
             ended_rows: list[dict] = []
+            event_lifecycle_rows: list[dict] = []
             visible_candidate_rows = 0
             rows = PortalRuntime.state_store.list_qt_active_items()
             for row in rows:
@@ -8085,6 +8237,8 @@ class FastAPIPortalController:
                 if _is_ended(row):
                     ended_rows.append(row)
                     continue
+                if str(payload.get("notice_type") or row.get("notice_type") or "").strip() == "事件通告":
+                    event_lifecycle_rows.append(row)
                 reconcile_item = dict(payload)
                 reconcile_item.setdefault(
                     "active_item_id",
@@ -8151,6 +8305,8 @@ class FastAPIPortalController:
                             },
                         },
                     )
+                if event_lifecycle_rows:
+                    self._reconcile_finished_qt_event_items(event_lifecycle_rows)
 
             self._submit_background(
                 "QtShellBootstrapActiveRepair",
@@ -12447,6 +12603,17 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"后台任务状态清理失败: {exc}")
 
+    def _run_scheduled_event_robot_retry(self) -> None:
+        try:
+            result = PortalRuntime.retry_pending_event_robot_messages(limit=20)
+            if int((result or {}).get("failed") or 0):
+                log_warning(
+                    "事件通告群消息仍有补发失败项，将继续重试: "
+                    f"failed={result.get('failed')}"
+                )
+        except Exception as exc:
+            log_warning(f"事件通告群消息补发失败: {exc}")
+
     def _run_scheduled_token_refresh(self) -> None:
         if _mock_external_enabled():
             return
@@ -12540,6 +12707,8 @@ class FastAPIPortalController:
             log_warning(f"轮巡工单附件重试失败: {exc}")
 
     def _run_scheduled_polling_relay(self) -> None:
+        if not PortalRuntime.polling_work_order_public_relay_should_run():
+            return
         relay = PortalRuntime.polling_work_order_relay()
         relay.run_once()
         manager = PortalRuntime.polling_work_orders()
@@ -12551,16 +12720,7 @@ class FastAPIPortalController:
                 PortalRuntime._send_polling_work_order_links(projected)
 
     def _start_polling_relay_worker(self) -> None:
-        if not PortalRuntime.polling_work_order_public_relay_enabled():
-            return
-        try:
-            relay = PortalRuntime.polling_work_order_relay()
-        except Exception as exc:
-            log_warning(f"轮巡公网工单配置无效，已停用公网连接器: {exc}")
-            return
-        if not relay.enabled or (
-            self._polling_relay_thread and self._polling_relay_thread.is_alive()
-        ):
+        if self._polling_relay_thread and self._polling_relay_thread.is_alive():
             return
         stop_event = threading.Event()
         self._polling_relay_stop = stop_event
@@ -12569,8 +12729,11 @@ class FastAPIPortalController:
             delay = 2.0
             while not stop_event.is_set():
                 try:
-                    self._run_scheduled_polling_relay()
-                    delay = 2.0
+                    if PortalRuntime.polling_work_order_public_relay_should_run():
+                        self._run_scheduled_polling_relay()
+                        delay = 2.0
+                    else:
+                        delay = 5.0
                 except Exception as exc:
                     log_warning(f"轮巡公网工单同步失败，将自动重试: {exc}")
                     delay = min(30.0, delay * 2.0)
@@ -12787,6 +12950,15 @@ class FastAPIPortalController:
             "interval",
             hours=1,
             id="job_cleanup",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_event_robot_retry,
+            "interval",
+            seconds=30,
+            id="event_robot_retry",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

@@ -5470,16 +5470,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = store
             PortalRuntime.local_upload_locks = {}
             PortalRuntime.local_upload_created_targets = {}
+            remote_fields = {}
+
+            def create_event(_notice_type, notice_payload):
+                fields = EventNoticeHandler(_notice_type).build_create_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, "rec-event-1"
+
             try:
                 with patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "rec-event-1"),
+                    side_effect=create_event,
                 ) as create_record, patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {"标题": "测试测试测试事件"}}),
-                ) as query_record:
+                    side_effect=lambda *_args: (
+                        True,
+                        {"fields": dict(remote_fields), "record_version": "v1"},
+                    ),
+                ) as query_record, patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
+                ):
                     first = PortalRuntime.execute_local_notice_upload(request_payload)
                     second = PortalRuntime.execute_local_notice_upload(request_payload)
             finally:
@@ -5535,16 +5556,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = store
             PortalRuntime.local_upload_locks = {}
             PortalRuntime.local_upload_created_targets = {}
+            remote_fields = {}
+
+            def create_event(_notice_type, notice_payload):
+                fields = EventNoticeHandler(_notice_type).build_create_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, "rec-event-1"
+
             try:
                 with patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "rec-event-1"),
+                    side_effect=create_event,
                 ) as create_record, patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {"标题": "测试测试测试事件"}}),
-                ) as query_record:
+                    side_effect=lambda *_args: (
+                        True,
+                        {"fields": dict(remote_fields), "record_version": "v1"},
+                    ),
+                ) as query_record, patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
+                ):
                     first = PortalRuntime.execute_local_notice_upload(payload("localid-event-1"))
                     second = PortalRuntime.execute_local_notice_upload(payload("localid-event-2"))
             finally:
@@ -5610,6 +5652,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         old_locks = PortalRuntime.local_upload_locks
         old_created_targets = PortalRuntime.local_upload_created_targets
         update_calls = []
+        remote = {"fields": {}, "record_version": "event-v0"}
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
             PortalRuntime.state_store = store
@@ -5630,17 +5673,39 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             def fake_update(record_id, notice_type, notice_payload):
                 update_calls.append((record_id, notice_type, notice_payload))
+                fields = EventNoticeHandler(notice_type).build_update_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote["fields"].update(fields)
+                remote["record_version"] = f"event-v{len(update_calls) + 1}"
                 return True, record_id
+
+            def fake_create(notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_create_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote["fields"] = dict(fields)
+                remote["record_version"] = "event-v1"
+                return True, "rec-event-1"
+
+            def query_remote(record_id, _notice_type):
+                return True, {
+                    "record_id": record_id,
+                    "fields": dict(remote["fields"]),
+                    "record_version": remote["record_version"],
+                }
 
             try:
                 with patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "rec-event-1"),
+                    side_effect=fake_create,
                 ) as create_record, patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {"标题": "测试测试测试事件"}}),
+                    side_effect=query_remote,
                 ) as query_record, patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
@@ -5649,6 +5714,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     portal_server_module,
                     "upload_media_to_feishu",
                     return_value=(True, "event-update-token"),
+                ), patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
                 ):
                     started = PortalRuntime.execute_local_notice_upload(
                         payload("upload", "localid-event-start", "开始")
@@ -5766,6 +5839,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "transfer_to_overhaul": True,
                 },
                 "screenshot_upload_id": screenshot["upload_id"],
+                "response_time": "2026-07-16 10:00",
             }
             remote_fields = {
                 "告警描述": "E楼压缩机高压报警",
@@ -5777,11 +5851,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "是否转检修": True,
                 "事件状态": "已结束",
             }
+            def write_end(record_id, notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_update_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, record_id
+
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": remote_fields}),
+                    side_effect=lambda record_id, _notice_type: (
+                        True,
+                        {
+                            "record_id": record_id,
+                            "fields": dict(remote_fields),
+                            "record_version": "event-end-v1",
+                        },
+                    ),
                 ), patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
@@ -5789,12 +5878,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
-                    return_value=(True, "rec-event-transfer"),
+                    side_effect=write_end,
                 ), patch.object(
                     PortalRuntime,
                     "enqueue_event_repair_project",
                     return_value=17,
-                ) as enqueue_project:
+                ) as enqueue_project, patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
+                ):
                     result = PortalRuntime.execute_local_notice_upload(request_payload)
             finally:
                 store.shutdown_write_worker(timeout=2.0)
@@ -5866,6 +5963,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "text": active["text"].replace("状态：更新", "状态：结束"),
                 },
                 "screenshot_upload_id": screenshot["upload_id"],
+                "response_time": "2026-08-14 10:00",
             }
             remote_status = "更新"
             interleaved = False
@@ -5891,6 +5989,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             def write_end(_record_id, _notice_type, _notice_payload):
                 nonlocal remote_status
+                fields = EventNoticeHandler(_notice_type).build_update_fields(
+                    _notice_payload
+                )
+                setattr(_notice_payload, "_clipflow_written_fields", dict(fields))
                 remote_status = "已结束"
                 return True, "结束写入成功"
 
@@ -5941,6 +6043,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "enqueue_event_repair_project",
                         return_value=17,
                     ) as enqueue_project,
+                    patch.object(
+                        portal_server_module,
+                        "send_robot_message_by_payload",
+                    ) as send_robot,
                 ):
                     result = PortalRuntime.execute_local_notice_upload(
                         request_payload
@@ -5948,10 +6054,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 store.shutdown_write_worker(timeout=2.0)
 
-        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["ok"], result)
+        self.assertIn("回读校验失败", result["message"])
         self.assertTrue(interleaved)
         self.assertEqual(remote_status, "更新")
         self.assertFalse(result["repair_project_queued"], result)
+        send_robot.assert_not_called()
         enqueue_project.assert_not_called()
 
     def test_local_event_end_keeps_success_when_repair_project_queue_fails(self):
@@ -5991,19 +6099,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "transfer_to_overhaul": True,
                 },
                 "screenshot_upload_id": screenshot["upload_id"],
+                "response_time": "2026-07-16 10:00",
             }
             store.upsert_qt_active_item(
                 request_payload["data_dict"],
                 section="event",
                 origin="portal",
             )
+            remote_fields = {
+                "是否转检修": True,
+                "事件状态": "已结束",
+            }
+
+            def write_end(record_id, notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_update_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, record_id
+
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(
+                    side_effect=lambda record_id, _notice_type: (
                         True,
-                        {"fields": {"是否转检修": True, "事件状态": "已结束"}},
+                        {
+                            "record_id": record_id,
+                            "fields": dict(remote_fields),
+                            "record_version": "event-end-warning-v1",
+                        },
                     ),
                 ), patch.object(
                     portal_server_module,
@@ -6012,11 +6138,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
-                    return_value=(True, "rec-event-transfer-warning"),
+                    side_effect=write_end,
                 ), patch.object(
                     PortalRuntime,
                     "enqueue_event_repair_project",
                     side_effect=PortalError("维修单字段配置不完整"),
+                ), patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
                 ):
                     result = PortalRuntime.execute_local_notice_upload(request_payload)
                     visible = store.list_visible_qt_active_items()
@@ -6071,12 +6205,30 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "_transfer_to_overhaul_explicit": True,
                 },
                 "screenshot_upload_id": screenshot["upload_id"],
+                "response_time": "2026-07-16 10:00",
             }
+            remote_fields = {"是否转检修": True}
+
+            def write_end(record_id, notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_update_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, record_id
+
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {"是否转检修": True}}),
+                    side_effect=lambda record_id, _notice_type: (
+                        True,
+                        {
+                            "record_id": record_id,
+                            "fields": dict(remote_fields),
+                            "record_version": "event-end-no-transfer-v1",
+                        },
+                    ),
                 ), patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
@@ -6084,11 +6236,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
-                    return_value=(True, "rec-event-no-transfer"),
+                    side_effect=write_end,
                 ), patch.object(
                     PortalRuntime,
                     "enqueue_event_repair_project",
-                ) as enqueue_project:
+                ) as enqueue_project, patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
+                ):
                     result = PortalRuntime.execute_local_notice_upload(request_payload)
             finally:
                 store.shutdown_write_worker(timeout=2.0)
@@ -6601,11 +6761,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "recover_selected": False,
                 "robot_group_choice": "auto",
             }
+            remote_fields = {}
+
+            def update_event(record_id, notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_update_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, record_id
+
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {}}),
+                    side_effect=lambda record_id, _notice_type: (
+                        True,
+                        {
+                            "record_id": record_id,
+                            "fields": dict(remote_fields),
+                            "record_version": "event-existing-v1",
+                        },
+                    ),
                 ) as query_record, patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
@@ -6617,8 +6794,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ) as create_record, patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
-                    return_value=(True, "rec-existing-event"),
-                ) as update_record:
+                    side_effect=update_event,
+                ) as update_record, patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
+                ):
                     result = PortalRuntime.execute_local_notice_upload(request_payload)
             finally:
                 PortalRuntime.state_store = old_store
@@ -6787,10 +6972,36 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "recover_selected": False,
                         "robot_group_choice": "auto",
                     }
+                    remote_fields = (
+                        {"事件状态": "处理中"}
+                        if notice_type == "事件通告"
+                        else {}
+                    )
+
+                    def update_notice(record_id_value, notice_type_value, notice_payload):
+                        if notice_type_value == "事件通告":
+                            fields = EventNoticeHandler(
+                                notice_type_value
+                            ).build_update_fields(notice_payload)
+                            setattr(
+                                notice_payload,
+                                "_clipflow_written_fields",
+                                dict(fields),
+                            )
+                            remote_fields.update(fields)
+                        return True, record_id_value
+
                     with patch.object(
                         portal_server_module,
                         "query_record_by_id",
-                        return_value=(True, {"fields": {}}),
+                        side_effect=lambda record_id_value, _notice_type: (
+                            True,
+                            {
+                                "record_id": record_id_value,
+                                "fields": dict(remote_fields),
+                                "record_version": f"notice-v{index}",
+                            },
+                        ),
                     ), patch.object(
                         portal_server_module,
                         "upload_media_to_feishu",
@@ -6798,7 +7009,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     ), patch.object(
                         portal_server_module,
                         "update_bitable_record_by_payload",
-                        return_value=(True, record_id),
+                        side_effect=update_notice,
+                    ), patch.object(
+                        portal_server_module,
+                        "send_robot_message_by_payload",
+                        return_value={
+                            "robot_sent": True,
+                            "robot_skipped": False,
+                            "last_robot_error": "",
+                        },
                     ):
                         result = PortalRuntime.execute_local_notice_upload(request_payload)
                     self.assertTrue(result["ok"], notice_type)
@@ -6973,6 +7192,45 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn(
             "_upload_operation_id",
             controller.payload["data_dict"],
+        )
+
+    def test_workflow_delegate_preserves_remote_written_retry_metadata(self):
+        class _Controller:
+            def execute_qt_notice_upload(self, _payload):
+                return {
+                    "ok": False,
+                    "name": "上传",
+                    "message": "目标已写入，等待核验",
+                    "record_id": "local-event-retry",
+                    "real_record_id": "rec-event-retry",
+                    "target_record_id": "rec-event-retry",
+                    "operation_id": "qt_notice:remote-written",
+                    "remote_written": True,
+                }
+
+        harness = _WorkflowBackendDelegateHarness(_Controller())
+        handled = harness._delegate_qt_notice_upload_to_backend(
+            data_snapshot={
+                "record_id": "local-event-retry",
+                "notice_type": "事件通告",
+                "text": "【事件通告】状态：开始",
+                "_upload_operation_id": "qt_notice:remote-written",
+            },
+            screenshot_bytes=None,
+            extra_images=[],
+            action_type="upload",
+            response_time="2026-08-31 10:00",
+            recover_selected=False,
+            robot_group_choice="auto",
+        )
+
+        self.assertTrue(handled)
+        self.assertFalse(harness.finished[0][1])
+        self.assertEqual(
+            harness._remote_written_retry_operations[
+                "qt_notice:remote-written"
+            ]["target_record_id"],
+            "rec-event-retry",
         )
 
     def test_workflow_delegate_applies_change_today_in_progress_result(self):
@@ -12724,36 +12982,32 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "recover_selected": False,
                 "robot_group_choice": "auto",
             }
+            remote = {
+                "fields": {"告警描述": "A楼Qt版本回填测试"},
+                "record_version": "version-current",
+            }
+
+            def query_remote(record_id, _notice_type):
+                return True, {
+                    "record_id": record_id,
+                    "fields": dict(remote["fields"]),
+                    "record_version": remote["record_version"],
+                }
+
+            def update_remote(record_id, notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_update_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote["fields"].update(fields)
+                remote["record_version"] = "version-after-write"
+                return True, "更新成功"
+
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    side_effect=[
-                        (
-                            True,
-                            {
-                                "fields": {"标题": "A楼Qt版本回填测试"},
-                                "record_version": "version-current",
-                            },
-                        ),
-                        (
-                            True,
-                            {
-                                "fields": {"标题": "A楼Qt版本回填测试"},
-                                "record_version": "version-after-write",
-                            },
-                        ),
-                        (
-                            True,
-                            {
-                                "fields": {
-                                    "标题": "A楼Qt版本回填测试",
-                                    "事件状态": "处理中",
-                                },
-                                "record_version": "version-after-write",
-                            },
-                        ),
-                    ],
+                    side_effect=query_remote,
                 ), patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
@@ -12761,8 +13015,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(
                     portal_server_module,
                     "update_bitable_record_by_payload",
-                    return_value=(True, "更新成功"),
-                ) as update_record:
+                    side_effect=update_remote,
+                ) as update_record, patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
+                ):
                     result = PortalRuntime.execute_local_notice_upload(
                         request_payload
                     )
@@ -12821,21 +13083,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     ),
                 },
             }
+            remote_fields = {}
+
+            def create_event(notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_create_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, "target-event-first-version"
+
             try:
                 with patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "target-event-first-version"),
+                    side_effect=create_event,
                 ) as create_record, patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(
+                    side_effect=lambda record_id, _notice_type: (
                         True,
                         {
-                            "fields": {"告警描述": "A楼事件首次上传版本测试"},
+                            "record_id": record_id,
+                            "fields": dict(remote_fields),
                             "record_version": "version-created-final",
                         },
                     ),
+                ), patch.object(
+                    portal_server_module,
+                    "send_robot_message_by_payload",
+                    return_value={
+                        "robot_sent": True,
+                        "robot_skipped": False,
+                        "last_robot_error": "",
+                    },
                 ):
                     result = PortalRuntime.execute_local_notice_upload(
                         request_payload
@@ -21300,6 +21581,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 object(),
                 item,
                 "event-cancel-version",
+            ),
+            _find_active_item_by_upload_operation=lambda _operation_id: (
+                None,
+                None,
             ),
             _is_valid_list_item=lambda _item: True,
             _rebuild_active_item_widget=lambda *_args, **_kwargs: None,
@@ -38076,6 +38361,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         class _Item:
             def __init__(self, payload):
                 self.payload = dict(payload)
+
+            def setData(self, _role, value):
+                self.payload = dict(value)
 
         class _Harness(MainWindowWorkflowMixin):
             def __init__(self, cache_store, payload):

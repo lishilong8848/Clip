@@ -87,10 +87,24 @@ class BaseNoticeHandler:
             tokens.extend(new_tokens)
         return tokens
 
-    def send_group_robot_message(self, title: str, content: str, notice_type: str, level: str):
+    def send_group_robot_message(
+        self,
+        title: str,
+        content: str,
+        notice_type: str,
+        level: str,
+        *,
+        message_uuid: str = "",
+    ):
         from ..robot_webhook import send_robot_title_and_content
 
-        return send_robot_title_and_content(title, content, notice_type, level)
+        return send_robot_title_and_content(
+            title,
+            content,
+            notice_type,
+            level,
+            message_uuid=message_uuid,
+        )
 
     def build_robot_message(self, payload: NoticePayload):
         info = extract_event_info(payload.text or "")

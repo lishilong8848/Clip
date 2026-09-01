@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from upload_event_module.ui import main_window_runtime
+from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin
+from upload_event_module.ui.settings_dialog import SettingsDialog
+
+
+class SettingsSaveRuntimeTests(unittest.TestCase):
+    def test_relay_http_allows_only_loopback_or_private_lan(self) -> None:
+        self.assertTrue(
+            SettingsDialog._is_valid_polling_work_order_public_relay_url(
+                "http://192.168.224.122:18767"
+            )
+        )
+        self.assertTrue(
+            SettingsDialog._is_valid_polling_work_order_public_relay_url(
+                "http://127.0.0.1:18767"
+            )
+        )
+        self.assertFalse(
+            SettingsDialog._is_valid_polling_work_order_public_relay_url(
+                "http://example.com:18767"
+            )
+        )
+
+    def test_unrelated_setting_save_does_not_restart_hot_reload(self) -> None:
+        manager = MagicMock()
+        window = SimpleNamespace(
+            _applied_disable_hot_reload=False,
+            hot_reload_manager=manager,
+        )
+        with patch.object(main_window_runtime.config, "load"), patch.object(
+            main_window_runtime.config,
+            "disable_hot_reload",
+            False,
+        ):
+            MainWindowRuntimeMixin.refresh_hot_reload_setting(window)
+
+        manager.stop.assert_not_called()
+        manager.start.assert_not_called()
+
+    def test_actual_hot_reload_toggle_still_stops_watcher(self) -> None:
+        manager = MagicMock()
+        window = SimpleNamespace(
+            _applied_disable_hot_reload=False,
+            hot_reload_manager=manager,
+        )
+        with patch.object(main_window_runtime.config, "load"), patch.object(
+            main_window_runtime.config,
+            "disable_hot_reload",
+            True,
+        ):
+            MainWindowRuntimeMixin.refresh_hot_reload_setting(window)
+
+        manager.stop.assert_called_once_with()
+        self.assertIsNone(window.hot_reload_manager)
+        self.assertTrue(window._applied_disable_hot_reload)
+
+
+if __name__ == "__main__":
+    unittest.main()

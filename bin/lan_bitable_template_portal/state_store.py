@@ -780,6 +780,120 @@ class LanPortalStateStore:
                 ).fetchone()
         return self._notice_remote_operation_payload(row)
 
+    def list_notice_remote_operations(
+        self,
+        *,
+        status: str = "",
+        limit: int = 100,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 100), 1000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if self._text(status):
+                    order = "DESC" if newest_first else "ASC"
+                    rows = conn.execute(
+                        f"""
+                        SELECT * FROM notice_remote_operations
+                        WHERE status = ?
+                        ORDER BY updated_at {order}
+                        LIMIT ?
+                        """,
+                        (self._text(status), limit),
+                    ).fetchall()
+                else:
+                    order = "DESC" if newest_first else "ASC"
+                    rows = conn.execute(
+                        f"""
+                        SELECT * FROM notice_remote_operations
+                        ORDER BY updated_at {order}
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+        return [
+            payload
+            for row in rows
+            if (payload := self._notice_remote_operation_payload(row)) is not None
+        ]
+
+    def list_pending_event_robot_operations(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return only due, verified event messages that still need delivery."""
+
+        if not self.db_path.exists():
+            return []
+        due_at = float(time.time() if now is None else now)
+        limit = max(1, min(int(limit or 20), 1000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM notice_remote_operations
+                    WHERE status = 'remote_written'
+                      AND json_extract(request_json, '$.notice_type') = '事件通告'
+                      AND json_extract(result_json, '$.robot_delivery_state') = 'pending'
+                      AND COALESCE(
+                            CAST(json_extract(result_json, '$.remote_verified') AS INTEGER),
+                            0
+                          ) = 1
+                      AND COALESCE(
+                            CAST(json_extract(result_json, '$.local_projection_completed') AS INTEGER),
+                            0
+                          ) = 1
+                      AND COALESCE(
+                            CAST(json_extract(result_json, '$.robot_next_retry_at') AS REAL),
+                            0
+                          ) <= ?
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (due_at, limit),
+                ).fetchall()
+        return [
+            payload
+            for row in rows
+            if (payload := self._notice_remote_operation_payload(row)) is not None
+        ]
+
+    def list_notice_remote_operations_for_target(
+        self,
+        target_record_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        normalized_target = self._text(target_record_id)
+        if not normalized_target or not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 1000), 1000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM notice_remote_operations
+                    WHERE target_record_id = ?
+                    ORDER BY created_at ASC, updated_at ASC
+                    LIMIT ?
+                    """,
+                    (normalized_target, limit),
+                ).fetchall()
+        return [
+            payload
+            for row in rows
+            if (payload := self._notice_remote_operation_payload(row)) is not None
+        ]
+
     def find_recoverable_notice_remote_operation(
         self,
         *,
@@ -3531,6 +3645,38 @@ class LanPortalStateStore:
                 cursor = conn.execute(
                     "UPDATE notice_upload_attachments SET used_at = ? WHERE upload_id = ?",
                     (time.time(), upload_id),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+    def mark_notice_upload_attachment_uploaded(
+        self,
+        upload_id: str,
+        file_token: str,
+    ) -> bool:
+        upload_id = self._text(upload_id)
+        file_token = self._text(file_token)
+        if not upload_id or not file_token:
+            return False
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT payload_json FROM notice_upload_attachments WHERE upload_id = ?",
+                    (upload_id,),
+                ).fetchone()
+                if not row:
+                    return False
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                payload = payload if isinstance(payload, dict) else {}
+                payload["file_token"] = file_token
+                cursor = conn.execute(
+                    """
+                    UPDATE notice_upload_attachments
+                    SET payload_json = ?, used_at = ?
+                    WHERE upload_id = ?
+                    """,
+                    (self._json(payload), time.time(), upload_id),
                 )
                 conn.commit()
                 return int(cursor.rowcount or 0) > 0

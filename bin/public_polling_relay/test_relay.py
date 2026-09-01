@@ -4,8 +4,12 @@ import base64
 import hashlib
 import json
 import os
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 from unittest.mock import patch
@@ -13,6 +17,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from .app import RelayError, RelaySettings, _verify_image_dimensions, create_app
+from .frontend import _COMMON_SCRIPT
 
 
 PNG_1X1 = base64.b64decode(
@@ -21,6 +26,38 @@ PNG_1X1 = base64.b64decode(
 
 
 class RelayFlowTest(unittest.TestCase):
+    def test_lan_http_photo_hash_has_working_non_webcrypto_fallback(self) -> None:
+        match = re.search(
+            r"(const SHA256_K=.*?\nasync function sha256Fallback\(.*?\n\})\nasync function sha256Hex",
+            _COMMON_SCRIPT,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            match,
+            "局域网 HTTP 页面必须包含不依赖 crypto.subtle 的 SHA-256。",
+        )
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js unavailable; fallback presence was verified statically.")
+        values = ["", "abc", "中文", "a" * 1000]
+        expected = [hashlib.sha256(value.encode()).hexdigest() for value in values]
+        script = (
+            "const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));\n"
+            + str(match.group(1))
+            + "\nconst values="
+            + json.dumps(values, ensure_ascii=False)
+            + ";Promise.all(values.map(value=>sha256Fallback(new TextEncoder().encode(value).buffer)))"
+            ".then(result=>console.log(JSON.stringify(result)));"
+        )
+        completed = subprocess.run(
+            [node, "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(json.loads(completed.stdout), expected)
+
     def test_production_settings_require_canonical_public_url(self) -> None:
         environment: dict[str, str] = {}
         with patch.dict(os.environ, environment, clear=True):
@@ -435,6 +472,111 @@ class RelayFlowTest(unittest.TestCase):
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
         self.assertEqual(self.operator_client.get("/api/v1/work-orders/session").status_code, 401)
 
+    def test_expired_photo_command_can_retry_without_duplicate_or_success_replay(self) -> None:
+        self._lease()
+        self._register()
+        current_step = {
+            "step_key": "1:1",
+            "run_index": 1,
+            "step_index": 1,
+            "step_count": 1,
+            "content": "当前步骤",
+            "position": "current",
+            "operator_required": True,
+            "reviewer_required": True,
+            "photos": [],
+        }
+        projection = {
+            "operator": {"state": "active", "steps": [current_step]},
+            "reviewer": {"state": "active", "steps": [current_step]},
+        }
+        updated = self._internal(
+            "PUT",
+            "/api/v1/internal/groups/public-group-0001/projection",
+            payload={
+                "state": "active",
+                "authority_version": 1,
+                "projection_revision": 2,
+                "projection": projection,
+            },
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        csrf = self._exchange_operator()["csrf_token"]
+        digest = hashlib.sha256(PNG_1X1).hexdigest()
+        initialized = self.operator_client.post(
+            "/api/v1/work-orders/uploads",
+            json={
+                "step_key": "1:1",
+                "expected_version": 1,
+                "file_name": "retry.png",
+                "content_type": "image/png",
+                "size": len(PNG_1X1),
+                "sha256": digest,
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        upload_id = initialized.json()["data"]["upload_id"]
+        content = self.operator_client.put(
+            f"/api/v1/work-orders/uploads/{upload_id}/content",
+            content=PNG_1X1,
+            headers={
+                "Content-Type": "image/png",
+                "X-Content-SHA256": digest,
+                "X-CSRF-Token": csrf,
+            },
+        )
+        self.assertEqual(content.status_code, 200, content.text)
+        completed = self.operator_client.post(
+            f"/api/v1/work-orders/uploads/{upload_id}/complete",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(completed.status_code, 202, completed.text)
+        command_id = completed.json()["data"]["command_id"]
+        store = self.app.state.store
+        with store._transaction() as connection:
+            connection.execute(
+                "UPDATE commands SET status='expired', expires_at=?, updated_at=? WHERE command_id=?",
+                (0, 0, command_id),
+            )
+        session = store.authenticate_session(
+            str(self.operator_client.cookies.get("wo_session") or ""), touch=False
+        )
+
+        def retry() -> tuple[str, str]:
+            command, _created = store.enqueue_command(
+                session=session,
+                idempotency_key=f"attach_{upload_id}",
+                kind="attach_photo",
+                payload={"upload_id": upload_id, "step_key": "1:1"},
+                expected_version=1,
+                ttl_seconds=60,
+            )
+            return command["command_id"], command["status"]
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            retried = list(executor.map(lambda _index: retry(), range(4)))
+        self.assertEqual({item[0] for item in retried}, {command_id})
+        self.assertEqual({item[1] for item in retried}, {"pending"})
+        with store._connection() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM commands WHERE idempotency_key=?",
+                    (f"attach_{upload_id}",),
+                ).fetchone()[0],
+                1,
+            )
+        with store._transaction() as connection:
+            connection.execute(
+                "UPDATE commands SET status='succeeded', updated_at=? WHERE command_id=?",
+                (1, command_id),
+            )
+            connection.execute(
+                "UPDATE uploads SET status='authority_attached', updated_at=? WHERE upload_id=?",
+                (1, upload_id),
+            )
+        succeeded_id, succeeded_status = retry()
+        self.assertEqual((succeeded_id, succeeded_status), (command_id, "succeeded"))
+
     def test_authority_lease_fencing_without_static_credentials(self) -> None:
         first = self._internal(
             "POST",
@@ -501,4 +643,3 @@ class RelayFlowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

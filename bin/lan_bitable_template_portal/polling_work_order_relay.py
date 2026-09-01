@@ -896,19 +896,28 @@ class PollingWorkOrderRelayConnector:
             )
         group = self.work_orders.get_group(target_record_id)
         payload = document.get("pending_projection")
+        pending_revision = (
+            int(payload.get("projection_revision") or 0)
+            if isinstance(payload, dict)
+            else 0
+        )
         if (
             not isinstance(payload, dict)
             or not str(payload.get("state") or "")
             or not isinstance(payload.get("projection"), dict)
-            or int(payload.get("projection_revision") or 0) <= 0
+            or pending_revision <= 0
+            or int(payload.get("authority_version") or 0)
+            != int(group.get("version") or 0)
         ):
             projection = self.dual_projection(target_record_id)
             payload = {
                 "state": str(group.get("state") or ""),
                 "authority_version": int(group.get("version") or 0),
                 "projection_revision": max(
-                    1, int(document.get("projection_revision") or 0) + 1
-                ),
+                    int(document.get("projection_revision") or 0),
+                    pending_revision,
+                )
+                + 1,
                 "projection": projection,
             }
             document = self._put_group_document(
@@ -1642,4 +1651,3 @@ __all__ = [
     "RelayResponse",
     "UrllibPollingRelayTransport",
 ]
-

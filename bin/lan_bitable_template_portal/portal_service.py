@@ -92,6 +92,7 @@ from .critical_guard import (
 )
 from .critical_guard_weather import (
     build_weather_guard_card,
+    is_same_day_weather_guard_upgrade,
     normalize_weather_snapshot,
     progress_summary as critical_guard_weather_progress,
     warning_task_name,
@@ -43619,6 +43620,12 @@ class MaintenancePortalService:
             for item in warning.get("sheet_types") or []
             if str(item or "").strip()
         ]
+        (
+            upgrade_source_found,
+            upgrade_cells,
+        ) = self._critical_guard_weather_upgrade_seed(
+            snapshot=snapshot, warning=warning, sheet_types=sheet_types
+        )
         detail = self.create_critical_guard_task(
             name=warning_task_name(warning),
             sheet_types=sheet_types,
@@ -43627,7 +43634,9 @@ class MaintenancePortalService:
             operator_open_id=operator_open_id,
             operator_name=operator_name or "天气预警自动任务",
             initial_cells_by_sheet={"灾害专项": weather_cells_patch(warning)},
+            initial_cells_by_scope_sheet=upgrade_cells,
             memory_key_override=CRITICAL_GUARD_WEATHER_MEMORY_KEY,
+            reuse_saved_memory=not upgrade_source_found,
         )
         source_payload = self._critical_guard_weather_source_payload(snapshot, warning)
         mapped = self._state_store.put_critical_guard_weather_task(
@@ -43642,6 +43651,82 @@ class MaintenancePortalService:
             source_payload=source_payload,
         )
         return mapped, bool(detail.get("created", True))
+
+    def _critical_guard_weather_upgrade_seed(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        warning: dict[str, Any],
+        sheet_types: list[str],
+    ) -> tuple[bool, dict[str, dict[str, dict[str, Any]]]]:
+        requested_sheets = set(sheet_types)
+        candidates: list[dict[str, Any]] = []
+        for item in self._state_store.list_critical_guard_weather_tasks(status="all"):
+            if str(item.get("weather_key") or "") == str(
+                warning.get("weather_key") or ""
+            ):
+                continue
+            source_payload = (
+                item.get("source_payload")
+                if isinstance(item.get("source_payload"), dict)
+                else {}
+            )
+            source_warning = (
+                source_payload.get("warning")
+                if isinstance(source_payload.get("warning"), dict)
+                else {}
+            )
+            previous_warning = {
+                "id": source_warning.get("id") or item.get("warning_id"),
+                "title": source_warning.get("title") or item.get("warning_title"),
+                "type": source_warning.get("type") or item.get("warning_type"),
+                "guard_level": source_warning.get("guard_level")
+                or item.get("guard_level"),
+                "publish_time": source_warning.get("publish_time"),
+                "start_time": source_warning.get("start_time"),
+            }
+            if not is_same_day_weather_guard_upgrade(
+                previous_warning,
+                warning,
+                previous_fallback_time=(
+                    source_payload.get("snapshot_at") or item.get("created_at")
+                ),
+                current_fallback_time=snapshot.get("snapshot_at"),
+            ):
+                continue
+            candidates.append(item)
+        candidates.sort(
+            key=lambda item: (
+                {"二级戒备": 2, "三级戒备": 3}.get(
+                    str(item.get("guard_level") or ""), 99
+                ),
+                -float(item.get("updated_at") or item.get("created_at") or 0),
+            )
+        )
+        reused: dict[str, dict[str, dict[str, Any]]] = {}
+        for item in candidates:
+            task = self._state_store.get_critical_guard_task(
+                str(item.get("task_id") or ""),
+                include_all_responses=True,
+            )
+            if not task:
+                continue
+            for response in task.get("responses") or []:
+                if not isinstance(response, dict):
+                    continue
+                scope = str(response.get("scope") or "").strip().upper()
+                sheet = str(response.get("sheet_type") or "").strip()
+                cells = response.get("cells")
+                if (
+                    not scope
+                    or sheet not in requested_sheets
+                    or response.get("status") not in {"draft", "submitted"}
+                    or not isinstance(cells, dict)
+                    or sheet in reused.get(scope, {})
+                ):
+                    continue
+                reused.setdefault(scope, {})[sheet] = copy.deepcopy(cells)
+        return bool(candidates), reused
 
     def _send_critical_guard_weather_scope_card(
         self,
@@ -44828,7 +44913,11 @@ class MaintenancePortalService:
         operator_open_id: str,
         operator_name: str,
         initial_cells_by_sheet: dict[str, dict[str, Any]] | None = None,
+        initial_cells_by_scope_sheet: dict[
+            str, dict[str, dict[str, Any]]
+        ] | None = None,
         memory_key_override: str = "",
+        reuse_saved_memory: bool = True,
     ) -> dict[str, Any]:
         task_name = re.sub(r"\s+", " ", str(name or "").strip())[:160]
         if not task_name:
@@ -44883,15 +44972,33 @@ class MaintenancePortalService:
                 scope_template_customized = bool(
                     scope_template and scope_template.get("customized")
                 )
-                memory = self._state_store.get_critical_guard_memory(
-                    memory_key=memory_key,
-                    scope=scope,
-                    sheet_type=sheet,
-                    template_version=template_version,
-                    fallback_latest=sheet in CRITICAL_GUARD_CHECK_SHEETS,
+                seeded_cells = (
+                    (initial_cells_by_scope_sheet or {}).get(scope, {}).get(sheet)
+                    if isinstance(initial_cells_by_scope_sheet, dict)
+                    else None
+                )
+                memory = (
+                    self._state_store.get_critical_guard_memory(
+                        memory_key=memory_key,
+                        scope=scope,
+                        sheet_type=sheet,
+                        template_version=template_version,
+                        fallback_latest=sheet in CRITICAL_GUARD_CHECK_SHEETS,
+                    )
+                    if reuse_saved_memory and not isinstance(seeded_cells, dict)
+                    else None
                 )
                 cells = (
                     memory_cells_for_new_task(
+                        sheet,
+                        scope,
+                        seeded_cells,
+                        template_items=scope_template_items,
+                        template_revision=scope_template_revision,
+                        template_customized=scope_template_customized,
+                    )
+                    if isinstance(seeded_cells, dict)
+                    else memory_cells_for_new_task(
                         sheet,
                         scope,
                         memory.get("cells"),
@@ -44909,19 +45016,45 @@ class MaintenancePortalService:
                     )
                 )
                 if sheet in CRITICAL_GUARD_FILE_SHEETS:
-                    latest_file = self._state_store.get_latest_critical_guard_scope_file(
-                        scope=scope,
-                        sheet_type=sheet,
-                    )
-                    if latest_file:
+                    source_file = None
+                    if isinstance(seeded_cells, dict):
+                        seeded_file_id = str(cells.get("source_file_id") or "").strip()
+                        seeded_file = (
+                            self._state_store.get_critical_guard_scope_file(seeded_file_id)
+                            if seeded_file_id
+                            else None
+                        )
+                        if (
+                            seeded_file
+                            and str(seeded_file.get("scope") or "").upper() == scope
+                            and str(seeded_file.get("sheet_type") or "") == sheet
+                            and Path(
+                                str(seeded_file.get("local_file_path") or "")
+                            ).is_file()
+                        ):
+                            source_file = seeded_file
+                        else:
+                            cells = dict(cells)
+                            for key in (
+                                "source_file_id",
+                                "source_file_name",
+                                "source_file_sha256",
+                            ):
+                                cells[key] = ""
+                    else:
+                        source_file = self._state_store.get_latest_critical_guard_scope_file(
+                            scope=scope,
+                            sheet_type=sheet,
+                        )
+                    if source_file:
                         cells = dict(cells)
                         cells.update(
                             {
-                                "source_file_id": str(latest_file.get("file_id") or ""),
+                                "source_file_id": str(source_file.get("file_id") or ""),
                                 "source_file_name": str(
-                                    latest_file.get("original_file_name") or ""
+                                    source_file.get("original_file_name") or ""
                                 ),
-                                "source_file_sha256": str(latest_file.get("sha256") or ""),
+                                "source_file_sha256": str(source_file.get("sha256") or ""),
                             }
                         )
                 initial_cells = (

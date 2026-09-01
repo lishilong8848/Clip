@@ -17,6 +17,7 @@ from upload_event_module.ui.main_window_clipboard import MainWindowClipboardMixi
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  # noqa: E402
 from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.core.parser import extract_notice_info  # noqa: E402
+from upload_event_module.config import EVENT_NOTICE_FIELDS  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from clipflow_backend.process_controller import BackendProcessPortalController  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
@@ -321,6 +322,127 @@ class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_startup_event_reconcile_removes_finished_and_missing_targets_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                targets = [
+                    ("active-finished", "rec-finished"),
+                    ("active-finished-copy", "rec-finished"),
+                    ("active-status-finished", "rec-status-finished"),
+                    ("active-live", "rec-live"),
+                    ("active-transient", "rec-transient"),
+                    ("active-missing", "rec-missing"),
+                ]
+                for active_item_id, record_id in targets:
+                    store.upsert_qt_active_item(
+                        {
+                            "active_item_id": active_item_id,
+                            "record_id": record_id,
+                            "target_record_id": record_id,
+                            "notice_type": "事件通告",
+                            "work_type": "event",
+                            "_is_placeholder_record": False,
+                            "text": f"【事件通告】状态：更新\n【标题】{active_item_id}",
+                        },
+                        section="event",
+                        origin="clipboard",
+                    )
+
+                def query(record_id, _notice_type):
+                    if record_id == "rec-finished":
+                        return True, {
+                            "fields": {EVENT_NOTICE_FIELDS["end_time"]: 1788148800000}
+                        }
+                    if record_id == "rec-status-finished":
+                        return True, {"fields": {"事件状态": "已结束"}}
+                    if record_id == "rec-missing":
+                        return False, "code=1254043, msg=RecordIdNotFound"
+                    if record_id == "rec-transient":
+                        raise ConnectionError("connection reset")
+                    return True, {"fields": {}}
+
+                rows = store.list_qt_active_items()
+                with patch(
+                    "clipflow_backend.main.query_record_by_id",
+                    side_effect=query,
+                ) as query_mock:
+                    stats = FastAPIPortalController._reconcile_finished_qt_event_items(rows)
+
+                remaining = {
+                    row["record_id"] for row in store.list_qt_active_items()
+                }
+                self.assertEqual(remaining, {"rec-live", "rec-transient"})
+                self.assertEqual(stats["checked"], 5)
+                self.assertEqual(stats["removed"], 3)
+                self.assertEqual(stats["missing"], 1)
+                self.assertEqual(stats["failed"], 1)
+                self.assertEqual(query_mock.call_count, 5)
+                finished_identity = store.resolve_notice_identity(
+                    work_type="event",
+                    active_item_id="active-finished",
+                    target_record_id="rec-finished",
+                )
+                self.assertEqual(finished_identity["status"], "已结束")
+                missing_identities = store.list_notice_identities(
+                    include_deleted=True,
+                    limit=100,
+                )
+                missing_identity = next(
+                    item
+                    for item in missing_identities
+                    if item.get("target_record_id") == "rec-missing"
+                )
+                self.assertIsNotNone(missing_identity.get("deleted_at"))
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_startup_event_reconcile_is_single_flight(self):
+        entered = threading.Event()
+        release = threading.Event()
+        row = {
+            "active_item_id": "active-single-flight",
+            "record_id": "rec-single-flight",
+            "notice_type": "事件通告",
+            "payload": {
+                "active_item_id": "active-single-flight",
+                "record_id": "rec-single-flight",
+                "target_record_id": "rec-single-flight",
+                "notice_type": "事件通告",
+                "work_type": "event",
+            },
+        }
+
+        def query(_record_id, _notice_type):
+            entered.set()
+            release.wait(timeout=2)
+            return True, {"fields": {}}
+
+        first_result = {}
+
+        def run_first():
+            first_result.update(
+                FastAPIPortalController._reconcile_finished_qt_event_items([row])
+            )
+
+        with patch(
+            "clipflow_backend.main.query_record_by_id",
+            side_effect=query,
+        ) as query_mock:
+            worker = threading.Thread(target=run_first)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1))
+            second = FastAPIPortalController._reconcile_finished_qt_event_items([row])
+            release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(second.get("skipped_inflight"), 1)
+        self.assertEqual(first_result.get("checked"), 1)
+        self.assertEqual(query_mock.call_count, 1)
+
     def test_upload_operation_lookup_skips_wrong_duplicate_record_row(self):
         harness = _RecordsHarness()
         wrong = _OperationItem(

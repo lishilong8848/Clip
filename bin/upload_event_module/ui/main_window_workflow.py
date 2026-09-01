@@ -108,7 +108,17 @@ class MainWindowWorkflowMixin:
         action_type: str,
     ) -> str:
         action = str(action_type or "").strip()
+        if isinstance(data_dict, dict) and bool(
+            data_dict.get("_remote_written_pending_verification")
+        ):
+            retry_action = str(
+                data_dict.get("_remote_written_retry_action") or ""
+            ).strip().lower()
+            if retry_action in {"upload", "update", "end"}:
+                return retry_action
         if action != "upload" or not isinstance(data_dict, dict):
+            return action
+        if str(data_dict.get("_remote_written_retry_action") or "").strip() == "upload":
             return action
         target_record_id = str(data_dict.get("target_record_id") or "").strip()
         if target_record_id and not bool(data_dict.get("_is_placeholder_record", True)):
@@ -713,6 +723,26 @@ class MainWindowWorkflowMixin:
         try:
             result = controller.execute_qt_notice_upload(request_payload)
         except Exception as exc:
+            if operation_id:
+                retry_operations = getattr(
+                    self,
+                    "_remote_written_retry_operations",
+                    None,
+                )
+                if not isinstance(retry_operations, dict):
+                    retry_operations = {}
+                    self._remote_written_retry_operations = retry_operations
+                retry_operations[operation_id] = {
+                    "operation_id": operation_id,
+                    "target_record_id": str(
+                        (data_snapshot or {}).get("target_record_id") or ""
+                    ).strip(),
+                    "original_record_id": str(
+                        (data_snapshot or {}).get("record_id") or ""
+                    ).strip(),
+                    "action_type": str(action_type or "upload").strip() or "upload",
+                    "remote_written": False,
+                }
             _finish(
                 self._backend_upload_action_name(action_type),
                 False,
@@ -754,6 +784,27 @@ class MainWindowWorkflowMixin:
                 robot_group_choice=robot_group_choice,
             )
         real_record_id = str(result.get("real_record_id") or "").strip()
+        if not success and bool(result.get("remote_written")) and operation_id:
+            target_record_id = str(
+                result.get("target_record_id") or real_record_id or ""
+            ).strip()
+            retry_operations = getattr(
+                self,
+                "_remote_written_retry_operations",
+                None,
+            )
+            if not isinstance(retry_operations, dict):
+                retry_operations = {}
+                self._remote_written_retry_operations = retry_operations
+            retry_operations[operation_id] = {
+                "operation_id": str(result.get("operation_id") or operation_id),
+                "target_record_id": target_record_id,
+                "original_record_id": str(
+                    (data_snapshot or {}).get("record_id") or record_id or ""
+                ).strip(),
+                "action_type": str(action_type or "upload").strip() or "upload",
+                "remote_written": True,
+            }
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id
         today_in_progress_state = str(
@@ -2299,6 +2350,12 @@ class MainWindowWorkflowMixin:
                 and candidate_target_id
                 and target_record_id == candidate_target_id
             )
+            if (
+                target_record_id
+                and candidate_target_id
+                and target_record_id != candidate_target_id
+            ):
+                continue
             try:
                 same_event = self._event_sparse_identity_matches(
                     data_dict,
@@ -2331,10 +2388,22 @@ class MainWindowWorkflowMixin:
                     pass
             self.show_message("截图上传进行中，暂时不能删除条目。")
             return
-        if bool(data_dict.get("_upload_in_progress")):
+        record_id = str((data_dict or {}).get("record_id") or "").strip()
+        candidate_fn = getattr(self, "_upload_completion_record_id_candidates", None)
+        unresolved_ids = set(
+            candidate_fn(record_id) if callable(candidate_fn) else [record_id]
+        )
+        unresolved_upload = bool(data_dict.get("_upload_in_progress")) or (
+            bool(str(data_dict.get("_upload_operation_id") or "").strip())
+            and bool(
+                unresolved_ids.intersection(
+                    set(getattr(self, "pending_action_record_ids", set()) or set())
+                )
+            )
+        )
+        if unresolved_upload:
             self.show_message("该通告正在上传，完成后才可删除。")
             return
-        record_id = str((data_dict or {}).get("record_id") or "").strip()
         list_widget, item = (
             self._find_active_item_by_active_item_id(active_item_id)
             if active_item_id
@@ -2480,7 +2549,11 @@ class MainWindowWorkflowMixin:
 
         self.pending_action_record_ids.add(record_id)
         self.pending_action_types[record_id] = action_type
-        data_dict["_upload_operation_id"] = f"qt_notice:{uuid.uuid4().hex}"
+        if not (
+            bool(data_dict.get("_remote_written_pending_verification"))
+            and str(data_dict.get("_upload_operation_id") or "").strip()
+        ):
+            data_dict["_upload_operation_id"] = f"qt_notice:{uuid.uuid4().hex}"
         pending_hash = self._calc_text_hash(data_dict.get("text", ""))
         data_dict["_pending_upload_hash"] = pending_hash
         data_dict["_has_unuploaded_changes"] = False
@@ -2560,26 +2633,56 @@ class MainWindowWorkflowMixin:
 
             # 当前提交继续上传；新文本作为下一代立即显示并允许排队。
             new_data = self._mark_notice_content_dirty(new_data)
-            queued_action = "end" if new_status == "结束" else "update"
-            pending_request = self.pending_update_after_upload.get(record_id)
+            rollback_entry = self.pending_upload_rollback_by_record_id.get(
+                record_id
+            ) or {}
+            rollback_snapshot = rollback_entry.get("old_data")
+            if isinstance(rollback_snapshot, dict):
+                try:
+                    new_data["_event_inflight_retry_snapshot"] = copy.deepcopy(
+                        rollback_snapshot
+                    )
+                except Exception:
+                    new_data["_event_inflight_retry_snapshot"] = dict(
+                        rollback_snapshot
+                    )
+            parsed_status = str(info.get("status") or new_status or "").strip()
+            queued_action = "end" if parsed_status == "结束" else "update"
+            new_data["status"] = "结束" if queued_action == "end" else "更新"
+            new_data["action"] = queued_action
+            pending_keys = self._upload_completion_record_id_candidates(record_id)
+            pending_key = next(
+                (
+                    key
+                    for key in pending_keys
+                    if isinstance(self.pending_update_after_upload.get(key), dict)
+                    and bool(self.pending_update_after_upload.get(key))
+                ),
+                "",
+            )
+            pending_request = (
+                self.pending_update_after_upload.get(pending_key) if pending_key else None
+            )
             requested = isinstance(pending_request, dict) and bool(pending_request)
+            if requested:
+                for key in pending_keys:
+                    self.pending_update_after_upload.pop(key, None)
+                pending_request = None
+                requested = False
+            current_operation_id = str(
+                new_data.get("_upload_operation_id") or ""
+            ).strip()
+            new_data = self._clear_remote_written_retry_state(new_data)
+            if current_operation_id:
+                # The next generation still needs the in-flight operation ID so
+                # its terminal callback can release this same-event queue.
+                new_data["_upload_operation_id"] = current_operation_id
             new_data["_queued_after_upload"] = True
             new_data["_queued_action"] = queued_action
             new_data["_queued_upload_requested"] = requested
             new_data["_upload_in_progress"] = False
             new_data["_pending_upload_hash"] = None
             new_data.pop("_upload_started_monotonic", None)
-            if requested:
-                queued_data = copy.deepcopy(new_data)
-                for key in (
-                    "_upload_operation_id",
-                    "_queued_after_upload",
-                    "_queued_action",
-                    "_queued_upload_requested",
-                ):
-                    queued_data.pop(key, None)
-                pending_request["data"] = queued_data
-                pending_request["action_type"] = queued_action
             item.setData(Qt.ItemDataRole.UserRole, new_data)
             if hasattr(self, "_upsert_active_cache_record"):
                 self._upsert_active_cache_record(new_data)

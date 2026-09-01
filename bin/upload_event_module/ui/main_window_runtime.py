@@ -690,8 +690,15 @@ class MainWindowRuntimeMixin:
                 )
                 if (
                     is_event
+                    and bool(existing_data.get("_queued_after_upload"))
+                    and incoming_text
+                    and incoming_text != existing_text
+                    and not bool(data.get("_has_unuploaded_changes"))
+                ):
+                    return {"ok": True, "stale": True, "queued": True}
+                if (
+                    is_event
                     and current_upload_busy
-                    and bool(data.get("_has_unuploaded_changes"))
                     and incoming_text
                     and incoming_text != existing_text
                 ):
@@ -704,15 +711,20 @@ class MainWindowRuntimeMixin:
                     )
                     if queued:
                         return {"ok": True, "updated": True, "queued": True}
-                if (
+                clear_retry_state = bool(
                     is_event
-                    and bool(existing_data.get("_queued_after_upload"))
-                    and incoming_text
-                    and incoming_text != existing_text
-                    and not bool(data.get("_has_unuploaded_changes"))
-                ):
-                    return {"ok": True, "stale": True, "queued": True}
+                    and (
+                        (
+                            incoming_text
+                            and incoming_text != existing_text
+                            and bool(data.get("_has_unuploaded_changes"))
+                        )
+                        or data.get("_has_unuploaded_changes") is False
+                    )
+                )
                 data = self._inherit_active_runtime_fields(data, existing_data)
+                if clear_retry_state:
+                    data = self._clear_remote_written_retry_state(data)
         if not canonical_supersedes:
             data = self._canonical_backend_active_payload(
                 data,
@@ -808,6 +820,49 @@ class MainWindowRuntimeMixin:
             list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
         if (not item or not self._is_valid_list_item(item)) and record_id:
             list_widget, item = self._find_active_item_by_record_id(record_id)
+        item_data = (
+            item.data(Qt.ItemDataRole.UserRole) or {}
+            if item and self._is_valid_list_item(item)
+            else {}
+        )
+        cleanup_ids = set()
+        candidate_fn = getattr(self, "_upload_completion_record_id_candidates", None)
+        for value in (
+            record_id,
+            canonical_target_record_id(payload),
+            str(item_data.get("record_id") or "").strip(),
+            canonical_target_record_id(item_data),
+        ):
+            value = str(value or "").strip()
+            if not value:
+                continue
+            cleanup_ids.update(
+                candidate_fn(value) if callable(candidate_fn) else [value]
+            )
+        for mapping_name in (
+            "pending_replace_by_record_id",
+            "pending_upload_rollback_by_record_id",
+            "pending_end_rollback_by_record_id",
+            "pending_new_by_record_id",
+            "pending_update_after_upload",
+            "pending_action_types",
+        ):
+            mapping = getattr(self, mapping_name, None)
+            if isinstance(mapping, dict):
+                for cleanup_id in cleanup_ids:
+                    mapping.pop(cleanup_id, None)
+        pending_ids = getattr(self, "pending_action_record_ids", None)
+        if isinstance(pending_ids, set):
+            pending_ids.difference_update(cleanup_ids)
+        retry_operations = getattr(self, "_remote_written_retry_operations", None)
+        if isinstance(retry_operations, dict):
+            for retry_id, retry_meta in list(retry_operations.items()):
+                retry_meta = retry_meta if isinstance(retry_meta, dict) else {}
+                if {
+                    str(retry_meta.get("target_record_id") or "").strip(),
+                    str(retry_meta.get("original_record_id") or "").strip(),
+                }.intersection(cleanup_ids):
+                    retry_operations.pop(retry_id, None)
         if item and self._is_valid_list_item(item):
             self._remove_active_item_from_source(list_widget, item)
             return {"ok": True, "deleted": True}
@@ -917,14 +972,18 @@ class MainWindowRuntimeMixin:
         try:
             from pathlib import Path
 
-            if config.disable_hot_reload:
+            disabled = bool(config.disable_hot_reload)
+            if disabled:
+                self._applied_disable_hot_reload = True
                 log_info("HotReload: 已禁用")
                 return
 
             project_root = Path(__file__).resolve().parents[3]
             self.hot_reload_manager = HotReloadManager(project_root, ui_host=self)
             self.hot_reload_manager.start()
+            self._applied_disable_hot_reload = False
         except Exception as exc:
+            self._applied_disable_hot_reload = None
             log_error(f"HotReload: 初始化失败: {exc}")
 
     def refresh_hot_reload_setting(self):
@@ -932,7 +991,11 @@ class MainWindowRuntimeMixin:
             from pathlib import Path
 
             config.load()
-            if config.disable_hot_reload:
+            disabled = bool(config.disable_hot_reload)
+            if getattr(self, "_applied_disable_hot_reload", None) == disabled:
+                return
+            self._applied_disable_hot_reload = disabled
+            if disabled:
                 if hasattr(self, "hot_reload_manager") and self.hot_reload_manager:
                     self.hot_reload_manager.stop()
                 self.hot_reload_manager = None
@@ -945,11 +1008,10 @@ class MainWindowRuntimeMixin:
                 or self.hot_reload_manager is None
             ):
                 self.hot_reload_manager = HotReloadManager(project_root, ui_host=self)
-            else:
-                self.hot_reload_manager.stop()
             self.hot_reload_manager.start()
             log_info("HotReload: 已启用")
         except Exception as exc:
+            self._applied_disable_hot_reload = None
             log_error(f"HotReload: 重新初始化失败: {exc}")
 
     def refresh_alert_setting(self):
@@ -1500,8 +1562,18 @@ class MainWindowRuntimeMixin:
         if not self._lan_scope_matches(scope, buildings):
             return {"ok": False, "error": "当前账号无权删除该楼栋的进行中通告。"}
         record_id = str(data.get("record_id") or "").strip()
-        if bool(data.get("_upload_in_progress")) or (
-            record_id and self._has_pending_upload(record_id)
+        candidate_fn = getattr(self, "_upload_completion_record_id_candidates", None)
+        candidate_ids = set(
+            candidate_fn(record_id) if callable(candidate_fn) else [record_id]
+        )
+        if (
+            bool(data.get("_upload_in_progress"))
+            or bool(
+                candidate_ids.intersection(
+                    set(getattr(self, "pending_action_record_ids", set()) or set())
+                )
+            )
+            or (record_id and self._has_pending_upload(record_id))
         ):
             return {"ok": False, "error": "该条目正在上传，请等待完成后再删除。"}
         remote_deleted = False

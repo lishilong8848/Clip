@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -24,6 +25,9 @@ DEFAULT_WEATHER_GUARD_ACTIONS = (
     "明确戒备期间现场 7*24 岗值班人员排班信息，无特殊情况不得随意调换班/请假；",
     "应急储备物资清点，填写《重保戒备检查表-物资检查清单》，应急物资可用性检查、物资排查问题清零；",
 )
+
+_SHANGHAI_TIMEZONE = dt.timezone(dt.timedelta(hours=8))
+_GUARD_LEVEL_RANKS = {"一级戒备": 1, "二级戒备": 2, "三级戒备": 3}
 
 
 def _text(value: Any) -> str:
@@ -50,6 +54,92 @@ def _format_clock(value: Any) -> str:
         return parsed.strftime("%m-%d %H:%M")
     except ValueError:
         return text[:16]
+
+
+def _warning_local_day(value: Any) -> str:
+    if isinstance(value, (int, float)) and value:
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            parsed = dt.datetime.fromtimestamp(timestamp, _SHANGHAI_TIMEZONE)
+            return parsed.date().isoformat()
+        except (OSError, OverflowError, ValueError):
+            return ""
+    text = _text(value)
+    if not text:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            return dt.date.fromisoformat(text[:10]).isoformat()
+        except ValueError:
+            return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_SHANGHAI_TIMEZONE)
+    return parsed.astimezone(_SHANGHAI_TIMEZONE).date().isoformat()
+
+
+def weather_warning_family_key(warning: dict[str, Any]) -> tuple[str, str]:
+    """Return the stable warning type/name pair used only for upgrade reuse."""
+    warning_type = re.sub(
+        r"[\s，,。；;：:、\-—_（）()【】\[\]]+",
+        "",
+        _text(warning.get("type")).lower(),
+    )
+    title = _text(warning.get("title")).lower()
+    title = title.replace("升级发布", "发布").replace("继续发布", "发布")
+    title = re.sub(r"(?:红色|橙色|黄色|蓝色)", "", title)
+    title = re.sub(r"(?:一级|二级|三级)戒备", "", title)
+    title = re.sub(r"[\s，,。；;：:、\-—_（）()【】\[\]]+", "", title)
+    return warning_type, title
+
+
+def is_same_day_weather_guard_upgrade(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    previous_fallback_time: Any = "",
+    current_fallback_time: Any = "",
+) -> bool:
+    previous_rank = _GUARD_LEVEL_RANKS.get(_text(previous.get("guard_level")))
+    current_rank = _GUARD_LEVEL_RANKS.get(_text(current.get("guard_level")))
+    if not previous_rank or not current_rank or current_rank >= previous_rank:
+        return False
+    previous_id = _text(previous.get("id"))
+    current_id = _text(current.get("id"))
+    previous_family = weather_warning_family_key(previous)
+    same_warning = bool(previous_id and previous_id == current_id) or (
+        all(previous_family) and previous_family == weather_warning_family_key(current)
+    )
+    if not same_warning:
+        return False
+    previous_day = next(
+        (
+            day
+            for value in (
+                previous.get("publish_time"),
+                previous.get("start_time"),
+                previous_fallback_time,
+            )
+            if (day := _warning_local_day(value))
+        ),
+        "",
+    )
+    current_day = next(
+        (
+            day
+            for value in (
+                current.get("publish_time"),
+                current.get("start_time"),
+                current_fallback_time,
+            )
+            if (day := _warning_local_day(value))
+        ),
+        "",
+    )
+    return bool(previous_day and previous_day == current_day)
 
 
 def _weather_schema_version(payload: dict[str, Any]) -> str:

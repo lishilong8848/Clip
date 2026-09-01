@@ -59,6 +59,8 @@ DEFAULT_LAN_TEMPLATE_PORTAL_HOST = "0.0.0.0"  # 局域网模板页面监听IP
 DEFAULT_LAN_TEMPLATE_PORTAL_PORT = 18766  # 局域网模板页面默认端口
 DEFAULT_LAN_TEMPLATE_PUBLIC_HOST = ""  # 手机签名等外部访问用局域网地址
 DEFAULT_LAN_LOW_PERFORMANCE_MODE = False  # 局域网通告降压模式
+DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED = False
+DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL = "http://127.0.0.1:18767"
 
 CONFIG_FILE = get_data_file_path("config.json")
 
@@ -114,6 +116,12 @@ class ConfigManager:
         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
         self.lan_template_public_host = DEFAULT_LAN_TEMPLATE_PUBLIC_HOST
         self.lan_low_performance_mode = DEFAULT_LAN_LOW_PERFORMANCE_MODE
+        self.polling_work_order_public_relay_enabled = (
+            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED
+        )
+        self.polling_work_order_public_relay_url = (
+            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+        )
         migrate_legacy_data_file("config.json")
         self.load()
 
@@ -355,6 +363,19 @@ class ConfigManager:
                             DEFAULT_LAN_LOW_PERFORMANCE_MODE,
                         )
                     )
+                    self.polling_work_order_public_relay_enabled = bool(
+                        config_data.get(
+                            "polling_work_order_public_relay_enabled",
+                            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED,
+                        )
+                    )
+                    self.polling_work_order_public_relay_url = str(
+                        config_data.get(
+                            "polling_work_order_public_relay_url",
+                            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL,
+                        )
+                        or DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+                    ).strip().rstrip("/")
                     log_info("系统: SQLite配置加载成功")
         except Exception as e:
             log_error(f"系统: 配置加载失败: {e}")
@@ -382,6 +403,8 @@ class ConfigManager:
         lan_template_portal_port=None,
         lan_template_public_host=None,
         lan_low_performance_mode=None,
+        polling_work_order_public_relay_enabled=None,
+        polling_work_order_public_relay_url=None,
         disable_hot_reload=None,
         disable_alerts=None,
         disable_speech=None,
@@ -497,6 +520,20 @@ class ConfigManager:
                 if lan_low_performance_mode is not None
                 else self.lan_low_performance_mode
             )
+            new_polling_work_order_public_relay_enabled = (
+                bool(polling_work_order_public_relay_enabled)
+                if polling_work_order_public_relay_enabled is not None
+                else self.polling_work_order_public_relay_enabled
+            )
+            new_polling_work_order_public_relay_url = (
+                str(polling_work_order_public_relay_url).strip().rstrip("/")
+                if polling_work_order_public_relay_url is not None
+                else self.polling_work_order_public_relay_url
+            )
+            if not new_polling_work_order_public_relay_url:
+                new_polling_work_order_public_relay_url = (
+                    DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+                )
             new_disable_hot_reload = (
                 disable_hot_reload
                 if disable_hot_reload is not None
@@ -633,6 +670,12 @@ class ConfigManager:
                 "lan_template_portal_port": new_lan_template_portal_port,
                 "lan_template_public_host": new_lan_template_public_host,
                 "lan_low_performance_mode": new_lan_low_performance_mode,
+                "polling_work_order_public_relay_enabled": (
+                    new_polling_work_order_public_relay_enabled
+                ),
+                "polling_work_order_public_relay_url": (
+                    new_polling_work_order_public_relay_url
+                ),
                 "disable_hot_reload": new_disable_hot_reload,
                 "disable_alerts": new_disable_alerts,
                 "disable_speech": new_disable_speech,
@@ -685,6 +728,12 @@ class ConfigManager:
             self.lan_template_portal_port = new_lan_template_portal_port
             self.lan_template_public_host = new_lan_template_public_host
             self.lan_low_performance_mode = new_lan_low_performance_mode
+            self.polling_work_order_public_relay_enabled = (
+                new_polling_work_order_public_relay_enabled
+            )
+            self.polling_work_order_public_relay_url = (
+                new_polling_work_order_public_relay_url
+            )
             self.disable_hot_reload = new_disable_hot_reload
             self.disable_alerts = new_disable_alerts
             self.disable_speech = new_disable_speech

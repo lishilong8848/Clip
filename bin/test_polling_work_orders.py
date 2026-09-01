@@ -50,7 +50,7 @@ def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> by
 
 
 class PollingWorkOrderTests(unittest.TestCase):
-    def test_maintenance_sop_is_isolated_and_builds_one_generic_work_order(self) -> None:
+    def test_maintenance_and_polling_share_sops_and_build_generic_work_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             service = PollingWorkOrderService(
@@ -71,11 +71,17 @@ class PollingWorkOrderTests(unittest.TestCase):
                     ],
                 }
             )
+            polling = service.add_sop_attachment(
+                polling["sop_id"],
+                file_name="轮巡说明.txt",
+                content=b"polling",
+                expected_version=polling["version"],
+            )
             maintenance = service.save_sop(
                 {
                     "work_type": "maintenance",
                     "scope": "A",
-                    "name": "同名SOP",
+                    "name": "维保通用SOP",
                     "steps": [
                         {
                             "content": "检查设备运行状态",
@@ -87,19 +93,32 @@ class PollingWorkOrderTests(unittest.TestCase):
                 }
             )
             self.assertEqual(
-                [item["sop_id"] for item in service.list_sops("A", "polling")],
-                [polling["sop_id"]],
+                {item["sop_id"] for item in service.list_sops("A", "polling")},
+                {polling["sop_id"], maintenance["sop_id"]},
             )
             self.assertEqual(
-                [item["sop_id"] for item in service.list_sops("A", "maintenance")],
-                [maintenance["sop_id"]],
+                {item["sop_id"] for item in service.list_sops("A", "maintenance")},
+                {polling["sop_id"], maintenance["sop_id"]},
             )
+            with self.assertRaisesRegex(Exception, "轮巡设备指向占位符"):
+                service.prepare_start(
+                    {
+                        "work_type": "maintenance",
+                        "scope": "A",
+                        "action": "start",
+                        "_web_action_request": True,
+                        "polling_sop_id": polling["sop_id"],
+                        "polling_sop_version": polling["version"],
+                    },
+                    job_id="maintenance-incompatible",
+                    people=[],
+                )
             maintenance = service.save_sop(
                 {
                     "sop_id": maintenance["sop_id"],
                     "work_type": "maintenance",
                     "scope": "A",
-                    "name": "同名SOP",
+                    "name": "维保通用SOP",
                     "expected_version": maintenance["version"],
                     "steps": [
                         {
@@ -167,7 +186,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                 "检查并记录设备运行状态",
             )
             output_name = service._workbook_output_name(group)
-            self.assertIn("同名SOP-操作人-操作员-审核人-审核员-操作记录", output_name)
+            self.assertIn("维保通用SOP-操作人-操作员-审核人-审核员-操作记录", output_name)
             self.assertNotIn("轮巡至", output_name)
             operator_token = service.role_token("recMaintenance", "operator")
             reviewer_token = service.role_token("recMaintenance", "reviewer")
@@ -202,7 +221,10 @@ class PollingWorkOrderTests(unittest.TestCase):
             generated = load_workbook(workbook["path"], read_only=True)
             try:
                 self.assertEqual(generated.sheetnames, ["工单1 维保作业"])
-                self.assertEqual(generated.active["B7"].value, "同名SOP · 维保作业")
+                self.assertEqual(
+                    generated.active["B7"].value,
+                    "维保通用SOP · 维保作业",
+                )
             finally:
                 generated.close()
             deleted = service.delete_sop(
@@ -210,7 +232,10 @@ class PollingWorkOrderTests(unittest.TestCase):
                 expected_version=maintenance["version"],
             )
             self.assertTrue(deleted["deleted"])
-            self.assertEqual(service.list_sops("A", "maintenance"), [])
+            self.assertEqual(
+                [item["sop_id"] for item in service.list_sops("A", "maintenance")],
+                [polling["sop_id"]],
+            )
             self.assertEqual(
                 [item["sop_id"] for item in service.list_sops("A", "polling")],
                 [polling["sop_id"]],
@@ -236,6 +261,10 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("directionTitle.hidden=maintenance", html)
         self.assertIn("if(pollingSopWorkType()==='polling')for", html)
         self.assertIn("['maintenance', 'polling'].includes(patch.work_type)", html)
+        self.assertIn("可在维保页查看和修改，但不能用于维保工单", html)
+        self.assertIn("function pollingSopHasDevicePlaceholders", html)
+        self.assertIn("button.disabled=blocked", html)
+        self.assertIn("含设备指向，维保不可选", html)
         button_pattern = re.compile(
             r'<h2 class="inbox-title"><span>通告处理</span>'
             r'(<button class="btn ghost" id="lite-polling-sop-open".*?</button>)'
@@ -1056,6 +1085,87 @@ class PollingWorkOrderTests(unittest.TestCase):
         relay_connector.assert_not_called()
         send_links.assert_called_once_with(group)
 
+    def test_public_work_order_setting_selects_local_simulation_relay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            store.put_settings(
+                {
+                    "polling_work_order_public_relay_enabled": True,
+                    "polling_work_order_public_relay_url": "http://192.168.224.122:18767",
+                }
+            )
+            previous_store = PortalRuntime.state_store
+            previous_connector = PortalRuntime._polling_relay_connector
+            previous_signature = PortalRuntime._polling_relay_connector_signature
+            PortalRuntime.state_store = store
+            PortalRuntime._polling_relay_connector = None
+            PortalRuntime._polling_relay_connector_signature = ""
+            try:
+                self.assertTrue(
+                    PortalRuntime.polling_work_order_public_relay_enabled()
+                )
+                relay = PortalRuntime.polling_work_order_relay()
+                self.assertTrue(relay.enabled)
+                self.assertEqual(relay.config.base_url, "http://192.168.224.122:18767")
+                self.assertTrue(relay.config.allow_insecure_http)
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime._polling_relay_connector = previous_connector
+                PortalRuntime._polling_relay_connector_signature = previous_signature
+
+    def test_existing_public_group_keeps_connector_running_after_toggle_off(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            store.put_settings(
+                {
+                    "polling_work_order_public_relay_enabled": False,
+                    "polling_work_order_public_relay_url": "http://127.0.0.1:18767",
+                }
+            )
+            store.put_document(
+                "polling_work_order",
+                "recPublicStillRunning",
+                {
+                    "target_record_id": "recPublicStillRunning",
+                    "state": "active",
+                    "relay": {"mode": "public_relay"},
+                },
+            )
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = store
+            try:
+                self.assertFalse(
+                    PortalRuntime.polling_work_order_public_relay_enabled()
+                )
+                self.assertTrue(
+                    PortalRuntime.polling_work_order_public_relay_should_run()
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_legacy_public_relay_environment_is_used_before_first_setting_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = store
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "CLIPFLOW_POLLING_RELAY_ENABLED": "1",
+                        "CLIPFLOW_POLLING_RELAY_URL": "https://legacy.example.com",
+                    },
+                ):
+                    self.assertTrue(
+                        PortalRuntime.polling_work_order_public_relay_enabled()
+                    )
+                    self.assertEqual(
+                        PortalRuntime._polling_work_order_public_relay_url(),
+                        "https://legacy.example.com",
+                    )
+            finally:
+                PortalRuntime.state_store = previous_store
+
     def test_polling_start_can_use_preserved_public_relay_path(self) -> None:
         manager = MagicMock()
         relay = MagicMock(enabled=True)
@@ -1088,7 +1198,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertTrue(manager.create_group.call_args.kwargs["public_relay"])
         send_links.assert_not_called()
 
-    def test_existing_public_group_is_migrated_to_lan_links(self) -> None:
+    def test_existing_public_group_keeps_its_creation_mode_when_setting_is_off(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = LanPortalStateStore(Path(temp) / "state.sqlite3")
             previous_store = PortalRuntime.state_store
@@ -1119,8 +1229,8 @@ class PollingWorkOrderTests(unittest.TestCase):
                 migrated = store.get_document(
                     "polling_work_order", "recLegacyRelay"
                 )
-                self.assertNotIn("relay", migrated)
-                send_links.assert_called_once()
+                self.assertEqual(migrated["relay"]["mode"], "public_relay")
+                send_links.assert_not_called()
             finally:
                 PortalRuntime.state_store = previous_store
 

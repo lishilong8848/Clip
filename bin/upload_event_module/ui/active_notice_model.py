@@ -109,6 +109,12 @@ class ActiveNoticeModel(QAbstractListModel):
             "end",
         }:
             return queued_action
+        if bool(record.get("_remote_written_pending_verification")):
+            retry_action = str(
+                record.get("_remote_written_retry_action") or ""
+            ).strip().lower()
+            if retry_action in {"upload", "update", "end"}:
+                return retry_action
         try:
             info = extract_event_info(record.get("text", "")) or {}
         except Exception:

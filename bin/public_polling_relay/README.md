@@ -16,14 +16,9 @@ $env:PUBLIC_POLLING_RELAY_UPLOAD_ROOT = 'D:\ClipFlowRelay\uploads'
 python -m bin.public_polling_relay --host 127.0.0.1 --port 18767
 ```
 
-当前 ClipFlow 程序只需公网地址：
+当前 ClipFlow 程序在“设置 → 局域网页面”中勾选“使用公网工单”并填写公网根地址即可。未勾选时，新工单继续使用局域网；已经创建的工单保持创建时的模式。
 
-```powershell
-$env:CLIPFLOW_POLLING_RELAY_ENABLED = '1'
-$env:CLIPFLOW_POLLING_RELAY_URL = 'https://workorder.example.com'
-```
-
-仓库当前仍固定使用局域网工单；上述环境变量不会自行启用公网连接。正式切换时，先将 `server.py` 中的 `POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED` 改为 `True`，再配置公网地址并重启。
+环境变量 `CLIPFLOW_POLLING_RELAY_ENABLED` 和 `CLIPFLOW_POLLING_RELAY_URL` 仅作为旧部署兼容配置，常规使用无需再修改源码常量。
 
 `CLIPFLOW_POLLING_RELAY_CONNECTOR_ID` 可选，作为本机安装标识前缀；每次进程启动会再生成唯一实例 ID，防止旧进程和新进程共用 fencing 租约。仅本机联调 HTTP 时可设置 `CLIPFLOW_POLLING_RELAY_ALLOW_INSECURE_HTTP=1`，生产禁止使用。
 
@@ -41,7 +36,7 @@ $env:PUBLIC_POLLING_RELAY_SECURE_COOKIE = '0'
 4. 反代允许至少 10MiB 请求体，读超时不小于 75 秒，且不对内部接口做 301/307 跳转；
 5. 先启动公网服务，再带上述 `CLIPFLOW_*` 环境变量重启当前程序。
 
-如果当前程序未带 `CLIPFLOW_POLLING_RELAY_ENABLED=1` 启动，新工单仍会走原本地页面；后续再开启不会迁移已创建的本地工单。
+如果当前程序设置中未勾选“使用公网工单”，新工单仍会走原本地页面；后续再开启不会迁移已创建的本地工单。
 
 ## 公网角色链接
 

@@ -1195,7 +1195,11 @@ class BackendProcessPortalController:
                 time.sleep(delay)
             operation = self.get_qt_notice_operation(operation_id)
             status = str((operation or {}).get("status") or "").strip()
-            if status in {"completed", "remote_written", "failed"}:
+            operation_result = dict((operation or {}).get("result") or {})
+            if status in {"completed", "failed"} or (
+                status == "remote_written"
+                and bool(operation_result.get("local_projection_completed"))
+            ):
                 break
         if not isinstance(operation, dict):
             return None
@@ -1217,6 +1221,7 @@ class BackendProcessPortalController:
             "end": "结束",
             "upload_replace": "归档",
         }.get(action_type, "上传")
+        result_payload = dict(operation.get("result") or {})
         if status == "failed":
             return {
                 "ok": False,
@@ -1226,7 +1231,24 @@ class BackendProcessPortalController:
                 "real_record_id": "",
                 "operation_recovered": True,
             }
-        result_payload = dict(operation.get("result") or {})
+        if status == "remote_written" and not bool(
+            result_payload.get("local_projection_completed")
+        ):
+            return {
+                "ok": False,
+                "name": action_name,
+                "message": str(
+                    operation.get("error")
+                    or result_payload.get("verification_error")
+                    or "目标多维已写入，本地状态正在核验补偿，请重试。"
+                ),
+                "record_id": original_record_id or target_record_id,
+                "real_record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "operation_id": operation_id,
+                "remote_written": True,
+                "operation_recovered": True,
+            }
         message = str(result_payload.get("message") or target_record_id).strip()
         response = {
             "ok": True,

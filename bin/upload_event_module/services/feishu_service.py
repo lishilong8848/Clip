@@ -39,6 +39,8 @@ FEISHU_ERROR_SUGGESTIONS = {
 _token_refresh_lock = threading.RLock()
 BITABLE_DATA_NOT_READY_CODE = 1254607
 BITABLE_DATA_NOT_READY_RETRY_DELAYS = (1.0, 2.5, 5.0)
+BITABLE_WRITE_CONFLICT_CODE = 1254291
+BITABLE_WRITE_CONFLICT_RETRY_DELAYS = (0.25, 0.75, 1.5)
 
 # These fields are useful when the target table has them, but older customer
 # tables may not.  Missing optional fields must not block the core notice state
@@ -180,6 +182,29 @@ def _with_bitable_data_ready_retry(request_fn: Callable[[str], object]):
         time.sleep(delay)
         response = _with_token_retry(request_fn)
     return response
+
+
+def _with_rejected_bitable_write_retry(request_fn: Callable[[str], object]):
+    """Retry only Feishu's explicit 'write was rejected as concurrent' result."""
+
+    response = _with_token_retry(request_fn)
+    for delay in BITABLE_WRITE_CONFLICT_RETRY_DELAYS:
+        try:
+            code = int(getattr(response, "code", 0) or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if response.success() or code != BITABLE_WRITE_CONFLICT_CODE:
+            return response
+        log_warning(f"飞书多维同表写入冲突(code={code})，{delay:g} 秒后重试...")
+        time.sleep(delay)
+        response = _with_token_retry(request_fn)
+    return response
+
+
+def _execute_bitable_write(request_fn: Callable[[str], object], notice_type: str):
+    if str(notice_type or "").strip() == "事件通告":
+        return _with_rejected_bitable_write_retry(request_fn)
+    return _with_token_retry(request_fn)
 
 
 def _get_bitable_fields(notice_type: str) -> list:
@@ -553,6 +578,9 @@ def _send_robot_message(handler, payload: NoticePayload):
     setattr(payload, "_clipflow_robot_error", "")
     setattr(payload, "_clipflow_robot_skipped", False)
 
+    if bool(getattr(payload, "_clipflow_defer_robot_message", False)):
+        return
+
     def _set_robot_result(*, sent: bool = False, error: str = "", skipped: bool = False):
         setattr(payload, "_clipflow_robot_sent", bool(sent))
         setattr(payload, "_clipflow_robot_error", str(error or ""))
@@ -581,7 +609,15 @@ def _send_robot_message(handler, payload: NoticePayload):
             level = "I2"
         elif choice == "i3":
             level = "I3"
-        ok, msg = handler.send_group_robot_message(title, content, notice_type, level)
+        ok, msg = handler.send_group_robot_message(
+            title,
+            content,
+            notice_type,
+            level,
+            message_uuid=str(
+                getattr(payload, "_clipflow_robot_message_uuid", "") or ""
+            ).strip(),
+        )
         if not ok and msg != "skip":
             _set_robot_result(error=str(msg or "群机器人发送失败"))
             log_error(f"群机器人发送失败: {msg}")
@@ -592,6 +628,27 @@ def _send_robot_message(handler, payload: NoticePayload):
     except Exception as exc:
         _set_robot_result(error=str(exc))
         log_error(f"群机器人发送异常: {exc}")
+
+
+def send_robot_message_by_payload(
+    notice_type: str,
+    payload: NoticePayload,
+    *,
+    message_uuid: str = "",
+) -> dict[str, Any]:
+    """Send a deferred notice message and expose its durable result."""
+
+    handler = get_notice_handler(notice_type)
+    setattr(payload, "_clipflow_defer_robot_message", False)
+    setattr(payload, "_clipflow_robot_message_uuid", str(message_uuid or "").strip())
+    _send_robot_message(handler, payload)
+    return {
+        "robot_sent": bool(getattr(payload, "_clipflow_robot_sent", False)),
+        "robot_skipped": bool(getattr(payload, "_clipflow_robot_skipped", False)),
+        "last_robot_error": str(
+            getattr(payload, "_clipflow_robot_error", "") or ""
+        ).strip(),
+    }
 
 
 def create_bitable_record(
@@ -637,6 +694,7 @@ def create_bitable_record(
     fields = _filter_missing_optional_fields(
         notice_type, handler.build_create_fields(payload)
     )
+    setattr(payload, "_clipflow_written_fields", dict(fields or {}))
     if _info_logging_enabled():
         log_info(f"Creating record({notice_type}) with fields: {fields}")
 
@@ -653,7 +711,7 @@ def create_bitable_record(
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.create(request, option)
 
-    response = _with_token_retry(do_create)
+    response = _execute_bitable_write(do_create, notice_type)
 
     if not response.success():
         error_msg = f"创建记录失败: {_parse_field_error(response, notice_type, fields)}"
@@ -683,6 +741,7 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
     fields = _filter_missing_optional_fields(
         notice_type, handler.build_create_fields(payload)
     )
+    setattr(payload, "_clipflow_written_fields", dict(fields or {}))
     if _info_logging_enabled():
         log_info(f"Creating record({notice_type}) with fields: {fields}")
 
@@ -699,7 +758,7 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.create(request, option)
 
-    response = _with_token_retry(do_create)
+    response = _execute_bitable_write(do_create, notice_type)
 
     if not response.success():
         error_msg = f"创建记录失败: {_parse_field_error(response, notice_type, fields)}"
@@ -746,7 +805,7 @@ def create_bitable_record_fields(notice_type: str, fields: dict):
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.create(request, option)
 
-    response = _with_token_retry(do_create)
+    response = _execute_bitable_write(do_create, notice_type)
 
     if not response.success():
         error_msg = f"创建记录失败: {_parse_field_error(response, notice_type, fields)}"
@@ -802,7 +861,7 @@ def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[Not
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.batch_create(request, option)
 
-    response = _with_token_retry(do_create)
+    response = _execute_bitable_write(do_create, notice_type)
 
     if not response.success():
         error_msg = f"批量创建记录失败: {response.code} - {response.msg}"
@@ -977,6 +1036,7 @@ def update_bitable_record(
     fields = _filter_missing_optional_fields(
         notice_type, handler.build_update_fields(payload)
     )
+    setattr(payload, "_clipflow_written_fields", dict(fields or {}))
     if _info_logging_enabled():
         log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
@@ -994,7 +1054,7 @@ def update_bitable_record(
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.update(request, option)
 
-    response = _with_token_retry(do_update)
+    response = _execute_bitable_write(do_update, notice_type)
 
     if not response.success():
         error_msg = f"更新记录失败: {_parse_field_error(response, notice_type, fields)}"
@@ -1024,6 +1084,7 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     fields = _filter_missing_optional_fields(
         notice_type, handler.build_update_fields(payload)
     )
+    setattr(payload, "_clipflow_written_fields", dict(fields or {}))
     if _info_logging_enabled():
         log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
@@ -1041,7 +1102,7 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.update(request, option)
 
-    response = _with_token_retry(do_update)
+    response = _execute_bitable_write(do_update, notice_type)
 
     if not response.success():
         error_msg = f"更新记录失败: {_parse_field_error(response, notice_type, fields)}"
@@ -1104,7 +1165,7 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.batch_update(request, option)
 
-    response = _with_token_retry(do_update)
+    response = _execute_bitable_write(do_update, notice_type)
 
     if not response.success():
         error_msg = f"批量更新记录失败: {response.code} - {response.msg}"
@@ -1156,7 +1217,7 @@ def update_bitable_record_fields(record_id: str, notice_type: str, fields: dict)
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.update(request, option)
 
-    response = _with_token_retry(do_update)
+    response = _execute_bitable_write(do_update, notice_type)
 
     if not response.success():
         error_msg = f"更新记录失败: {_parse_field_error(response, notice_type, fields)}"

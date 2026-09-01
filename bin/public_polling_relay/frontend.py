@@ -109,7 +109,31 @@ async function runCommand(type,fields,pendingText,successText){
   catch(error){if(error.status===503||error.code==='authority_offline')relay.snapshot={...relay.snapshot,authority_online:false};setStatus(error.message||'工单操作失败','error');try{await refreshSession()}catch{}return false}
   finally{relay.busy=false;renderConnectivity();if(relay.snapshot)renderSnapshot(relay.snapshot)}
 }
-async function sha256Hex(file){const bytes=await file.arrayBuffer(),hash=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(hash)].map(value=>value.toString(16).padStart(2,'0')).join('')}
+const SHA256_K=[
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+];
+const rotateRight=(value,bits)=>(value>>>bits)|(value<<(32-bits));
+async function sha256Fallback(buffer){
+  const source=new Uint8Array(buffer),bitLength=source.length*8,paddedLength=Math.ceil((source.length+9)/64)*64,data=new Uint8Array(paddedLength),view=new DataView(data.buffer),words=new Int32Array(64),state=new Int32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  data.set(source);data[source.length]=0x80;view.setUint32(paddedLength-8,Math.floor(bitLength/0x100000000),false);view.setUint32(paddedLength-4,bitLength>>>0,false);
+  for(let offset=0;offset<paddedLength;offset+=64){
+    for(let index=0;index<16;index++)words[index]=view.getInt32(offset+index*4,false);
+    for(let index=16;index<64;index++){const a=words[index-15],b=words[index-2],s0=rotateRight(a,7)^rotateRight(a,18)^(a>>>3),s1=rotateRight(b,17)^rotateRight(b,19)^(b>>>10);words[index]=(words[index-16]+s0+words[index-7]+s1)|0}
+    let [a,b,c,d,e,f,g,h]=state;
+    for(let index=0;index<64;index++){const s1=rotateRight(e,6)^rotateRight(e,11)^rotateRight(e,25),choice=(e&f)^(~e&g),t1=(h+s1+choice+SHA256_K[index]+words[index])|0,s0=rotateRight(a,2)^rotateRight(a,13)^rotateRight(a,22),majority=(a&b)^(a&c)^(b&c),t2=(s0+majority)|0;h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0}
+    state[0]=(state[0]+a)|0;state[1]=(state[1]+b)|0;state[2]=(state[2]+c)|0;state[3]=(state[3]+d)|0;state[4]=(state[4]+e)|0;state[5]=(state[5]+f)|0;state[6]=(state[6]+g)|0;state[7]=(state[7]+h)|0;
+    if(offset&&offset%(1024*1024)===0)await sleep(0);
+  }
+  return [...state].map(value=>(value>>>0).toString(16).padStart(8,'0')).join('');
+}
+async function sha256Hex(file){const bytes=await file.arrayBuffer();if(globalThis.crypto?.subtle){try{const hash=await globalThis.crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(hash)].map(value=>value.toString(16).padStart(2,'0')).join('')}catch{}}return sha256Fallback(bytes)}
 async function uploadOnePhoto(stepKey,file){
   if(!writeAvailable())throw new Error('内网工单服务离线，暂不能上传照片');
   if(!String(file.type||'').startsWith('image/'))throw new Error('只能上传图片');
@@ -119,7 +143,7 @@ async function uploadOnePhoto(stepKey,file){
   let data=await jsonResponse(response,'照片上传初始化失败'),uploadId=String(data.upload_id||'');if(!uploadId)throw new Error('中继未返回上传编号');
   response=await fetch(`${API.uploads}/${encodeURIComponent(uploadId)}/content`,{method:'PUT',credentials:'same-origin',headers:{'Content-Type':file.type,'X-Content-SHA256':digest,'X-CSRF-Token':relay.csrf},body:file});
   await jsonResponse(response,'照片内容上传失败');
-  response=await fetch(`${API.uploads}/${encodeURIComponent(uploadId)}/complete`,{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':relay.csrf}});data=await jsonResponse(response,'照片上传确认失败');if(!data.command_id)throw new Error('中继未返回照片关联操作编号');await waitCommand(data.command_id);await refreshSession();
+  response=await fetch(`${API.uploads}/${encodeURIComponent(uploadId)}/complete`,{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':relay.csrf}});data=await jsonResponse(response,'照片上传确认失败');if(!data.command_id)throw new Error('中继未返回照片关联操作编号');const result=await waitCommand(data.command_id);await refreshSession();if(String(result.status||'').toLowerCase()==='pending')throw new Error('照片已暂存，正在等待当前程序确认，请稍后查看');
 }
 async function uploadPhotos(stepKey,files){
   if(relay.busy||!files?.length)return;relay.busy=true;renderSnapshot(relay.snapshot);
@@ -127,7 +151,7 @@ async function uploadPhotos(stepKey,files){
   catch(error){if(error.status===503||error.code==='authority_offline')relay.snapshot={...relay.snapshot,authority_online:false};setStatus(error.message||'操作照片上传失败','error');try{await refreshSession()}catch{}}
   finally{relay.busy=false;renderConnectivity();if(relay.snapshot)renderSnapshot(relay.snapshot)}
 }
-function photoUrl(photo){return `${API.photos}/${encodeURIComponent(String(photo.photo_id||photo.id||''))}`}
+function photoUrl(photo){const direct=String(photo?.preview_url||'');if(direct.startsWith(`${API.photos}/`))return direct;const photoId=String(photo?.photo_id||photo?.id||'');return photoId?`${API.photos}/${encodeURIComponent(photoId)}`:''}
 function pendingText(snapshot){const items=Array.isArray(snapshot?.pending_commands)?snapshot.pending_commands:[];return items.length?`有 ${items.length} 个操作正在等待内网确认`:''}
 async function startRelayPage(){
   window.addEventListener('offline',()=>{relay.transportOnline=false;relay.controller?.abort();renderConnectivity();if(relay.snapshot)renderSnapshot(relay.snapshot)});
@@ -187,7 +211,7 @@ function stepCard(step){
   const run=document.createElement('small'),content=document.createElement('p'),checks=document.createElement('div');run.textContent=step.run_label||'';content.textContent=step.content||'';checks.className='checks';
   checks.append(mark(step.operator_required?(step.operator_confirmed?'操作人已确认':'操作人待确认'):'操作人不需要',Boolean(step.operator_confirmed)),mark(step.reviewer_required?(step.reviewer_confirmed?'现场审核人已确认':'现场审核人待确认'):'现场审核人不需要',Boolean(step.reviewer_confirmed)));
   const photos=Array.isArray(step.photos)?step.photos:[];checks.append(mark(photos.length?`操作照片 ${photos.length} 张`:'操作照片待拍',photos.length>0,photos.length===0));const wait=remaining(step);if(step.position==='current'&&wait>0){const timer=mark(`倒计时 ${wait} 秒`,false,true);timer.dataset.countdown='1';checks.append(timer)}article.append(head,run,content,checks);
-  if(photos.length){const gallery=document.createElement('div');gallery.className='photos';for(const photo of photos){const link=document.createElement('a'),image=document.createElement('img');link.href=photoUrl(photo);link.target='_blank';link.rel='noopener noreferrer';image.src=photoUrl(photo);image.alt=photo.name||'操作照片';image.className='photo-thumb';image.loading='eager';image.decoding='async';link.append(image);gallery.append(link)}article.append(gallery)}
+  if(photos.length){const gallery=document.createElement('div');gallery.className='photos';for(const photo of photos){const url=photoUrl(photo);if(!url)continue;const link=document.createElement('a'),image=document.createElement('img');link.href=url;link.target='_blank';link.rel='noopener noreferrer';image.src=url;image.alt=photo.name||'操作照片';image.className='photo-thumb';image.loading='eager';image.decoding='async';link.append(image);gallery.append(link)}if(gallery.childElementCount)article.append(gallery)}
   const canAddPhoto=step.position==='current'&&!step.reviewer_confirmed&&!(relay.snapshot?.role==='operator'&&step.operator_confirmed);if(canAddPhoto){const upload=document.createElement('label'),input=document.createElement('input');upload.className=`photo-upload ${canWrite()?'':'disabled'}`;upload.textContent=photos.length?'继续拍照/添加多张照片':'拍照/上传操作照片';input.type='file';input.accept='image/*';input.multiple=true;input.setAttribute('capture','environment');input.disabled=!canWrite();input.onchange=()=>uploadPhotos(step.step_key,[...(input.files||[])]);upload.append(input);article.append(upload)}
   if(step.position==='current'){const required=relay.snapshot?.role==='operator'?step.operator_required:step.reviewer_required,done=relay.snapshot?.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=relay.snapshot?.role==='reviewer'&&step.operator_required&&!step.operator_confirmed,button=document.createElement('button');button.className='action';button.dataset.confirm='1';button.textContent=done?'已确认':waiting?'等待操作人确认':!photos.length?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${relay.snapshot?.role_label||''}）`;button.disabled=!canWrite()||!required||done||waiting||!photos.length||wait>0;button.onclick=()=>runCommand('confirm',{step_key:step.step_key},'正在确认当前步骤...','当前步骤已确认');article.append(button);
     if(relay.snapshot?.role==='reviewer'&&relay.snapshot?.can_rollback_previous){const rollback=document.createElement('button');rollback.className='secondary danger rollback';rollback.type='button';rollback.textContent='回退上一步';rollback.disabled=!canWrite();rollback.onclick=()=>rollbackStep(step.step_key);article.append(rollback)}}return article;
@@ -225,4 +249,3 @@ def render_polling_work_order_steps_page() -> str:
 # Short aliases for relay application routers.
 render_overview_page = render_polling_work_order_page
 render_steps_page = render_polling_work_order_steps_page
-

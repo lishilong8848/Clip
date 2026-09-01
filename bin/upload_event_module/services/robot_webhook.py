@@ -155,10 +155,18 @@ def _resolve_group_name(notice_type: str, level: str) -> str:
 
 
 def _send_message_to_chat(
-    tenant_access_token: str, chat_id: str, text: str
+    tenant_access_token: str,
+    chat_id: str,
+    text: str,
+    *,
+    message_uuid: str = "",
 ) -> Tuple[bool, str]:
     return _send_message_to_receive_id(
-        tenant_access_token, chat_id, text, receive_id_type="chat_id"
+        tenant_access_token,
+        chat_id,
+        text,
+        receive_id_type="chat_id",
+        message_uuid=message_uuid,
     )
 
 
@@ -171,7 +179,12 @@ def _send_message_to_open_id(
 
 
 def _send_message_to_receive_id(
-    tenant_access_token: str, receive_id: str, text: str, *, receive_id_type: str
+    tenant_access_token: str,
+    receive_id: str,
+    text: str,
+    *,
+    receive_id_type: str,
+    message_uuid: str = "",
 ) -> Tuple[bool, str]:
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
@@ -182,7 +195,9 @@ def _send_message_to_receive_id(
         "receive_id": receive_id,
         "msg_type": "text",
         "content": json.dumps({"text": text}, ensure_ascii=False),
-        "uuid": str(uuid.uuid4()),
+        # Feishu deduplicates retries carrying the same UUID.  Most callers use
+        # a fresh value; durable notice operations pass a stable one.
+        "uuid": str(message_uuid or uuid.uuid4()),
     }
     params = {"receive_id_type": receive_id_type}
 
@@ -414,6 +429,8 @@ def send_robot_title_and_content(
     content: str,
     notice_type: str,
     level: str,
+    *,
+    message_uuid: str = "",
 ) -> Tuple[bool, str]:
     """发送单条消息（标题 + 内容），并根据群名称路由发送。"""
     if not title and not content:
@@ -432,7 +449,12 @@ def send_robot_title_and_content(
         return False, err
 
     text = f"{title}\n{content}" if title and content else (title or content)
-    ok, msg = _send_message_to_chat(token, chat_id, text)
+    ok, msg = _send_message_to_chat(
+        token,
+        chat_id,
+        text,
+        message_uuid=message_uuid,
+    )
     if ok:
         log_info(f"群消息发送成功: {group_name}")
     else:

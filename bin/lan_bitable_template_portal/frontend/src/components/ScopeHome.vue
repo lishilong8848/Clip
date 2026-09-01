@@ -144,7 +144,14 @@
           v-for="scope in displayScopeOptions"
           :key="scope.value"
           class="scope-card"
-          :class="scopeCardClass(scope.value)"
+          :class="[scopeCardClass(scope.value), { interactive: scopeCardIsEnabled(scope.value) }]"
+          :role="scopeCardIsEnabled(scope.value) ? 'button' : undefined"
+          :tabindex="scopeCardIsEnabled(scope.value) ? 0 : -1"
+          :aria-label="scopeCardIsEnabled(scope.value) ? `${activeConfig.actionLabel}：${scopeDisplayLabel(scope)}` : undefined"
+          :aria-disabled="scopeCardIsEnabled(scope.value) ? undefined : 'true'"
+          @click="activateScopeCard($event, scope.value)"
+          @keydown.enter="activateScopeCard($event, scope.value)"
+          @keydown.space="activateScopeCard($event, scope.value)"
         >
           <div class="scope-card__main">
             <span class="scope-building-icon" :class="scopeIconClass(scope.value)" aria-hidden="true"></span>
@@ -708,6 +715,22 @@ function isOpeningWorkbench(scope: string): boolean {
   );
 }
 
+function scopeCardIsEnabled(scope: string): boolean {
+  if (activeMode.value === "handover") {
+    return Boolean(props.handoverLinks[normalizeScopeValue(scope, "")]);
+  }
+  return !openingWorkbenchKey.value;
+}
+
+function activateScopeCard(event: MouseEvent | KeyboardEvent, scope: string): void {
+  const card = event.currentTarget as HTMLElement | null;
+  const target = event.target as Element | null;
+  if (!card || !scopeCardIsEnabled(scope)) return;
+  if (target !== card && target?.closest("button, a, input, select, textarea, label")) return;
+  if (event instanceof KeyboardEvent && event.key === " ") event.preventDefault();
+  card.querySelector<HTMLElement>(".scope-actions .primary:not(:disabled)")?.click();
+}
+
 function defaultEventScope(): string {
   const values = props.scopeOptions.map((item) => normalizeScopeValue(item.value, "")).filter(Boolean);
   return values.find((value) => value === "ALL")
@@ -1129,6 +1152,15 @@ onBeforeUnmount(clearWaterBuildingsPoll);
     linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(247, 251, 255, 0.94)),
     radial-gradient(circle at 92% 14%, rgba(28, 108, 255, 0.12), transparent 31%);
   isolation: isolate;
+}
+
+.scope-card.interactive {
+  cursor: pointer;
+}
+
+.scope-card.interactive:focus-visible {
+  outline: 3px solid rgba(22, 120, 255, 0.28);
+  outline-offset: 3px;
 }
 
 .scope-card::before {

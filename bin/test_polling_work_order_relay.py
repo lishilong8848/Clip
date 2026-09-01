@@ -578,6 +578,51 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             with self.assertRaises(PollingRelayProtocolError):
                 connector.process_command(tampered)
 
+    def test_stale_pending_projection_is_rebuilt_after_photo_is_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            manager = FakeWorkOrders(store)
+            clock = FakeClock()
+            connector = PollingWorkOrderRelayConnector(
+                store,
+                manager,
+                config=_config(),
+                transport=FakeRelayTransport(_config(), clock),
+                clock=clock,
+            )
+            connector.register_group(manager.target_record_id)
+            relay = store.get_document(
+                POLLING_RELAY_GROUP_NAMESPACE, manager.target_record_id
+            )
+            relay["pending_projection"] = {
+                "state": "active",
+                "authority_version": 1,
+                "projection_revision": 2,
+                "projection": connector.dual_projection(manager.target_record_id),
+            }
+            store.put_document(
+                POLLING_RELAY_GROUP_NAMESPACE, manager.target_record_id, relay
+            )
+
+            manager.add_step_photo(
+                manager.role_token(manager.target_record_id, "operator"),
+                step_key="1:1",
+                expected_version=1,
+                file_name="photo.png",
+                mime_type="image/png",
+                content=b"new-photo",
+            )
+            staged = connector._stage_projection(manager.target_record_id)
+
+            self.assertEqual(staged["authority_version"], 2)
+            self.assertEqual(staged["projection_revision"], 3)
+            self.assertEqual(
+                staged["projection"]["operator"]["steps"][0]["photos"][0][
+                    "sha256"
+                ],
+                hashlib.sha256(b"new-photo").hexdigest(),
+            )
+
     def test_executing_photo_command_recovers_without_repeating_local_action(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
@@ -782,4 +827,3 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

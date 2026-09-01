@@ -79,7 +79,7 @@ def set_registry(new_registry: ServiceRegistry) -> None:
     service_registry = new_registry
 
 
-# 全局飞书 API 请求锁 (防止 SSL 多线程冲突)
+# 飞书多维写入锁；媒体、点读和机器人请求必须可并行。
 _feishu_lock = threading.RLock()
 
 
@@ -88,35 +88,30 @@ def get_feishu_lock() -> threading.RLock:
 
 
 def refresh_feishu_token():
-    with _feishu_lock:
-        return service_registry.feishu_module.refresh_feishu_token()
+    return service_registry.feishu_module.refresh_feishu_token()
 
 
 def check_token_status():
-    with _feishu_lock:
-        return service_registry.feishu_module.check_token_status()
+    return service_registry.feishu_module.check_token_status()
 
 
 def ensure_feishu_token(*args, **kwargs):
-    with _feishu_lock:
-        ensure_fn = getattr(service_registry.feishu_module, "ensure_feishu_token", None)
-        if callable(ensure_fn):
-            return ensure_fn(*args, **kwargs)
-        return service_registry.feishu_module.check_token_status()
+    ensure_fn = getattr(service_registry.feishu_module, "ensure_feishu_token", None)
+    if callable(ensure_fn):
+        return ensure_fn(*args, **kwargs)
+    return service_registry.feishu_module.check_token_status()
 
 
 def resolve_bitable_app_token(app_id: str, app_secret: str, app_token: str):
-    with _feishu_lock:
-        return service_registry.feishu_module.resolve_bitable_app_token(
-            app_id, app_secret, app_token
-        )
+    return service_registry.feishu_module.resolve_bitable_app_token(
+        app_id, app_secret, app_token
+    )
 
 
 def upload_media_to_feishu(image_bytes, file_name="screenshot.jpg", file_size=None):
-    with _feishu_lock:
-        return service_registry.feishu_module.upload_media_to_feishu(
-            image_bytes, file_name=file_name, file_size=file_size
-        )
+    return service_registry.feishu_module.upload_media_to_feishu(
+        image_bytes, file_name=file_name, file_size=file_size
+    )
 
 
 def create_bitable_record(*args, **kwargs):
@@ -159,8 +154,7 @@ def batch_create_bitable_records_by_payload(*args, **kwargs):
 
 
 def query_record_by_id(*args, **kwargs):
-    with _feishu_lock:
-        return service_registry.feishu_module.query_record_by_id(*args, **kwargs)
+    return service_registry.feishu_module.query_record_by_id(*args, **kwargs)
 
 
 def delete_bitable_record(*args, **kwargs):
@@ -178,6 +172,12 @@ def update_bitable_record_by_payload(*args, **kwargs):
         return service_registry.feishu_module.update_bitable_record_by_payload(
             *args, **kwargs
         )
+
+
+def send_robot_message_by_payload(*args, **kwargs):
+    return service_registry.feishu_module.send_robot_message_by_payload(
+        *args, **kwargs
+    )
 
 
 def batch_update_bitable_records_by_payload(*args, **kwargs):

@@ -714,6 +714,41 @@ class RelayStore:
             if existing:
                 if not hmac.compare_digest(str(existing["request_hash"]), request_hash):
                     raise RelayError(409, "idempotency_conflict", "幂等键已用于其他请求。")
+                if kind == "attach_photo" and str(existing["status"]) in {
+                    "expired",
+                    "retryable_error",
+                }:
+                    group = self._group_for_public_write(connection, session)
+                    if int(group["authority_version"]) != int(expected_version):
+                        raise RelayError(409, "version_conflict", "工单状态已更新，请刷新后重试。")
+                    upload = connection.execute(
+                        "SELECT * FROM uploads WHERE upload_id=?",
+                        (str(payload.get("upload_id") or ""),),
+                    ).fetchone()
+                    if (
+                        upload
+                        and str(upload["public_group_id"])
+                        == str(session["public_group_id"])
+                        and str(upload["role"]) == str(session["role"])
+                        and str(upload["status"]) == "relay_ready"
+                        and float(upload["expires_at"]) > now
+                    ):
+                        connection.execute(
+                            """
+                            UPDATE commands SET status='pending', expires_at=?, leased_by='',
+                                lease_epoch=0, lease_until=0, result_json='{}', ack_hash='', updated_at=?
+                            WHERE command_id=? AND status IN ('expired','retryable_error')
+                            """,
+                            (
+                                now + max(15, int(ttl_seconds)),
+                                now,
+                                existing["command_id"],
+                            ),
+                        )
+                        existing = connection.execute(
+                            "SELECT * FROM commands WHERE command_id=?",
+                            (existing["command_id"],),
+                        ).fetchone()
                 return self._command_public(existing), False
             group = self._group_for_public_write(connection, session)
             if int(group["authority_version"]) != int(expected_version):
@@ -1463,4 +1498,3 @@ class RelayStore:
             if path.is_file() and path.is_relative_to(self.upload_root):
                 with contextlib.suppress(OSError):
                     path.unlink()
-

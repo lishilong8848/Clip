@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import copy
 import sys
 import tempfile
 import threading
@@ -17,6 +18,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.critical_guard_weather import (
     build_weather_guard_card,
+    is_same_day_weather_guard_upgrade,
     normalize_weather_snapshot,
     progress_summary,
     weather_cells_patch,
@@ -407,6 +409,321 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             "stable-token",
         )
 
+    def test_weather_upgrade_reuses_only_filled_common_sheets(self) -> None:
+        service = self._weather_service()
+        previous_weather, created = service._ensure_critical_guard_weather_task(
+            snapshot={
+                "snapshot_at": "2026-08-11T10:00:00+08:00",
+                "weather": {},
+                "actions": [],
+            },
+            warning={
+                "weather_key": "level-three-weather-key",
+                "id": "level-three-warning-id",
+                "title": "南通市气象台发布暴雨蓝色预警",
+                "type": "暴雨",
+                "color": "blue",
+                "guard_level": "三级戒备",
+                "publish_time": "2026-08-11T09:00:00+08:00",
+                "sheet_types": ["设备安全"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        self.assertTrue(created)
+        previous = self.store.get_critical_guard_task(
+            previous_weather["task_id"], include_all_responses=True
+        ) or {}
+        response = next(
+            item
+            for item in previous["responses"]
+            if item["scope"] == "A" and item["sheet_type"] == "设备安全"
+        )
+        cells = dict(response["cells"])
+        checks = {key: dict(value) for key, value in cells["checks"].items()}
+        first_key = next(iter(checks))
+        checks[first_key] = {"status": "abnormal", "note": "三级戒备已填写"}
+        cells["checks"] = checks
+        self.store.update_critical_guard_response(
+            response["response_id"],
+            cells=cells,
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=response["version"],
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+
+        unrelated = service.create_critical_guard_task(
+            name="其他日期其他类型任务",
+            sheet_types=["环境安全"],
+            target_scopes=["A"],
+            operation_id="unrelated-weather-memory-task",
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        unrelated_response = unrelated["responses"][0]
+        unrelated_cells = copy.deepcopy(unrelated_response["cells"])
+        unrelated_key = next(iter(unrelated_cells["checks"]))
+        unrelated_cells["checks"][unrelated_key] = {
+            "status": "abnormal",
+            "note": "不应被天气升级沿用",
+        }
+        self.store.update_critical_guard_response(
+            unrelated_response["response_id"],
+            cells=unrelated_cells,
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=unrelated_response["version"],
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+
+        weather_task, created = service._ensure_critical_guard_weather_task(
+            snapshot={
+                "snapshot_at": "2026-08-11T11:00:00+08:00",
+                "weather": {},
+                "actions": [],
+            },
+            warning={
+                "weather_key": "level-two-weather-key",
+                "id": "level-two-warning-id",
+                "title": "南通市气象台升级发布暴雨橙色预警",
+                "type": "暴雨",
+                "color": "orange",
+                "guard_level": "二级戒备",
+                "publish_time": "2026-08-11T10:30:00+08:00",
+                "sheet_types": ["设备安全", "环境安全"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+
+        self.assertTrue(created)
+        task = self.store.get_critical_guard_task(
+            weather_task["task_id"], include_all_responses=True
+        ) or {}
+        self.assertEqual(task["memory_key"], CRITICAL_GUARD_WEATHER_MEMORY_KEY)
+        by_scope_sheet = {
+            (item["scope"], item["sheet_type"]): item for item in task["responses"]
+        }
+        self.assertEqual(
+            by_scope_sheet[("A", "设备安全")]["cells"]["checks"][first_key],
+            {"status": "abnormal", "note": "三级戒备已填写"},
+        )
+        self.assertEqual(
+            by_scope_sheet[("B", "设备安全")]["cells"]["checks"][first_key],
+            {"status": "normal", "note": ""},
+        )
+        self.assertEqual(
+            by_scope_sheet[("A", "环境安全")]["cells"]["checks"][unrelated_key],
+            {"status": "normal", "note": ""},
+        )
+        self.assertTrue(
+            all(item["status"] == "pending" for item in task["responses"])
+        )
+        current_response = by_scope_sheet[("A", "设备安全")]
+        current_cells = copy.deepcopy(current_response["cells"])
+        current_cells["checks"][first_key] = {
+            "status": "abnormal",
+            "note": "二级戒备现有编辑",
+        }
+        self.store.update_critical_guard_response(
+            current_response["response_id"],
+            cells=current_cells,
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=current_response["version"],
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+        _refreshed, created_again = service._ensure_critical_guard_weather_task(
+            snapshot={"snapshot_at": "2026-08-11T11:05:00+08:00"},
+            warning=copy.deepcopy(weather_task["source_payload"]["warning"]),
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        self.assertFalse(created_again)
+        reloaded = self.store.get_critical_guard_response(
+            current_response["response_id"]
+        ) or {}
+        self.assertEqual(
+            reloaded["cells"]["checks"][first_key]["note"],
+            "二级戒备现有编辑",
+        )
+
+    def test_upgrade_without_filled_source_does_not_use_unrelated_memory(self) -> None:
+        service = self._weather_service()
+        unrelated = service.create_critical_guard_task(
+            name="无关手动重保",
+            sheet_types=["设备安全"],
+            target_scopes=["A"],
+            operation_id="unrelated-upgrade-memory",
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        unrelated_response = unrelated["responses"][0]
+        unrelated_cells = copy.deepcopy(unrelated_response["cells"])
+        first_key = next(iter(unrelated_cells["checks"]))
+        unrelated_cells["checks"][first_key] = {
+            "status": "abnormal",
+            "note": "无关记忆",
+        }
+        self.store.update_critical_guard_response(
+            unrelated_response["response_id"],
+            cells=unrelated_cells,
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=unrelated_response["version"],
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+        service._ensure_critical_guard_weather_task(
+            snapshot={"snapshot_at": "2026-08-11T09:00:00+08:00"},
+            warning={
+                "weather_key": "empty-level-three-key",
+                "id": "same-warning-id",
+                "title": "暴雨蓝色预警",
+                "type": "暴雨",
+                "guard_level": "三级戒备",
+                "publish_time": "2026-08-11T09:00:00+08:00",
+                "sheet_types": ["设备安全"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        current_weather, _created = service._ensure_critical_guard_weather_task(
+            snapshot={"snapshot_at": "2026-08-11T10:00:00+08:00"},
+            warning={
+                "weather_key": "empty-level-two-key",
+                "id": "same-warning-id",
+                "title": "暴雨橙色预警",
+                "type": "暴雨",
+                "guard_level": "二级戒备",
+                "publish_time": "2026-08-11T10:00:00+08:00",
+                "sheet_types": ["设备安全"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        current = self.store.get_critical_guard_task(
+            current_weather["task_id"], include_all_responses=True
+        ) or {}
+        current_response = next(
+            item
+            for item in current["responses"]
+            if item["scope"] == "A" and item["sheet_type"] == "设备安全"
+        )
+        self.assertEqual(
+            current_response["cells"]["checks"][first_key],
+            {"status": "normal", "note": ""},
+        )
+
+    def test_upgrade_keeps_seeded_file_instead_of_newer_unrelated_file(self) -> None:
+        service = self._weather_service()
+        first_path = Path(self.temp_dir.name) / "first.xlsx"
+        first_path.write_bytes(b"first")
+        self.store.put_critical_guard_scope_file(
+            file_id="first-file-id",
+            scope="A",
+            sheet_type="物资检查清单",
+            original_file_name="first.xlsx",
+            local_file_path=str(first_path),
+            sha256="1" * 64,
+            size=5,
+            uploaded_by_open_id="operator-open-id",
+            uploaded_by_name="管理员",
+        )
+        previous_weather, _created = service._ensure_critical_guard_weather_task(
+            snapshot={"snapshot_at": "2026-08-11T09:00:00+08:00"},
+            warning={
+                "weather_key": "file-level-three-key",
+                "id": "file-warning-id",
+                "title": "暴雨蓝色预警",
+                "type": "暴雨",
+                "guard_level": "三级戒备",
+                "publish_time": "2026-08-11T09:00:00+08:00",
+                "sheet_types": ["物资检查清单"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        previous = self.store.get_critical_guard_task(
+            previous_weather["task_id"], include_all_responses=True
+        ) or {}
+        response = next(
+            item
+            for item in previous["responses"]
+            if item["scope"] == "A" and item["sheet_type"] == "物资检查清单"
+        )
+        self.store.update_critical_guard_response(
+            response["response_id"],
+            cells=response["cells"],
+            signatures=[],
+            signature_source="",
+            signature_record_id="",
+            signature_name="",
+            generated=False,
+            generated_image=None,
+            expected_version=response["version"],
+            actor_open_id="operator-open-id",
+            actor_name="填写人",
+        )
+        second_path = Path(self.temp_dir.name) / "second.xlsx"
+        second_path.write_bytes(b"second")
+        self.store.put_critical_guard_scope_file(
+            file_id="second-file-id",
+            scope="A",
+            sheet_type="物资检查清单",
+            original_file_name="second.xlsx",
+            local_file_path=str(second_path),
+            sha256="2" * 64,
+            size=6,
+            uploaded_by_open_id="operator-open-id",
+            uploaded_by_name="管理员",
+        )
+        current_weather, _created = service._ensure_critical_guard_weather_task(
+            snapshot={"snapshot_at": "2026-08-11T10:00:00+08:00"},
+            warning={
+                "weather_key": "file-level-two-key",
+                "id": "file-warning-id",
+                "title": "暴雨橙色预警",
+                "type": "暴雨",
+                "guard_level": "二级戒备",
+                "publish_time": "2026-08-11T10:00:00+08:00",
+                "sheet_types": ["物资检查清单"],
+            },
+            operator_open_id="operator-open-id",
+            operator_name="管理员",
+        )
+        current = self.store.get_critical_guard_task(
+            current_weather["task_id"], include_all_responses=True
+        ) or {}
+        current_response = next(
+            item
+            for item in current["responses"]
+            if item["scope"] == "A" and item["sheet_type"] == "物资检查清单"
+        )
+        self.assertEqual(
+            current_response["cells"]["source_file_id"], "first-file-id"
+        )
+
     def test_new_weather_task_reuses_latest_saved_checks_per_scope(self) -> None:
         service = self._weather_service()
         previous = service.create_critical_guard_task(
@@ -418,11 +735,12 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             operator_name="管理员",
         )
         response = previous["responses"][0]
-        cells = dict(response["cells"])
-        checks = {key: dict(value) for key, value in cells["checks"].items()}
-        first_key = next(iter(checks))
-        checks[first_key] = {"status": "abnormal", "note": "沿用上次检查结果"}
-        cells["checks"] = checks
+        cells = copy.deepcopy(response["cells"])
+        first_key = next(iter(cells["checks"]))
+        cells["checks"][first_key] = {
+            "status": "abnormal",
+            "note": "沿用上次检查结果",
+        }
         self.store.update_critical_guard_response(
             response["response_id"],
             cells=cells,
@@ -456,7 +774,6 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         task = self.store.get_critical_guard_task(
             weather_task["task_id"], include_all_responses=True
         ) or {}
-        self.assertEqual(task["memory_key"], CRITICAL_GUARD_WEATHER_MEMORY_KEY)
         by_scope = {item["scope"]: item for item in task["responses"]}
         self.assertEqual(
             by_scope["A"]["cells"]["checks"][first_key],
@@ -466,6 +783,25 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
             by_scope["B"]["cells"]["checks"][first_key],
             {"status": "normal", "note": ""},
         )
+
+    def test_upgrade_match_requires_same_shanghai_day(self) -> None:
+        previous = {
+            "id": "stable-warning-id",
+            "title": "旧标题",
+            "type": "暴雨",
+            "guard_level": "三级戒备",
+            "publish_time": "2026-08-11T16:55:00Z",
+        }
+        current = {
+            "id": "stable-warning-id",
+            "title": "新标题",
+            "type": "台风",
+            "guard_level": "二级戒备",
+            "publish_time": "2026-08-12T00:05:00+08:00",
+        }
+        self.assertTrue(is_same_day_weather_guard_upgrade(previous, current))
+        current["publish_time"] = "2026-08-12T16:05:00Z"
+        self.assertFalse(is_same_day_weather_guard_upgrade(previous, current))
 
     def test_weather_job_cleanup_keeps_recent_terminal_jobs(self) -> None:
         for index in range(5):

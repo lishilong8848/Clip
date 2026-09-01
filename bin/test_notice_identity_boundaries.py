@@ -1433,20 +1433,38 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         old_service = PortalRuntime.service
         old_created_targets = dict(getattr(PortalRuntime, "local_upload_created_targets", {}) or {})
         fake_state = FakeStateStore()
+        remote_fields = {}
         PortalRuntime.state_store = fake_state
         PortalRuntime.service = object()
         PortalRuntime.local_upload_created_targets = {}
         try:
+            def query_record(record_id: str, _notice_type: str):
+                if record_id == "recMissingEvent":
+                    return False, "查询记录失败:1254043-RecordIdNotFound"
+                return True, {
+                    "record_id": record_id,
+                    "fields": dict(remote_fields),
+                    "record_version": "v1",
+                }
+
+            def create_event(notice_type: str, notice_payload: NoticePayload):
+                fields = EventNoticeHandler(notice_type).build_create_fields(
+                    notice_payload
+                )
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, "recNewEvent"
+
             with mock.patch(
                 "lan_bitable_template_portal.server.query_record_by_id",
-                return_value=(False, "查询记录失败:1254043-RecordIdNotFound"),
+                side_effect=query_record,
             ), mock.patch(
                 "lan_bitable_template_portal.server.create_bitable_record_by_payload",
-                return_value=(True, "recNewEvent"),
+                side_effect=create_event,
             ) as create_record:
                 result = PortalRuntime.execute_local_notice_upload(request_payload)
 
-            self.assertTrue(result.get("ok"))
+            self.assertTrue(result.get("ok"), result)
             self.assertEqual(result.get("name"), "上传")
             self.assertEqual(result.get("real_record_id"), "recNewEvent")
             self.assertEqual(fake_state.active_items[0][0]["target_record_id"], "recNewEvent")

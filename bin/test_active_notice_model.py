@@ -714,7 +714,6 @@ class ActiveNoticeModelTests(unittest.TestCase):
                         "target_record_id": "rec-runtime-serial",
                         "notice_type": "事件通告",
                         "_is_placeholder_record": False,
-                        "_has_unuploaded_changes": True,
                         "text": new_text,
                     },
                 }
@@ -726,6 +725,52 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(captured["content"], new_text)
         self.assertEqual(captured["status"], "结束")
         self.assertEqual(captured["active_item_id"], "aid-runtime-serial")
+
+    def test_runtime_upsert_does_not_replace_queued_event_with_old_success_projection(self):
+        old_text = "【事件通告】状态：更新\n【标题】A楼事件\n【概述】旧上传"
+        next_text = "【事件通告】状态：结束\n【标题】A楼事件\n【概述】新结束"
+        harness = _RuntimeActiveUpsertHarness(
+            {
+                "active_item_id": "aid-runtime-stale",
+                "record_id": "rec-runtime-stale",
+                "target_record_id": "rec-runtime-stale",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": True,
+                "_queued_after_upload": True,
+                "_queued_action": "end",
+                "_upload_operation_id": "qt_notice:old",
+                "text": next_text,
+            }
+        )
+        harness.pending_action_record_ids = {"rec-runtime-stale"}
+        harness._queue_pending_content = lambda *_args, **_kwargs: self.fail(
+            "旧成功投影不应重新进入下一代队列"
+        )
+
+        result = harness._apply_backend_active_upsert(
+            {
+                "item": {
+                    "active_item_id": "aid-runtime-stale",
+                    "record_id": "rec-runtime-stale",
+                    "payload": {
+                        "active_item_id": "aid-runtime-stale",
+                        "record_id": "rec-runtime-stale",
+                        "target_record_id": "rec-runtime-stale",
+                        "notice_type": "事件通告",
+                        "_is_placeholder_record": False,
+                        "_has_unuploaded_changes": False,
+                        "text": old_text,
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result["stale"])
+        self.assertEqual(
+            harness._active_notice_event_model.records()[0]["text"],
+            next_text,
+        )
 
     def test_action_state_helpers_match_legacy_widget_rules(self):
         placeholder = {
@@ -1089,6 +1134,40 @@ class ActiveNoticeModelTests(unittest.TestCase):
             old_text,
         )
 
+    def test_event_queue_action_uses_new_text_status_not_stale_caller_status(self):
+        harness = _ReplaceRecordIdHarness()
+        harness.pending_action_record_ids = {"rec-event-end"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-end",
+                "record_id": "rec-event-end",
+                "target_record_id": "rec-event-end",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": "qt_notice:old",
+                "text": "【事件通告】状态：更新\n【标题】A楼事件\n【概述】处理中",
+            },
+        )
+
+        queued = harness._queue_pending_content(
+            "rec-event-end",
+            "【事件通告】状态：结束\n【标题】A楼事件\n【概述】处理完成",
+            "更新",
+        )
+        data = item.data(Qt.ItemDataRole.UserRole)
+
+        self.assertTrue(queued)
+        self.assertEqual(data["status"], "结束")
+        self.assertEqual(data["action"], "end")
+        self.assertEqual(data["_queued_action"], "end")
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "结束")
+
     def test_same_event_text_is_not_queued_again_while_uploading(self):
         harness = _ReplaceRecordIdHarness()
         harness.pending_action_record_ids = {"rec-event-same"}
@@ -1195,17 +1274,15 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(data["text"], end_text)
         self.assertEqual(data["_queued_action"], "end")
         self.assertTrue(data["_queued_after_upload"])
-        self.assertTrue(data["_queued_upload_requested"])
-        pending = harness.pending_update_after_upload[record_id]
-        self.assertEqual(pending["action_type"], "end")
-        self.assertEqual(pending["data"]["text"], end_text)
+        self.assertFalse(data["_queued_upload_requested"])
+        self.assertNotIn(record_id, harness.pending_update_after_upload)
         self.assertEqual(
             harness.pending_upload_rollback_by_record_id[record_id]["old_data"][
                 "text"
             ],
             start_text,
         )
-        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "已排队")
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "结束")
 
     def test_queued_event_upload_success_keeps_next_text_and_dispatch_request(self):
         harness = _ReplaceRecordIdHarness()
@@ -1280,8 +1357,8 @@ class ActiveNoticeModelTests(unittest.TestCase):
         )
         self.assertEqual(data["text"], new_text)
         self.assertTrue(data["_has_unuploaded_changes"])
-        self.assertTrue(data["_queued_upload_requested"])
-        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "已排队")
+        self.assertFalse(data["_queued_upload_requested"])
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "更新")
         self.assertFalse(harness.pending_action_record_ids)
 
     def test_queued_event_upload_failure_rolls_back_and_discards_next_generation(self):
@@ -1722,6 +1799,478 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertNotIn("placeholder-1", harness.pending_action_types)
         self.assertIsNone(harness.current_screenshot_record_id)
         self.assertIsNone(harness.current_screenshot_action_type)
+
+    def test_remote_written_failure_keeps_target_and_operation_for_retry(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._set_last_ui_op = lambda *_args, **_kwargs: None
+        harness.current_screenshot_record_id = "local-event-pending"
+        harness.current_screenshot_action_type = "upload"
+        operation_id = "qt_notice:pending-verification"
+        harness._remote_written_retry_operations = {
+            operation_id: {
+                "operation_id": operation_id,
+                "target_record_id": "rec-event-pending",
+                "original_record_id": "local-event-pending",
+                "action_type": "upload",
+            }
+        }
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event-pending",
+                "record_id": "local-event-pending",
+                "notice_type": "事件通告",
+                "text": "【事件通告】状态：开始",
+                "_is_placeholder_record": True,
+                "_has_unuploaded_changes": True,
+                "_upload_in_progress": True,
+                "_upload_operation_id": operation_id,
+            },
+        )
+
+        harness.restore_button_state(
+            False,
+            "上传",
+            "local-event-pending",
+            operation_id=operation_id,
+        )
+
+        data = item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(data["record_id"], "rec-event-pending")
+        self.assertEqual(data["target_record_id"], "rec-event-pending")
+        self.assertEqual(data["_upload_operation_id"], operation_id)
+        self.assertEqual(data["_remote_written_retry_action"], "upload")
+        self.assertTrue(data["_remote_written_pending_verification"])
+        self.assertIn("可安全重试", data["_last_upload_error"])
+        self.assertEqual(
+            harness._coerce_upload_action_for_existing_target(data, "upload"),
+            "upload",
+        )
+        self.assertEqual(
+            harness._coerce_upload_action_for_existing_target(data, "update"),
+            "upload",
+        )
+
+    def test_handle_action_reuses_pending_event_operation_id(self):
+        harness = _ReplaceRecordIdHarness()
+        harness.pending_action_record_ids = set()
+        harness.pending_action_types = {}
+        harness._dialog_block_reason = lambda _kind: ""
+        harness._is_record_binding_conflicted = lambda _data: False
+        harness._is_routing_conflicted = lambda _data: False
+        harness._has_pending_upload = lambda _record_id: False
+        harness.show_message = lambda _message: None
+        captured = {}
+        harness._show_screenshot_dialog = (
+            lambda data, action: captured.update(
+                {"data": dict(data), "action": action}
+            )
+        )
+        operation_id = "qt_notice:reuse-pending"
+        data = {
+            "active_item_id": "aid-reuse-pending",
+            "record_id": "rec-reuse-pending",
+            "target_record_id": "rec-reuse-pending",
+            "notice_type": "事件通告",
+            "_is_placeholder_record": False,
+            "_has_unuploaded_changes": True,
+            "_upload_operation_id": operation_id,
+            "_remote_written_retry_action": "upload",
+            "_remote_written_pending_verification": True,
+            "text": "【事件通告】状态：新增\n【标题】A楼事件",
+        }
+        item = QListWidgetItem("retry")
+        harness.list_active_event.addItem(item)
+        item.setData(Qt.ItemDataRole.UserRole, data)
+
+        harness.handle_action(data, "update")
+
+        self.assertEqual(captured["action"], "upload")
+        self.assertEqual(captured["data"]["_upload_operation_id"], operation_id)
+
+    def test_cancelled_retry_dialog_keeps_pending_event_operation_id(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._set_last_ui_op = lambda *_args, **_kwargs: None
+        harness.pending_action_record_ids = {"rec-cancel-retry"}
+        harness.pending_action_types = {"rec-cancel-retry": "upload"}
+        harness.current_screenshot_record_id = "rec-cancel-retry"
+        harness.current_screenshot_action_type = "upload"
+        harness._remote_written_retry_operations = {}
+        operation_id = "qt_notice:cancel-retry"
+        item = QListWidgetItem("retry")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-cancel-retry",
+                "record_id": "rec-cancel-retry",
+                "target_record_id": "rec-cancel-retry",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": operation_id,
+                "_remote_written_retry_action": "upload",
+                "_remote_written_pending_verification": True,
+                "text": "【事件通告】状态：新增\n【标题】A楼事件",
+            },
+        )
+
+        harness.restore_button_state(
+            False,
+            "上传",
+            "rec-cancel-retry",
+            mark_failed=False,
+        )
+
+        restored = item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(restored["_upload_operation_id"], operation_id)
+        self.assertTrue(restored["_remote_written_pending_verification"])
+        self.assertEqual(restored["_remote_written_retry_action"], "upload")
+
+    def test_event_operation_id_survives_cache_snapshot_for_idempotent_retry(self):
+        operation_id = "qt_notice:restart-safe"
+        cached = persistent_active_item_data(
+            {
+                "active_item_id": "aid-restart-safe",
+                "record_id": "rec-restart-safe",
+                "target_record_id": "rec-restart-safe",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_upload_operation_id": operation_id,
+                "text": (
+                    "【事件通告】状态：新增\n【标题】A楼事件\n"
+                    "【来源】BMS\n【时间】2026-08-31 12:00\n【概述】测试"
+                ),
+            }
+        )
+
+        self.assertEqual(cached["_upload_operation_id"], operation_id)
+        self.assertTrue(cached["_remote_written_pending_verification"])
+        self.assertEqual(cached["_remote_written_retry_action"], "update")
+        self.assertTrue(cached["_has_unuploaded_changes"])
+
+    def test_pending_verification_action_uses_original_start_action(self):
+        record = {
+            "record_id": "rec-retry-start",
+            "target_record_id": "rec-retry-start",
+            "notice_type": "事件通告",
+            "_is_placeholder_record": False,
+            "_has_unuploaded_changes": True,
+            "_remote_written_pending_verification": True,
+            "_remote_written_retry_action": "upload",
+            "text": "【事件通告】状态：新增\n【标题】A楼事件",
+        }
+
+        self.assertEqual(ActiveNoticeModel.action_for_record(record), "upload")
+
+    def test_cache_restart_discards_queued_generation_and_keeps_inflight_event(self):
+        operation_id = "qt_notice:queued-restart"
+        inflight = {
+            "active_item_id": "aid-queued-restart",
+            "record_id": "local-event-queued-restart",
+            "notice_type": "事件通告",
+            "_is_placeholder_record": True,
+            "_has_unuploaded_changes": False,
+            "_upload_in_progress": True,
+            "_upload_operation_id": operation_id,
+            "text": "【事件通告】状态：新增\n【标题】原开始正文",
+        }
+        queued = {
+            **inflight,
+            "text": "【事件通告】状态：结束\n【标题】后复制的结束正文",
+            "_upload_in_progress": False,
+            "_has_unuploaded_changes": True,
+            "_queued_after_upload": True,
+            "_queued_action": "end",
+            "_event_inflight_retry_snapshot": inflight,
+        }
+
+        cached = persistent_active_item_data(queued)
+
+        self.assertEqual(cached["text"], inflight["text"])
+        self.assertEqual(cached["_upload_operation_id"], operation_id)
+        self.assertEqual(cached["_remote_written_retry_action"], "upload")
+        self.assertNotIn("_event_inflight_retry_snapshot", cached)
+
+    def test_transport_failure_keeps_event_operation_for_same_id_retry(self):
+        harness = _ReplaceRecordIdHarness()
+        operation_id = "qt_notice:transport-timeout"
+
+        class _TimeoutController:
+            @staticmethod
+            def execute_qt_notice_upload(_payload):
+                raise TimeoutError("timed out")
+
+        harness.lan_template_portal_controller = _TimeoutController()
+        finished = {}
+        harness._post_request_finished = (
+            lambda name, success, message, record_id, operation_id="": finished.update(
+                {
+                    "name": name,
+                    "success": success,
+                    "message": message,
+                    "record_id": record_id,
+                    "operation_id": operation_id,
+                }
+            )
+        )
+        harness._delegate_qt_notice_upload_to_backend(
+            data_snapshot={
+                "active_item_id": "aid-transport-timeout",
+                "record_id": "local-transport-timeout",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": True,
+                "_upload_operation_id": operation_id,
+                "text": "【事件通告】状态：新增\n【标题】A楼事件",
+            },
+            screenshot_bytes=None,
+            extra_images=[],
+            action_type="upload",
+            response_time="",
+            recover_selected=False,
+            robot_group_choice="auto",
+        )
+
+        self.assertFalse(finished["success"])
+        self.assertEqual(finished["operation_id"], operation_id)
+        retry = harness._remote_written_retry_operations[operation_id]
+        self.assertEqual(retry["action_type"], "upload")
+        self.assertFalse(retry["remote_written"])
+
+    def test_monotonic_clock_rollback_recovers_event_without_losing_operation(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._upsert_active_cache_record = lambda _data: True
+        harness.request_active_cache_save = lambda *_args, **_kwargs: None
+        harness.current_screenshot_record_id = ""
+        harness.pending_action_record_ids = set()
+        harness.pending_action_types = {}
+        old_text = "【事件通告】状态：更新\n【标题】A楼事件\n【概述】旧上传"
+        new_text = old_text.replace("旧上传", "应丢弃的新队列")
+        item = QListWidgetItem("clock-rollback")
+        harness.list_active_event.addItem(item)
+        operation_id = "qt_notice:clock-rollback"
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-clock-rollback",
+                "record_id": "rec-clock-rollback",
+                "target_record_id": "rec-clock-rollback",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_upload_in_progress": True,
+                "_upload_started_monotonic": time.monotonic() + 100000,
+                "_upload_operation_id": operation_id,
+                "_queued_after_upload": True,
+                "_queued_action": "update",
+                "_queued_upload_requested": True,
+                "text": new_text,
+            },
+        )
+        harness.pending_upload_rollback_by_record_id["rec-clock-rollback"] = {
+            "old_data": {
+                "active_item_id": "aid-clock-rollback",
+                "record_id": "rec-clock-rollback",
+                "target_record_id": "rec-clock-rollback",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "text": old_text,
+            }
+        }
+        harness.pending_update_after_upload["rec-clock-rollback"] = {
+            "data": {"text": new_text},
+            "action_type": "update",
+        }
+
+        result = harness._recover_stale_upload_states()
+        data = item.data(Qt.ItemDataRole.UserRole)
+
+        self.assertEqual(result["stale_upload_recovered"], 1)
+        self.assertFalse(data["_upload_in_progress"])
+        self.assertEqual(data["_upload_operation_id"], operation_id)
+        self.assertTrue(data["_remote_written_pending_verification"])
+        self.assertEqual(data["_remote_written_retry_action"], "update")
+        self.assertEqual(data["text"], old_text)
+        self.assertNotIn("_queued_after_upload", data)
+        self.assertNotIn("rec-clock-rollback", harness.pending_update_after_upload)
+
+    def test_success_projection_clears_remote_written_retry_metadata(self):
+        text = (
+            "【事件通告】状态：更新\n【标题】A楼事件\n"
+            "【来源】BMS\n【时间】2026-08-31 12:00\n【概述】处理中"
+        )
+        harness = _RuntimeActiveUpsertHarness(
+            {
+                "active_item_id": "aid-retry-success",
+                "record_id": "rec-retry-success",
+                "target_record_id": "rec-retry-success",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": True,
+                "_upload_operation_id": "qt_notice:retry-success",
+                "_remote_written_retry_action": "update",
+                "_remote_written_pending_verification": True,
+                "text": text,
+            }
+        )
+        harness.pending_action_record_ids = set()
+
+        result = harness._apply_backend_active_upsert(
+            {
+                "item": {
+                    "active_item_id": "aid-retry-success",
+                    "record_id": "rec-retry-success",
+                    "payload": {
+                        "active_item_id": "aid-retry-success",
+                        "record_id": "rec-retry-success",
+                        "target_record_id": "rec-retry-success",
+                        "notice_type": "事件通告",
+                        "_is_placeholder_record": False,
+                        "_has_unuploaded_changes": False,
+                        "text": text,
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        data = harness._active_notice_event_model.record_by_active_item_id(
+            "aid-retry-success"
+        )
+        self.assertNotIn("_upload_operation_id", data)
+        self.assertNotIn("_remote_written_retry_action", data)
+        self.assertNotIn("_remote_written_pending_verification", data)
+
+    def test_new_clipboard_generation_clears_previous_retry_metadata(self):
+        old_text = (
+            "【事件通告】状态：更新\n【标题】A楼事件\n"
+            "【来源】BMS\n【时间】2026-08-31 12:00\n【概述】旧进展"
+        )
+        new_text = old_text.replace("旧进展", "新进展")
+        harness = _RuntimeActiveUpsertHarness(
+            {
+                "active_item_id": "aid-retry-generation",
+                "record_id": "rec-retry-generation",
+                "target_record_id": "rec-retry-generation",
+                "notice_type": "事件通告",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": True,
+                "_upload_operation_id": "qt_notice:old-generation",
+                "_remote_written_retry_action": "update",
+                "_remote_written_pending_verification": True,
+                "text": old_text,
+            }
+        )
+        harness.pending_action_record_ids = set()
+
+        result = harness._apply_backend_active_upsert(
+            {
+                "item": {
+                    "active_item_id": "aid-retry-generation",
+                    "record_id": "rec-retry-generation",
+                    "payload": {
+                        "active_item_id": "aid-retry-generation",
+                        "record_id": "rec-retry-generation",
+                        "target_record_id": "rec-retry-generation",
+                        "notice_type": "事件通告",
+                        "_is_placeholder_record": False,
+                        "_has_unuploaded_changes": True,
+                        "text": new_text,
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        data = harness._active_notice_event_model.record_by_active_item_id(
+            "aid-retry-generation"
+        )
+        self.assertEqual(data["text"], new_text)
+        self.assertNotIn("_upload_operation_id", data)
+        self.assertNotIn("_remote_written_retry_action", data)
+        self.assertNotIn("_remote_written_pending_verification", data)
+
+    def test_active_delete_clears_only_deleted_event_queue(self):
+        harness = _RuntimeActiveUpsertHarness(
+            {
+                "active_item_id": "aid-delete-a",
+                "record_id": "rec-delete-a",
+                "target_record_id": "rec-delete-a",
+                "notice_type": "事件通告",
+                "text": "【事件通告】状态：更新\n【标题】A",
+            }
+        )
+        harness._active_notice_event_model.upsert_record(
+            {
+                "active_item_id": "aid-delete-b",
+                "record_id": "rec-delete-b",
+                "target_record_id": "rec-delete-b",
+                "notice_type": "事件通告",
+                "text": "【事件通告】状态：更新\n【标题】B",
+            }
+        )
+        for name in (
+            "pending_replace_by_record_id",
+            "pending_upload_rollback_by_record_id",
+            "pending_end_rollback_by_record_id",
+            "pending_new_by_record_id",
+            "pending_update_after_upload",
+            "pending_action_types",
+        ):
+            setattr(harness, name, {"rec-delete-a": {"a": 1}, "rec-delete-b": {"b": 1}})
+        harness.pending_action_record_ids = {"rec-delete-a", "rec-delete-b"}
+
+        result = harness._apply_backend_active_delete(
+            {"active_item_id": "aid-delete-a", "record_id": "rec-delete-a"}
+        )
+
+        self.assertTrue(result["deleted"])
+        self.assertIsNone(
+            harness._active_notice_event_model.record_by_active_item_id("aid-delete-a")
+        )
+        self.assertIsNotNone(
+            harness._active_notice_event_model.record_by_active_item_id("aid-delete-b")
+        )
+        self.assertEqual(harness.pending_action_record_ids, {"rec-delete-b"})
+        self.assertNotIn("rec-delete-a", harness.pending_update_after_upload)
+        self.assertIn("rec-delete-b", harness.pending_update_after_upload)
+
+    def test_event_delete_does_not_treat_different_remote_targets_as_siblings(self):
+        harness = _ReplaceRecordIdHarness()
+        shared_text = (
+            "【事件通告】状态：更新\n【标题】{title}\n"
+            "【来源】BMS\n【时间】2026-08-31 12:00\n【概述】处理中"
+        )
+        first = {
+            "active_item_id": "aid-sibling-a",
+            "record_id": "rec-sibling-a",
+            "target_record_id": "rec-sibling-a",
+            "notice_type": "事件通告",
+            "buildings": ["A楼"],
+            "level": "I3",
+            "source": "BMS",
+            "text": shared_text.format(title="事件A"),
+        }
+        second = {
+            **first,
+            "active_item_id": "aid-sibling-b",
+            "record_id": "rec-sibling-b",
+            "target_record_id": "rec-sibling-b",
+            "text": shared_text.format(title="事件B"),
+        }
+        for data in (first, second):
+            item = QListWidgetItem(data["active_item_id"])
+            harness.list_active_event.addItem(item)
+            item.setData(Qt.ItemDataRole.UserRole, data)
+
+        self.assertEqual(harness._event_delete_live_sibling(first), {})
 
     def test_runtime_upload_fields_are_inherited_during_cache_refresh(self):
         harness = _RecordsFlagHarness()

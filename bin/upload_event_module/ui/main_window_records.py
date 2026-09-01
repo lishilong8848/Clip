@@ -42,6 +42,48 @@ class MainWindowRecordsMixin:
         "_timer_start_time",
         "_timer_last_update_response_time",
     )
+    _REMOTE_WRITTEN_RETRY_FIELDS = (
+        "_upload_operation_id",
+        "_remote_written_retry_action",
+        "_remote_written_pending_verification",
+    )
+
+    @classmethod
+    def _clear_remote_written_retry_state(cls, data_dict: dict | None) -> dict:
+        data = dict(data_dict or {})
+        for key in cls._REMOTE_WRITTEN_RETRY_FIELDS:
+            data.pop(key, None)
+        return data
+
+    def _rollback_queued_event_for_retry(self, data_dict: dict | None) -> dict:
+        data = dict(data_dict or {})
+        if (
+            str(data.get("notice_type") or "").strip() != "事件通告"
+            or not bool(data.get("_queued_after_upload"))
+        ):
+            return data
+        operation_id = str(data.get("_upload_operation_id") or "").strip()
+        record_id = str(data.get("record_id") or "").strip()
+        candidate_ids = self._upload_completion_record_id_candidates(record_id)
+        rollback = None
+        for candidate_id in candidate_ids:
+            candidate_rollback = self.pending_upload_rollback_by_record_id.pop(
+                candidate_id, None
+            )
+            if rollback is None and candidate_rollback:
+                rollback = candidate_rollback
+            self.pending_update_after_upload.pop(candidate_id, None)
+            self.pending_new_by_record_id.pop(candidate_id, None)
+        old_data = rollback.get("old_data") if isinstance(rollback, dict) else None
+        if isinstance(old_data, dict):
+            data = dict(old_data)
+        if operation_id:
+            data["_upload_operation_id"] = operation_id
+        data.pop("_queued_after_upload", None)
+        data.pop("_queued_action", None)
+        data.pop("_queued_upload_requested", None)
+        data.pop("_event_inflight_retry_snapshot", None)
+        return data
 
     def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
         save = getattr(self, "save_active_cache", None)
@@ -194,8 +236,40 @@ class MainWindowRecordsMixin:
                         dialog_active = False
                 if dialog_active:
                     continue
-                if not started_at or now - started_at < hard_timeout:
+                age = now - started_at if started_at else 0.0
+                if not started_at or 0.0 <= age < hard_timeout:
                     continue
+                data = self._rollback_queued_event_for_retry(data)
+                operation_id = str(data.get("_upload_operation_id") or "").strip()
+                if (
+                    operation_id
+                    and str(data.get("notice_type") or "").strip() == "事件通告"
+                ):
+                    data["_remote_written_pending_verification"] = True
+                    data.setdefault(
+                        "_remote_written_retry_action",
+                        str(
+                            getattr(self, "pending_action_types", {}).get(
+                                str(data.get("record_id") or "").strip(),
+                                "",
+                            )
+                            or ""
+                        ).strip().lower()
+                        or (
+                            "end"
+                            if str(
+                                (extract_event_info(data.get("text", "")) or {}).get(
+                                    "status"
+                                )
+                                or ""
+                            ).strip()
+                            == "结束"
+                            else "upload"
+                            if self._is_placeholder_record(data)
+                            else "update"
+                        ),
+                    )
+                    item.setData(Qt.ItemDataRole.UserRole, data)
                 clear_state = getattr(self, "clear_upload_runtime_state_for_ids", None)
                 if callable(clear_state):
                     clear_state(
@@ -260,15 +334,35 @@ class MainWindowRecordsMixin:
                 recovered += 1
                 continue
             started_at = float(data.get("_upload_started_monotonic") or 0.0)
-            if started_at and now - started_at < 5.0:
+            age = now - started_at if started_at else 0.0
+            if started_at and 0.0 <= age < 5.0:
                 continue
-            data = dict(data)
+            data = self._rollback_queued_event_for_retry(data)
             data["_upload_in_progress"] = False
             data["_pending_upload_hash"] = None
             data["_has_unuploaded_changes"] = True
             data["_last_upload_error"] = "上传状态超时，已恢复按钮，可刷新核对后重试。"
             data.pop("_upload_started_monotonic", None)
-            data.pop("_upload_operation_id", None)
+            operation_id = str(data.get("_upload_operation_id") or "").strip()
+            if (
+                operation_id
+                and str(data.get("notice_type") or "").strip() == "事件通告"
+            ):
+                data["_remote_written_pending_verification"] = True
+                data.setdefault(
+                    "_remote_written_retry_action",
+                    "end"
+                    if str(
+                        (extract_event_info(data.get("text", "")) or {}).get("status")
+                        or ""
+                    ).strip()
+                    == "结束"
+                    else "upload"
+                    if self._is_placeholder_record(data)
+                    else "update",
+                )
+            else:
+                data.pop("_upload_operation_id", None)
             item.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
                 list_widget,
@@ -1432,6 +1526,10 @@ class MainWindowRecordsMixin:
                 "_upload_operation_id",
             ):
                 if key in existing_data:
+                    updated[key] = existing_data.get(key)
+        if bool(existing_data.get("_remote_written_pending_verification")):
+            for key in self._REMOTE_WRITTEN_RETRY_FIELDS:
+                if key not in updated and key in existing_data:
                     updated[key] = existing_data.get(key)
         return updated
 
@@ -4171,6 +4269,16 @@ class MainWindowRecordsMixin:
         if self._closing:
             return
         if record_id:
+            retry_operations = getattr(
+                self,
+                "_remote_written_retry_operations",
+                {},
+            )
+            retry_meta = (
+                dict(retry_operations.get(operation_id) or {})
+                if not success and isinstance(retry_operations, dict)
+                else {}
+            )
             candidate_ids = self._upload_completion_record_id_candidates(record_id)
             for candidate_id in candidate_ids:
                 if candidate_id in self.pending_action_record_ids:
@@ -4202,6 +4310,33 @@ class MainWindowRecordsMixin:
                 list_widget = None
             if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
+                if (
+                    not success
+                    and not retry_meta
+                    and bool(data.get("_remote_written_pending_verification"))
+                    and str(data.get("_upload_operation_id") or "").strip()
+                ):
+                    retry_action = str(
+                        data.get("_remote_written_retry_action") or name or "upload"
+                    ).strip().lower()
+                    retry_action = {
+                        "上传": "upload",
+                        "更新": "update",
+                        "结束": "end",
+                    }.get(retry_action, retry_action)
+                    retry_meta = {
+                        "operation_id": str(
+                            data.get("_upload_operation_id") or operation_id
+                        ).strip(),
+                        "target_record_id": str(
+                            data.get("target_record_id") or ""
+                        ).strip(),
+                        "original_record_id": str(
+                            data.get("record_id") or record_id or ""
+                        ).strip(),
+                        "action_type": retry_action,
+                        "remote_written": False,
+                    }
                 if not success:
                     rollback = None
                     for candidate_id in candidate_ids:
@@ -4229,6 +4364,43 @@ class MainWindowRecordsMixin:
                             pending_upload_hash=None,
                             has_unuploaded_changes=True,
                         )
+                preserve_operation = bool(retry_meta)
+                if preserve_operation:
+                    preserved_operation_id = str(
+                        retry_meta.get("operation_id") or operation_id
+                    ).strip()
+                    target_record_id = str(
+                        retry_meta.get("target_record_id") or ""
+                    ).strip()
+                    current_record_id = str(data.get("record_id") or record_id).strip()
+                    data = dict(data)
+                    data["_upload_operation_id"] = preserved_operation_id
+                    data["_remote_written_retry_action"] = str(
+                        retry_meta.get("action_type") or name or "upload"
+                    ).strip().lower()
+                    data["_remote_written_pending_verification"] = True
+                    if target_record_id:
+                        data["record_id"] = target_record_id
+                        data["target_record_id"] = target_record_id
+                        data["_is_placeholder_record"] = False
+                    item.setData(Qt.ItemDataRole.UserRole, data)
+                    if (
+                        target_record_id
+                        and current_record_id
+                        and current_record_id != target_record_id
+                    ):
+                        self._replace_record_id_everywhere(
+                            current_record_id,
+                            target_record_id,
+                        )
+                        rebound_list, rebound_item = (
+                            self._find_active_item_by_upload_operation(
+                                preserved_operation_id
+                            )
+                        )
+                        if rebound_item and self._is_valid_list_item(rebound_item):
+                            list_widget, item = rebound_list, rebound_item
+                            data = item.data(Qt.ItemDataRole.UserRole) or data
                 observed_version = str(data.get("record_version") or "").strip()
                 if observed_version:
                     data["expected_record_version"] = observed_version
@@ -4236,11 +4408,32 @@ class MainWindowRecordsMixin:
                     data.pop("_queued_after_upload", None)
                     data.pop("_queued_action", None)
                     data.pop("_queued_upload_requested", None)
+                elif bool(data.get("_queued_upload_requested")):
+                    pending_updates = getattr(
+                        self,
+                        "pending_update_after_upload",
+                        {},
+                    )
+                    if not any(
+                        candidate_id in pending_updates
+                        for candidate_id in candidate_ids
+                    ):
+                        # The previous operation is terminal and no queued request
+                        # remains. Keep the newer text actionable instead of
+                        # leaving the button stuck at “已排队”.
+                        data["_queued_upload_requested"] = False
                 queued_after_upload = bool(data.get("_queued_after_upload"))
                 if not success:
                     data["_has_unuploaded_changes"] = True
                     if mark_failed:
-                        data["_last_upload_error"] = f"{name or '上传'}失败，可重试。"
+                        data["_last_upload_error"] = (
+                            "目标多维已写入，等待核验；可安全重试。"
+                            if preserve_operation
+                            and bool(retry_meta.get("remote_written"))
+                            else "后端执行结果未确认，已保留原操作编号；可安全重试。"
+                            if preserve_operation
+                            else f"{name or '上传'}失败，可重试。"
+                        )
                     else:
                         data.pop("_last_upload_error", None)
                 elif queued_after_upload:
@@ -4255,7 +4448,16 @@ class MainWindowRecordsMixin:
                 data["_upload_in_progress"] = False
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_upload_started_monotonic", None)
-                data.pop("_upload_operation_id", None)
+                if success:
+                    data.pop("_event_inflight_retry_snapshot", None)
+                if preserve_operation:
+                    data["_upload_operation_id"] = str(
+                        retry_meta.get("operation_id") or operation_id
+                    ).strip()
+                else:
+                    data.pop("_upload_operation_id", None)
+                    data.pop("_remote_written_retry_action", None)
+                    data.pop("_remote_written_pending_verification", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 if hasattr(self, "_upsert_active_notice_model_item"):
                     try:
@@ -4276,6 +4478,8 @@ class MainWindowRecordsMixin:
                         self._upsert_active_cache_record(data)
                     except Exception:
                         pass
+                if preserve_operation and isinstance(retry_operations, dict):
+                    retry_operations.pop(operation_id, None)
 
             screenshot_candidates = set(candidate_ids)
             if matched_record_id:
@@ -4321,7 +4525,11 @@ class MainWindowRecordsMixin:
             data["_has_unuploaded_changes"] = True
             data["_last_upload_error"] = error_text
             data.pop("_upload_started_monotonic", None)
-            data.pop("_upload_operation_id", None)
+            if not (
+                str(data.get("notice_type") or "").strip() == "事件通告"
+                and bool(data.get("_remote_written_pending_verification"))
+            ):
+                data.pop("_upload_operation_id", None)
             item.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
                 list_widget,
@@ -4410,7 +4618,11 @@ class MainWindowRecordsMixin:
                 data["_pending_upload_hash"] = None
                 data.pop("_upload_started_monotonic", None)
                 data.pop("_upload_pending_dialog", None)
-                data.pop("_upload_operation_id", None)
+                if not (
+                    str(data.get("notice_type") or "").strip() == "事件通告"
+                    and bool(data.get("_remote_written_pending_verification"))
+                ):
+                    data.pop("_upload_operation_id", None)
                 if mark_uploaded and not bool(data.get("_queued_after_upload")):
                     data["_has_unuploaded_changes"] = False
                     data.pop("_last_upload_error", None)

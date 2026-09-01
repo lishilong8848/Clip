@@ -22,4 +22,14 @@ function resetLocalRuntimeStateIfRequested(): void {
 
 resetLocalRuntimeStateIfRequested();
 
+document.addEventListener("click", (event) => {
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  if (!input || !["date", "time", "month", "datetime-local"].includes(input.type) || input.disabled || input.readOnly) return;
+  try {
+    input.showPicker?.();
+  } catch {
+    // Unsupported browsers keep their normal focus, typing and native control behavior.
+  }
+});
+
 createApp(App).mount("#app");

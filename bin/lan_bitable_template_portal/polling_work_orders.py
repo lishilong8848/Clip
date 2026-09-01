@@ -148,7 +148,7 @@ class PollingWorkOrderService:
 
     def list_sops(self, scope: str, work_type: str = "polling") -> list[dict]:
         scope = str(scope or "").strip().upper()
-        work_type = _work_order_type(work_type)
+        _work_order_type(work_type)
         if scope not in POLLING_SOP_SCOPES:
             raise PortalError("请在明确的单楼页面读取 SOP。")
         items = [
@@ -159,7 +159,6 @@ class PollingWorkOrderService:
                 str((document.get("payload") or {}).get("scope") or "").strip().upper()
                 == scope
             )
-            and _stored_work_order_type(document.get("payload") or {}) == work_type
         ]
         return sorted(items, key=lambda item: str(item.get("name") or "").casefold())
 
@@ -494,8 +493,17 @@ class PollingWorkOrderService:
             sop.get("scope") or ""
         ).strip().upper() != request_scope:
             raise PortalError("所选 SOP 不属于当前楼栋，请重新选择。")
-        if _stored_work_order_type(sop) != work_type:
-            raise PortalError("所选 SOP 不属于当前通告类型，请重新选择。")
+        if work_type == "maintenance" and any(
+            re.search(
+                r"\{\{(?:from|to|other)\}\}",
+                str(step.get("content") or ""),
+            )
+            for step in sop.get("steps") or []
+            if isinstance(step, dict)
+        ):
+            raise PortalError(
+                "所选 SOP 包含轮巡设备指向占位符，不能用于维保工单。"
+            )
         expected_version = int(request_payload.get("polling_sop_version") or 0)
         if expected_version != int(sop.get("version") or 0):
             raise PortalConflictError("所选 SOP 已修改，请重新选择。")

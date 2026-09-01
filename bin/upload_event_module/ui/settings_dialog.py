@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QCheckBox,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 
 from ..config import (
 
@@ -52,6 +52,8 @@ from ..config import (
     DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
     DEFAULT_LAN_TEMPLATE_PUBLIC_HOST,
     DEFAULT_LAN_LOW_PERFORMANCE_MODE,
+    DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED,
+    DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL,
     DEFAULT_DISABLE_HOT_RELOAD,
     DEFAULT_DISABLE_ALERTS,
     DEFAULT_DISABLE_SPEECH,
@@ -338,6 +340,28 @@ class SettingsDialog(QDialog):
             "勾选后会让通告卡片和多维上传更慢地排队处理，优先保证运行程序电脑不卡。"
         )
         lan_portal_layout.addWidget(self.lan_low_performance_checkbox)
+        self.polling_work_order_public_relay_checkbox = QCheckBox("使用公网工单")
+        self.polling_work_order_public_relay_checkbox.setToolTip(
+            "仅影响之后新建的轮巡/维保工单；未勾选时继续使用当前局域网工单。"
+        )
+        lan_portal_layout.addWidget(self.polling_work_order_public_relay_checkbox)
+        public_relay_url_label = QLabel("公网工单地址")
+        self.polling_work_order_public_relay_url_input = QLineEdit()
+        self.polling_work_order_public_relay_url_input.setPlaceholderText(
+            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+        )
+        self.polling_work_order_public_relay_url_input.setMinimumHeight(34)
+        lan_portal_layout.addWidget(public_relay_url_label)
+        lan_portal_layout.addWidget(self.polling_work_order_public_relay_url_input)
+        public_relay_hint = QLabel(
+            "局域网模拟可使用 http://192.168.224.122:18767；正式公网必须填写 HTTPS 根地址。"
+        )
+        public_relay_hint.setObjectName("LanPortalHint")
+        public_relay_hint.setWordWrap(True)
+        lan_portal_layout.addWidget(public_relay_hint)
+        self.polling_work_order_public_relay_checkbox.toggled.connect(
+            self.polling_work_order_public_relay_url_input.setEnabled
+        )
         form_layout.addWidget(lan_portal_card)
 
 
@@ -498,6 +522,28 @@ class SettingsDialog(QDialog):
         self.lan_low_performance_checkbox.setChecked(
             bool(getattr(config, "lan_low_performance_mode", False))
         )
+        self.polling_work_order_public_relay_checkbox.setChecked(
+            bool(
+                getattr(
+                    config,
+                    "polling_work_order_public_relay_enabled",
+                    DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED,
+                )
+            )
+        )
+        self.polling_work_order_public_relay_url_input.setText(
+            str(
+                getattr(
+                    config,
+                    "polling_work_order_public_relay_url",
+                    DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL,
+                )
+                or DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+            )
+        )
+        self.polling_work_order_public_relay_url_input.setEnabled(
+            self.polling_work_order_public_relay_checkbox.isChecked()
+        )
 
     @staticmethod
     def _is_valid_lan_template_portal_host(value: str) -> bool:
@@ -544,6 +590,38 @@ class SettingsDialog(QDialog):
                 )
             )
 
+    @staticmethod
+    def _is_valid_polling_work_order_public_relay_url(value: str) -> bool:
+        from urllib.parse import urlsplit
+
+        text = str(value or "").strip().rstrip("/")
+        try:
+            parsed = urlsplit(text)
+        except Exception:
+            return False
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            return False
+        if parsed.scheme == "https":
+            return True
+        host = str(parsed.hostname or "").lower()
+        if host == "localhost":
+            return True
+        try:
+            import ipaddress
+
+            address = ipaddress.ip_address(host)
+            return address.is_loopback or address.is_private
+        except Exception:
+            return False
+
     def save_settings(self):
         """保存设置"""
         feishu_app_id = self.app_id_input.text().strip()
@@ -582,6 +660,13 @@ class SettingsDialog(QDialog):
         )
         lan_template_public_host = self.lan_template_public_host_input.text().strip()
         lan_low_performance_mode = self.lan_low_performance_checkbox.isChecked()
+        polling_work_order_public_relay_enabled = (
+            self.polling_work_order_public_relay_checkbox.isChecked()
+        )
+        polling_work_order_public_relay_url = (
+            self.polling_work_order_public_relay_url_input.text().strip().rstrip("/")
+            or DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+        )
         if not self._is_valid_lan_template_portal_host(lan_template_portal_host):
             show_toast_message(
                 self,
@@ -596,6 +681,18 @@ class SettingsDialog(QDialog):
                 self,
                 "❌ 签名链接局域网地址格式无效，请填写如 192.168.224.130",
                 duration_ms=2400,
+            )
+            return
+        if (
+            polling_work_order_public_relay_enabled
+            and not self._is_valid_polling_work_order_public_relay_url(
+                polling_work_order_public_relay_url
+            )
+        ):
+            show_toast_message(
+                self,
+                "❌ 公网工单地址无效：局域网模拟请用私有 IP，正式环境请用 HTTPS 根地址",
+                duration_ms=2800,
             )
             return
 
@@ -650,14 +747,17 @@ group_name_change_i3=group_name_change_i3,
             lan_template_portal_port=DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
             lan_template_public_host=lan_template_public_host,
             lan_low_performance_mode=lan_low_performance_mode,
+            polling_work_order_public_relay_enabled=(
+                polling_work_order_public_relay_enabled
+            ),
+            polling_work_order_public_relay_url=polling_work_order_public_relay_url,
             disable_hot_reload=disable_hot_reload,
             disable_alerts=disable_alerts,
             disable_speech=disable_speech,
         ):
             show_toast_message(self, "✅ 设置已保存", duration_ms=1500)
-            self.settings_saved.emit()
-
             self.hide()
+            QTimer.singleShot(0, self.settings_saved.emit)
 
     def reset_to_default(self):
         """恢复默认设置"""
@@ -698,6 +798,12 @@ group_name_change_i3=group_name_change_i3,
         self.lan_template_portal_host_input.setText(DEFAULT_LAN_TEMPLATE_PORTAL_HOST)
         self.lan_template_public_host_input.setText(DEFAULT_LAN_TEMPLATE_PUBLIC_HOST)
         self.lan_low_performance_checkbox.setChecked(DEFAULT_LAN_LOW_PERFORMANCE_MODE)
+        self.polling_work_order_public_relay_checkbox.setChecked(
+            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED
+        )
+        self.polling_work_order_public_relay_url_input.setText(
+            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+        )
 
 
 

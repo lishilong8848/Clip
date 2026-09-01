@@ -34,6 +34,7 @@ _TRANSIENT_UPLOAD_FIELDS = {
     "_queued_after_upload",
     "_queued_action",
     "_queued_upload_requested",
+    "_event_inflight_retry_snapshot",
 }
 
 
@@ -236,12 +237,41 @@ def normalize_active_item_data(data_dict: dict | None) -> dict:
 def persistent_active_item_data(data_dict: dict | None) -> dict:
     """Return an active-item snapshot that is safe to persist.
 
-    Upload progress, transient errors and operation correlation IDs only describe
-    the current Qt process. Persisting them can revive an old "上传中" or
-    "失败可重试" state after a cache refresh or restart.
+    Upload progress and transient errors only describe the current Qt process.
+    Event operation IDs are retained as idempotency keys so a restart cannot
+    turn an uncertain result into a second remote write.
     """
     normalized = normalize_active_item_data(data_dict)
+    inflight_snapshot = normalized.get("_event_inflight_retry_snapshot")
+    if (
+        bool(normalized.get("_queued_after_upload"))
+        and isinstance(inflight_snapshot, dict)
+        and str(normalized.get("notice_type") or "").strip() == "事件通告"
+    ):
+        normalized = normalize_active_item_data(inflight_snapshot)
+    event_operation_id = str(normalized.get("_upload_operation_id") or "").strip()
+    preserve_event_operation = bool(
+        event_operation_id
+        and str(normalized.get("notice_type") or "").strip() == "事件通告"
+    )
+    if preserve_event_operation:
+        normalized["_remote_written_pending_verification"] = True
+        retry_action = str(
+            normalized.get("_remote_written_retry_action") or ""
+        ).strip().lower()
+        if retry_action not in {"upload", "update", "end"}:
+            info = extract_event_info(normalized.get("text", "")) or {}
+            if str(info.get("status") or "").strip() == "结束":
+                retry_action = "end"
+            elif bool(normalized.get("_is_placeholder_record", True)):
+                retry_action = "upload"
+            else:
+                retry_action = "update"
+        normalized["_remote_written_retry_action"] = retry_action
+        normalized["_has_unuploaded_changes"] = True
     for field in _TRANSIENT_UPLOAD_FIELDS:
+        if field == "_upload_operation_id" and preserve_event_operation:
+            continue
         normalized.pop(field, None)
     return normalized
 
