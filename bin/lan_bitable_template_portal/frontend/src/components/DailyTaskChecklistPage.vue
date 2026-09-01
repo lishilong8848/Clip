@@ -1,5 +1,14 @@
 <template>
-  <section class="daily-page">
+  <main v-if="printMode" class="morning-print-page">
+    <div v-if="morningPrintLoading" class="morning-print-state" role="status">
+      正在准备晨会表格…
+    </div>
+    <div v-else-if="morningPrintError" class="morning-print-state error" role="alert">
+      {{ morningPrintError }}
+    </div>
+    <MorningMeetingSheet v-else :model="morningPrintModel" />
+  </main>
+  <section v-else class="daily-page">
     <header class="daily-header">
       <div class="daily-header__left">
         <VnetBackButton @click="navigate('/')" />
@@ -9,6 +18,17 @@
         </div>
       </div>
       <div class="daily-header__actions">
+        <button
+          v-if="scopeCode === 'H'"
+          type="button"
+          class="btn secondary"
+          :disabled="loading || selectedDate !== today || morningLoading"
+          title="生成当天A-E、H楼及110站晨会表格"
+          @click="openMorningMeeting"
+        >
+          <FileSpreadsheet :size="17" aria-hidden="true" />
+          生成晨会表格
+        </button>
         <button
           type="button"
           class="btn primary"
@@ -232,11 +252,56 @@
         </footer>
       </section>
     </div>
+
+    <div v-if="morningDialogOpen" class="send-dialog-backdrop" @click.self="closeMorningMeeting">
+      <section class="morning-dialog" role="dialog" aria-modal="true" aria-labelledby="morning-dialog-title">
+        <header>
+          <div>
+            <span>H楼晨会</span>
+            <h2 id="morning-dialog-title">生成当天晨会表格</h2>
+          </div>
+          <button type="button" class="dialog-close" :disabled="morningBusy" @click="closeMorningMeeting">关闭</button>
+        </header>
+        <div v-if="morningLoading" class="morning-inline-state" role="status">
+          <span class="spinner" aria-hidden="true"></span> 正在汇总当天通告
+        </div>
+        <template v-else-if="morningModel">
+          <div class="morning-weather-fields">
+            <label><span>天气</span><input v-model="morningModel.weather_condition" maxlength="40" /></label>
+            <label><span>干球温度（℃）</span><input v-model="morningModel.dry_bulb_temperature" type="number" min="-50" max="80" step="0.1" /></label>
+            <label><span>湿球温度（℃）</span><input v-model="morningModel.wet_bulb_temperature" type="number" min="-50" max="80" step="0.1" /></label>
+          </div>
+          <div v-if="morningWarnings.length" class="dialog-message warning" role="status">
+            {{ morningWarnings.join('；') }}
+          </div>
+          <div class="morning-preview-wrap">
+            <MorningMeetingSheet :model="morningModel" />
+          </div>
+          <div v-if="morningError" class="dialog-message error" role="alert">{{ morningError }}</div>
+          <div v-else-if="morningSuccess" class="dialog-message success" role="status">{{ morningSuccess }}</div>
+        </template>
+        <div v-else-if="morningError" class="dialog-message error" role="alert">{{ morningError }}</div>
+        <footer>
+          <span>{{ morningGeneratedAt ? `生成于 ${morningGeneratedAt}` : '生成后可下载或打印' }}</span>
+          <div>
+            <button type="button" class="btn secondary" :disabled="morningBusy || !morningDownloadUrl" @click="downloadMorningMeeting">
+              <Download :size="16" /> 下载Excel
+            </button>
+            <button type="button" class="btn secondary" :disabled="morningBusy || !morningPrintUrl" @click="printMorningMeeting">
+              <Printer :size="16" /> 打印
+            </button>
+            <button type="button" class="btn primary" :disabled="morningBusy || !morningModel" @click="generateMorningMeeting">
+              <FileSpreadsheet :size="16" /> {{ morningBusy ? '生成中' : morningDownloadUrl ? '重新生成' : '生成表格' }}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   CalendarDays,
   CheckCircle2,
@@ -246,10 +311,13 @@ import {
   ClipboardCheck,
   ClipboardList,
   Clock3,
+  Download,
   Droplets,
   FileCheck2,
+  FileSpreadsheet,
   Megaphone,
   RefreshCw,
+  Printer,
   Send,
   Siren,
   Wrench,
@@ -259,6 +327,7 @@ import { navigate } from "../navigation";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
 import RepairPeoplePicker from "./RepairPeoplePicker.vue";
+import MorningMeetingSheet from "./MorningMeetingSheet.vue";
 
 type Dict = Record<string, any>;
 type DailyTask = {
@@ -285,10 +354,13 @@ type DailyCategory = {
   tasks: DailyTask[];
 };
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   scope: string;
   scopeOptions: Array<{ value: string; label: string }>;
-}>();
+  printMode?: boolean;
+}>(), {
+  printMode: false,
+});
 
 const emit = defineEmits<{
   "switch-scope": [scope: string];
@@ -306,6 +378,20 @@ const sendRecipients = ref<Dict[]>([]);
 const sendBusy = ref(false);
 const sendError = ref("");
 const sendSuccess = ref("");
+const morningDialogOpen = ref(false);
+const morningLoading = ref(false);
+const morningBusy = ref(false);
+const morningError = ref("");
+const morningSuccess = ref("");
+const morningModel = ref<Dict | null>(null);
+const morningDownloadUrl = ref("");
+const morningPrintUrl = ref("");
+const morningGeneratedAt = ref("");
+const morningOperationId = ref("");
+const morningPrintLoading = ref(false);
+const morningPrintError = ref("");
+const morningPrintModel = ref<Dict>({});
+let morningPrintStyle: HTMLStyleElement | null = null;
 let requestController: AbortController | null = null;
 let requestGeneration = 0;
 
@@ -363,6 +449,11 @@ const generatedText = computed(() => {
   if (!value) return "";
   return `更新于 ${value.slice(11, 16)}`;
 });
+const morningWarnings = computed(() => (
+  Array.isArray(morningModel.value?.warnings)
+    ? morningModel.value?.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+    : []
+));
 
 function normalizeScope(value: string): string {
   const text = String(value || "").trim().toUpperCase();
@@ -420,6 +511,7 @@ function changeDate(): void {
   if (selectedDate.value > today) selectedDate.value = today;
   syncDateRoute();
   closeSendDialog();
+  closeMorningMeeting();
   void loadTasks();
 }
 
@@ -436,6 +528,109 @@ function closeSendDialog(): void {
   sendDialogOpen.value = false;
   sendError.value = "";
   sendSuccess.value = "";
+}
+
+async function openMorningMeeting(): Promise<void> {
+  if (scopeCode.value !== "H" || selectedDate.value !== today || morningLoading.value) return;
+  morningDialogOpen.value = true;
+  morningLoading.value = true;
+  morningError.value = "";
+  morningSuccess.value = "";
+  try {
+    const data = await requestJson(
+      `/api/daily-tasks/morning-meeting/preview?date=${encodeURIComponent(selectedDate.value)}`,
+      { cache: "no-store", timeoutMs: 60_000 },
+    );
+    morningModel.value = data;
+    morningDownloadUrl.value = String(data.download_url || "");
+    morningPrintUrl.value = String(data.print_url || "");
+    morningGeneratedAt.value = String(data.generated_at || "");
+  } catch (error: any) {
+    morningModel.value = null;
+    morningError.value = error?.message || "晨会数据读取失败。";
+  } finally {
+    morningLoading.value = false;
+  }
+}
+
+function closeMorningMeeting(): void {
+  if (morningBusy.value) return;
+  morningDialogOpen.value = false;
+  morningError.value = "";
+  morningSuccess.value = "";
+}
+
+async function generateMorningMeeting(): Promise<void> {
+  if (morningBusy.value || !morningModel.value) return;
+  morningBusy.value = true;
+  morningError.value = "";
+  morningSuccess.value = "";
+  if (!morningOperationId.value) morningOperationId.value = newOperationId();
+  try {
+    const data = await requestJson("/api/daily-tasks/morning-meeting/generate", {
+      method: "POST",
+      timeoutMs: 120_000,
+      body: JSON.stringify({
+        date: selectedDate.value,
+        weather_condition: morningModel.value.weather_condition || "",
+        dry_bulb_temperature: morningModel.value.dry_bulb_temperature ?? null,
+        wet_bulb_temperature: morningModel.value.wet_bulb_temperature ?? null,
+        operation_id: morningOperationId.value,
+      }),
+    });
+    morningModel.value = data.model || morningModel.value;
+    morningDownloadUrl.value = String(data.download_url || "");
+    morningPrintUrl.value = String(data.print_url || "");
+    morningGeneratedAt.value = String(data.generated_at || "");
+    morningSuccess.value = "晨会表格已生成，可下载或打印。";
+    morningOperationId.value = "";
+  } catch (error: any) {
+    morningError.value = error?.message || "晨会表格生成失败。";
+  } finally {
+    morningBusy.value = false;
+  }
+}
+
+function downloadMorningMeeting(): void {
+  if (!morningDownloadUrl.value) return;
+  const anchor = document.createElement("a");
+  anchor.href = morningDownloadUrl.value;
+  anchor.download = "";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+function printMorningMeeting(): void {
+  if (!morningPrintUrl.value) return;
+  window.open(morningPrintUrl.value, "_blank", "noopener,noreferrer");
+}
+
+async function loadMorningMeetingPrint(): Promise<void> {
+  const date = validDateParam(new URLSearchParams(window.location.search).get("date"));
+  if (!date) {
+    morningPrintError.value = "打印日期缺失。";
+    return;
+  }
+  morningPrintLoading.value = true;
+  morningPrintError.value = "";
+  try {
+    const data = await requestJson(
+      `/api/daily-tasks/morning-meeting/print-model?date=${encodeURIComponent(date)}`,
+      { cache: "no-store", timeoutMs: 60_000 },
+    );
+    morningPrintModel.value = data;
+    morningPrintStyle?.remove();
+    morningPrintStyle = document.createElement("style");
+    morningPrintStyle.textContent = "@page { size: A4 landscape; margin: 5mm; }";
+    document.head.appendChild(morningPrintStyle);
+    await nextTick();
+    window.setTimeout(() => window.print(), 120);
+  } catch (error: any) {
+    morningPrintError.value = error?.message || "晨会表格打印内容读取失败。";
+  } finally {
+    morningPrintLoading.value = false;
+  }
 }
 
 function newOperationId(): string {
@@ -507,16 +702,22 @@ async function loadTasks(): Promise<void> {
 watch(
   () => props.scope,
   () => {
+    if (props.printMode) return;
     selectedCategory.value = "all";
     closeSendDialog();
+    closeMorningMeeting();
     void loadTasks();
   },
 );
 
-onMounted(loadTasks);
+onMounted(() => {
+  if (props.printMode) void loadMorningMeetingPrint();
+  else void loadTasks();
+});
 onBeforeUnmount(() => {
   requestGeneration += 1;
   requestController?.abort();
+  morningPrintStyle?.remove();
 });
 </script>
 
@@ -1127,21 +1328,41 @@ button:disabled {
   box-shadow: 0 28px 80px rgba(7, 37, 86, 0.28);
 }
 
+.morning-dialog {
+  width: min(1240px, 100%);
+  max-height: calc(100vh - 28px);
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #d5e3f5;
+  border-radius: 16px;
+  background: #f8fbff;
+  box-shadow: 0 28px 80px rgba(7, 37, 86, 0.28);
+}
+
 .send-dialog > header,
 .send-dialog > footer,
-.send-dialog > footer > div {
+.send-dialog > footer > div,
+.morning-dialog > header,
+.morning-dialog > footer,
+.morning-dialog > footer > div {
   display: flex;
   align-items: center;
 }
 
 .send-dialog > header,
-.send-dialog > footer {
+.send-dialog > footer,
+.morning-dialog > header,
+.morning-dialog > footer {
   justify-content: space-between;
   gap: 14px;
 }
 
 .send-dialog > header span,
-.send-dialog > footer > span {
+.send-dialog > footer > span,
+.morning-dialog > header span,
+.morning-dialog > footer > span {
   color: #647991;
   font-size: 12px;
   font-weight: 800;
@@ -1153,9 +1374,88 @@ button:disabled {
   font-size: 20px;
 }
 
+.morning-dialog h2 {
+  margin: 3px 0 0;
+  color: #071a39;
+  font-size: 20px;
+}
+
 .send-dialog > footer {
   padding-top: 14px;
   border-top: 1px solid #dce7f5;
+}
+
+.morning-dialog > footer {
+  position: sticky;
+  bottom: -18px;
+  z-index: 3;
+  padding: 12px 0 0;
+  border-top: 1px solid #dce7f5;
+  background: #f8fbff;
+}
+
+.morning-dialog > footer > div {
+  gap: 8px;
+}
+
+.morning-weather-fields {
+  display: grid;
+  grid-template-columns: 1fr 180px 180px;
+  gap: 10px;
+}
+
+.morning-weather-fields label {
+  display: grid;
+  gap: 5px;
+  color: #526a87;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.morning-weather-fields input {
+  min-height: 38px;
+  border: 1px solid #cfe0f7;
+  border-radius: 9px;
+  padding: 0 10px;
+  background: #fff;
+  color: #102d56;
+  font: inherit;
+}
+
+.morning-preview-wrap {
+  overflow: auto;
+  border: 1px solid #d3dfed;
+  border-radius: 10px;
+  padding: 10px;
+  background: #dfe6ee;
+}
+
+.morning-preview-wrap > * {
+  margin: 0 auto;
+  box-shadow: 0 10px 28px rgba(7, 37, 86, 0.16);
+}
+
+.morning-inline-state,
+.morning-print-state {
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #607792;
+  font-weight: 850;
+}
+
+.morning-print-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: start center;
+  overflow: auto;
+  background: #fff;
+}
+
+.morning-print-state.error {
+  color: #b4232f;
 }
 
 .send-dialog > footer > div {
@@ -1194,6 +1494,12 @@ button:disabled {
   color: #047857;
 }
 
+.dialog-message.warning {
+  border-color: #f0d49d;
+  background: #fffaf0;
+  color: #8b5b09;
+}
+
 .spinning {
   animation: spin 0.8s linear infinite;
 }
@@ -1220,6 +1526,30 @@ button:disabled {
 
   .summary-grid article:nth-child(4) {
     border-top: 1px solid #e5edf7;
+  }
+
+  .daily-header,
+  .daily-header__actions,
+  .morning-dialog > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .morning-weather-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media print {
+  .morning-print-page {
+    width: 277mm;
+    height: 190mm;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .morning-print-state {
+    display: none !important;
   }
 }
 </style>

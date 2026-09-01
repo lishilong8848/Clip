@@ -351,6 +351,17 @@ class DailyTaskSendRequest(APIModel):
         extra = "forbid"
 
 
+class MorningMeetingGenerateRequest(APIModel):
+    date: str = Field(default="", max_length=10)
+    weather_condition: str = Field(default="", max_length=40)
+    dry_bulb_temperature: float | int | str | None = None
+    wet_bulb_temperature: float | int | str | None = None
+    operation_id: str = Field(default="", max_length=128)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class NoticeMemoryImportRequest(APIModel):
     scope: str = "ALL"
     text: str = ""

@@ -6,7 +6,6 @@ import copy
 import datetime as dt
 import hashlib
 import io
-import math
 import os
 import posixpath
 import re
@@ -1398,6 +1397,38 @@ def _image_dimensions(content: bytes) -> tuple[int, int]:
     return width, height
 
 
+def _horizontal_signature_layout(
+    image_sizes: list[tuple[int, int]],
+    area_width: float,
+    area_height: float,
+) -> list[tuple[float, float, float, float]]:
+    if not image_sizes:
+        return []
+    padding = min(4.0, area_width * 0.02, area_height * 0.08)
+    gap = min(
+        3.0,
+        max(0.0, (area_width - padding * 2) / (len(image_sizes) * 10)),
+    )
+    max_height = max(1.0, area_height - padding * 2)
+    base_sizes = []
+    for source_width, source_height in image_sizes:
+        scale = min(max_height / source_height, 120.0 / source_width)
+        base_sizes.append((source_width * scale, source_height * scale))
+    available_width = max(
+        1.0,
+        area_width - padding * 2 - gap * (len(base_sizes) - 1),
+    )
+    shrink = min(1.0, available_width / sum(width for width, _height in base_sizes))
+    x = padding
+    placements = []
+    for width, height in base_sizes:
+        width *= shrink
+        height *= shrink
+        placements.append((x, (area_height - height) / 2, width, height))
+        x += width + gap
+    return placements
+
+
 def normalize_drill_signature_png(content: bytes) -> bytes:
     content = bytes(content or b"")
     if not content or len(content) > DRILL_MAX_SIGNATURE_BYTES:
@@ -1627,17 +1658,40 @@ def _patch_workbook(
                 continue
             row1, col1, _row2, _col2, area_width, area_height = _row_col_pixels(record_sheet, str(placement["range"]))
             count = len(signers)
-            if placement.get("layout") == "vertical":
-                columns, rows = 1, count
-            else:
-                columns = min(5, count)
-                rows = int(math.ceil(count / columns))
-            slot_width, slot_height = area_width / columns, area_height / rows
-            for index, signer in enumerate(signers):
+            prepared = []
+            for signer in signers:
                 record_id = str(signer.get("record_id") or "")
                 content = signatures.get(record_id)
                 if not content:
                     raise DrillError(f"{signer.get('name') or record_id}缺少可用签名。")
+                prepared.append((signer, content, _image_dimensions(content)))
+            if placement.get("layout") == "vertical":
+                slot_height = area_height / count
+                positions = []
+                for index, (_signer, _content, (source_width, source_height)) in enumerate(prepared):
+                    padding = min(5.0, area_width * 0.08, slot_height * 0.08)
+                    scale = min(
+                        max(1.0, area_width - padding * 2) / source_width,
+                        max(1.0, slot_height - padding * 2) / source_height,
+                    )
+                    width, height = source_width * scale, source_height * scale
+                    positions.append(
+                        (
+                            (area_width - width) / 2,
+                            index * slot_height + (slot_height - height) / 2,
+                            width,
+                            height,
+                        )
+                    )
+            else:
+                positions = _horizontal_signature_layout(
+                    [size for _signer, _content, size in prepared],
+                    area_width,
+                    area_height,
+                )
+            for (signer, content, _source_size), (x, y, width, height) in zip(
+                prepared, positions
+            ):
                 digest = hashlib.sha256(content).hexdigest()
                 media_name = f"xl/media/drill_signature_{digest}.png"
                 suffix = 0
@@ -1668,16 +1722,6 @@ def _patch_workbook(
                         },
                     )
                     image_relations[digest] = rel_id
-                source_width, source_height = _image_dimensions(content)
-                grid_row, grid_col = divmod(index, columns)
-                padding = min(5.0, slot_width * 0.08, slot_height * 0.08)
-                scale = min(
-                    max(1.0, slot_width - padding * 2) / source_width,
-                    max(1.0, slot_height - padding * 2) / source_height,
-                )
-                width, height = source_width * scale, source_height * scale
-                x = grid_col * slot_width + (slot_width - width) / 2
-                y = grid_row * slot_height + (slot_height - height) / 2
                 anchor_row, anchor_col, x, y = _anchor_from_offset(
                     record_sheet, row1, col1, x, y
                 )

@@ -67,10 +67,20 @@ class _DailyTaskStore:
             "record_id": "rec_water_private",
             "building": "E楼",
             "meter": "总水表",
+            "frequency": "每日",
+            "shift": "白班",
             "statistic_date": TEST_DATE,
             "created_time": f"{TEST_DATE} 07:30",
             "computed_usage": 12.5,
+            "meter_value": 123.5,
+            "previous_value_text": "120",
         }
+        self.previous_water_record = {
+            "record_id": "rec_water_previous",
+            "meter_value": 110,
+            "statistic_date": "2026-07-27",
+        }
+        self.previous_water_lookup: dict[str, Any] = {}
         self.audits = [
             {
                 "audit_id": "audit_mop_private",
@@ -153,6 +163,12 @@ class _DailyTaskStore:
             else None
         )
 
+    def find_previous_water_consumption_record(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | None:
+        self.previous_water_lookup = dict(kwargs)
+        return dict(self.previous_water_record)
+
 
 class DailyTaskChecklistTests(unittest.TestCase):
     def _service(self) -> MaintenancePortalService:
@@ -224,6 +240,67 @@ class DailyTaskChecklistTests(unittest.TestCase):
         self.assertNotIn("rec_project_private", serialized)
         self.assertNotIn("rec_event_private", serialized)
         self.assertNotIn("rec_water_private", serialized)
+
+    def test_water_report_includes_meter_values_and_change_rate(self) -> None:
+        service = self._service()
+        water = service._daily_water_tasks(scope="E", date=TEST_DATE)[0]
+
+        self.assertEqual(water["level"], "12.5 t")
+        self.assertEqual(water["water_current_value"], "123.5")
+        self.assertEqual(water["water_previous_value"], "120")
+        self.assertEqual(water["water_change_ratio"], "+2.92%")
+
+        report = {
+            "window_start": "2026-07-27 17:50:00",
+            "window_end": "2026-07-28 17:50:00",
+            "stats": service._daily_report_stats([water]),
+            "categories": service._daily_report_groups([water]),
+            "event_sla": {"stats": {}, "events": []},
+            "warnings": [],
+        }
+        card = service.build_daily_work_report_card(
+            report,
+            scope_label="E楼",
+            link_scope="E",
+            public_base="",
+        )
+        content = card["elements"][0]["text"]["content"]
+        self.assertIn("当期耗水量 12.5 t", content)
+        self.assertIn("当前数值 123.5 · 上次数值 120 · 变化率 +2.92%", content)
+
+    def test_water_report_falls_back_to_same_type_previous_record(self) -> None:
+        service = self._service()
+        service._state_store.water_record["previous_value_text"] = ""
+
+        water = service._daily_water_tasks(scope="E", date=TEST_DATE)[0]
+
+        self.assertEqual(water["water_previous_value"], "110")
+        self.assertEqual(water["water_change_ratio"], "+12.27%")
+        self.assertEqual(
+            service._state_store.previous_water_lookup,
+            {
+                "scope": "E",
+                "meter": "总水表",
+                "frequency": "每日",
+                "shift": "白班",
+                "statistic_date": TEST_DATE,
+                "exclude_record_id": "rec_water_private",
+            },
+        )
+
+    def test_water_report_handles_zero_and_missing_baselines(self) -> None:
+        service = self._service()
+        service._state_store.water_record["previous_value_text"] = "0"
+        zero = service._daily_water_tasks(scope="E", date=TEST_DATE)[0]
+        self.assertEqual(
+            zero["water_change_ratio"], "原值为 0，按大幅变化处理"
+        )
+
+        service._state_store.water_record["previous_value_text"] = ""
+        service._state_store.previous_water_record = {}
+        missing = service._daily_water_tasks(scope="E", date=TEST_DATE)[0]
+        self.assertEqual(missing["water_previous_value"], "未填写")
+        self.assertEqual(missing["water_change_ratio"], "无法计算")
 
     def test_invalid_date_is_rejected(self) -> None:
         with self.assertRaisesRegex(PortalError, "YYYY-MM-DD"):
@@ -473,6 +550,128 @@ class DailyTaskChecklistTests(unittest.TestCase):
             "分类汇总** 通告 0 · 事件 0 · 检修 0 · 维护单 0 · 水耗 0",
             content,
         )
+
+    def test_full_report_groups_tasks_by_building_without_duplicates(self) -> None:
+        service = self._service()
+
+        def task(task_id: str, title: str, building: str, category: str = "notice") -> dict[str, Any]:
+            return {
+                "task_id": task_id,
+                "title": title,
+                "building": building,
+                "category": category,
+                "category_label": "事件" if category == "event" else "通告",
+                "type_label": "事件通告" if category == "event" else "维保通告",
+                "status": "进行中",
+                "status_tone": "ongoing",
+                "time": "10:00",
+                "sort_time": 10,
+                "action_summary": "开始",
+            }
+
+        cross = task("cross", "跨楼事项", "A楼、B楼")
+        event = {
+            "event_key": "event-c",
+            "title": "C楼事件",
+            "building": "C楼",
+            "building_codes": ["C"],
+            "level": "I3",
+            "status": "进行中",
+            "occurrence_time": "2026-07-28 09:00:00",
+            "rows": [],
+            "pending": {"number": 1, "deadline": "2026-07-28 09:02:00"},
+        }
+        reports = [
+            {"scope": "A", "window_start": "start", "window_end": "end", "tasks": [task("a", "A楼事项", "A楼"), cross], "event_sla": {"events": []}},
+            {"scope": "B", "window_start": "start", "window_end": "end", "tasks": [cross], "event_sla": {"events": []}},
+            {"scope": "C", "window_start": "start", "window_end": "end", "tasks": [task("event-c", "C楼事件", "C楼", "event")], "event_sla": {"events": [event]}},
+            {"scope": "D", "window_start": "start", "window_end": "end", "tasks": [], "event_sla": {"events": []}},
+            {"scope": "E", "window_start": "start", "window_end": "end", "tasks": [task("unknown", "待确认事项", "")], "event_sla": {"events": []}},
+        ]
+
+        combined = service._combine_daily_work_reports(reports)
+        sections = combined["building_sections"]
+
+        self.assertEqual(
+            [item["key"] for item in sections],
+            ["A", "B", "C", "D", "E", "CROSS", "UNKNOWN"],
+        )
+        tasks_by_section = {
+            item["key"]: [task["task_id"] for task in item["tasks"]]
+            for item in sections
+        }
+        self.assertEqual(tasks_by_section["A"], ["a"])
+        self.assertEqual(tasks_by_section["C"], ["event-c"])
+        self.assertEqual(tasks_by_section["CROSS"], ["cross"])
+        self.assertEqual(tasks_by_section["UNKNOWN"], ["unknown"])
+        self.assertEqual(sum(row == "cross" for rows in tasks_by_section.values() for row in rows), 1)
+        self.assertEqual(sections[2]["event_sla"]["stats"]["pending"], 1)
+
+        card = service.build_daily_work_report_card(
+            combined,
+            scope_label="A-E楼全楼",
+            link_scope="ALL",
+            public_base="",
+        )
+        content = card["elements"][0]["text"]["content"]
+        positions = [
+            content.index(f"**{label} ·")
+            for label in (
+                "A楼",
+                "B楼",
+                "C楼",
+                "D楼",
+                "E楼",
+                "跨楼栋/园区",
+                "楼栋待确认",
+            )
+        ]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(content.count("跨楼事项"), 1)
+
+    def test_manual_all_report_builds_the_same_grouped_card(self) -> None:
+        service = self._service()
+        service._critical_guard_public_base_url = lambda: ""  # type: ignore[method-assign]
+        service._load_signature_people = lambda: [  # type: ignore[method-assign]
+            {"name": "甲", "open_id": "ou_a"}
+        ]
+
+        def snapshot(*, scope: str, report_end: dt.datetime) -> dict[str, Any]:
+            del report_end
+            task = {
+                "task_id": f"task-{scope}",
+                "category": "notice",
+                "title": f"{scope}楼事项",
+                "building": f"{scope}楼",
+                "status": "进行中",
+                "status_tone": "ongoing",
+                "sort_time": 1,
+            }
+            return {
+                "scope": scope,
+                "window_start": "start",
+                "window_end": "end",
+                "tasks": [task],
+                "event_sla": {"events": []},
+                "warnings": [],
+            }
+
+        service.get_daily_work_report_snapshot = snapshot  # type: ignore[method-assign]
+        with patch(
+            "lan_bitable_template_portal.portal_service.send_interactive_to_open_ids",
+            return_value=(True, "ok", []),
+        ) as sender:
+            service.send_daily_work_report_to_people(
+                scope="ALL",
+                date=dt.date.today().isoformat(),
+                recipient_open_ids=["ou_a"],
+                operation_id="manual-all",
+            )
+
+        content = sender.call_args.args[0]["elements"][0]["text"]["content"]
+        self.assertLess(content.index("**A楼 ·"), content.index("**E楼 ·"))
+        self.assertIn("**跨楼栋/园区 · 0项**", content)
+        self.assertIn("**楼栋待确认 · 0项**", content)
 
     def test_manual_today_report_validates_people_and_sends_each_recipient(self) -> None:
         service = self._service()

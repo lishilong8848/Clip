@@ -1,7 +1,7 @@
 <template>
-  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage }">
+  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }">
     <AppTopbar
-      v-if="!signatureLinkMode && !isDrillPrintPage"
+      v-if="!signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
       :brand-logo-src="brandLogoSrc"
       :header-subtitle="headerSubtitle"
       :auth="auth"
@@ -24,7 +24,7 @@
     />
 
     <AppStatusNotices
-      v-if="!isDrillPrintPage && (!signatureLinkMode || pageStatusText)"
+      v-if="!isDrillPrintPage && !isMorningMeetingPrintPage && (!signatureLinkMode || pageStatusText)"
       :connection-notice="signatureLinkMode ? null : connectionNotice"
       :page-status-text="pageStatusText"
     />
@@ -103,6 +103,7 @@
       v-else-if="isDailyTaskPage"
       :scope="currentScope"
       :scope-options="visibleScopeOptions"
+      :print-mode="isMorningMeetingPrintPage"
       @status="syncText = $event"
       @switch-scope="enterDailyTasks"
     />
@@ -264,7 +265,8 @@ const repairModuleComponent = computed(() => (
 ));
 const isSignaturePage = computed(() => routePath.value === "/signature");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
-const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks");
+const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks" || routePath.value === "/daily-tasks/morning-meeting/print");
+const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCriticalGuardPage = computed(() => routePath.value === "/critical-guard");
 const isDrillManagementPage = computed(() => routePath.value === "/drill-management" || routePath.value === "/drill-management/print");
@@ -805,6 +807,11 @@ onBeforeUnmount(() => {
 }
 
 .app-shell.drill-print-shell {
+  min-height: 100vh;
+  background: #ffffff;
+}
+
+.app-shell.morning-print-shell {
   min-height: 100vh;
   background: #ffffff;
 }

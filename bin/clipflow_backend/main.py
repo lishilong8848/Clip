@@ -69,6 +69,7 @@ from clipflow_backend.api_models import (
     HandoverPasswordResetConfirmRequest,
     JobMarkStuckFailedRequest,
     MockPressureRequest,
+    MorningMeetingGenerateRequest,
     NoticeMemoryHistorySaveRequest,
     NoticeMemoryHistoryScanRequest,
     NoticeMemoryImportRequest,
@@ -1173,6 +1174,11 @@ class FastAPIPortalController:
         async def drill_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
+        @app.get("/daily-tasks/morning-meeting/print")
+        @app.get("/daily-tasks/morning-meeting/print/")
+        async def morning_meeting_print_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
         @app.get("/signature")
         @app.get("/signature/")
         async def signature_page(request: Request):
@@ -2145,6 +2151,117 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/daily-tasks/morning-meeting/preview")
+        async def morning_meeting_preview(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(session, "H")
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_morning_meeting_preview,
+                    date=str(request.query_params.get("date") or "").strip(),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/daily-tasks/morning-meeting/generate")
+        async def morning_meeting_generate(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(session, "H")
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        MorningMeetingGenerateRequest,
+                    )
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                generated = await asyncio.to_thread(
+                    PortalRuntime.service.generate_morning_meeting,
+                    date=str(payload.get("date") or "").strip(),
+                    weather_condition=str(
+                        payload.get("weather_condition") or ""
+                    ).strip(),
+                    dry_bulb_temperature=payload.get("dry_bulb_temperature"),
+                    wet_bulb_temperature=payload.get("wet_bulb_temperature"),
+                    operation_id=str(payload.get("operation_id") or "").strip(),
+                    actor_name=str(user.get("name") or "").strip(),
+                )
+                date_key = str(generated.get("date") or "")
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "date": date_key,
+                        "generated_at": str(generated.get("generated_at") or ""),
+                        "model": generated.get("model") or {},
+                        "download_url": (
+                            "/api/daily-tasks/morning-meeting/download?date="
+                            + quote(date_key, safe="")
+                        ),
+                        "print_url": (
+                            "/daily-tasks/morning-meeting/print?date="
+                            + quote(date_key, safe="")
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/daily-tasks/morning-meeting/download")
+        async def morning_meeting_download(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(session, "H")
+                generated = await asyncio.to_thread(
+                    PortalRuntime.service.get_generated_morning_meeting,
+                    date=str(request.query_params.get("date") or "").strip(),
+                )
+                file_name = str(generated.get("file_name") or "晨会表格.xlsx")
+                return Response(
+                    content=Path(str(generated.get("file_path") or "")).read_bytes(),
+                    media_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    headers={
+                        "Content-Disposition": (
+                            "attachment; filename*=UTF-8''"
+                            + quote(file_name, safe="")
+                        )
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.get("/api/daily-tasks/morning-meeting/print-model")
+        async def morning_meeting_print_model(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(session, "H")
+                generated = await asyncio.to_thread(
+                    PortalRuntime.service.get_generated_morning_meeting,
+                    date=str(request.query_params.get("date") or "").strip(),
+                )
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        **dict(generated.get("model") or {}),
+                        "generated_at": str(generated.get("generated_at") or ""),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
 
         @app.get("/api/records")
         @app.get("/api/workbench")

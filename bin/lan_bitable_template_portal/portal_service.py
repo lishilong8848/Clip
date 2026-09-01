@@ -64,6 +64,13 @@ from .repair_status_index import (
     repair_completed_at_seconds,
 )
 from .operation_audit import finish_business_audit
+from .morning_meeting import (
+    MORNING_MEETING_NAMESPACE,
+    MORNING_MEETING_SCOPES,
+    MorningMeetingError,
+    build_morning_meeting_workbook,
+    morning_meeting_file_name,
+)
 from .critical_guard import (
     CRITICAL_GUARD_CHECK_SHEETS,
     CRITICAL_GUARD_FILE_SHEETS,
@@ -1316,6 +1323,7 @@ class MaintenancePortalService:
     _handover_reset_lock = threading.RLock()
     _hidden_ongoing_lock = threading.RLock()
     _daily_report_lock = threading.RLock()
+    _morning_meeting_lock = threading.RLock()
 
     def __init__(
         self,
@@ -25082,6 +25090,24 @@ class MaintenancePortalService:
                 if isinstance(amount, (int, float))
                 else ""
             )
+            previous_value = self._water_number(record.get("previous_value_text"))
+            if previous_value is None:
+                previous_record = (
+                    self._state_store.find_previous_water_consumption_record(
+                        scope=scope_code,
+                        meter=str(record.get("meter") or ""),
+                        frequency=str(record.get("frequency") or ""),
+                        shift=str(record.get("shift") or ""),
+                        statistic_date=str(record.get("statistic_date") or ""),
+                        exclude_record_id=record_id,
+                    )
+                    or {}
+                )
+                previous_value = self._water_number(previous_record.get("meter_value"))
+            meter_change = self._water_meter_change(
+                previous_value,
+                record.get("meter_value"),
+            )
             status = "需处理" if failed else "已录入"
             tasks.append(
                 {
@@ -25111,8 +25137,18 @@ class MaintenancePortalService:
                         record.get("building")
                         or WATER_CONSUMPTION_SCOPE_LABELS.get(scope_code, "")
                     ),
+                    "building_codes": [scope_code],
                     "specialty": "",
                     "level": amount_text,
+                    "water_current_value": self._water_change_value_text(
+                        record.get("meter_value")
+                    ),
+                    "water_previous_value": self._water_change_value_text(
+                        previous_value
+                    ),
+                    "water_change_ratio": self._water_change_ratio_text(
+                        meter_change
+                    ),
                     "progress_percent": None,
                 }
             )
@@ -25193,6 +25229,441 @@ class MaintenancePortalService:
             "tasks": all_tasks,
             "warnings": list(dict.fromkeys(warnings)),
         }
+
+    @staticmethod
+    def _morning_meeting_normalized_title(value: Any) -> str:
+        return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(value or "")).lower()
+
+    def _morning_meeting_day_in_range(
+        self,
+        day: dt.date,
+        start_value: Any,
+        end_value: Any,
+    ) -> bool:
+        start = self._history_datetime_from_values(start_value)
+        end = self._history_datetime_from_values(end_value)
+        if start and end:
+            left, right = sorted((start.date(), end.date()))
+            return left <= day <= right
+        if start:
+            return start.date() == day
+        if end:
+            return end.date() == day
+        return False
+
+    def _morning_meeting_candidate(
+        self,
+        item: dict[str, Any],
+        *,
+        origin_priority: int,
+    ) -> dict[str, Any] | None:
+        work_type = self._item_work_type(item)
+        if work_type not in {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+            WORK_TYPE_POLLING,
+            WORK_TYPE_ADJUST,
+            WORK_TYPE_POWER,
+        }:
+            return None
+        title = re.sub(
+            r"[\r\n]+",
+            " ",
+            str(item.get("title") or item.get("name") or "").strip(),
+        ).strip()
+        if not title:
+            return None
+        target_id = canonical_target_record_id(item)
+        source_id = canonical_source_record_id(item)
+        codes = self._building_codes_from_value(
+            item.get("building_codes")
+            or item.get("codes")
+            or item.get("building")
+            or item.get("location")
+            or title
+        )
+        building_text = " ".join(
+            str(item.get(key) or "")
+            for key in ("building", "building_code", "location")
+        ).upper()
+        normalized_title = self._morning_meeting_normalized_title(title)
+        aliases = [
+            value
+            for value in (
+                f"target:{target_id}" if target_id else "",
+                f"source:{source_id}" if source_id else "",
+                f"title:{work_type}:{normalized_title}" if normalized_title else "",
+            )
+            if value
+        ]
+        sort_dt = self._history_datetime_from_values(
+            item.get("start_time"),
+            item.get("started_at"),
+            item.get("time_str"),
+        )
+        return {
+            "work_type": work_type,
+            "title": title,
+            "building_codes": codes,
+            "campus": bool(
+                "CAMPUS" in building_text
+                or "园区" in building_text
+                or str(item.get("scope") or "").upper() == "ALL"
+            ),
+            "aliases": aliases,
+            "sort_time": sort_dt.timestamp() if sort_dt else 0.0,
+            "origin_priority": origin_priority,
+        }
+
+    def _morning_meeting_source_candidates(
+        self,
+        *,
+        day: dt.date,
+        source_snapshot: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        month = f"{day.month}月"
+        records = self._workbench_records(
+            month=month,
+            scope="ALL",
+            source_snapshot=source_snapshot,
+        )
+        candidates: list[dict[str, Any]] = []
+        for record in records:
+            payload = self._source_snapshot_active_payload(record)
+            if not self._morning_meeting_day_in_range(
+                day,
+                payload.get("start_time"),
+                payload.get("end_time"),
+            ):
+                continue
+            candidate = self._morning_meeting_candidate(
+                payload,
+                origin_priority=0,
+            )
+            if candidate:
+                candidates.append(candidate)
+        return candidates
+
+    def _morning_meeting_active_candidates(self) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        active_items = self._project_ongoing_items(
+            "ALL",
+            self._state_store.list_visible_qt_active_items(),
+        )
+        for item in active_items:
+            if self._target_status_is_finished(item.get("status")):
+                continue
+            candidate = self._morning_meeting_candidate(
+                item,
+                origin_priority=1,
+            )
+            if candidate:
+                candidates.append(candidate)
+        return candidates
+
+    def _morning_meeting_daily_candidates(
+        self,
+        *,
+        date_key: str,
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        summary = self.get_daily_summary(scope="ALL", date=date_key)
+        for item in summary.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            actions = [
+                action
+                for action in item.get("actions") or []
+                if isinstance(action, dict)
+            ]
+            if str(item.get("status") or "").strip() in {"已删除", "删除"}:
+                continue
+            if actions and str(actions[-1].get("action") or "") == "delete":
+                continue
+            candidate = self._morning_meeting_candidate(
+                item,
+                origin_priority=2,
+            )
+            if candidate:
+                candidates.append(candidate)
+        return candidates
+
+    @staticmethod
+    def _morning_meeting_merge_candidates(
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        aliases: dict[str, int] = {}
+        for candidate in candidates:
+            indexes = {
+                aliases[alias]
+                for alias in candidate.get("aliases") or []
+                if alias in aliases
+            }
+            if indexes:
+                index = min(indexes)
+                current = merged[index]
+                current["building_codes"] = list(
+                    dict.fromkeys(
+                        [
+                            *list(current.get("building_codes") or []),
+                            *list(candidate.get("building_codes") or []),
+                        ]
+                    )
+                )
+                current["campus"] = bool(current.get("campus") or candidate.get("campus"))
+                current["aliases"] = list(
+                    dict.fromkeys(
+                        [
+                            *list(current.get("aliases") or []),
+                            *list(candidate.get("aliases") or []),
+                        ]
+                    )
+                )
+                if int(candidate.get("origin_priority") or 0) >= int(
+                    current.get("origin_priority") or 0
+                ):
+                    for key in ("work_type", "title", "sort_time", "origin_priority"):
+                        current[key] = candidate.get(key)
+            else:
+                index = len(merged)
+                merged.append(copy.deepcopy(candidate))
+            for alias in merged[index].get("aliases") or []:
+                aliases[alias] = index
+        return merged
+
+    def _morning_meeting_weather(self) -> tuple[dict[str, Any], list[str]]:
+        warnings: list[str] = []
+        state = self._state_store.get_critical_guard_weather_state()
+        snapshot = state.get("snapshot") if isinstance(state.get("snapshot"), dict) else {}
+        weather = snapshot.get("weather") if isinstance(snapshot.get("weather"), dict) else {}
+        if not weather:
+            warnings.append("本地暂无天气快照，可手动填写天气和温度。")
+        elif state.get("last_error"):
+            warnings.append("最近一次天气读取失败，当前显示最近成功快照，可手动修改。")
+        return (
+            {
+                "weather_condition": str(weather.get("condition") or ""),
+                "dry_bulb_temperature": weather.get("temperature"),
+                "wet_bulb_temperature": weather.get("wet_bulb"),
+                "weather_observed_at": str(weather.get("observed_at") or ""),
+            },
+            warnings,
+        )
+
+    def get_morning_meeting_preview(
+        self,
+        *,
+        date: str = "",
+        prefer_generated: bool = True,
+    ) -> dict[str, Any]:
+        date_key = self._daily_task_date(date)
+        today = dt.datetime.now().astimezone().date()
+        if date_key != today.isoformat():
+            raise PortalConflictError("晨会表格只支持生成当天数据。")
+        source_snapshot = self._state_store.get_source_scope_snapshot("ALL")
+        if not source_snapshot.get("exists"):
+            raise PortalConflictError("通告源表快照尚未就绪，请先刷新数据。")
+        candidates = self._morning_meeting_merge_candidates(
+            [
+                *self._morning_meeting_source_candidates(
+                    day=today,
+                    source_snapshot=source_snapshot,
+                ),
+                *self._morning_meeting_active_candidates(),
+                *self._morning_meeting_daily_candidates(date_key=date_key),
+            ]
+        )
+        work_type_order = {
+            WORK_TYPE_MAINTENANCE: 0,
+            WORK_TYPE_CHANGE: 1,
+            WORK_TYPE_REPAIR: 2,
+            WORK_TYPE_POLLING: 3,
+            WORK_TYPE_ADJUST: 4,
+            WORK_TYPE_POWER: 5,
+        }
+        rows = {scope: [] for scope in MORNING_MEETING_SCOPES}
+        seen_by_scope = {scope: set() for scope in MORNING_MEETING_SCOPES}
+        candidates.sort(
+            key=lambda item: (
+                work_type_order.get(str(item.get("work_type") or ""), 99),
+                float(item.get("sort_time") or 0),
+                str(item.get("title") or ""),
+            )
+        )
+        for item in candidates:
+            codes = [
+                code
+                for code in item.get("building_codes") or []
+                if code in MORNING_MEETING_SCOPES
+            ]
+            if codes:
+                targets = codes
+                title = str(item.get("title") or "")
+            else:
+                targets = ["H"]
+                prefix = "【园区】" if item.get("campus") else "【楼栋待确认】"
+                title = f"{prefix}{item.get('title') or ''}"
+            normalized = self._morning_meeting_normalized_title(title)
+            for scope in targets:
+                if normalized in seen_by_scope[scope]:
+                    continue
+                seen_by_scope[scope].add(normalized)
+                rows[scope].append(title)
+        weather, weather_warnings = self._morning_meeting_weather()
+        generated = self._state_store.get_document(
+            MORNING_MEETING_NAMESPACE,
+            date_key,
+        ) or {}
+        generated_path = Path(str(generated.get("file_path") or ""))
+        generated_available = generated_path.is_file()
+        updated_at = float(source_snapshot.get("updated_at") or 0)
+        result = {
+            "date": date_key,
+            **weather,
+            "rows": [
+                {
+                    "scope": scope,
+                    "label": self._building_label_from_code(scope),
+                    "lines": ["值班巡检", *rows[scope]],
+                    "notice_count": len(rows[scope]),
+                }
+                for scope in MORNING_MEETING_SCOPES
+            ],
+            "notice_count": sum(len(items) for items in rows.values()),
+            "source_updated_at": (
+                dt.datetime.fromtimestamp(updated_at).strftime("%Y-%m-%d %H:%M:%S")
+                if updated_at
+                else ""
+            ),
+            "warnings": list(
+                dict.fromkeys(
+                    [*self._current_load_warnings(), *weather_warnings]
+                )
+            ),
+            "generated": generated_available,
+            "generated_at": str(generated.get("generated_at") or ""),
+            "download_url": (
+                f"/api/daily-tasks/morning-meeting/download?date={quote(date_key)}"
+                if generated_available
+                else ""
+            ),
+            "print_url": (
+                f"/daily-tasks/morning-meeting/print?date={quote(date_key)}"
+                if generated_available
+                else ""
+            ),
+        }
+        generated_model = (
+            generated.get("model")
+            if isinstance(generated.get("model"), dict)
+            else {}
+        )
+        if prefer_generated and generated_model and generated_path.is_file():
+            result = {
+                **copy.deepcopy(generated_model),
+                "warnings": result["warnings"],
+                "source_updated_at": result["source_updated_at"],
+                "generated": True,
+                "generated_at": str(generated.get("generated_at") or ""),
+                "download_url": result["download_url"],
+                "print_url": result["print_url"],
+            }
+        return result
+
+    @staticmethod
+    def _morning_meeting_temperature(value: Any, label: str) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise PortalError(f"{label}必须是数字。") from exc
+        if not math.isfinite(number) or not -50 <= number <= 80:
+            raise PortalError(f"{label}必须在 -50℃ 至 80℃ 之间。")
+        return round(number, 1)
+
+    def generate_morning_meeting(
+        self,
+        *,
+        date: str,
+        weather_condition: str = "",
+        dry_bulb_temperature: Any = None,
+        wet_bulb_temperature: Any = None,
+        operation_id: str = "",
+        actor_name: str = "",
+    ) -> dict[str, Any]:
+        date_key = self._daily_task_date(date)
+        operation_id = str(operation_id or "").strip()
+        with self._morning_meeting_lock:
+            existing = self._state_store.get_document(
+                MORNING_MEETING_NAMESPACE,
+                date_key,
+            ) or {}
+            existing_path = Path(str(existing.get("file_path") or ""))
+            if (
+                operation_id
+                and existing.get("operation_id") == operation_id
+                and existing_path.is_file()
+            ):
+                return copy.deepcopy(existing)
+            model = self.get_morning_meeting_preview(
+                date=date_key,
+                prefer_generated=False,
+            )
+            model.update(
+                {
+                    "weather_condition": str(weather_condition or "").strip()[:40],
+                    "dry_bulb_temperature": self._morning_meeting_temperature(
+                        dry_bulb_temperature,
+                        "干球温度",
+                    ),
+                    "wet_bulb_temperature": self._morning_meeting_temperature(
+                        wet_bulb_temperature,
+                        "湿球温度",
+                    ),
+                }
+            )
+            output_dir = Path(get_data_file_path("morning_meeting")) / date_key
+            file_name = morning_meeting_file_name(dt.date.fromisoformat(date_key))
+            output_path = output_dir / file_name
+            try:
+                build_morning_meeting_workbook(output_path, model)
+            except MorningMeetingError as exc:
+                raise PortalError(str(exc)) from exc
+            generated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            document = {
+                "date": date_key,
+                "file_name": file_name,
+                "file_path": os.fspath(output_path.resolve()),
+                "model": model,
+                "operation_id": operation_id,
+                "actor_name": str(actor_name or "").strip(),
+                "generated_at": generated_at,
+            }
+            self._state_store.put_document(
+                MORNING_MEETING_NAMESPACE,
+                date_key,
+                document,
+            )
+            return copy.deepcopy(document)
+
+    def get_generated_morning_meeting(
+        self,
+        *,
+        date: str,
+    ) -> dict[str, Any]:
+        date_key = self._daily_task_date(date)
+        document = self._state_store.get_document(
+            MORNING_MEETING_NAMESPACE,
+            date_key,
+        ) or {}
+        path = Path(str(document.get("file_path") or "")).resolve()
+        root = (Path(get_data_file_path("morning_meeting")) / date_key).resolve()
+        if not path.is_file() or not path.is_relative_to(root):
+            raise PortalError("当天晨会表格尚未生成。")
+        return {**copy.deepcopy(document), "file_path": os.fspath(path)}
 
     @staticmethod
     def _daily_report_period(
@@ -25841,8 +26312,11 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         task_map: dict[str, dict[str, Any]] = {}
         event_map: dict[str, dict[str, Any]] = {}
+        task_scopes: dict[str, set[str]] = {}
+        event_scopes: dict[str, set[str]] = {}
         warnings: list[str] = []
         for report in reports:
+            source_scope = str(report.get("scope") or "").strip().upper()
             warnings.extend(str(item) for item in report.get("warnings") or [])
             for task in report.get("tasks") or []:
                 if not isinstance(task, dict):
@@ -25850,6 +26324,8 @@ class MaintenancePortalService:
                 key = str(task.get("task_id") or "").strip()
                 if not key:
                     continue
+                if source_scope in DAILY_WORK_REPORT_SCOPES:
+                    task_scopes.setdefault(key, set()).add(source_scope)
                 existing = task_map.get(key)
                 if existing is None or float(task.get("sort_time") or 0) >= float(
                     existing.get("sort_time") or 0
@@ -25859,8 +26335,11 @@ class MaintenancePortalService:
                 if not isinstance(event, dict):
                     continue
                 key = str(event.get("event_key") or "").strip()
-                if key and key not in event_map:
-                    event_map[key] = dict(event)
+                if key:
+                    if source_scope in DAILY_WORK_REPORT_SCOPES:
+                        event_scopes.setdefault(key, set()).add(source_scope)
+                    if key not in event_map:
+                        event_map[key] = dict(event)
         tasks = list(task_map.values())
         tasks.sort(
             key=lambda item: (
@@ -25870,20 +26349,81 @@ class MaintenancePortalService:
             reverse=True,
         )
         events = list(event_map.values())
-        sla_stats = {
-            "events": len(events),
-            "on_time": 0,
-            "late": 0,
-            "pending": 0,
-            "unknown": 0,
-        }
+        def sla_stats_for(items: list[dict[str, Any]]) -> dict[str, int]:
+            result = {
+                "events": len(items),
+                "on_time": 0,
+                "late": 0,
+                "pending": 0,
+                "unknown": 0,
+            }
+            for event in items:
+                for row in event.get("rows") or []:
+                    state = str(row.get("state") or "unknown")
+                    if state in result:
+                        result[state] += 1
+                if event.get("pending"):
+                    result["pending"] += 1
+            return result
+
+        def section_key(item: dict[str, Any], source_scopes: set[str]) -> str:
+            building_text = str(item.get("building") or "").strip()
+            building_codes = list(item.get("building_codes") or [])
+            codes = {
+                code
+                for code in (
+                    *self._building_codes_from_value(building_codes),
+                    *self._building_codes_from_value(building_text),
+                )
+                if code in DAILY_WORK_REPORT_SCOPES
+            }
+            upper_building = building_text.upper()
+            if (
+                len(codes) > 1
+                or len(source_scopes) > 1
+                or "园区" in building_text
+                or "CAMPUS" in upper_building
+                or upper_building == "ALL"
+            ):
+                return "CROSS"
+            if len(codes) == 1:
+                return next(iter(codes))
+            return "UNKNOWN"
+
+        section_specs = [
+            ("A", "A楼"),
+            ("B", "B楼"),
+            ("C", "C楼"),
+            ("D", "D楼"),
+            ("E", "E楼"),
+            ("CROSS", "跨楼栋/园区"),
+            ("UNKNOWN", "楼栋待确认"),
+        ]
+        tasks_by_section = {key: [] for key, _label in section_specs}
+        events_by_section = {key: [] for key, _label in section_specs}
+        for task in tasks:
+            key = str(task.get("task_id") or "")
+            tasks_by_section[section_key(task, task_scopes.get(key, set()))].append(task)
         for event in events:
-            for row in event.get("rows") or []:
-                state = str(row.get("state") or "unknown")
-                if state in sla_stats:
-                    sla_stats[state] += 1
-            if event.get("pending"):
-                sla_stats["pending"] += 1
+            key = str(event.get("event_key") or "")
+            events_by_section[section_key(event, event_scopes.get(key, set()))].append(event)
+        building_sections = []
+        for key, label in section_specs:
+            section_tasks = tasks_by_section[key]
+            section_events = events_by_section[key]
+            building_sections.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "stats": self._daily_report_stats(section_tasks),
+                    "categories": self._daily_report_groups(section_tasks),
+                    "tasks": section_tasks,
+                    "event_sla": {
+                        "stats": sla_stats_for(section_events),
+                        "events": section_events,
+                    },
+                }
+            )
         first = reports[0] if reports else {}
         return {
             "scope": "ALL_AE",
@@ -25893,7 +26433,8 @@ class MaintenancePortalService:
             "stats": self._daily_report_stats(tasks),
             "categories": self._daily_report_groups(tasks),
             "tasks": tasks,
-            "event_sla": {"stats": sla_stats, "events": events},
+            "event_sla": {"stats": sla_stats_for(events), "events": events},
+            "building_sections": building_sections,
             "warnings": list(dict.fromkeys(item for item in warnings if item)),
         }
 
@@ -25936,71 +26477,142 @@ class MaintenancePortalService:
             f"超时 {int(sla_stats.get('late') or 0)} · "
             f"待发送 {int(sla_stats.get('pending') or 0)}",
         ]
-        events = event_sla.get("events") or []
-        if events:
-            lines.extend(["", "**事件通告时效**"])
         action_labels = {"start": "新增", "update": "更新", "end": "结束"}
-        for event in events:
-            title = self._daily_report_markdown(event.get("title"))
-            level = self._daily_report_markdown(event.get("level"), limit=30)
-            occurrence = str(event.get("occurrence_time") or "")
-            lines.append(
-                f"**{title}** · {level} · {self._daily_report_markdown(event.get('status'), limit=20)}"
-            )
-            lines.append(f"　发生 {occurrence or '时间缺失'}")
-            for row in event.get("rows") or []:
-                state = str(row.get("state") or "unknown")
-                if state == "late":
-                    result_text = f"超时 {row.get('late_text') or '0分0秒'}"
-                elif state == "on_time":
-                    result_text = "达标"
-                else:
-                    result_text = "时间缺失，无法判定"
-                lines.append(
-                    f"　第{int(row.get('number') or 0)}条 "
-                    f"{action_labels.get(str(row.get('action') or ''), '通告')} "
-                    f"{str(row.get('response_time') or '')[11:19]} · {result_text}"
-                )
-            pending = event.get("pending")
-            if isinstance(pending, dict):
-                deadline = str(pending.get("deadline") or "")
-                lines.append(
-                    f"　第{int(pending.get('number') or 0)}条待发送"
-                    + (f" · 截止 {deadline[11:19]}" if deadline else "")
-                )
-            for recover_time in event.get("recoveries") or []:
-                lines.append(f"　恢复 {str(recover_time)[11:19]} · 不参与编号")
-            if event.get("historical_minute_precision"):
-                lines.append("　注：历史时间精度至分钟，按00秒核算")
-
-        task_lines: list[str] = []
         omitted = 0
-        for group in report.get("categories") or []:
-            if not isinstance(group, dict) or group.get("key") == "event":
-                continue
-            group_tasks = [item for item in group.get("tasks") or [] if isinstance(item, dict)]
-            if not group_tasks:
-                continue
-            section = ["", f"**{self._daily_report_markdown(group.get('label'), limit=20)} · {len(group_tasks)}项**"]
-            for task in group_tasks:
-                detail = " · ".join(
-                    item
-                    for item in (
-                        self._daily_report_markdown(task.get("time"), limit=10),
-                        self._daily_report_markdown(task.get("type_label"), limit=20),
-                        self._daily_report_markdown(task.get("title")),
-                        self._daily_report_markdown(task.get("status"), limit=20),
-                        self._daily_report_markdown(task.get("action_summary"), limit=50),
-                    )
-                    if item
+
+        def append_events(events: list[dict[str, Any]], heading: str) -> None:
+            if not events:
+                return
+            lines.extend(["", f"**{heading}**"])
+            for event in events:
+                title = self._daily_report_markdown(event.get("title"))
+                level = self._daily_report_markdown(event.get("level"), limit=30)
+                occurrence = str(event.get("occurrence_time") or "")
+                lines.append(
+                    f"**{title}** · {level} · "
+                    f"{self._daily_report_markdown(event.get('status'), limit=20)}"
                 )
-                candidate = f"· {detail}"
-                if len("\n".join(lines + task_lines + section + [candidate])) > 22000:
-                    omitted += 1
+                lines.append(f"　发生 {occurrence or '时间缺失'}")
+                for row in event.get("rows") or []:
+                    state = str(row.get("state") or "unknown")
+                    if state == "late":
+                        result_text = f"超时 {row.get('late_text') or '0分0秒'}"
+                    elif state == "on_time":
+                        result_text = "达标"
+                    else:
+                        result_text = "时间缺失，无法判定"
+                    lines.append(
+                        f"　第{int(row.get('number') or 0)}条 "
+                        f"{action_labels.get(str(row.get('action') or ''), '通告')} "
+                        f"{str(row.get('response_time') or '')[11:19]} · {result_text}"
+                    )
+                pending = event.get("pending")
+                if isinstance(pending, dict):
+                    deadline = str(pending.get("deadline") or "")
+                    lines.append(
+                        f"　第{int(pending.get('number') or 0)}条待发送"
+                        + (f" · 截止 {deadline[11:19]}" if deadline else "")
+                    )
+                for recover_time in event.get("recoveries") or []:
+                    lines.append(f"　恢复 {str(recover_time)[11:19]} · 不参与编号")
+                if event.get("historical_minute_precision"):
+                    lines.append("　注：历史时间精度至分钟，按00秒核算")
+
+        def append_tasks(groups: list[dict[str, Any]]) -> None:
+            nonlocal omitted
+            for group in groups:
+                if not isinstance(group, dict) or group.get("key") == "event":
                     continue
-                section.append(candidate)
-            task_lines.extend(section)
-        lines.extend(task_lines)
+                group_tasks = [
+                    item
+                    for item in group.get("tasks") or []
+                    if isinstance(item, dict)
+                ]
+                if not group_tasks:
+                    continue
+                lines.extend(
+                    [
+                        "",
+                        f"**{self._daily_report_markdown(group.get('label'), limit=20)}"
+                        f" · {len(group_tasks)}项**",
+                    ]
+                )
+                for task in group_tasks:
+                    water_detail = ""
+                    if str(task.get("category") or "") == "water":
+                        water_parts = []
+                        if task.get("level"):
+                            water_parts.append(f"当期耗水量 {task.get('level')}")
+                        if "water_current_value" in task:
+                            water_parts.extend(
+                                [
+                                    f"当前数值 {task.get('water_current_value')}",
+                                    f"上次数值 {task.get('water_previous_value')}",
+                                    f"变化率 {task.get('water_change_ratio')}",
+                                ]
+                            )
+                        water_detail = " · ".join(water_parts)
+                    detail = " · ".join(
+                        item
+                        for item in (
+                            self._daily_report_markdown(task.get("time"), limit=10),
+                            self._daily_report_markdown(task.get("type_label"), limit=20),
+                            self._daily_report_markdown(task.get("title")),
+                            self._daily_report_markdown(task.get("status"), limit=20),
+                            self._daily_report_markdown(task.get("action_summary"), limit=50),
+                            self._daily_report_markdown(water_detail, limit=160),
+                        )
+                        if item
+                    )
+                    candidate = f"· {detail}"
+                    if len("\n".join(lines + [candidate])) > 22000:
+                        omitted += 1
+                        continue
+                    lines.append(candidate)
+
+        building_sections = [
+            item
+            for item in report.get("building_sections") or []
+            if isinstance(item, dict)
+        ]
+        if building_sections:
+            for section in building_sections:
+                section_stats = section.get("stats") or {}
+                section_sla = section.get("event_sla") or {}
+                section_sla_stats = section_sla.get("stats") or {}
+                section_counts = {
+                    str(item.get("label") or ""): int(item.get("count") or 0)
+                    for item in section.get("categories") or []
+                    if isinstance(item, dict)
+                }
+                section_label = self._daily_report_markdown(
+                    section.get("label"), limit=30
+                )
+                lines.extend(
+                    [
+                        "",
+                        f"**{section_label} · {int(section_stats.get('total') or 0)}项**",
+                        f"进行中 {int(section_stats.get('ongoing') or 0)} · "
+                        f"已完成 {int(section_stats.get('completed') or 0)} · "
+                        f"需关注 {int(section_stats.get('attention') or 0)}",
+                        "分类 "
+                        + " · ".join(
+                            f"{label} {section_counts.get(label, 0)}"
+                            for label in ("通告", "事件", "检修", "维护单", "水耗")
+                        ),
+                        f"事件时效 达标 {int(section_sla_stats.get('on_time') or 0)} · "
+                        f"超时 {int(section_sla_stats.get('late') or 0)} · "
+                        f"待发送 {int(section_sla_stats.get('pending') or 0)}",
+                    ]
+                )
+                append_events(
+                    list(section_sla.get("events") or []),
+                    f"{section_label}事件通告时效",
+                )
+                append_tasks(list(section.get("categories") or []))
+        else:
+            append_events(list(event_sla.get("events") or []), "事件通告时效")
+            append_tasks(list(report.get("categories") or []))
         if omitted:
             lines.extend(["", f"还有 {omitted} 项详情请在每日任务页面查看。"])
         if not int(stats.get("total") or 0):
@@ -26205,13 +26817,26 @@ class MaintenancePortalService:
             else None
         )
         if not isinstance(report, dict) or not isinstance(card, dict):
-            report = self.get_daily_work_report_snapshot(
-                scope=normalized_scope,
-                report_end=report_end,
-            )
+            if normalized_scope == "ALL":
+                report = self._combine_daily_work_reports(
+                    [
+                        self.get_daily_work_report_snapshot(
+                            scope=building_scope,
+                            report_end=report_end,
+                        )
+                        for building_scope in DAILY_WORK_REPORT_SCOPES
+                    ]
+                )
+                scope_label = "A-E楼全楼"
+            else:
+                report = self.get_daily_work_report_snapshot(
+                    scope=normalized_scope,
+                    report_end=report_end,
+                )
+                scope_label = self._scope_label(normalized_scope)
             card = self.build_daily_work_report_card(
                 report,
-                scope_label=self._scope_label(normalized_scope),
+                scope_label=scope_label,
                 link_scope=normalized_scope,
             )
         else:

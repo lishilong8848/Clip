@@ -2244,9 +2244,9 @@ details.locked { opacity: .75; }
 .sheet-cell-text { position: relative; z-index: 1; }
 .sheet-preview-table img.sheet-template-image { position: absolute; z-index: 2; max-width: none; max-height: none; margin: 0; object-fit: contain; pointer-events: none; }
 .sheet-image-warning { position: sticky; left: 0; margin: 0; padding: 8px 10px; border-top: 1px solid #fde68a; background: #fffbeb; color: #92400e; font-size: 11px; font-weight: 800; }
-.sheet-signers { min-height: 34px; display: flex; align-items: center; justify-content: space-evenly; gap: 6px; }
+.sheet-signers { min-height: 34px; display: flex; align-items: center; justify-content: flex-start; gap: 2px; overflow: hidden; }
 .sheet-signers span { color: #31516f; font-family: "KaiTi", "STKaiti", serif; font-size: 13px; font-weight: 700; white-space: nowrap; }
-.sheet-signers img { min-width: 0; flex: 1 1 0; max-width: 120px; }
+.sheet-signers img { min-width: 0; flex: 1 1 0; max-width: 120px; margin: 0; object-fit: contain; }
 .sheet-table-wrap.compact { max-height: 480px; }
 
 .sticky-actions { position: sticky; bottom: 10px; z-index: 5; display: flex; align-items: center; flex-wrap: wrap; gap: 9px; border: 1px solid #cfe0ff; border-radius: 18px; padding: 10px; background: rgba(255,255,255,.96); box-shadow: 0 14px 34px rgba(0,47,135,.14); backdrop-filter: blur(10px); }

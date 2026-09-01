@@ -20,6 +20,7 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.drill_management import (  # noqa: E402
     DrillConflictError,
     DrillManagementService,
+    _horizontal_signature_layout,
     _parse_workbook,
     build_time_chain,
     detect_drill_configuration,
@@ -328,6 +329,22 @@ class DrillManagementTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(Exception, "尺寸过大"):
             normalize_drill_signature_png(oversized.getvalue())
+
+    def test_horizontal_signatures_pack_left_and_shrink_to_fit(self) -> None:
+        roomy = _horizontal_signature_layout([(160, 50)] * 3, 600, 40)
+        self.assertLessEqual(roomy[0][0], 4)
+        self.assertLessEqual(
+            max(
+                roomy[index + 1][0] - roomy[index][0] - roomy[index][2]
+                for index in range(len(roomy) - 1)
+            ),
+            3.01,
+        )
+        self.assertLess(roomy[-1][0] + roomy[-1][2], 600)
+
+        crowded = _horizontal_signature_layout([(160, 50)] * 10, 200, 40)
+        self.assertLessEqual(crowded[-1][0] + crowded[-1][2], 200)
+        self.assertTrue(all(width < 20 for _x, _y, width, _height in crowded))
 
     def test_new_drawing_is_inserted_before_later_worksheet_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
