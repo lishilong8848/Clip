@@ -25234,23 +25234,6 @@ class MaintenancePortalService:
     def _morning_meeting_normalized_title(value: Any) -> str:
         return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(value or "")).lower()
 
-    def _morning_meeting_day_in_range(
-        self,
-        day: dt.date,
-        start_value: Any,
-        end_value: Any,
-    ) -> bool:
-        start = self._history_datetime_from_values(start_value)
-        end = self._history_datetime_from_values(end_value)
-        if start and end:
-            left, right = sorted((start.date(), end.date()))
-            return left <= day <= right
-        if start:
-            return start.date() == day
-        if end:
-            return end.date() == day
-        return False
-
     def _morning_meeting_candidate(
         self,
         item: dict[str, Any],
@@ -25316,35 +25299,6 @@ class MaintenancePortalService:
             "origin_priority": origin_priority,
         }
 
-    def _morning_meeting_source_candidates(
-        self,
-        *,
-        day: dt.date,
-        source_snapshot: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        month = f"{day.month}月"
-        records = self._workbench_records(
-            month=month,
-            scope="ALL",
-            source_snapshot=source_snapshot,
-        )
-        candidates: list[dict[str, Any]] = []
-        for record in records:
-            payload = self._source_snapshot_active_payload(record)
-            if not self._morning_meeting_day_in_range(
-                day,
-                payload.get("start_time"),
-                payload.get("end_time"),
-            ):
-                continue
-            candidate = self._morning_meeting_candidate(
-                payload,
-                origin_priority=0,
-            )
-            if candidate:
-                candidates.append(candidate)
-        return candidates
-
     def _morning_meeting_active_candidates(self) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         active_items = self._project_ongoing_items(
@@ -25352,6 +25306,9 @@ class MaintenancePortalService:
             self._state_store.list_visible_qt_active_items(),
         )
         for item in active_items:
+            target_id = canonical_target_record_id(item)
+            if not target_id or is_local_record_id(target_id):
+                continue
             if self._target_status_is_finished(item.get("status")):
                 continue
             candidate = self._morning_meeting_candidate(
@@ -25380,6 +25337,11 @@ class MaintenancePortalService:
             if str(item.get("status") or "").strip() in {"已删除", "删除"}:
                 continue
             if actions and str(actions[-1].get("action") or "") == "delete":
+                continue
+            if not self._target_status_is_finished(item.get("status")) and not any(
+                str(action.get("action") or "") == "end"
+                for action in actions
+            ):
                 continue
             candidate = self._morning_meeting_candidate(
                 item,
@@ -25462,15 +25424,8 @@ class MaintenancePortalService:
         today = dt.datetime.now().astimezone().date()
         if date_key != today.isoformat():
             raise PortalConflictError("晨会表格只支持生成当天数据。")
-        source_snapshot = self._state_store.get_source_scope_snapshot("ALL")
-        if not source_snapshot.get("exists"):
-            raise PortalConflictError("通告源表快照尚未就绪，请先刷新数据。")
         candidates = self._morning_meeting_merge_candidates(
             [
-                *self._morning_meeting_source_candidates(
-                    day=today,
-                    source_snapshot=source_snapshot,
-                ),
                 *self._morning_meeting_active_candidates(),
                 *self._morning_meeting_daily_candidates(date_key=date_key),
             ]
@@ -25518,6 +25473,7 @@ class MaintenancePortalService:
         ) or {}
         generated_path = Path(str(generated.get("file_path") or ""))
         generated_available = generated_path.is_file()
+        source_snapshot = self._state_store.get_source_scope_snapshot("ALL")
         updated_at = float(source_snapshot.get("updated_at") or 0)
         result = {
             "date": date_key,

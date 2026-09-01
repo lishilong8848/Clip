@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import inspect
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,10 +15,22 @@ if str(BIN_DIR) not in sys.path:
 from upload_event_module.ui import main_window_runtime
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin
 from upload_event_module.ui.settings_dialog import SettingsDialog
-from upload_event_module.config import ConfigManager
+from upload_event_module.config import (
+    ConfigManager,
+    DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL,
+)
 
 
 class SettingsSaveRuntimeTests(unittest.TestCase):
+    def test_settings_save_submits_blocking_work_to_background_executor(self) -> None:
+        source = inspect.getsource(SettingsDialog.save_settings)
+        self.assertIn("def run()", source)
+        self.assertIn("self._relay_health_executor.submit(run)", source)
+        self.assertGreater(source.index("config.save("), source.index("def run()"))
+
+    def test_public_relay_url_has_no_hard_coded_default(self) -> None:
+        self.assertEqual(DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL, "")
+
     def test_public_relay_url_change_is_blocked_by_open_public_group(self) -> None:
         manager = ConfigManager.__new__(ConfigManager)
         manager.polling_work_order_public_relay_url = "https://old.example"

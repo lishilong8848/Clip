@@ -119,6 +119,7 @@ class MorningMeetingTests(unittest.TestCase):
             {
                 "work_type": "power",
                 "active_item_id": "manual-power",
+                "target_record_id": "target-power",
                 "title": "园区上电操作",
                 "building": "园区",
                 "building_code": "CAMPUS",
@@ -127,7 +128,15 @@ class MorningMeetingTests(unittest.TestCase):
             {
                 "work_type": "adjust",
                 "active_item_id": "manual-unknown",
+                "target_record_id": "target-unknown",
                 "title": "待确认楼栋调整",
+                "status": "开始",
+            },
+            {
+                "work_type": "maintenance",
+                "active_item_id": "draft-maintenance",
+                "title": "未上传本地草稿",
+                "building_codes": ["D"],
                 "status": "开始",
             },
             {
@@ -187,13 +196,13 @@ class MorningMeetingTests(unittest.TestCase):
         value = cell.find(f"{{{_MAIN_NS}}}v")
         return "" if value is None else str(value.text or "")
 
-    def test_preview_merges_plans_active_and_completed_by_building(self) -> None:
+    def test_preview_only_includes_ongoing_targets_and_completed_today(self) -> None:
         preview = self._service().get_morning_meeting_preview(
             date=dt.date.today().isoformat()
         )
         rows = {item["scope"]: item["lines"] for item in preview["rows"]}
 
-        self.assertEqual(rows["A"], ["值班巡检", "A楼水质检查", "A、B楼联合变更"])
+        self.assertEqual(rows["A"], ["值班巡检", "A、B楼联合变更"])
         self.assertEqual(rows["B"], ["值班巡检", "A、B楼联合变更"])
         self.assertEqual(rows["C"], ["值班巡检"])
         self.assertEqual(rows["E"], ["值班巡检", "E楼当天结束检修"])
@@ -208,6 +217,8 @@ class MorningMeetingTests(unittest.TestCase):
         )
         self.assertEqual(rows["110"], ["值班巡检", "110站上电操作"])
         self.assertNotIn("未来检修", str(rows))
+        self.assertNotIn("A楼水质检查", str(rows))
+        self.assertNotIn("未上传本地草稿", str(rows))
         self.assertNotIn("不应出现的事件", str(rows))
         self.assertNotIn("已删除调整", str(rows))
         self.assertEqual(rows["A"].count("A、B楼联合变更"), 1)
@@ -259,7 +270,8 @@ class MorningMeetingTests(unittest.TestCase):
             self.assertEqual(self._cell_text(sheet, "F2"), "27.1")
             self.assertEqual(self._cell_text(sheet, "H2"), "25.2")
             self.assertIn("1、值班巡检", self._cell_text(sheet, "B4"))
-            self.assertIn("A楼水质检查", self._cell_text(sheet, "B4"))
+            self.assertIn("A、B楼联合变更", self._cell_text(sheet, "B4"))
+            self.assertNotIn("A楼水质检查", self._cell_text(sheet, "B4"))
             page_setup = sheet.find(f"{{{_MAIN_NS}}}pageSetup")
             self.assertEqual(page_setup.attrib.get("orientation"), "landscape")
             self.assertEqual(page_setup.attrib.get("fitToWidth"), "1")

@@ -15,7 +15,7 @@
 
   <main v-else class="drill-page">
     <header class="drill-page__header">
-      <VnetBackButton :disabled="busy" @click="leavePage" />
+      <VnetBackButton @click="leavePage" />
       <div class="drill-page__title">
         <span>演练管理</span>
         <h1>{{ pageTitle }}</h1>
@@ -629,7 +629,7 @@ const SheetTable = defineComponent({
         style: columnWidthStyle(tableProps.model, columnIndex),
       }));
       return h("div", { class: ["sheet-table-wrap", { compact: tableProps.compact }] }, [
-        h("table", { class: "sheet-preview-table" }, [h("colgroup", columns), h("tbody", rows)]),
+        h("table", { class: "sheet-preview-table", style: sheetTableStyle(tableProps.model) }, [h("colgroup", columns), h("tbody", rows)]),
         tableProps.model.images_truncated
           ? h("p", { class: "sheet-image-warning", role: "status" }, "模板图片较多，当前预览仅显示前 20 张；生成的 Excel 不受影响。")
           : null,
@@ -809,19 +809,21 @@ const generateValidationErrors = computed(() => validateExecution());
 const canGenerate = computed(() => Boolean(execution.value && executionSteps.value.length && !generateValidationErrors.value.length));
 const generateDisabledReason = computed(() => generateValidationErrors.value[0] || "");
 const printFrameStyle = computed<Dict>(() => {
-  const portrait = printSheet.value === "record";
+  const portrait = String(printModel.value.orientation || (printSheet.value === "record" ? "portrait" : "landscape")) !== "landscape";
+  const margins = printPageMargins();
   return {
-    width: `${portrait ? 756 : 1085}px`,
-    height: `${portrait ? 1085 : 756}px`,
+    width: `${Math.max(1, (portrait ? 793.7 : 1122.5) - margins.left - margins.right)}px`,
+    height: `${Math.max(1, (portrait ? 1122.5 : 793.7) - margins.top - margins.bottom)}px`,
   };
 });
 const printSheetStyle = computed<Dict>(() => {
-  const portrait = printSheet.value === "record";
-  const availableWidth = portrait ? 756 : 1085;
-  const availableHeight = portrait ? 1085 : 756;
+  const availableWidth = Number.parseFloat(String(printFrameStyle.value.width || 1));
+  const availableHeight = Number.parseFloat(String(printFrameStyle.value.height || 1));
   const sheetWidth = Math.max(1, Number(printModel.value.sheet_width_px || 1));
   const sheetHeight = Math.max(1, Number(printModel.value.sheet_height_px || 1));
-  const scale = Math.min(availableWidth / sheetWidth, availableHeight / sheetHeight);
+  const configuredScale = Number(printModel.value.page_scale || 0) / 100;
+  const fitScale = Math.min(availableWidth / sheetWidth, availableHeight / sheetHeight);
+  const scale = configuredScale > 0 ? Math.min(configuredScale, fitScale) : fitScale;
   return {
     width: `${sheetWidth}px`,
     height: `${sheetHeight}px`,
@@ -1524,7 +1526,9 @@ async function loadPrintModel(): Promise<void> {
 function installPrintStyle(): void {
   printStyle?.remove();
   printStyle = document.createElement("style");
-  printStyle.textContent = `@page { size: A4 ${printSheet.value === "assessment" ? "landscape" : "portrait"}; margin: 5mm; }`;
+  const orientation = String(printModel.value.orientation || (printSheet.value === "assessment" ? "landscape" : "portrait"));
+  const margins = printModel.value.page_margins || {};
+  printStyle.textContent = `@page { size: A4 ${orientation}; margin: ${Number(margins.top ?? .2)}in ${Number(margins.right ?? .2)}in ${Number(margins.bottom ?? .2)}in ${Number(margins.left ?? .2)}in; }`;
   document.head.appendChild(printStyle);
 }
 
@@ -1776,7 +1780,7 @@ function statusLabel(status: unknown): string {
     archived: "已归档",
     queued: "等待生成",
     generating: "生成中",
-    syncing: "正在同步",
+    syncing: "正在同步（可返回）",
     sync_pending: "等待同步",
     synced: "已同步",
     completed: "已完成",
@@ -1904,7 +1908,7 @@ function sheetCellContent(cell: SheetCell): ReturnType<typeof h>[] | string {
   const directUrl = String(signature.image_data_url || signature.image_url || signature.signature_url || cell.image_url || cell.signature_url || cell.src || "");
   const content: ReturnType<typeof h>[] = [];
   if (directUrl) {
-    content.push(h("img", { src: directUrl, alt: cell.text || "签名", onLoad: markPrintImageLoaded }));
+    content.push(h("img", { class: "sheet-signature-image", src: directUrl, alt: cell.text || "签名", onLoad: markPrintImageLoaded }));
   } else if (arrayFrom(signature.signers).length) {
     content.push(h("div", { class: "sheet-signers" }, arrayFrom(signature.signers).map((signer: Dict, index: number) => {
       const imageUrl = String(signer.image_url || signer.signature_url || "");
@@ -1980,6 +1984,23 @@ function sheetCellAddress(rowIndex: number, columnIndex: number): string {
 function columnWidthStyle(model: Dict, columnIndex: number): Dict {
   const width = model.column_widths?.[String(columnIndex)] ?? model.column_widths?.[columnIndex];
   return width ? { width: `${Number(width)}px` } : {};
+}
+
+function sheetTableStyle(model: Dict): Dict {
+  return {
+    width: `${Math.max(1, Number(model.sheet_width_px || 1))}px`,
+    tableLayout: "fixed",
+  };
+}
+
+function printPageMargins(): Record<"top" | "right" | "bottom" | "left", number> {
+  const margins = printModel.value.page_margins || {};
+  return {
+    top: Number(margins.top ?? .2) * 96,
+    right: Number(margins.right ?? .2) * 96,
+    bottom: Number(margins.bottom ?? .2) * 96,
+    left: Number(margins.left ?? .2) * 96,
+  };
 }
 
 function rowHeightStyle(model: Dict, rowIndex: number): Dict {
@@ -2233,13 +2254,15 @@ details.locked { opacity: .75; }
 .mapping-grid.compact { grid-template-columns: repeat(5, minmax(100px,1fr)); }
 
 .step-table-wrap, .sheet-table-wrap { min-width: 0; overflow: auto; border: 1px solid #dbe7f5; border-radius: 14px; background: #fff; }
-.step-table, .sheet-preview-table { width: 100%; border-collapse: collapse; }
-.step-table th, .step-table td, .sheet-preview-table td { border: 1px solid #dbe3ee; padding: 8px; color: #334155; font-size: 12px; line-height: 1.5; vertical-align: middle; }
+.step-table, .sheet-preview-table { border-collapse: collapse; }
+.step-table { width: 100%; }
+.step-table th, .step-table td { border: 1px solid #dbe3ee; padding: 8px; color: #334155; font-size: 12px; line-height: 1.5; vertical-align: middle; }
 .step-table th { background: #eff6ff; color: #0f4fb8; text-align: left; white-space: nowrap; }
 .step-table td:nth-child(3) { min-width: 300px; }
 .step-table input { width: 76px; }
-.sheet-preview-table td { min-width: 48px; white-space: pre-wrap; text-align: center; }
+.sheet-preview-table td { box-sizing: border-box; padding: 1px 3px; color: #000; font-size: 11pt; line-height: 1.2; white-space: pre-wrap; text-align: center; vertical-align: middle; }
 .sheet-preview-table img { display: block; max-width: 100%; max-height: 76px; margin: auto; object-fit: contain; }
+.sheet-preview-table img.sheet-signature-image { width: 100%; height: 100%; max-height: none; margin: 0; }
 .sheet-preview-table td.sheet-cell-has-image { position: relative; overflow: visible; }
 .sheet-cell-text { position: relative; z-index: 1; }
 .sheet-preview-table img.sheet-template-image { position: absolute; z-index: 2; max-width: none; max-height: none; margin: 0; object-fit: contain; pointer-events: none; }

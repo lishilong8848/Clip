@@ -18,6 +18,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from lan_bitable_template_portal.drill_management import (  # noqa: E402
+    DRILL_EXECUTION_NAMESPACE,
     DrillConflictError,
     DrillManagementService,
     _horizontal_signature_layout,
@@ -249,6 +250,35 @@ def _duplicate_workbook_part(source: bytes) -> bytes:
 
 
 class DrillManagementTests(unittest.TestCase):
+    def test_pending_counts_use_published_execution_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            service = DrillManagementService(
+                store, data_root=Path(temporary) / "drills"
+            )
+            definitions = [
+                {"drill_id": "d1", "status": "published"},
+                {"drill_id": "d2", "status": "published"},
+                {"drill_id": "draft", "status": "draft"},
+            ]
+            for key, payload in {
+                "d1:A": {"drill_id": "d1", "scope": "A", "status": "synced"},
+                "d2:A": {"drill_id": "d2", "scope": "A", "status": "syncing"},
+                "d1:B": {"drill_id": "d1", "scope": "B", "status": "draft"},
+                "d2:B": {
+                    "drill_id": "d2",
+                    "scope": "B",
+                    "status": "sync_pending",
+                    "last_error": "同步失败",
+                },
+            }.items():
+                store.put_document(DRILL_EXECUTION_NAMESPACE, key, payload)
+
+            self.assertEqual(
+                service.pending_counts(definitions, ["A", "B", "C"]),
+                {"A": 0, "B": 2, "C": 2},
+            )
+
     @unittest.skipUnless(
         Path(r"D:\下载\21V-JSNTFOC-EOP-PD-306 机柜单路断电故障应急处理流程V1.3.xlsx").is_file(),
         "reference drill workbook is not available",
@@ -532,6 +562,7 @@ class DrillManagementTests(unittest.TestCase):
             self.assertEqual(preview["cell_styles"]["C2"]["font_size"], 16.0)
             self.assertEqual(preview["cell_styles"]["C2"]["fill"], "#FFCC00")
             self.assertEqual(preview["cell_styles"]["C2"]["borders"]["bottom"]["style"], "thin")
+            self.assertEqual(preview["cell_styles"]["C2"]["borders"]["right"]["style"], "thin")
             self.assertGreater(preview["sheet_width_px"], 0)
             self.assertGreater(preview["sheet_height_px"], 0)
             people = [
@@ -591,9 +622,29 @@ class DrillManagementTests(unittest.TestCase):
             self.assertEqual(record["cells"]["C5"], "南通机房E楼")
             self.assertEqual(record["cells"]["C8"], "")
             self.assertEqual(record["cells"]["C10"], "")
+            for reference in ("F13", "G13"):
+                self.assertEqual(record["cell_styles"][reference]["align"], "center")
+                self.assertEqual(
+                    record["cell_styles"][reference]["vertical_align"], "center"
+                )
+            for reference in ("G6", "J6"):
+                self.assertEqual(
+                    assessment["cell_styles"][reference]["align"], "center"
+                )
+                self.assertEqual(
+                    assessment["cell_styles"][reference]["vertical_align"],
+                    "center",
+                )
             print_model = service.print_model(definition["drill_id"], "E", "record")
             self.assertTrue(print_model["generated_current"])
             self.assertTrue({"C8", "C10:I10"}.issubset({item["range"] for item in print_model["signature_cells"]}))
+            assessment_print = service.print_model(
+                definition["drill_id"], "E", "assessment"
+            )
+            self.assertEqual(
+                {item["range"] for item in assessment_print["signature_cells"]},
+                {definition["configuration"]["mapping"]["assessment"]["participants"]},
+            )
             syncing = service.begin_sync(
                 definition["drill_id"],
                 "E",

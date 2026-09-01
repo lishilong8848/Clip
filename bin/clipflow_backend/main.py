@@ -185,6 +185,7 @@ from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.drill_management import (
     DrillManagementService,
+    drill_signature_layout,
     normalize_drill_signature_png,
 )
 from upload_event_module.config import config
@@ -3776,6 +3777,11 @@ class FastAPIPortalController:
                         for item in definitions
                         if str(item.get("status") or "") == "published"
                     ]
+                pending_counts = await asyncio.to_thread(
+                    self._drills.pending_counts,
+                    definitions,
+                    scope_codes,
+                )
                 people = (
                     await asyncio.to_thread(self._drill_people, scope)
                     if scope
@@ -3791,7 +3797,7 @@ class FastAPIPortalController:
                                 "scope": code,
                                 "label": f"{code}楼",
                                 "authorized": True,
-                                "pending": 0,
+                                "pending": int(pending_counts.get(code) or 0),
                             }
                             for code in scope_codes
                         ],
@@ -10923,15 +10929,9 @@ class FastAPIPortalController:
             width = max(48, min(1600, int(cell.get("width_px") or 320)))
             height = max(32, min(1000, int(cell.get("height_px") or 96)))
             layout = str(cell.get("layout") or "grid").strip().lower()
-            if layout == "vertical":
-                columns, rows = 1, len(signers)
-            else:
-                columns = min(5, len(signers))
-                rows = max(1, (len(signers) + columns - 1) // columns)
             canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
-            slot_width = max(1, width // columns)
-            slot_height = max(1, height // rows)
-            for index, signer in enumerate(signers):
+            prepared = []
+            for signer in signers:
                 record_id = str(signer.get("record_id") or "").strip()
                 try:
                     signature_bytes = PortalRuntime.service.signature_image_bytes(
@@ -10940,19 +10940,26 @@ class FastAPIPortalController:
                     signature_bytes = normalize_drill_signature_png(signature_bytes)
                     with Image.open(io.BytesIO(signature_bytes)) as source:
                         image = source.convert("RGBA")
-                        image.thumbnail(
-                            (max(1, slot_width - 8), max(1, slot_height - 8)),
-                            Image.Resampling.LANCZOS,
-                        )
-                        column = index % columns
-                        row = index // columns
-                        left = column * slot_width + max(0, (slot_width - image.width) // 2)
-                        top = row * slot_height + max(0, (slot_height - image.height) // 2)
-                        canvas.alpha_composite(image, (left, top))
+                        image.load()
+                        prepared.append(image)
                 except Exception as exc:
                     if required:
                         name = str(signer.get("name") or record_id or "未知人员")
                         raise PortalError(f"无法读取{name}的签名：{exc}") from exc
+            positions = drill_signature_layout(
+                [(image.width, image.height) for image in prepared],
+                width,
+                height,
+                layout,
+            )
+            for image, (left, top, image_width, image_height) in zip(
+                prepared, positions
+            ):
+                resized = image.resize(
+                    (max(1, round(image_width)), max(1, round(image_height))),
+                    Image.Resampling.LANCZOS,
+                )
+                canvas.alpha_composite(resized, (round(left), round(top)))
             output = io.BytesIO()
             canvas.save(output, format="PNG", optimize=True)
             cell["image_data_url"] = (

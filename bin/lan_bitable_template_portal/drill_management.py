@@ -537,6 +537,28 @@ def _parse_workbook(
                     continue
                 for col in range(max(1, left), min(right, 200) + 1):
                     column_widths[col] = width
+            page_setup = root.find(f"{{{_MAIN_NS}}}pageSetup")
+            orientation = str(
+                (page_setup.attrib.get("orientation") if page_setup is not None else "")
+                or "portrait"
+            ).lower()
+            try:
+                page_scale = int(
+                    (page_setup.attrib.get("scale") if page_setup is not None else 0)
+                    or 0
+                )
+            except (TypeError, ValueError):
+                page_scale = 0
+            page_margins_node = root.find(f"{{{_MAIN_NS}}}pageMargins")
+            page_margins = {}
+            if page_margins_node is not None:
+                for edge in ("top", "right", "bottom", "left"):
+                    try:
+                        page_margins[edge] = float(
+                            page_margins_node.attrib.get(edge) or 0
+                        )
+                    except (TypeError, ValueError):
+                        pass
             connectors: list[dict[str, int]] = []
             preview_images: list[dict[str, Any]] = []
             preview_images_truncated = False
@@ -606,6 +628,11 @@ def _parse_workbook(
                     "row_heights": row_heights,
                     "default_col_width": default_col_width,
                     "column_widths": column_widths,
+                    "orientation": orientation
+                    if orientation in {"portrait", "landscape"}
+                    else "portrait",
+                    "page_scale": page_scale if page_scale in range(10, 401) else 0,
+                    "page_margins": page_margins,
                     "connectors": connectors,
                     "preview_images": preview_images,
                     "preview_images_truncated": preview_images_truncated,
@@ -1125,7 +1152,7 @@ def _derived_values(
     assessment = mapping["assessment"]
     assessment_values: dict[str, str | int | float] = {
         _cell_target(assessment["drill_name"]): str(definition.get("name") or ""),
-        _cell_target(assessment["participants"]): "、".join(item["name"] for item in participants),
+        _cell_target(assessment["participants"]): "",
         _cell_target(assessment["total_score"]): 100,
     }
     if drill_date:
@@ -1139,24 +1166,34 @@ def _derived_values(
         assessment_values[str(score_row["score_cell"])] = score_row["score"]
     signature_cells = [
         {
+            "sheet_type": "record",
             "range": mapping["commander"],
             "layout": "grid",
             "signers": [commander],
         },
         {
+            "sheet_type": "record",
             "range": mapping["participants"],
             "layout": "grid",
             "signers": participants,
         },
         {
+            "sheet_type": "record",
             "range": mapping["participant_signatures"],
             "layout": "grid",
             "signers": participants,
         },
         {
+            "sheet_type": "record",
             "range": mapping["recorder_signature"],
             "layout": "grid",
             "signers": [commander],
+        },
+        {
+            "sheet_type": "assessment",
+            "range": assessment["participants"],
+            "layout": "grid",
+            "signers": participants,
         },
     ]
     step_signers = execution.get("step_signers") if isinstance(execution.get("step_signers"), dict) else {}
@@ -1166,6 +1203,7 @@ def _derived_values(
         signers = [participant_by_id.get(str(record_id or ""), {}) for record_id in step_signers.get(str(row), [])]
         signature_cells.append(
             {
+                "sheet_type": "record",
                 "range": f"{step_mapping['executor_col']}{row}",
                 "layout": "vertical",
                 "signers": [item for item in signers if item],
@@ -1429,6 +1467,36 @@ def _horizontal_signature_layout(
     return placements
 
 
+def drill_signature_layout(
+    image_sizes: list[tuple[int, int]],
+    area_width: float,
+    area_height: float,
+    layout: str,
+) -> list[tuple[float, float, float, float]]:
+    if str(layout or "").strip().lower() != "vertical":
+        return _horizontal_signature_layout(image_sizes, area_width, area_height)
+    if not image_sizes:
+        return []
+    slot_height = area_height / len(image_sizes)
+    positions = []
+    for index, (source_width, source_height) in enumerate(image_sizes):
+        padding = min(5.0, area_width * 0.08, slot_height * 0.08)
+        scale = min(
+            max(1.0, area_width - padding * 2) / source_width,
+            max(1.0, slot_height - padding * 2) / source_height,
+        )
+        width, height = source_width * scale, source_height * scale
+        positions.append(
+            (
+                (area_width - width) / 2,
+                index * slot_height + (slot_height - height) / 2,
+                width,
+                height,
+            )
+        )
+    return positions
+
+
 def normalize_drill_signature_png(content: bytes) -> bytes:
     content = bytes(content or b"")
     if not content or len(content) > DRILL_MAX_SIGNATURE_BYTES:
@@ -1475,7 +1543,7 @@ def _ensure_drawing_parts(
     sheet: dict[str, Any],
     sheet_root: ET.Element,
 ) -> tuple[str, ET.Element, str, ET.Element]:
-    names = set(archive.namelist()) | set(additions)
+    names = set(archive.namelist()) | set(additions) | set(replacements)
     sheet_path = str(sheet["path"])
     sheet_rels_path = _sheet_relationship_path(sheet_path)
     if sheet_rels_path in replacements:
@@ -1574,6 +1642,40 @@ def _set_inline_text(sheet_root: ET.Element, reference: str, value: Any) -> None
     text_node.text = text
 
 
+def _center_cells(
+    sheet_root: ET.Element,
+    styles_root: ET.Element,
+    references: list[str],
+    centered_styles: dict[int, int],
+) -> None:
+    cell_xfs = styles_root.find(f"{{{_MAIN_NS}}}cellXfs")
+    if cell_xfs is None:
+        raise DrillError("演练文件缺少单元格样式定义。")
+    cells = {
+        str(cell.attrib.get("r") or "").replace("$", "").upper(): cell
+        for cell in sheet_root.findall(f".//{{{_MAIN_NS}}}c")
+    }
+    for reference in references:
+        cell = cells.get(_cell_target(reference))
+        if cell is None:
+            continue
+        base_id = int(cell.attrib.get("s") or 0)
+        if base_id not in centered_styles:
+            try:
+                centered = copy.deepcopy(list(cell_xfs)[base_id])
+            except IndexError as exc:
+                raise DrillError("演练文件的单元格样式索引无效。") from exc
+            alignment = centered.find(f"{{{_MAIN_NS}}}alignment")
+            if alignment is None:
+                alignment = ET.SubElement(centered, f"{{{_MAIN_NS}}}alignment")
+            alignment.attrib.update({"horizontal": "center", "vertical": "center"})
+            centered.attrib["applyAlignment"] = "1"
+            cell_xfs.append(centered)
+            centered_styles[base_id] = len(cell_xfs) - 1
+        cell.attrib["s"] = str(centered_styles[base_id])
+    cell_xfs.attrib["count"] = str(len(cell_xfs))
+
+
 def _append_signature_anchor(
     drawing_root: ET.Element,
     *,
@@ -1638,125 +1740,151 @@ def _patch_workbook(
             record_sheet["path"]: ET.fromstring(archive.read(record_sheet["path"])),
             assessment_sheet["path"]: ET.fromstring(archive.read(assessment_sheet["path"])),
         }
+        styles_root = ET.fromstring(archive.read("xl/styles.xml"))
         for reference, value in (derived.get("record_values") or {}).items():
             _set_inline_text(sheet_roots[record_sheet["path"]], reference, value)
         for reference, value in (derived.get("assessment_values") or {}).items():
             _set_inline_text(sheet_roots[assessment_sheet["path"]], reference, value)
-        drawing_path, drawing_root, drawing_rels_path, drawing_rels_root = _ensure_drawing_parts(
-            replacements, additions, archive, record_sheet, sheet_roots[record_sheet["path"]]
+        step_mapping = configuration["mapping"]["steps"]
+        centered_styles: dict[int, int] = {}
+        _center_cells(
+            sheet_roots[record_sheet["path"]],
+            styles_root,
+            [
+                f"{column}{int(step['row'])}"
+                for step in configuration.get("steps") or []
+                for column in (step_mapping["start_col"], step_mapping["end_col"])
+            ],
+            centered_styles,
         )
-        existing_ids = [
-            int(item.attrib.get("id") or 0)
-            for item in drawing_root.findall(f".//{{{_XDR_NS}}}cNvPr")
-            if str(item.attrib.get("id") or "").isdigit()
-        ]
-        shape_id = max(existing_ids or [0]) + 1
-        image_relations: dict[str, str] = {}
-        for placement in derived.get("signature_cells") or []:
-            signers = [item for item in placement.get("signers") or [] if str(item.get("record_id") or "")]
-            if not signers:
+        assessment_mapping = configuration["mapping"]["assessment"]
+        _center_cells(
+            sheet_roots[assessment_sheet["path"]],
+            styles_root,
+            [assessment_mapping["start_time"], assessment_mapping["end_time"]],
+            centered_styles,
+        )
+        replacements["xl/styles.xml"] = ET.tostring(
+            styles_root, encoding="utf-8", xml_declaration=True
+        )
+        drawing_paths: list[str] = []
+        for sheet_type, current_sheet in (
+            ("record", record_sheet),
+            ("assessment", assessment_sheet),
+        ):
+            placements = [
+                item
+                for item in derived.get("signature_cells") or []
+                if str(item.get("sheet_type") or "record") == sheet_type
+            ]
+            if not placements:
                 continue
-            row1, col1, _row2, _col2, area_width, area_height = _row_col_pixels(record_sheet, str(placement["range"]))
-            count = len(signers)
-            prepared = []
-            for signer in signers:
-                record_id = str(signer.get("record_id") or "")
-                content = signatures.get(record_id)
-                if not content:
-                    raise DrillError(f"{signer.get('name') or record_id}缺少可用签名。")
-                prepared.append((signer, content, _image_dimensions(content)))
-            if placement.get("layout") == "vertical":
-                slot_height = area_height / count
-                positions = []
-                for index, (_signer, _content, (source_width, source_height)) in enumerate(prepared):
-                    padding = min(5.0, area_width * 0.08, slot_height * 0.08)
-                    scale = min(
-                        max(1.0, area_width - padding * 2) / source_width,
-                        max(1.0, slot_height - padding * 2) / source_height,
-                    )
-                    width, height = source_width * scale, source_height * scale
-                    positions.append(
-                        (
-                            (area_width - width) / 2,
-                            index * slot_height + (slot_height - height) / 2,
-                            width,
-                            height,
-                        )
-                    )
-            else:
-                positions = _horizontal_signature_layout(
+            drawing_path, drawing_root, drawing_rels_path, drawing_rels_root = _ensure_drawing_parts(
+                replacements,
+                additions,
+                archive,
+                current_sheet,
+                sheet_roots[current_sheet["path"]],
+            )
+            drawing_paths.append(drawing_path)
+            existing_ids = [
+                int(item.attrib.get("id") or 0)
+                for item in drawing_root.findall(f".//{{{_XDR_NS}}}cNvPr")
+                if str(item.attrib.get("id") or "").isdigit()
+            ]
+            shape_id = max(existing_ids or [0]) + 1
+            image_relations: dict[str, str] = {}
+            for placement in placements:
+                signers = [item for item in placement.get("signers") or [] if str(item.get("record_id") or "")]
+                if not signers:
+                    continue
+                row1, col1, _row2, _col2, area_width, area_height = _row_col_pixels(
+                    current_sheet, str(placement["range"])
+                )
+                prepared = []
+                for signer in signers:
+                    record_id = str(signer.get("record_id") or "")
+                    content = signatures.get(record_id)
+                    if not content:
+                        raise DrillError(f"{signer.get('name') or record_id}缺少可用签名。")
+                    prepared.append((signer, content, _image_dimensions(content)))
+                positions = drill_signature_layout(
                     [size for _signer, _content, size in prepared],
                     area_width,
                     area_height,
+                    str(placement.get("layout") or ""),
                 )
-            for (signer, content, _source_size), (x, y, width, height) in zip(
-                prepared, positions
-            ):
-                digest = hashlib.sha256(content).hexdigest()
-                media_name = f"xl/media/drill_signature_{digest}.png"
-                suffix = 0
-                while media_name in archive_names or media_name in additions:
-                    existing = (
-                        additions.get(media_name)
-                        if media_name in additions
-                        else archive.read(media_name)
+                for (signer, content, _source_size), (x, y, width, height) in zip(
+                    prepared, positions
+                ):
+                    digest = hashlib.sha256(content).hexdigest()
+                    media_name = f"xl/media/drill_signature_{digest}.png"
+                    suffix = 0
+                    while media_name in archive_names or media_name in additions:
+                        existing = (
+                            additions.get(media_name)
+                            if media_name in additions
+                            else archive.read(media_name)
+                        )
+                        if existing == content:
+                            break
+                        suffix += 1
+                        media_name = f"xl/media/drill_signature_{digest}_{suffix}.png"
+                    if media_name not in archive_names:
+                        additions.setdefault(media_name, content)
+                    rel_id = image_relations.get(digest)
+                    if not rel_id:
+                        rel_id = _next_rid(drawing_rels_root)
+                        ET.SubElement(
+                            drawing_rels_root,
+                            f"{{{_PKG_REL_NS}}}Relationship",
+                            {
+                                "Id": rel_id,
+                                "Type": f"{_DOC_REL_NS}/image",
+                                "Target": posixpath.relpath(media_name, posixpath.dirname(drawing_path)),
+                            },
+                        )
+                        image_relations[digest] = rel_id
+                    anchor_row, anchor_col, x, y = _anchor_from_offset(
+                        current_sheet, row1, col1, x, y
                     )
-                    if existing == content:
-                        break
-                    suffix += 1
-                    media_name = (
-                        f"xl/media/drill_signature_{digest}_{suffix}.png"
+                    _append_signature_anchor(
+                        drawing_root,
+                        rel_id=rel_id,
+                        shape_id=shape_id,
+                        name=f"演练签名-{shape_id}",
+                        row=anchor_row,
+                        col=anchor_col,
+                        col_offset_px=x,
+                        row_offset_px=y,
+                        width_px=width,
+                        height_px=height,
                     )
-                if media_name not in archive_names:
-                    additions.setdefault(media_name, content)
-                rel_id = image_relations.get(digest)
-                if not rel_id:
-                    rel_id = _next_rid(drawing_rels_root)
-                    ET.SubElement(
-                        drawing_rels_root,
-                        f"{{{_PKG_REL_NS}}}Relationship",
-                        {
-                            "Id": rel_id,
-                            "Type": f"{_DOC_REL_NS}/image",
-                            "Target": posixpath.relpath(media_name, posixpath.dirname(drawing_path)),
-                        },
-                    )
-                    image_relations[digest] = rel_id
-                anchor_row, anchor_col, x, y = _anchor_from_offset(
-                    record_sheet, row1, col1, x, y
-                )
-                _append_signature_anchor(
-                    drawing_root,
-                    rel_id=rel_id,
-                    shape_id=shape_id,
-                    name=f"演练签名-{shape_id}",
-                    row=anchor_row,
-                    col=anchor_col,
-                    col_offset_px=x,
-                    row_offset_px=y,
-                    width_px=width,
-                    height_px=height,
-                )
-                shape_id += 1
+                    shape_id += 1
+            replacements[drawing_path] = ET.tostring(
+                drawing_root, encoding="utf-8", xml_declaration=True
+            )
+            replacements[drawing_rels_path] = ET.tostring(
+                drawing_rels_root, encoding="utf-8", xml_declaration=True
+            )
         for sheet_path, root in sheet_roots.items():
             replacements[sheet_path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-        replacements[drawing_path] = ET.tostring(drawing_root, encoding="utf-8", xml_declaration=True)
-        replacements[drawing_rels_path] = ET.tostring(drawing_rels_root, encoding="utf-8", xml_declaration=True)
         content_types = ET.fromstring(archive.read("[Content_Types].xml"))
         if not any(
             item.attrib.get("Extension", "").lower() == "png"
             for item in content_types.findall(f"{{{_CT_NS}}}Default")
         ):
             ET.SubElement(content_types, f"{{{_CT_NS}}}Default", {"Extension": "png", "ContentType": "image/png"})
-        if not any(
-            item.attrib.get("PartName") == f"/{drawing_path}"
-            for item in content_types.findall(f"{{{_CT_NS}}}Override")
-        ):
-            ET.SubElement(
-                content_types,
-                f"{{{_CT_NS}}}Override",
-                {"PartName": f"/{drawing_path}", "ContentType": "application/vnd.openxmlformats-officedocument.drawing+xml"},
-            )
+        for drawing_path in drawing_paths:
+            if not any(
+                item.attrib.get("PartName") == f"/{drawing_path}"
+                for item in content_types.findall(f"{{{_CT_NS}}}Override")
+            ):
+                ET.SubElement(
+                    content_types,
+                    f"{{{_CT_NS}}}Override",
+                    {"PartName": f"/{drawing_path}", "ContentType": "application/vnd.openxmlformats-officedocument.drawing+xml"},
+                )
         replacements["[Content_Types].xml"] = ET.tostring(content_types, encoding="utf-8", xml_declaration=True)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
@@ -1808,73 +1936,115 @@ def _verify_generated_workbook(
                     f"生成文件回读校验失败：{sheet_name}!{reference}。"
                 )
 
-    record_sheet = _find_sheet(workbook, configuration["record_sheet"])
-    drawing_path = str(record_sheet.get("drawing_path") or "")
-    expected_anchor_count = sum(
-        len(item.get("signers") or [])
-        for item in derived.get("signature_cells") or []
-    )
-    expected_hashes = {
-        hashlib.sha256(signatures[record_id]).hexdigest()
-        for record_id in {
-            str(person.get("record_id") or "")
-            for item in derived.get("signature_cells") or []
-            for person in item.get("signers") or []
-            if str(person.get("record_id") or "")
-        }
-    }
     with zipfile.ZipFile(output_path) as archive:
         names = set(archive.namelist())
-        drawing_rels_path = _drawing_relationship_path(drawing_path)
-        if not drawing_path or drawing_path not in names or drawing_rels_path not in names:
-            raise DrillError("生成文件缺少签名绘图关系。")
-        drawing_root = ET.fromstring(archive.read(drawing_path))
-        relationship_root = ET.fromstring(archive.read(drawing_rels_path))
-        relationships = {
-            str(item.attrib.get("Id") or ""): item
-            for item in relationship_root.findall(
-                f"{{{_PKG_REL_NS}}}Relationship"
-            )
-        }
-        generated_anchors = []
-        for anchor in list(drawing_root):
-            properties = anchor.find(f".//{{{_XDR_NS}}}cNvPr")
-            if properties is not None and str(
-                properties.attrib.get("name") or ""
-            ).startswith("演练签名-"):
-                generated_anchors.append(anchor)
-        if len(generated_anchors) != expected_anchor_count:
-            raise DrillError("生成文件中的签名图片数量不正确。")
-        used_relationships = set()
-        actual_hashes = set()
-        for anchor in generated_anchors:
-            blip = anchor.find(f".//{{{_A_NS}}}blip")
-            rel_id = (
-                str(blip.attrib.get(f"{{{_DOC_REL_NS}}}embed") or "")
-                if blip is not None
-                else ""
-            )
-            relationship = relationships.get(rel_id)
-            if (
-                not rel_id
-                or relationship is None
-                or not str(relationship.attrib.get("Type") or "").endswith(
-                    "/image"
-                )
+        for sheet_type, sheet_name in (
+            ("record", configuration["record_sheet"]),
+            ("assessment", configuration["assessment_sheet"]),
+        ):
+            placements = [
+                item
+                for item in derived.get("signature_cells") or []
+                if str(item.get("sheet_type") or "record") == sheet_type
+            ]
+            if not placements:
+                continue
+            sheet = _find_sheet(workbook, sheet_name)
+            drawing_path = str(sheet.get("drawing_path") or "")
+            drawing_rels_path = _drawing_relationship_path(drawing_path)
+            if not drawing_path or drawing_path not in names or drawing_rels_path not in names:
+                raise DrillError("生成文件缺少签名绘图关系。")
+            drawing_root = ET.fromstring(archive.read(drawing_path))
+            relationship_root = ET.fromstring(archive.read(drawing_rels_path))
+            relationships = {
+                str(item.attrib.get("Id") or ""): item
+                for item in relationship_root.findall(f"{{{_PKG_REL_NS}}}Relationship")
+            }
+            generated_anchors = []
+            for anchor in list(drawing_root):
+                properties = anchor.find(f".//{{{_XDR_NS}}}cNvPr")
+                if properties is not None and str(
+                    properties.attrib.get("name") or ""
+                ).startswith("演练签名-"):
+                    generated_anchors.append(anchor)
+            if len(generated_anchors) != sum(
+                len(item.get("signers") or []) for item in placements
             ):
-                raise DrillError("生成文件中的签名图片关系无效。")
-            target = _resolve_zip_target(
-                drawing_path, str(relationship.attrib.get("Target") or "")
+                raise DrillError("生成文件中的签名图片数量不正确。")
+            expected_hashes = {
+                hashlib.sha256(signatures[record_id]).hexdigest()
+                for record_id in {
+                    str(person.get("record_id") or "")
+                    for item in placements
+                    for person in item.get("signers") or []
+                    if str(person.get("record_id") or "")
+                }
+            }
+            used_relationships = set()
+            actual_hashes = set()
+            for anchor in generated_anchors:
+                blip = anchor.find(f".//{{{_A_NS}}}blip")
+                rel_id = (
+                    str(blip.attrib.get(f"{{{_DOC_REL_NS}}}embed") or "")
+                    if blip is not None
+                    else ""
+                )
+                relationship = relationships.get(rel_id)
+                if (
+                    not rel_id
+                    or relationship is None
+                    or not str(relationship.attrib.get("Type") or "").endswith("/image")
+                ):
+                    raise DrillError("生成文件中的签名图片关系无效。")
+                target = _resolve_zip_target(
+                    drawing_path, str(relationship.attrib.get("Target") or "")
+                )
+                if target not in names:
+                    raise DrillError("生成文件中的签名图片文件缺失。")
+                content = archive.read(target)
+                if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise DrillError("生成文件中的签名图片不是有效 PNG。")
+                used_relationships.add(rel_id)
+                actual_hashes.add(hashlib.sha256(content).hexdigest())
+            if (
+                len(used_relationships) != len(expected_hashes)
+                or actual_hashes != expected_hashes
+            ):
+                raise DrillError("生成文件中的签名图片或关系数量不正确。")
+
+
+def _preview_cell_styles(
+    sheet: dict[str, Any], row_count: int, col_count: int
+) -> dict[str, dict[str, Any]]:
+    styles = {
+        reference: copy.deepcopy(style)
+        for reference, style in (sheet.get("cell_styles") or {}).items()
+        if _cell_parts(reference)[0] <= row_count
+        and _cell_parts(reference)[1] <= col_count
+    }
+    for reference in sheet.get("merges") or []:
+        row1, col1, row2, col2 = _range_bounds(reference)
+        anchor = styles.setdefault(_cell_ref(row1, col1), {})
+        borders = anchor.setdefault("borders", {})
+        for edge, cells in (
+            ("top", (_cell_ref(row1, col) for col in range(col1, col2 + 1))),
+            ("right", (_cell_ref(row, col2) for row in range(row1, row2 + 1))),
+            ("bottom", (_cell_ref(row2, col) for col in range(col1, col2 + 1))),
+            ("left", (_cell_ref(row, col1) for row in range(row1, row2 + 1))),
+        ):
+            if edge in borders:
+                continue
+            border = next(
+                (
+                    (styles.get(cell) or {}).get("borders", {}).get(edge)
+                    for cell in cells
+                    if (styles.get(cell) or {}).get("borders", {}).get(edge)
+                ),
+                None,
             )
-            if target not in names:
-                raise DrillError("生成文件中的签名图片文件缺失。")
-            content = archive.read(target)
-            if not content.startswith(b"\x89PNG\r\n\x1a\n"):
-                raise DrillError("生成文件中的签名图片不是有效 PNG。")
-            used_relationships.add(rel_id)
-            actual_hashes.add(hashlib.sha256(content).hexdigest())
-        if len(used_relationships) != len(expected_hashes) or actual_hashes != expected_hashes:
-            raise DrillError("生成文件中的签名图片或关系数量不正确。")
+            if border:
+                borders[edge] = copy.deepcopy(border)
+    return styles
 
 
 def _sheet_preview_model(sheet: dict[str, Any], *, sheet_type: str, derived: dict[str, Any], generated_current: bool) -> dict[str, Any]:
@@ -1914,13 +2084,9 @@ def _sheet_preview_model(sheet: dict[str, Any], *, sheet_type: str, derived: dic
             ],
         }
         for item in derived.get("signature_cells") or []
-    ] if sheet_type == "record" else []
-    cell_styles = {
-        reference: copy.deepcopy(style)
-        for reference, style in (sheet.get("cell_styles") or {}).items()
-        if _cell_parts(reference)[0] <= row_count
-        and _cell_parts(reference)[1] <= col_count
-    }
+        if str(item.get("sheet_type") or "record") == sheet_type
+    ]
+    cell_styles = _preview_cell_styles(sheet, row_count, col_count)
     images = [
         copy.deepcopy(item)
         for item in sheet.get("preview_images") or []
@@ -1934,7 +2100,9 @@ def _sheet_preview_model(sheet: dict[str, Any], *, sheet_type: str, derived: dic
     return {
         "sheet_type": sheet_type,
         "sheet_name": sheet.get("name"),
-        "orientation": "portrait" if sheet_type == "record" else "landscape",
+        "orientation": str(sheet.get("orientation") or "portrait"),
+        "page_scale": int(sheet.get("page_scale") or 0),
+        "page_margins": copy.deepcopy(sheet.get("page_margins") or {}),
         "row_count": row_count,
         "column_count": col_count,
         "rows": rows,
@@ -2003,6 +2171,48 @@ class DrillManagementService:
             result["configuration_locked"] = result["has_executions"]
             items.append(result)
         return sorted(items, key=lambda item: (int(item.get("year") or 0), int(item.get("month") or 0), str(item.get("created_at") or "")), reverse=True)
+
+    def pending_counts(
+        self, definitions: list[dict[str, Any]], scopes: list[str] | tuple[str, ...]
+    ) -> dict[str, int]:
+        published_ids = {
+            str(item.get("drill_id") or "")
+            for item in definitions
+            if str(item.get("status") or "") == "published"
+            and str(item.get("drill_id") or "")
+        }
+        normalized_scopes = [_normalize_scope(scope) for scope in scopes]
+        executions = {
+            (
+                str(payload.get("drill_id") or ""),
+                str(payload.get("scope") or "").upper(),
+            ): payload
+            for document in self.state_store.list_documents(
+                DRILL_EXECUTION_NAMESPACE
+            )
+            if isinstance(document.get("payload"), dict)
+            for payload in [document["payload"]]
+        }
+
+        def needs_attention(execution: dict[str, Any] | None) -> bool:
+            if not execution:
+                return True
+            status = str(execution.get("status") or "draft").lower()
+            if status in {"synced", "completed", "queued", "generating", "syncing"}:
+                return False
+            if status == "sync_pending" and not str(
+                execution.get("last_error") or ""
+            ).strip():
+                return False
+            return True
+
+        return {
+            scope: sum(
+                needs_attention(executions.get((drill_id, scope)))
+                for drill_id in published_ids
+            )
+            for scope in normalized_scopes
+        }
 
     def get_definition(self, drill_id: str) -> dict[str, Any]:
         item = self.state_store.get_document(DRILL_DEFINITION_NAMESPACE, str(drill_id or "").strip())

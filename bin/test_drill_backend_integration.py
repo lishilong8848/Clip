@@ -48,6 +48,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         ]
         drills = Mock()
         drills.list_definitions.return_value = definitions
+        drills.pending_counts.return_value = {"A": 1, "E": 1}
         drills.get_definition.side_effect = lambda drill_id: next(
             item for item in definitions if item["drill_id"] == drill_id
         )
@@ -103,6 +104,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                 [item["drill_id"] for item in user.json()["data"]["drills"]],
                 ["published-drill"],
             )
+            self.assertEqual(user.json()["data"]["scopes"][0]["pending"], 1)
             self.assertNotIn("path", user.json()["data"]["drills"][0]["source"])
             self.assertEqual(
                 {item["drill_id"] for item in admin.json()["data"]["drills"]},

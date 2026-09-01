@@ -990,7 +990,6 @@ class MainWindowRuntimeMixin:
         try:
             from pathlib import Path
 
-            config.load()
             disabled = bool(config.disable_hot_reload)
             if getattr(self, "_applied_disable_hot_reload", None) == disabled:
                 return
@@ -1016,7 +1015,6 @@ class MainWindowRuntimeMixin:
 
     def refresh_alert_setting(self):
         try:
-            config.load()
             speech_manager.set_enabled(
                 not bool(getattr(config, "disable_alerts", False))
                 and not bool(getattr(config, "disable_speech", True))

@@ -76,6 +76,7 @@ class SettingsDialog(QDialog):
 
     settings_saved = pyqtSignal()
     relay_health_test_finished = pyqtSignal(dict)
+    settings_save_finished = pyqtSignal(dict)
 
 
     def __init__(self, parent=None):
@@ -85,6 +86,7 @@ class SettingsDialog(QDialog):
             max_workers=1, thread_name_prefix="RelayHealthTest"
         )
         self.relay_health_test_finished.connect(self._on_relay_health_test_finished)
+        self.settings_save_finished.connect(self._on_settings_save_finished)
 
         self.setObjectName("SettingsWindow")
 
@@ -355,7 +357,7 @@ class SettingsDialog(QDialog):
         public_relay_url_label = QLabel("公网工单地址")
         self.polling_work_order_public_relay_url_input = QLineEdit()
         self.polling_work_order_public_relay_url_input.setPlaceholderText(
-            DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
+            "https://workorder.example.com"
         )
         self.polling_work_order_public_relay_url_input.setMinimumHeight(34)
         lan_portal_layout.addWidget(public_relay_url_label)
@@ -373,7 +375,7 @@ class SettingsDialog(QDialog):
         )
         lan_portal_layout.addLayout(relay_test_row)
         public_relay_hint = QLabel(
-            "局域网模拟可使用 http://192.168.224.122:18767；正式公网必须填写 HTTPS 根地址。"
+            "勾选后请填写公网工单 HTTPS 根地址；之后新建的工单会发送到该地址。"
         )
         public_relay_hint.setObjectName("LanPortalHint")
         public_relay_hint.setWordWrap(True)
@@ -722,16 +724,6 @@ class SettingsDialog(QDialog):
             self.polling_work_order_public_relay_url_input.text().strip().rstrip("/")
             or DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
         )
-        relay_url_block_reason = config.polling_work_order_relay_url_change_block_reason(
-            polling_work_order_public_relay_url
-        )
-        if relay_url_block_reason:
-            show_toast_message(
-                self,
-                f"❌ {relay_url_block_reason}",
-                duration_ms=3200,
-            )
-            return
         if not self._is_valid_lan_template_portal_host(lan_template_portal_host):
             show_toast_message(
                 self,
@@ -764,65 +756,78 @@ class SettingsDialog(QDialog):
         disable_hot_reload = self.disable_hot_reload_checkbox.isChecked()
         disable_alerts = self.disable_alerts_checkbox.isChecked()
         disable_speech = self.disable_speech_checkbox.isChecked()
-        resolved_token, replaced = resolve_bitable_app_token(
-
-            feishu_app_id, feishu_app_secret, feishu_app_token
-
-        )
-
-        if replaced:
-
-            feishu_app_token = resolved_token
-
-            self.app_token_input.setText(resolved_token)
-
-
-
-        if config.save(
-
-            app_id=feishu_app_id,
-
-            app_secret=feishu_app_secret,
-
-            app_token=feishu_app_token,
-
-            table_id_weibao=table_id_weibao,
-
-            table_id_biangeng=table_id_biangeng,
-
-            table_id_tiaozheng=table_id_tiaozheng,
-
-            table_id_shijian=table_id_shijian,
-
-            table_id_power=table_id_power,
-
-            table_id_polling=table_id_polling,
-
-            table_id_overhaul=table_id_overhaul,
-group_name_change_i3=group_name_change_i3,
-
-            group_name_maintenance=group_name_maintenance,
-
-            group_name_event_i2=group_name_event_i2,
-
-            group_name_event_i3=group_name_event_i3,
-
-            group_name_event_prompt=group_name_event_prompt,
-            lan_template_portal_host=lan_template_portal_host,
-            lan_template_portal_port=DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
-            lan_template_public_host=lan_template_public_host,
-            lan_low_performance_mode=lan_low_performance_mode,
-            polling_work_order_public_relay_enabled=(
+        save_values = {
+            "app_id": feishu_app_id,
+            "app_secret": feishu_app_secret,
+            "app_token": feishu_app_token,
+            "table_id_weibao": table_id_weibao,
+            "table_id_biangeng": table_id_biangeng,
+            "table_id_tiaozheng": table_id_tiaozheng,
+            "table_id_shijian": table_id_shijian,
+            "table_id_power": table_id_power,
+            "table_id_polling": table_id_polling,
+            "table_id_overhaul": table_id_overhaul,
+            "group_name_change_i3": group_name_change_i3,
+            "group_name_maintenance": group_name_maintenance,
+            "group_name_event_i2": group_name_event_i2,
+            "group_name_event_i3": group_name_event_i3,
+            "group_name_event_prompt": group_name_event_prompt,
+            "lan_template_portal_host": lan_template_portal_host,
+            "lan_template_portal_port": DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
+            "lan_template_public_host": lan_template_public_host,
+            "lan_low_performance_mode": lan_low_performance_mode,
+            "polling_work_order_public_relay_enabled": (
                 polling_work_order_public_relay_enabled
             ),
-            polling_work_order_public_relay_url=polling_work_order_public_relay_url,
-            disable_hot_reload=disable_hot_reload,
-            disable_alerts=disable_alerts,
-            disable_speech=disable_speech,
-        ):
-            show_toast_message(self, "✅ 设置已保存", duration_ms=1500)
-            self.hide()
-            QTimer.singleShot(0, self.settings_saved.emit)
+            "polling_work_order_public_relay_url": polling_work_order_public_relay_url,
+            "disable_hot_reload": disable_hot_reload,
+            "disable_alerts": disable_alerts,
+            "disable_speech": disable_speech,
+        }
+        self.save_btn.setEnabled(False)
+        self.save_btn.setText("保存中...")
+
+        def run() -> None:
+            result = {"ok": False, "error": "设置保存失败，请稍后重试。"}
+            try:
+                resolved_token, replaced = resolve_bitable_app_token(
+                    feishu_app_id, feishu_app_secret, feishu_app_token
+                )
+                if replaced:
+                    save_values["app_token"] = resolved_token
+                if config.save(**save_values):
+                    result = {
+                        "ok": True,
+                        "app_token": resolved_token if replaced else "",
+                    }
+            except Exception as exc:
+                result["error"] = str(exc) or result["error"]
+            try:
+                self.settings_save_finished.emit(result)
+            except RuntimeError:
+                pass
+
+        try:
+            self._relay_health_executor.submit(run)
+        except RuntimeError as exc:
+            self._on_settings_save_finished({"ok": False, "error": str(exc)})
+
+    def _on_settings_save_finished(self, result: dict) -> None:
+        self.save_btn.setEnabled(True)
+        self.save_btn.setText("保存")
+        if not (result or {}).get("ok"):
+            show_toast_message(
+                self,
+                f"❌ {str((result or {}).get('error') or '设置保存失败，请稍后重试。')}",
+                duration_ms=3000,
+            )
+            return
+        resolved_token = str((result or {}).get("app_token") or "")
+        if resolved_token:
+            self.app_token_input.setText(resolved_token)
+        show_toast_message(self, "✅ 设置已保存", duration_ms=1500)
+        self.hide()
+        QTimer.singleShot(0, self.settings_saved.emit)
 
     def reset_to_default(self):
         """恢复默认设置"""
