@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -19,6 +21,7 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
     REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
     REPAIR_SNAPSHOT_SOURCE_PROJECTS,
 )
+from upload_event_module.services import robot_webhook  # noqa: E402
 
 
 TEST_DATE = "2026-07-28"
@@ -26,6 +29,7 @@ TEST_DATE = "2026-07-28"
 
 class _DailyTaskStore:
     def __init__(self) -> None:
+        self.documents: dict[tuple[str, str], dict[str, Any]] = {}
         self.repair_snapshots = {
             REPAIR_SNAPSHOT_SOURCE_PROJECTS: [
                 {
@@ -92,6 +96,24 @@ class _DailyTaskStore:
                 "updated_at": 1785180000.0,
                 "started_at": 1785179999.0,
             },
+        ]
+
+    def get_document(self, namespace: str, key: str) -> dict[str, Any] | None:
+        payload = self.documents.get((namespace, key))
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def put_document(
+        self, namespace: str, key: str, payload: dict[str, Any]
+    ) -> None:
+        self.documents[(namespace, key)] = dict(payload)
+
+    def list_documents(
+        self, namespace: str, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
+        return [
+            {"key": key, "payload": dict(payload)}
+            for (stored_namespace, key), payload in self.documents.items()
+            if stored_namespace == namespace
         ]
 
     def get_repair_snapshot(
@@ -251,6 +273,284 @@ class DailyTaskChecklistTests(unittest.TestCase):
         self.assertEqual(len(event_tasks), 1)
         self.assertIn("更新", event_tasks[0]["action_summary"])
         self.assertEqual(event_tasks[0]["time"], "09:10")
+
+    def test_event_sla_excludes_recovery_and_uses_previous_response_after_fourth(self) -> None:
+        service = self._service()
+        occurrence = dt.datetime(2026, 7, 28, 10, 0, 0)
+        service._daily_report_event_timelines = lambda **_kwargs: [  # type: ignore[method-assign]
+            {
+                "event_key": "event-i3",
+                "title": "I3事件",
+                "building": "E楼",
+                "building_codes": ["E"],
+                "initial_level": "I3",
+                "occurrence_dt": occurrence,
+                "occurrence_precision": "second",
+                "ended": True,
+                "actions": [
+                    {"action": "start", "response_dt": occurrence + dt.timedelta(minutes=1), "precision": "second"},
+                    {"action": "update", "response_dt": occurrence + dt.timedelta(minutes=4), "precision": "second"},
+                    {"action": "recover", "response_dt": occurrence + dt.timedelta(minutes=6), "precision": "second"},
+                    {"action": "update", "response_dt": occurrence + dt.timedelta(minutes=9), "precision": "second"},
+                    {"action": "update", "response_dt": occurrence + dt.timedelta(minutes=29), "precision": "second"},
+                    {"action": "end", "response_dt": occurrence + dt.timedelta(minutes=60, seconds=5), "precision": "second"},
+                ],
+            }
+        ]
+
+        payload = service._daily_report_event_sla(
+            scope="E",
+            window_start=occurrence - dt.timedelta(hours=1),
+            window_end=occurrence + dt.timedelta(hours=2),
+        )
+        event = payload["events"][0]
+
+        self.assertEqual([row["number"] for row in event["rows"]], [1, 2, 3, 4, 5])
+        self.assertEqual(len(event["recoveries"]), 1)
+        self.assertEqual(event["rows"][4]["deadline"], "2026-07-28 10:59:00")
+        self.assertEqual(event["rows"][4]["late_text"], "1分5秒")
+        self.assertIsNone(event["pending"])
+
+    def test_non_i3_pending_is_marked_without_overdue_duration(self) -> None:
+        service = self._service()
+        occurrence = dt.datetime(2026, 7, 28, 10, 0, 0)
+        service._daily_report_event_timelines = lambda **_kwargs: [  # type: ignore[method-assign]
+            {
+                "event_key": "event-i2",
+                "title": "I2事件",
+                "building": "E楼",
+                "building_codes": ["E"],
+                "initial_level": "I2",
+                "occurrence_dt": occurrence,
+                "occurrence_precision": "second",
+                "ended": False,
+                "actions": [
+                    {"action": "start", "response_dt": occurrence + dt.timedelta(minutes=1), "precision": "second"},
+                    {"action": "update", "response_dt": occurrence + dt.timedelta(minutes=4), "precision": "second"},
+                    {"action": "update", "response_dt": occurrence + dt.timedelta(minutes=9), "precision": "second"},
+                    {"action": "update", "response_dt": occurrence + dt.timedelta(minutes=14), "precision": "second"},
+                ],
+            }
+        ]
+
+        event = service._daily_report_event_sla(
+            scope="E",
+            window_start=occurrence - dt.timedelta(hours=1),
+            window_end=occurrence + dt.timedelta(hours=2),
+        )["events"][0]
+
+        self.assertEqual(event["pending"]["number"], 5)
+        self.assertEqual(event["pending"]["deadline"], "2026-07-28 10:29:00")
+        self.assertNotIn("late_seconds", event["pending"])
+
+    def test_event_timeline_persists_exact_seconds_and_recovery_kind(self) -> None:
+        service = self._service()
+        payload = {
+            "target_record_id": "rec_event_timeline",
+            "title": "E楼UPS告警",
+            "building": "E楼",
+            "time_str": "2026-07-28 23:59:30",
+            "response_time": "00:01:05",
+            "event_level": "I3",
+            "recover_selected": True,
+        }
+
+        service._record_event_timeline_action(
+            job_id="job-recover",
+            action="update",
+            payload=payload,
+        )
+        stored = service._state_store.get_document(
+            "daily_event_timeline", "rec_event_timeline"
+        )
+
+        self.assertEqual(stored["building_codes"], ["E"])
+        self.assertEqual(stored["actions"][0]["action"], "recover")
+        self.assertEqual(
+            stored["actions"][0]["response_time"], "2026-07-29 00:01:05"
+        )
+        self.assertEqual(stored["actions"][0]["precision"], "second")
+
+    def test_rolling_window_excludes_both_boundaries_and_merges_task_ids(self) -> None:
+        service = self._service()
+        start = dt.datetime(2026, 7, 27, 17, 50)
+        end = dt.datetime(2026, 7, 28, 17, 50)
+
+        def checklist(*, scope: str, date: str) -> dict[str, Any]:
+            del scope
+            rows = {
+                "2026-07-27": [
+                    {"task_id": "before", "title": "过早", "category": "notice", "sort_time": start.timestamp() - 1},
+                    {"task_id": "same", "title": "跨日任务", "category": "notice", "sort_time": start.timestamp(), "action_summary": "开始"},
+                ],
+                "2026-07-28": [
+                    {"task_id": "same", "title": "跨日任务", "category": "notice", "sort_time": end.timestamp() - 1, "action_summary": "更新"},
+                    {"task_id": "at-end", "title": "下个周期", "category": "notice", "sort_time": end.timestamp()},
+                ],
+            }
+            return {"tasks": rows[date], "warnings": []}
+
+        service.get_daily_task_checklist = checklist  # type: ignore[method-assign]
+        tasks, _warnings = service._daily_report_tasks_for_window(
+            scope="E", window_start=start, window_end=end
+        )
+
+        self.assertEqual([item["task_id"] for item in tasks], ["same"])
+        self.assertEqual(tasks[0]["action_summary"], "开始；更新")
+
+    def test_daily_report_delivery_is_idempotent_across_retries(self) -> None:
+        service = self._service()
+        service._critical_guard_public_base_url = lambda: ""  # type: ignore[method-assign]
+        now = dt.datetime(2026, 7, 28, 17, 50)
+        document = {
+            "report_key": "2026-07-28",
+            "cards": {"E": {"header": {}, "elements": []}},
+            "deliveries": {
+                "E": {
+                    "card_key": "E",
+                    "open_id": "ou_test",
+                    "status": "pending",
+                    "attempts": 0,
+                    "message_uuid": "stable-uuid",
+                }
+            },
+            "status": "pending",
+        }
+        service._new_daily_work_report_document = lambda **_kwargs: dict(document)  # type: ignore[method-assign]
+
+        with patch(
+            "lan_bitable_template_portal.portal_service.send_interactive_to_open_ids",
+            return_value=(True, "ok", []),
+        ) as sender:
+            first = service.process_daily_work_reports(now=now, force=True)
+            second = service.process_daily_work_reports(now=now, force=True)
+
+        self.assertEqual(first["sent"], 1)
+        self.assertEqual(second["sent"], 0)
+        sender.assert_called_once()
+        self.assertEqual(sender.call_args.kwargs["message_uuid"], "stable-uuid")
+
+    def test_interactive_sender_forwards_stable_uuid(self) -> None:
+        with patch.object(
+            robot_webhook,
+            "_get_tenant_access_token",
+            return_value=("token", ""),
+        ), patch.object(
+            robot_webhook,
+            "_request_json",
+            return_value={"code": 0},
+        ) as request_json:
+            ok, _message, _results = robot_webhook.send_interactive_to_open_ids(
+                {"header": {}, "elements": []},
+                ["ou_test"],
+                message_uuid="stable-card-uuid",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            request_json.call_args.kwargs["json_payload"]["uuid"],
+            "stable-card-uuid",
+        )
+
+    def test_empty_card_still_lists_every_summary_category(self) -> None:
+        service = self._service()
+        service._critical_guard_public_base_url = lambda: ""  # type: ignore[method-assign]
+        report = {
+            "window_start": "2026-07-27 17:50:00",
+            "window_end": "2026-07-28 17:50:00",
+            "stats": {"total": 0, "ongoing": 0, "completed": 0, "attention": 0},
+            "categories": service._daily_report_groups([]),
+            "event_sla": {"stats": {}, "events": []},
+            "warnings": [],
+        }
+
+        card = service.build_daily_work_report_card(
+            report, scope_label="E楼", link_scope="E"
+        )
+        content = card["elements"][0]["text"]["content"]
+
+        self.assertIn(
+            "分类汇总** 通告 0 · 事件 0 · 检修 0 · 维护单 0 · 水耗 0",
+            content,
+        )
+
+    def test_manual_today_report_validates_people_and_sends_each_recipient(self) -> None:
+        service = self._service()
+        service._critical_guard_public_base_url = lambda: ""  # type: ignore[method-assign]
+        service._load_signature_people = lambda: [  # type: ignore[method-assign]
+            {"name": "甲", "open_id": "ou_a"},
+            {"name": "乙", "open_id": "ou_b"},
+        ]
+        service.get_daily_work_report_snapshot = lambda **_kwargs: {  # type: ignore[method-assign]
+            "scope": "E",
+            "window_start": f"{dt.date.today().isoformat()} 00:00:00",
+            "window_end": f"{dt.date.today().isoformat()} 23:59:59",
+            "stats": {"total": 0, "ongoing": 0, "completed": 0, "attention": 0},
+            "categories": service._daily_report_groups([]),
+            "tasks": [],
+            "event_sla": {"stats": {}, "events": []},
+            "warnings": [],
+        }
+
+        with patch(
+            "lan_bitable_template_portal.portal_service.send_interactive_to_open_ids",
+            return_value=(True, "ok", []),
+        ) as sender:
+            result = service.send_daily_work_report_to_people(
+                scope="E",
+                date=dt.date.today().isoformat(),
+                recipient_open_ids=["ou_a", "ou_b", "ou_a"],
+                operation_id="manual-operation",
+            )
+
+        self.assertEqual(result["sent_count"], 2)
+        self.assertEqual(sender.call_count, 2)
+        self.assertNotEqual(
+            sender.call_args_list[0].kwargs["message_uuid"],
+            sender.call_args_list[1].kwargs["message_uuid"],
+        )
+
+    def test_manual_today_report_rejects_historical_date(self) -> None:
+        service = self._service()
+        with self.assertRaisesRegex(PortalError, "今日"):
+            service.send_daily_work_report_to_people(
+                scope="E",
+                date="2020-01-01",
+                recipient_open_ids=["ou_a"],
+            )
+
+    def test_manual_today_report_reuses_scheduled_card_snapshot(self) -> None:
+        service = self._service()
+        today = dt.date.today().isoformat()
+        scheduled_card = {"header": {"title": {"content": "E楼每日工作汇总"}}, "elements": []}
+        service._state_store.put_document(
+            "daily_work_report",
+            today,
+            {
+                "reports": {"E": {"stats": {"total": 7}}},
+                "cards": {"E": scheduled_card},
+            },
+        )
+        service._load_signature_people = lambda: [  # type: ignore[method-assign]
+            {"name": "甲", "open_id": "ou_a"}
+        ]
+        service.get_daily_work_report_snapshot = lambda **_kwargs: self.fail(  # type: ignore[method-assign]
+            "stored snapshot should be reused"
+        )
+
+        with patch(
+            "lan_bitable_template_portal.portal_service.send_interactive_to_open_ids",
+            return_value=(True, "ok", []),
+        ) as sender:
+            result = service.send_daily_work_report_to_people(
+                scope="E",
+                date=today,
+                recipient_open_ids=["ou_a"],
+                operation_id="reuse-snapshot",
+            )
+
+        self.assertEqual(result["stats"]["total"], 7)
+        self.assertEqual(sender.call_args.args[0], scheduled_card)
 
 
 if __name__ == "__main__":

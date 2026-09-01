@@ -9,6 +9,16 @@
         </div>
       </div>
       <div class="daily-header__actions">
+        <button
+          type="button"
+          class="btn primary"
+          :disabled="loading || selectedDate !== today"
+          :title="selectedDate === today ? '选择人员并发送今日工作汇总' : '仅支持发送今天的工作汇总'"
+          @click="openSendDialog"
+        >
+          <Send :size="17" aria-hidden="true" />
+          发送今日工作至飞书
+        </button>
         <VnetSelect
           v-if="availableScopes.length > 1"
           :model-value="scopeCode"
@@ -186,6 +196,42 @@
         正在更新
       </div>
     </main>
+
+    <div v-if="sendDialogOpen" class="send-dialog-backdrop" @click.self="closeSendDialog">
+      <section class="send-dialog" role="dialog" aria-modal="true" aria-labelledby="daily-send-title">
+        <header>
+          <div>
+            <span>飞书发送</span>
+            <h2 id="daily-send-title">发送{{ scopeLabel }}今日工作</h2>
+          </div>
+          <button type="button" class="dialog-close" :disabled="sendBusy" @click="closeSendDialog">关闭</button>
+        </header>
+        <RepairPeoplePicker
+          v-model="sendRecipients"
+          :scope="scopeCode"
+          input-id="daily-report-recipients"
+          label="选择接收人员"
+          :disabled="sendBusy"
+        />
+        <div v-if="sendError" class="dialog-message error" role="alert">{{ sendError }}</div>
+        <div v-else-if="sendSuccess" class="dialog-message success" role="status">{{ sendSuccess }}</div>
+        <footer>
+          <span>已选择 {{ sendRecipients.length }} 人</span>
+          <div>
+            <button type="button" class="btn secondary" :disabled="sendBusy" @click="closeSendDialog">取消</button>
+            <button
+              type="button"
+              class="btn primary"
+              :disabled="sendBusy || !sendRecipients.length"
+              @click="sendTodayReport"
+            >
+              <Send :size="16" aria-hidden="true" />
+              {{ sendBusy ? "发送中" : "确认发送" }}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
   </section>
 </template>
 
@@ -204,6 +250,7 @@ import {
   FileCheck2,
   Megaphone,
   RefreshCw,
+  Send,
   Siren,
   Wrench,
 } from "lucide-vue-next";
@@ -211,6 +258,7 @@ import { requestJson } from "../api/client";
 import { navigate } from "../navigation";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
+import RepairPeoplePicker from "./RepairPeoplePicker.vue";
 
 type Dict = Record<string, any>;
 type DailyTask = {
@@ -253,6 +301,11 @@ const selectedCategory = ref("all");
 const loading = ref(false);
 const errorText = ref("");
 const payload = ref<Dict>({});
+const sendDialogOpen = ref(false);
+const sendRecipients = ref<Dict[]>([]);
+const sendBusy = ref(false);
+const sendError = ref("");
+const sendSuccess = ref("");
 let requestController: AbortController | null = null;
 let requestGeneration = 0;
 
@@ -366,7 +419,57 @@ function changeDate(): void {
   }
   if (selectedDate.value > today) selectedDate.value = today;
   syncDateRoute();
+  closeSendDialog();
   void loadTasks();
+}
+
+function openSendDialog(): void {
+  if (loading.value || selectedDate.value !== today) return;
+  sendRecipients.value = [];
+  sendError.value = "";
+  sendSuccess.value = "";
+  sendDialogOpen.value = true;
+}
+
+function closeSendDialog(): void {
+  if (sendBusy.value) return;
+  sendDialogOpen.value = false;
+  sendError.value = "";
+  sendSuccess.value = "";
+}
+
+function newOperationId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `daily-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function sendTodayReport(): Promise<void> {
+  if (sendBusy.value || !sendRecipients.value.length) return;
+  sendBusy.value = true;
+  sendError.value = "";
+  sendSuccess.value = "";
+  try {
+    const data = await requestJson("/api/daily-tasks/send", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: scopeCode.value,
+        date: selectedDate.value,
+        recipient_open_ids: sendRecipients.value
+          .map((person) => String(person.user_id || person.open_id || "").trim())
+          .filter(Boolean),
+        operation_id: newOperationId(),
+      }),
+    });
+    const sent = Number(data.sent_count || 0);
+    const failed = Number(data.failed_count || 0);
+    sendSuccess.value = failed
+      ? `已发送 ${sent} 人，${failed} 人发送失败。`
+      : `已成功发送给 ${sent} 人。`;
+  } catch (error: any) {
+    sendError.value = error?.message || "今日工作汇总发送失败。";
+  } finally {
+    sendBusy.value = false;
+  }
 }
 
 async function loadTasks(): Promise<void> {
@@ -405,6 +508,7 @@ watch(
   () => props.scope,
   () => {
     selectedCategory.value = "all";
+    closeSendDialog();
     void loadTasks();
   },
 );
@@ -519,6 +623,12 @@ onBeforeUnmount(() => {
   border: 1px solid #cfe0f7;
   background: #fff;
   color: #1558b7;
+}
+
+.btn.primary {
+  background: #1763d7;
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(23, 99, 215, 0.2);
 }
 
 button:disabled {
@@ -991,6 +1101,97 @@ button:disabled {
   font-size: 11px;
   font-weight: 900;
   box-shadow: 0 8px 18px rgba(18, 72, 137, 0.1);
+}
+
+.send-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 920;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(5, 20, 44, 0.54);
+  backdrop-filter: blur(4px);
+}
+
+.send-dialog {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: visible;
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid #d5e3f5;
+  border-radius: 16px;
+  background: #f8fbff;
+  box-shadow: 0 28px 80px rgba(7, 37, 86, 0.28);
+}
+
+.send-dialog > header,
+.send-dialog > footer,
+.send-dialog > footer > div {
+  display: flex;
+  align-items: center;
+}
+
+.send-dialog > header,
+.send-dialog > footer {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.send-dialog > header span,
+.send-dialog > footer > span {
+  color: #647991;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.send-dialog h2 {
+  margin: 3px 0 0;
+  color: #071a39;
+  font-size: 20px;
+}
+
+.send-dialog > footer {
+  padding-top: 14px;
+  border-top: 1px solid #dce7f5;
+}
+
+.send-dialog > footer > div {
+  gap: 8px;
+}
+
+.dialog-close {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #cfe0f7;
+  border-radius: 9px;
+  background: #fff;
+  color: #1558b7;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.dialog-message {
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.dialog-message.error {
+  border-color: #fecaca;
+  background: #fff6f6;
+  color: #a43232;
+}
+
+.dialog-message.success {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
 }
 
 .spinning {

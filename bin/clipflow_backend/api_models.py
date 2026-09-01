@@ -341,6 +341,16 @@ class GenerateTemplatesRequest(APIModel):
     drafts: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class DailyTaskSendRequest(APIModel):
+    scope: str = "ALL"
+    date: str = ""
+    recipient_open_ids: list[str] = Field(default_factory=list, max_length=20)
+    operation_id: str = Field(default="", max_length=128)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class NoticeMemoryImportRequest(APIModel):
     scope: str = "ALL"
     text: str = ""

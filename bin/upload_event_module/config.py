@@ -168,6 +168,32 @@ class ConfigManager:
             log_error(f"系统: SQLite配置保存失败: {exc}")
             return False
 
+    def polling_work_order_relay_url_change_block_reason(self, new_url: str) -> str:
+        current = str(self.polling_work_order_public_relay_url or "").strip().rstrip("/")
+        candidate = str(new_url or "").strip().rstrip("/")
+        if not candidate or candidate == current:
+            return ""
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            for document in LanPortalStateStore().list_documents("polling_work_order"):
+                payload = (
+                    document.get("payload")
+                    if isinstance(document.get("payload"), dict)
+                    else {}
+                )
+                relay = payload.get("relay") if isinstance(payload.get("relay"), dict) else {}
+                if (
+                    str(relay.get("mode") or "") == "public_relay"
+                    and str(payload.get("state") or "")
+                    in {"active", "upload_pending", "completed"}
+                ):
+                    return "存在未结束的公网工单，请先结束或删除后再修改公网工单地址。"
+        except Exception as exc:
+            log_error(f"系统: 公网工单地址变更检查失败: {exc}")
+            return "公网工单状态暂时无法核验，已阻止修改地址。"
+        return ""
+
     def load(self):
         """加载配置文件"""
         try:
@@ -534,6 +560,12 @@ class ConfigManager:
                 new_polling_work_order_public_relay_url = (
                     DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
                 )
+            relay_url_block_reason = self.polling_work_order_relay_url_change_block_reason(
+                new_polling_work_order_public_relay_url
+            )
+            if relay_url_block_reason:
+                log_error(f"系统: {relay_url_block_reason}")
+                return False
             new_disable_hot_reload = (
                 disable_hot_reload
                 if disable_hot_reload is not None

@@ -238,6 +238,7 @@ def _send_interactive_to_receive_id(
     card: dict[str, Any],
     *,
     receive_id_type: str,
+    message_uuid: str = "",
 ) -> Tuple[bool, str]:
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
@@ -248,7 +249,7 @@ def _send_interactive_to_receive_id(
         "receive_id": receive_id,
         "msg_type": "interactive",
         "content": json.dumps(card, ensure_ascii=False),
-        "uuid": str(uuid.uuid4()),
+        "uuid": str(message_uuid or uuid.uuid4()),
     }
     params = {"receive_id_type": receive_id_type}
     try:
@@ -335,7 +336,10 @@ def send_text_to_open_ids(
 
 
 def send_interactive_to_open_ids(
-    card: dict[str, Any], open_ids: List[str]
+    card: dict[str, Any],
+    open_ids: List[str],
+    *,
+    message_uuid: str = "",
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
     """向一个或多个 open_id 发送飞书交互卡片。"""
     if not isinstance(card, dict) or not card:
@@ -354,6 +358,7 @@ def send_interactive_to_open_ids(
             open_id,
             card,
             receive_id_type="open_id",
+            message_uuid=message_uuid,
         )
         results.append(
             {

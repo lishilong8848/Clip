@@ -58,6 +58,7 @@ from .identity_utils import (
 )
 from .state_store import LanPortalStateStore
 from .polling_work_orders import PollingWorkOrderService
+from .polling_work_order_relay import probe_polling_relay_health
 from .local_notice_images import LocalNoticeImageStore
 from upload_event_module.config import (
     CHANGE_NOTICE_FIELDS,
@@ -162,6 +163,8 @@ class PortalRuntime:
     state_store = LanPortalStateStore()
     _polling_relay_connector: Any = None
     _polling_relay_connector_signature = ""
+    _polling_relay_health_lock = threading.RLock()
+    _polling_relay_health_cache: dict[str, Any] = {}
 
     @classmethod
     def polling_work_orders(cls) -> PollingWorkOrderService:
@@ -226,6 +229,75 @@ class PortalRuntime:
             )
         except Exception:
             return False
+
+    @classmethod
+    def polling_work_order_public_relay_health(
+        cls, *, force: bool = False, timeout: float = 2.0
+    ) -> dict[str, Any]:
+        relay_url = cls._polling_work_order_public_relay_url()
+        now = time.time()
+        with cls._polling_relay_health_lock:
+            cached = dict(cls._polling_relay_health_cache or {})
+            if (
+                not force
+                and cached.get("ready") is True
+                and str(cached.get("url") or "") == relay_url
+                and now - float(cached.get("checked_at") or 0) < 30.0
+            ):
+                return cached
+        result = probe_polling_relay_health(relay_url, timeout=timeout)
+        result.update({"url": relay_url, "checked_at": now})
+        with cls._polling_relay_health_lock:
+            cls._polling_relay_health_cache = dict(result)
+        return result
+
+    @classmethod
+    def _resolve_polling_work_order_mode(
+        cls,
+        prepared: dict,
+        *,
+        previous_prepared: dict | None = None,
+    ) -> dict:
+        if (
+            str(prepared.get("action") or "").strip().lower() != "start"
+            or not prepared.get("polling_work_order_required")
+            or str(prepared.get("work_type") or "")
+            not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}
+        ):
+            return prepared
+        previous = previous_prepared if isinstance(previous_prepared, dict) else {}
+        previous_mode = str(previous.get("polling_work_order_mode") or "").strip()
+        if previous_mode in {"public_relay", "local", "local_fallback"}:
+            for key in (
+                "polling_work_order_mode",
+                "polling_work_order_fallback_reason",
+                "polling_work_order_relay_checked_at",
+                "polling_work_order_relay_url",
+            ):
+                if key in previous:
+                    prepared[key] = copy.deepcopy(previous[key])
+            return prepared
+        if not cls.polling_work_order_public_relay_enabled():
+            prepared["polling_work_order_mode"] = "local"
+            return prepared
+        health = cls.polling_work_order_public_relay_health(timeout=2.0)
+        prepared["polling_work_order_relay_checked_at"] = float(
+            health.get("checked_at") or time.time()
+        )
+        prepared["polling_work_order_relay_url"] = str(health.get("url") or "")
+        if health.get("ready") is True:
+            prepared["polling_work_order_mode"] = "public_relay"
+            prepared.pop("polling_work_order_fallback_reason", None)
+        else:
+            prepared["polling_work_order_mode"] = "local_fallback"
+            prepared["polling_work_order_fallback_reason"] = str(
+                health.get("error") or "公网工单不可用。"
+            )
+            log_warning(
+                "公网工单不可用，本次开始已固定切换局域网: "
+                f"{prepared['polling_work_order_fallback_reason']}"
+            )
+        return prepared
 
     @classmethod
     def polling_work_order_relay(cls):
@@ -1334,9 +1406,19 @@ class PortalRuntime:
             or not prepared.get("polling_work_order_required")
         ):
             return {}
+        selected_mode = str(
+            prepared.get("polling_work_order_mode") or ""
+        ).strip()
+        if selected_mode not in {"public_relay", "local", "local_fallback"}:
+            selected_mode = (
+                "public_relay"
+                if cls.polling_work_order_public_relay_enabled()
+                else "local"
+            )
+            prepared["polling_work_order_mode"] = selected_mode
         relay = (
             cls.polling_work_order_relay()
-            if cls.polling_work_order_public_relay_enabled()
+            if selected_mode == "public_relay"
             else None
         )
         use_public_relay = bool(relay and relay.enabled)
@@ -11024,6 +11106,11 @@ class PortalRuntime:
             target_record_id,
         )
         if polling_group:
+            polling_relay = (
+                polling_group.get("relay")
+                if isinstance(polling_group.get("relay"), dict)
+                else {}
+            )
             event_payload.update(
                 {
                     "polling_work_order_group_id": target_record_id,
@@ -11035,6 +11122,18 @@ class PortalRuntime:
                     ),
                     "polling_work_order_reviewer_link": str(
                         polling_group.get("reviewer_link") or ""
+                    ),
+                    "polling_work_order_mode": str(
+                        polling_relay.get("mode") or "local"
+                    ),
+                    "polling_work_order_fallback_reason": str(
+                        polling_relay.get("fallback_reason") or ""
+                    ),
+                    "polling_work_order_registration_state": str(
+                        polling_relay.get("registration_state") or ""
+                    ),
+                    "polling_work_order_last_error": str(
+                        polling_relay.get("last_error") or ""
                     ),
                 }
             )
@@ -13639,6 +13738,40 @@ class PortalRuntime:
                 ok = True
             else:
                 prepared = cls.service.prepare_action_job(job_id)
+                stored_prepared = (
+                    current_job.get("prepared")
+                    if isinstance(current_job.get("prepared"), dict)
+                    and current_job.get("prepared")
+                    else current_job.get("request")
+                    if isinstance(current_job.get("request"), dict)
+                    else None
+                )
+                prepared = cls._resolve_polling_work_order_mode(
+                    prepared,
+                    previous_prepared=stored_prepared,
+                )
+                prepared = cls.service._synchronize_prepared_notice_text(prepared)
+                message_signature = cls.service._action_message_signature(prepared)
+                prepared["message_signature"] = message_signature
+                prepared["message_sent"] = bool(current_job.get("message_sent")) and (
+                    str(current_job.get("message_signature") or "")
+                    == message_signature
+                )
+                frozen_request = dict(current_job.get("request") or {})
+                for key in (
+                    "polling_work_order_mode",
+                    "polling_work_order_fallback_reason",
+                    "polling_work_order_relay_checked_at",
+                    "polling_work_order_relay_url",
+                ):
+                    if key in prepared:
+                        frozen_request[key] = copy.deepcopy(prepared[key])
+                cls.service.mark_job(
+                    job_id,
+                    prepared=prepared,
+                    request=frozen_request,
+                    message_signature=message_signature,
+                )
                 operation_request = cls._notice_remote_operation_request(prepared)
                 operation_lock_key = str(
                     prepared.get("target_record_id")

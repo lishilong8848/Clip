@@ -14,9 +14,37 @@ if str(BIN_DIR) not in sys.path:
 from upload_event_module.ui import main_window_runtime
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin
 from upload_event_module.ui.settings_dialog import SettingsDialog
+from upload_event_module.config import ConfigManager
 
 
 class SettingsSaveRuntimeTests(unittest.TestCase):
+    def test_public_relay_url_change_is_blocked_by_open_public_group(self) -> None:
+        manager = ConfigManager.__new__(ConfigManager)
+        manager.polling_work_order_public_relay_url = "https://old.example"
+        store = MagicMock()
+        store.list_documents.return_value = [
+            {
+                "payload": {
+                    "state": "active",
+                    "relay": {"mode": "public_relay"},
+                }
+            }
+        ]
+        with patch(
+            "lan_bitable_template_portal.state_store.LanPortalStateStore",
+            return_value=store,
+        ):
+            reason = manager.polling_work_order_relay_url_change_block_reason(
+                "https://new.example"
+            )
+        self.assertIn("未结束的公网工单", reason)
+        self.assertEqual(
+            manager.polling_work_order_relay_url_change_block_reason(
+                "https://old.example/"
+            ),
+            "",
+        )
+
     def test_relay_http_allows_only_loopback_or_private_lan(self) -> None:
         self.assertTrue(
             SettingsDialog._is_valid_polling_work_order_public_relay_url(

@@ -106,6 +106,11 @@ TOKEN_ERROR_CODES = {99991663, 99991664, 99991665, 99991668, 99991677}
 CHANGE_SOURCE_APP_TOKEN = "JhiVwgfoIimAqEk8YwEc09sknGd"
 CHANGE_SOURCE_TABLE_ID = "tblBvg6wCYSX3hcg"
 CHANGE_CONFIRMATION_NAMESPACE = "change_confirmation"
+DAILY_EVENT_TIMELINE_NAMESPACE = "daily_event_timeline"
+DAILY_WORK_REPORT_NAMESPACE = "daily_work_report"
+DAILY_WORK_REPORT_SCOPES = ("A", "B", "C", "D", "E")
+DAILY_WORK_REPORT_RETRY_END = (18, 10)
+DAILY_WORK_REPORT_SEND_TIME = (17, 50)
 ZHIHANG_CHANGE_APP_TOKEN = "IrIibPkUOa6udGsMhu2cbOqhnWg"
 ZHIHANG_CHANGE_TABLE_ID = "tblqMJvYW5dxFFfU"
 REPAIR_SOURCE_APP_TOKEN = "AnEBwJlvGiJfDdkOB32cUPuknzg"
@@ -1276,12 +1281,14 @@ def send_text_to_open_ids(
 def send_interactive_to_open_ids(
     card: dict[str, Any],
     open_ids: list[str],
+    *,
+    message_uuid: str = "",
 ) -> tuple[bool, str, list[dict[str, Any]]]:
     from upload_event_module.services.robot_webhook import (
         send_interactive_to_open_ids as send_impl,
     )
 
-    return send_impl(card, open_ids)
+    return send_impl(card, open_ids, message_uuid=message_uuid)
 
 
 def send_interactive_to_chat_id(
@@ -1308,6 +1315,7 @@ class MaintenancePortalService:
     _handover_lock = threading.RLock()
     _handover_reset_lock = threading.RLock()
     _hidden_ongoing_lock = threading.RLock()
+    _daily_report_lock = threading.RLock()
 
     def __init__(
         self,
@@ -21290,13 +21298,15 @@ class MaintenancePortalService:
         if not text:
             return None
         match = re.search(
-            r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})",
+            r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})"
+            r"(?::(\d{1,2}))?",
             text,
         )
         if not match:
             match = re.search(
                 r"(\d{4})[年-](\d{1,2})[月-](\d{1,2})日?\s*"
-                r"(\d{1,2})(?:[：:点时.](\d{1,2}))?",
+                r"(\d{1,2})(?:[：:点时.](\d{1,2}))?"
+                r"(?:[：:.](\d{1,2}))?",
                 text,
             )
         if not match:
@@ -21308,6 +21318,7 @@ class MaintenancePortalService:
                 int(match.group(3)),
                 int(match.group(4)),
                 int(match.group(5) or 0),
+                int(match.group(6) or 0),
             )
         except Exception:
             return None
@@ -23471,6 +23482,200 @@ class MaintenancePortalService:
                 **patch,
             )
 
+    @classmethod
+    def _event_occurrence_datetime(
+        cls, payload: dict[str, Any]
+    ) -> dt.datetime | None:
+        for field_name in (
+            "occurrence_time",
+            "event_time",
+            "time_str",
+            "fault_time",
+        ):
+            parsed = cls._parse_notice_datetime(payload.get(field_name))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @classmethod
+    def _event_response_datetime(
+        cls, payload: dict[str, Any]
+    ) -> dt.datetime | None:
+        response_text = cls._format_input_datetime(
+            payload.get("response_time")
+            or payload.get("actual_action_time")
+        ).strip()
+        parsed = cls._parse_notice_datetime(response_text)
+        if parsed is not None:
+            return parsed
+        match = re.search(
+            r"(?<!\d)([01]?\d|2[0-3])[:：.]([0-5]?\d)"
+            r"(?:[:：.]([0-5]?\d))?(?!\d)",
+            response_text,
+        )
+        if not match:
+            return None
+        occurrence = cls._event_occurrence_datetime(payload)
+        base_date = occurrence.date() if occurrence else dt.datetime.now().date()
+        hour = int(match.group(1))
+        if occurrence and occurrence.hour >= 23 and hour == 0:
+            base_date += dt.timedelta(days=1)
+        return dt.datetime(
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            hour,
+            int(match.group(2)),
+            int(match.group(3) or 0),
+        )
+
+    @staticmethod
+    def _event_timeline_key(payload: dict[str, Any]) -> str:
+        for field_name in (
+            "target_record_id",
+            "record_id",
+            "source_record_id",
+            "active_item_id",
+        ):
+            value = str(payload.get(field_name) or "").strip()
+            if value:
+                return value
+        signature = "|".join(
+            [
+                str(payload.get("title") or "").strip(),
+                str(
+                    payload.get("occurrence_time")
+                    or payload.get("event_time")
+                    or payload.get("time_str")
+                    or ""
+                ).strip(),
+                str(payload.get("building") or "").strip(),
+            ]
+        )
+        return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]
+
+    def _record_event_timeline_action(
+        self,
+        *,
+        job_id: str,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        get_document = getattr(self._state_store, "get_document", None)
+        put_document = getattr(self._state_store, "put_document", None)
+        if not callable(get_document) or not callable(put_document):
+            return
+        event_key = self._event_timeline_key(payload)
+        if not event_key:
+            return
+        current = get_document(DAILY_EVENT_TIMELINE_NAMESPACE, event_key) or {}
+        current = dict(current) if isinstance(current, dict) else {}
+        occurrence = self._event_occurrence_datetime(payload)
+        response = self._event_response_datetime(payload)
+        response_raw = str(
+            payload.get("response_time")
+            or payload.get("actual_action_time")
+            or ""
+        ).strip()
+        event_action = (
+            "recover"
+            if action == "update" and bool(payload.get("recover_selected"))
+            else action
+        )
+        action_item = {
+            "action": event_action,
+            "response_time": (
+                response.strftime("%Y-%m-%d %H:%M:%S") if response else ""
+            ),
+            "precision": (
+                "second"
+                if re.search(r"\d{1,2}[:：.]\d{1,2}[:：.]\d{1,2}", response_raw)
+                else "minute"
+            ),
+            "job_id": str(job_id or ""),
+        }
+        actions = [
+            dict(item)
+            for item in current.get("actions") or []
+            if isinstance(item, dict)
+        ]
+        if not any(
+            str(item.get("job_id") or "") == str(job_id or "")
+            for item in actions
+        ):
+            actions.append(action_item)
+        actions.sort(
+            key=lambda item: str(item.get("response_time") or "9999-12-31")
+        )
+        building_codes = self._clean_building_codes(
+            payload.get("building_codes")
+        )
+        if not building_codes:
+            building_codes = self._building_codes_from_value(
+                payload.get("buildings") or payload.get("building")
+            )
+        initial_level = str(current.get("initial_level") or "").strip()
+        if not initial_level and action == "start":
+            initial_level = str(
+                payload.get("event_level") or payload.get("level") or ""
+            ).strip()
+        current.update(
+            {
+                "event_key": event_key,
+                "target_record_id": str(
+                    payload.get("target_record_id")
+                    or payload.get("record_id")
+                    or current.get("target_record_id")
+                    or ""
+                ).strip(),
+                "source_record_id": str(
+                    payload.get("source_record_id")
+                    or current.get("source_record_id")
+                    or ""
+                ).strip(),
+                "active_item_id": str(
+                    payload.get("active_item_id")
+                    or current.get("active_item_id")
+                    or ""
+                ).strip(),
+                "title": str(
+                    payload.get("title")
+                    or current.get("title")
+                    or "未命名事件"
+                ).strip(),
+                "building": str(
+                    payload.get("building") or current.get("building") or ""
+                ).strip(),
+                "building_codes": building_codes
+                or list(current.get("building_codes") or []),
+                "initial_level": initial_level
+                or str(current.get("level") or "").strip(),
+                "occurrence_time": (
+                    occurrence.strftime("%Y-%m-%d %H:%M:%S")
+                    if occurrence
+                    else str(current.get("occurrence_time") or "")
+                ),
+                "occurrence_precision": (
+                    "second"
+                    if occurrence
+                    and re.search(
+                        r"\d{1,2}[:：.]\d{1,2}[:：.]\d{1,2}",
+                        str(
+                            payload.get("occurrence_time")
+                            or payload.get("event_time")
+                            or payload.get("time_str")
+                            or ""
+                        ),
+                    )
+                    else "minute"
+                ),
+                "ended": bool(current.get("ended")) or event_action == "end",
+                "actions": actions,
+                "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        put_document(DAILY_EVENT_TIMELINE_NAMESPACE, event_key, current)
+
     def _record_successful_action(
         self, job_id: str, *, record_id: str = "", active_item_id: str = ""
     ) -> None:
@@ -23559,6 +23764,27 @@ class MaintenancePortalService:
             identity_payload,
             origin=str(prepared.get("origin") or "action_success"),
         )
+        event_response = None
+        event_action = action
+        if work_type == WORK_TYPE_EVENT:
+            event_response = self._event_response_datetime(prepared)
+            event_action = (
+                "recover"
+                if action == "update" and bool(prepared.get("recover_selected"))
+                else action
+            )
+            try:
+                self._record_event_timeline_action(
+                    job_id=job_id,
+                    action=action,
+                    payload={**prepared, **prepared_identity},
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "事件时效时间线保存失败: job_id=%s error=%s",
+                    job_id,
+                    exc,
+                )
         with self._summary_lock:
             payload = self._load_day_summary_locked()
             items = payload.setdefault("items", [])
@@ -23659,6 +23885,10 @@ class MaintenancePortalService:
                 "fault_time",
                 "expected_time",
                 "repair_management_record_id",
+                "time_str",
+                "occurrence_time",
+                "event_time",
+                "event_level",
             ):
                 value = prepared.get(field)
                 if value not in (None, ""):
@@ -23677,8 +23907,14 @@ class MaintenancePortalService:
             item.setdefault("actions", []).append(
                 {
                     "action": action,
+                    "event_action": event_action,
                     "label": action_label,
                     "time": now,
+                    "response_time": (
+                        event_response.strftime("%Y-%m-%d %H:%M:%S")
+                        if event_response
+                        else ""
+                    ),
                     "job_id": job_id,
                     "record_id": target_record_id,
                     "progress": str(prepared.get("progress") or ""),
@@ -24329,7 +24565,14 @@ class MaintenancePortalService:
                 if isinstance(action, dict)
             ]
             labels = [
-                action_labels.get(str(action.get("action") or "").strip(), "")
+                action_labels.get(
+                    str(
+                        action.get("event_action")
+                        or action.get("action")
+                        or ""
+                    ).strip(),
+                    "",
+                )
                 for action in actions
             ]
             labels = [label for label in labels if label]
@@ -24367,7 +24610,10 @@ class MaintenancePortalService:
                 task = tasks_by_signature.get(signature)
 
             sort_time = self._daily_task_sort_time(
-                *[action.get("time") for action in actions],
+                *[
+                    action.get("response_time") or action.get("time")
+                    for action in actions
+                ],
                 item.get("ended_at"),
                 item.get("last_updated_at"),
                 item.get("started_at"),
@@ -24947,6 +25193,1164 @@ class MaintenancePortalService:
             "tasks": all_tasks,
             "warnings": list(dict.fromkeys(warnings)),
         }
+
+    @staticmethod
+    def _daily_report_period(
+        report_end: dt.datetime,
+    ) -> tuple[dt.datetime, dt.datetime]:
+        end = report_end.replace(second=0, microsecond=0)
+        return end - dt.timedelta(days=1), end
+
+    def _daily_report_tasks_for_window(
+        self,
+        *,
+        scope: str,
+        window_start: dt.datetime,
+        window_end: dt.datetime,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        tasks_by_id: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
+        day = window_start.date()
+        while day <= window_end.date():
+            payload = self.get_daily_task_checklist(
+                scope=scope,
+                date=day.strftime("%Y-%m-%d"),
+            )
+            warnings.extend(str(item) for item in payload.get("warnings") or [])
+            for raw_task in payload.get("tasks") or []:
+                if not isinstance(raw_task, dict):
+                    continue
+                task = dict(raw_task)
+                sort_time = float(task.get("sort_time") or 0)
+                if sort_time <= 0:
+                    sort_time = dt.datetime.combine(day, dt.time()).timestamp()
+                if not (
+                    window_start.timestamp()
+                    <= sort_time
+                    < window_end.timestamp()
+                ):
+                    continue
+                task_id = str(task.get("task_id") or "").strip()
+                if not task_id:
+                    task_id = self._daily_task_id(
+                        str(task.get("category") or "task"),
+                        "|".join(
+                            [
+                                str(task.get("title") or ""),
+                                str(task.get("building") or ""),
+                            ]
+                        ),
+                    )
+                    task["task_id"] = task_id
+                existing = tasks_by_id.get(task_id)
+                if existing is None or sort_time >= float(
+                    existing.get("sort_time") or 0
+                ):
+                    summaries = list(
+                        dict.fromkeys(
+                            [
+                                str((existing or {}).get("action_summary") or "").strip(),
+                                str(task.get("action_summary") or "").strip(),
+                            ]
+                        )
+                    )
+                    task["action_summary"] = "；".join(
+                        item for item in summaries if item
+                    )
+                    tasks_by_id[task_id] = task
+            day += dt.timedelta(days=1)
+        tasks = list(tasks_by_id.values())
+        tasks.sort(
+            key=lambda item: (
+                float(item.get("sort_time") or 0),
+                str(item.get("title") or ""),
+            ),
+            reverse=True,
+        )
+        return tasks, list(dict.fromkeys(item for item in warnings if item))
+
+    @classmethod
+    def _daily_report_datetimes(
+        cls, value: Any
+    ) -> list[tuple[dt.datetime, str]]:
+        if value in (None, "", [], {}):
+            return []
+        if isinstance(value, (list, tuple, set)):
+            result: list[tuple[dt.datetime, str]] = []
+            for item in value:
+                result.extend(cls._daily_report_datetimes(item))
+            return result
+        if isinstance(value, dict):
+            for field_name in ("value", "text", "timestamp", "time"):
+                if field_name in value:
+                    return cls._daily_report_datetimes(value.get(field_name))
+            return []
+        if isinstance(value, (int, float)) or re.fullmatch(
+            r"\d+(?:\.\d+)?", str(value).strip()
+        ):
+            numeric = float(value)
+            if numeric > 10_000_000_000:
+                numeric /= 1000
+            if numeric > 1_000_000_000:
+                with suppress(OSError, OverflowError, ValueError):
+                    return [(dt.datetime.fromtimestamp(numeric), "second")]
+        text = str(value or "").replace("T", " ").strip()
+        result: list[tuple[dt.datetime, str]] = []
+        pattern = re.compile(
+            r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?\s*"
+            r"(\d{1,2})[:：.](\d{1,2})(?:[:：.](\d{1,2}))?"
+        )
+        for match in pattern.finditer(text):
+            with suppress(ValueError):
+                result.append(
+                    (
+                        dt.datetime(
+                            int(match.group(1)),
+                            int(match.group(2)),
+                            int(match.group(3)),
+                            int(match.group(4)),
+                            int(match.group(5)),
+                            int(match.group(6) or 0),
+                        ),
+                        "second" if match.group(6) is not None else "minute",
+                    )
+                )
+        return result
+
+    @staticmethod
+    def _daily_report_event_keys(item: dict[str, Any]) -> list[str]:
+        keys = [
+            str(item.get(field_name) or "").strip()
+            for field_name in (
+                "target_record_id",
+                "record_id",
+                "source_record_id",
+                "active_item_id",
+                "event_key",
+            )
+        ]
+        return list(dict.fromkeys(key for key in keys if key))
+
+    @staticmethod
+    def _daily_report_add_event_action(
+        event: dict[str, Any],
+        *,
+        action: str,
+        response_time: dt.datetime,
+        precision: str,
+    ) -> None:
+        actions = event.setdefault("actions", [])
+        for index, existing in enumerate(actions):
+            if not isinstance(existing, dict):
+                continue
+            existing_time = existing.get("response_dt")
+            if not isinstance(existing_time, dt.datetime):
+                continue
+            if (
+                str(existing.get("action") or "") == action
+                and existing_time == response_time
+            ):
+                return
+            if (
+                str(existing.get("action") or "") == action
+                and str(existing.get("precision") or "") == "minute"
+                and precision == "second"
+                and existing_time.replace(second=0, microsecond=0)
+                == response_time.replace(second=0, microsecond=0)
+            ):
+                actions[index] = {
+                    "action": action,
+                    "response_dt": response_time,
+                    "precision": precision,
+                }
+                return
+        actions.append(
+            {
+                "action": action,
+                "response_dt": response_time,
+                "precision": precision,
+            }
+        )
+
+    def _daily_report_event_timelines(
+        self,
+        *,
+        scope: str,
+        window_start: dt.datetime,
+        window_end: dt.datetime,
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        index_by_identity: dict[str, dict[str, Any]] = {}
+
+        def event_for(raw: dict[str, Any]) -> dict[str, Any]:
+            for identity_key in self._daily_report_event_keys(raw):
+                if identity_key in index_by_identity:
+                    return index_by_identity[identity_key]
+            occurrence_values = self._daily_report_datetimes(
+                raw.get("occurrence_time")
+                or raw.get("event_time")
+                or raw.get("time_str")
+            )
+            occurrence_dt, occurrence_precision = (
+                occurrence_values[0] if occurrence_values else (None, "")
+            )
+            event_key = next(
+                iter(self._daily_report_event_keys(raw)),
+                self._daily_task_id(
+                    "event-sla",
+                    "|".join(
+                        [
+                            str(raw.get("title") or raw.get("alarm_desc") or ""),
+                            str(raw.get("occurrence_time") or ""),
+                        ]
+                    ),
+                ),
+            )
+            event = {
+                "event_key": event_key,
+                "identity_keys": self._daily_report_event_keys(raw),
+                "title": self._daily_task_public_title(
+                    raw.get("alarm_desc") or raw.get("title"),
+                    "未命名事件",
+                ),
+                "building": self._daily_task_building_label(
+                    raw.get("building"),
+                    raw.get("building_codes") or [],
+                ),
+                "building_codes": (
+                    self._clean_building_codes(raw.get("building_codes"))
+                    or self._building_codes_from_value(raw.get("building"))
+                ),
+                "initial_level": str(
+                    raw.get("initial_level")
+                    or raw.get("event_level")
+                    or raw.get("level")
+                    or ""
+                ).strip(),
+                "occurrence_dt": occurrence_dt,
+                "occurrence_precision": occurrence_precision,
+                "status": str(raw.get("status") or "处理中").strip(),
+                "ended": bool(raw.get("ended"))
+                or "结束" in str(raw.get("status") or ""),
+                "actions": [],
+            }
+            events.append(event)
+            for identity_key in event["identity_keys"]:
+                index_by_identity[identity_key] = event
+            return event
+
+        months = list(
+            dict.fromkeys(
+                [
+                    window_start.strftime("%Y-%m"),
+                    window_end.strftime("%Y-%m"),
+                ]
+            )
+        )
+        for month in months:
+            snapshot = self.get_event_monthly_snapshot(scope=scope, month=month)
+            for raw in snapshot.get("records") or []:
+                if not isinstance(raw, dict):
+                    continue
+                event = event_for(raw)
+                if not event.get("occurrence_dt"):
+                    values = self._daily_report_datetimes(raw.get("occurrence_time"))
+                    if values:
+                        event["occurrence_dt"], event["occurrence_precision"] = values[0]
+                for field_name, action in (
+                    ("response_time", "start"),
+                    ("progress_update", "update"),
+                    ("recover_time", "recover"),
+                    ("end_time", "end"),
+                ):
+                    for response_dt, precision in self._daily_report_datetimes(
+                        raw.get(field_name)
+                    ):
+                        self._daily_report_add_event_action(
+                            event,
+                            action=action,
+                            response_time=response_dt,
+                            precision=precision,
+                        )
+                        if action == "end":
+                            event["ended"] = True
+
+        list_documents = getattr(self._state_store, "list_documents", None)
+        local_documents = (
+            list_documents(DAILY_EVENT_TIMELINE_NAMESPACE)
+            if callable(list_documents)
+            else []
+        )
+        for document in local_documents:
+            raw = document.get("payload") if isinstance(document, dict) else {}
+            if not isinstance(raw, dict) or not self._scope_matches_item(scope, raw):
+                continue
+            event = event_for(raw)
+            for field_name in ("title", "building", "initial_level"):
+                if raw.get(field_name):
+                    event[field_name] = str(raw.get(field_name) or "").strip()
+            building_codes = self._clean_building_codes(
+                raw.get("building_codes")
+            )
+            if not building_codes:
+                building_codes = self._building_codes_from_value(
+                    raw.get("building")
+                )
+            if building_codes:
+                event["building_codes"] = building_codes
+            occurrence_values = self._daily_report_datetimes(
+                raw.get("occurrence_time")
+            )
+            if occurrence_values:
+                event["occurrence_dt"] = occurrence_values[0][0]
+                event["occurrence_precision"] = str(
+                    raw.get("occurrence_precision") or occurrence_values[0][1]
+                )
+            event["ended"] = bool(event.get("ended")) or bool(raw.get("ended"))
+            for action_item in raw.get("actions") or []:
+                if not isinstance(action_item, dict):
+                    continue
+                values = self._daily_report_datetimes(
+                    action_item.get("response_time")
+                )
+                if not values:
+                    continue
+                self._daily_report_add_event_action(
+                    event,
+                    action=str(action_item.get("action") or "").strip(),
+                    response_time=values[0][0],
+                    precision=str(action_item.get("precision") or values[0][1]),
+                )
+
+        included: list[dict[str, Any]] = []
+        for event in events:
+            actions = [
+                item
+                for item in event.get("actions") or []
+                if isinstance(item, dict)
+                and isinstance(item.get("response_dt"), dt.datetime)
+            ]
+            actions.sort(key=lambda item: item["response_dt"])
+            event["actions"] = actions
+            occurrence_dt = event.get("occurrence_dt")
+            activity_in_window = bool(
+                isinstance(occurrence_dt, dt.datetime)
+                and window_start <= occurrence_dt < window_end
+            ) or any(
+                window_start <= item["response_dt"] < window_end
+                for item in actions
+            )
+            if not activity_in_window and bool(event.get("ended")):
+                continue
+            if not activity_in_window and not bool(event.get("ended")):
+                if not isinstance(occurrence_dt, dt.datetime) or occurrence_dt >= window_end:
+                    continue
+            included.append(event)
+        return included
+
+    @staticmethod
+    def _daily_report_deadline(
+        *,
+        number: int,
+        occurrence: dt.datetime | None,
+        previous_response: dt.datetime | None,
+        i3: bool,
+    ) -> dt.datetime | None:
+        fixed_minutes = {1: 2, 2: 5, 3: 10, 4: 30 if i3 else 15}
+        if number in fixed_minutes:
+            return (
+                occurrence + dt.timedelta(minutes=fixed_minutes[number])
+                if occurrence
+                else None
+            )
+        if previous_response is None:
+            return None
+        return previous_response + dt.timedelta(minutes=30 if i3 else 15)
+
+    @staticmethod
+    def _daily_report_late_text(seconds: int) -> str:
+        seconds = max(0, int(seconds or 0))
+        minutes, remaining = divmod(seconds, 60)
+        return f"{minutes}分{remaining}秒"
+
+    def _daily_report_event_sla(
+        self,
+        *,
+        scope: str,
+        window_start: dt.datetime,
+        window_end: dt.datetime,
+    ) -> dict[str, Any]:
+        result_events: list[dict[str, Any]] = []
+        stats = {"events": 0, "on_time": 0, "late": 0, "pending": 0, "unknown": 0}
+        for event in self._daily_report_event_timelines(
+            scope=scope,
+            window_start=window_start,
+            window_end=window_end,
+        ):
+            level = str(event.get("initial_level") or "").strip()
+            normalized_level = re.sub(r"\s+|级", "", level.upper())
+            level_missing = not bool(normalized_level)
+            is_i3 = normalized_level == "I3"
+            actions = list(event.get("actions") or [])
+            starts = [item for item in actions if item.get("action") == "start"]
+            following = [
+                item
+                for item in actions
+                if item.get("action") in {"update", "end"}
+            ]
+            numbered: list[tuple[int, dict[str, Any]]] = []
+            if starts:
+                numbered.append((1, starts[0]))
+                numbered.extend(
+                    (index, item)
+                    for index, item in enumerate(following, start=2)
+                )
+            rows: list[dict[str, Any]] = []
+            previous_response: dt.datetime | None = None
+            occurrence = event.get("occurrence_dt")
+            occurrence = occurrence if isinstance(occurrence, dt.datetime) else None
+            for number, item in numbered:
+                response_dt = item.get("response_dt")
+                response_dt = (
+                    response_dt if isinstance(response_dt, dt.datetime) else None
+                )
+                deadline = self._daily_report_deadline(
+                    number=number,
+                    occurrence=occurrence,
+                    previous_response=previous_response,
+                    i3=is_i3,
+                )
+                state = "unknown"
+                late_seconds = 0
+                if response_dt is not None and deadline is not None:
+                    late_seconds = max(
+                        0, int((response_dt - deadline).total_seconds())
+                    )
+                    state = "late" if late_seconds else "on_time"
+                stats[state] += 1
+                rows.append(
+                    {
+                        "number": number,
+                        "action": str(item.get("action") or ""),
+                        "response_time": (
+                            response_dt.strftime("%Y-%m-%d %H:%M:%S")
+                            if response_dt
+                            else ""
+                        ),
+                        "deadline": (
+                            deadline.strftime("%Y-%m-%d %H:%M:%S")
+                            if deadline
+                            else ""
+                        ),
+                        "state": state,
+                        "late_seconds": late_seconds,
+                        "late_text": self._daily_report_late_text(late_seconds),
+                        "precision": str(item.get("precision") or "minute"),
+                    }
+                )
+                previous_response = response_dt or previous_response
+            pending: dict[str, Any] | None = None
+            if not bool(event.get("ended")):
+                next_number = len(numbered) + 1 if starts else 1
+                deadline = self._daily_report_deadline(
+                    number=next_number,
+                    occurrence=occurrence,
+                    previous_response=previous_response,
+                    i3=is_i3,
+                )
+                pending = {
+                    "number": next_number,
+                    "deadline": (
+                        deadline.strftime("%Y-%m-%d %H:%M:%S")
+                        if deadline
+                        else ""
+                    ),
+                    "state": "pending",
+                }
+                stats["pending"] += 1
+            recoveries = [
+                item["response_dt"].strftime("%Y-%m-%d %H:%M:%S")
+                for item in actions
+                if item.get("action") == "recover"
+                and isinstance(item.get("response_dt"), dt.datetime)
+            ]
+            result_events.append(
+                {
+                    "event_key": str(event.get("event_key") or ""),
+                    "title": str(event.get("title") or "未命名事件"),
+                    "building": str(event.get("building") or ""),
+                    "building_codes": list(event.get("building_codes") or []),
+                    "level": level or "等级待核对",
+                    "level_missing": level_missing,
+                    "cadence_minutes": 30 if is_i3 else 15,
+                    "occurrence_time": (
+                        occurrence.strftime("%Y-%m-%d %H:%M:%S")
+                        if occurrence
+                        else ""
+                    ),
+                    "status": "已结束" if event.get("ended") else "进行中",
+                    "ended": bool(event.get("ended")),
+                    "rows": rows,
+                    "pending": pending,
+                    "recoveries": recoveries,
+                    "historical_minute_precision": (
+                        str(event.get("occurrence_precision") or "") == "minute"
+                        or any(row.get("precision") == "minute" for row in rows)
+                    ),
+                }
+            )
+        stats["events"] = len(result_events)
+        result_events.sort(
+            key=lambda item: (
+                str(item.get("occurrence_time") or ""),
+                str(item.get("title") or ""),
+            ),
+            reverse=True,
+        )
+        return {"stats": stats, "events": result_events}
+
+    @staticmethod
+    def _daily_report_groups(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        labels = {
+            "notice": "通告",
+            "event": "事件",
+            "repair": "检修",
+            "mop": "维护单",
+            "water": "水耗",
+        }
+        groups: list[dict[str, Any]] = []
+        for category, label in labels.items():
+            items = [
+                dict(item)
+                for item in tasks
+                if str(item.get("category") or "") == category
+            ]
+            items.sort(
+                key=lambda item: (
+                    float(item.get("sort_time") or 0),
+                    str(item.get("title") or ""),
+                ),
+                reverse=True,
+            )
+            groups.append(
+                {
+                    "key": category,
+                    "label": label,
+                    "count": len(items),
+                    "tasks": items,
+                }
+            )
+        return groups
+
+    @classmethod
+    def _daily_report_stats(
+        cls, tasks: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        return {
+            "total": len(tasks),
+            "ongoing": sum(
+                1 for item in tasks if item.get("status_tone") == "ongoing"
+            ),
+            "completed": sum(
+                1 for item in tasks if item.get("status_tone") == "completed"
+            ),
+            "attention": sum(
+                1
+                for item in tasks
+                if item.get("status_tone") in {"warning", "error"}
+            ),
+        }
+
+    def get_daily_work_report_snapshot(
+        self,
+        *,
+        scope: str,
+        report_end: dt.datetime,
+    ) -> dict[str, Any]:
+        window_start, window_end = self._daily_report_period(report_end)
+        tasks, warnings = self._daily_report_tasks_for_window(
+            scope=scope,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        event_sla = self._daily_report_event_sla(
+            scope=scope,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        existing_event_titles = {
+            re.sub(r"\s+", "", str(item.get("title") or ""))
+            for item in tasks
+            if item.get("category") == "event"
+        }
+        for event in event_sla.get("events") or []:
+            normalized_title = re.sub(r"\s+", "", str(event.get("title") or ""))
+            if normalized_title in existing_event_titles:
+                continue
+            response_times = [
+                self._parse_notice_datetime(row.get("response_time"))
+                for row in event.get("rows") or []
+            ]
+            response_times = [item for item in response_times if item is not None]
+            occurrence = self._parse_notice_datetime(event.get("occurrence_time"))
+            sort_dt = max(response_times, default=occurrence)
+            sort_time = sort_dt.timestamp() if sort_dt is not None else 0.0
+            task = {
+                "task_id": self._daily_task_id(
+                    "event", event.get("event_key") or normalized_title
+                ),
+                "category": "event",
+                "category_label": "事件",
+                "type_key": "event",
+                "type_label": "事件通告",
+                "title": str(event.get("title") or "未命名事件"),
+                "status": str(event.get("status") or "进行中"),
+                "status_tone": self._daily_task_status_tone(event.get("status")),
+                "time": self._daily_task_time_text(sort_time),
+                "sort_time": sort_time,
+                "action_summary": "事件时效待查看",
+                "building": str(event.get("building") or ""),
+                "specialty": "",
+                "level": str(event.get("level") or ""),
+                "progress_percent": None,
+            }
+            tasks.append(task)
+            existing_event_titles.add(normalized_title)
+        tasks.sort(
+            key=lambda item: (
+                float(item.get("sort_time") or 0),
+                str(item.get("title") or ""),
+            ),
+            reverse=True,
+        )
+        return {
+            "scope": self._normalize_scope(scope),
+            "window_start": window_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "window_end": window_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "stats": self._daily_report_stats(tasks),
+            "categories": self._daily_report_groups(tasks),
+            "tasks": tasks,
+            "event_sla": event_sla,
+            "warnings": warnings,
+        }
+
+    def _combine_daily_work_reports(
+        self,
+        reports: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        task_map: dict[str, dict[str, Any]] = {}
+        event_map: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
+        for report in reports:
+            warnings.extend(str(item) for item in report.get("warnings") or [])
+            for task in report.get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                key = str(task.get("task_id") or "").strip()
+                if not key:
+                    continue
+                existing = task_map.get(key)
+                if existing is None or float(task.get("sort_time") or 0) >= float(
+                    existing.get("sort_time") or 0
+                ):
+                    task_map[key] = dict(task)
+            for event in (report.get("event_sla") or {}).get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                key = str(event.get("event_key") or "").strip()
+                if key and key not in event_map:
+                    event_map[key] = dict(event)
+        tasks = list(task_map.values())
+        tasks.sort(
+            key=lambda item: (
+                float(item.get("sort_time") or 0),
+                str(item.get("title") or ""),
+            ),
+            reverse=True,
+        )
+        events = list(event_map.values())
+        sla_stats = {
+            "events": len(events),
+            "on_time": 0,
+            "late": 0,
+            "pending": 0,
+            "unknown": 0,
+        }
+        for event in events:
+            for row in event.get("rows") or []:
+                state = str(row.get("state") or "unknown")
+                if state in sla_stats:
+                    sla_stats[state] += 1
+            if event.get("pending"):
+                sla_stats["pending"] += 1
+        first = reports[0] if reports else {}
+        return {
+            "scope": "ALL_AE",
+            "window_start": str(first.get("window_start") or ""),
+            "window_end": str(first.get("window_end") or ""),
+            "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "stats": self._daily_report_stats(tasks),
+            "categories": self._daily_report_groups(tasks),
+            "tasks": tasks,
+            "event_sla": {"stats": sla_stats, "events": events},
+            "warnings": list(dict.fromkeys(item for item in warnings if item)),
+        }
+
+    @staticmethod
+    def _daily_report_markdown(value: Any, *, limit: int = 180) -> str:
+        text = re.sub(r"[\r\n]+", " ", str(value or "")).strip()
+        text = text.replace("*", "＊").replace("`", "'")
+        return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+    def build_daily_work_report_card(
+        self,
+        report: dict[str, Any],
+        *,
+        scope_label: str,
+        link_scope: str,
+        public_base: str | None = None,
+    ) -> dict[str, Any]:
+        stats = report.get("stats") or {}
+        event_sla = report.get("event_sla") or {}
+        sla_stats = event_sla.get("stats") or {}
+        category_counts = {
+            str(item.get("label") or ""): int(item.get("count") or 0)
+            for item in report.get("categories") or []
+            if isinstance(item, dict)
+        }
+        lines = [
+            f"**统计周期** {str(report.get('window_start') or '')[:16]} 至 "
+            f"{str(report.get('window_end') or '')[:16]}",
+            f"**事项汇总** 共 {int(stats.get('total') or 0)} 项 · "
+            f"进行中 {int(stats.get('ongoing') or 0)} · "
+            f"已完成 {int(stats.get('completed') or 0)} · "
+            f"需关注 {int(stats.get('attention') or 0)}",
+            "**分类汇总** "
+            + " · ".join(
+                f"{label} {category_counts.get(label, 0)}"
+                for label in ("通告", "事件", "检修", "维护单", "水耗")
+            ),
+            f"**事件时效** 事件 {int(sla_stats.get('events') or 0)} · "
+            f"达标 {int(sla_stats.get('on_time') or 0)} · "
+            f"超时 {int(sla_stats.get('late') or 0)} · "
+            f"待发送 {int(sla_stats.get('pending') or 0)}",
+        ]
+        events = event_sla.get("events") or []
+        if events:
+            lines.extend(["", "**事件通告时效**"])
+        action_labels = {"start": "新增", "update": "更新", "end": "结束"}
+        for event in events:
+            title = self._daily_report_markdown(event.get("title"))
+            level = self._daily_report_markdown(event.get("level"), limit=30)
+            occurrence = str(event.get("occurrence_time") or "")
+            lines.append(
+                f"**{title}** · {level} · {self._daily_report_markdown(event.get('status'), limit=20)}"
+            )
+            lines.append(f"　发生 {occurrence or '时间缺失'}")
+            for row in event.get("rows") or []:
+                state = str(row.get("state") or "unknown")
+                if state == "late":
+                    result_text = f"超时 {row.get('late_text') or '0分0秒'}"
+                elif state == "on_time":
+                    result_text = "达标"
+                else:
+                    result_text = "时间缺失，无法判定"
+                lines.append(
+                    f"　第{int(row.get('number') or 0)}条 "
+                    f"{action_labels.get(str(row.get('action') or ''), '通告')} "
+                    f"{str(row.get('response_time') or '')[11:19]} · {result_text}"
+                )
+            pending = event.get("pending")
+            if isinstance(pending, dict):
+                deadline = str(pending.get("deadline") or "")
+                lines.append(
+                    f"　第{int(pending.get('number') or 0)}条待发送"
+                    + (f" · 截止 {deadline[11:19]}" if deadline else "")
+                )
+            for recover_time in event.get("recoveries") or []:
+                lines.append(f"　恢复 {str(recover_time)[11:19]} · 不参与编号")
+            if event.get("historical_minute_precision"):
+                lines.append("　注：历史时间精度至分钟，按00秒核算")
+
+        task_lines: list[str] = []
+        omitted = 0
+        for group in report.get("categories") or []:
+            if not isinstance(group, dict) or group.get("key") == "event":
+                continue
+            group_tasks = [item for item in group.get("tasks") or [] if isinstance(item, dict)]
+            if not group_tasks:
+                continue
+            section = ["", f"**{self._daily_report_markdown(group.get('label'), limit=20)} · {len(group_tasks)}项**"]
+            for task in group_tasks:
+                detail = " · ".join(
+                    item
+                    for item in (
+                        self._daily_report_markdown(task.get("time"), limit=10),
+                        self._daily_report_markdown(task.get("type_label"), limit=20),
+                        self._daily_report_markdown(task.get("title")),
+                        self._daily_report_markdown(task.get("status"), limit=20),
+                        self._daily_report_markdown(task.get("action_summary"), limit=50),
+                    )
+                    if item
+                )
+                candidate = f"· {detail}"
+                if len("\n".join(lines + task_lines + section + [candidate])) > 22000:
+                    omitted += 1
+                    continue
+                section.append(candidate)
+            task_lines.extend(section)
+        lines.extend(task_lines)
+        if omitted:
+            lines.extend(["", f"还有 {omitted} 项详情请在每日任务页面查看。"])
+        if not int(stats.get("total") or 0):
+            lines.extend(["", "**本周期无事项记录**"])
+        warnings = [str(item) for item in report.get("warnings") or [] if str(item).strip()]
+        if warnings:
+            lines.extend(["", "**数据提示**", *[f"· {self._daily_report_markdown(item)}" for item in warnings]])
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "\n".join(lines)},
+            }
+        ]
+        if public_base is None:
+            public_base = self._critical_guard_public_base_url()
+        if public_base:
+            elements.append(
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "type": "primary",
+                            "text": {"tag": "plain_text", "content": "查看每日任务"},
+                            "url": (
+                                f"{public_base}/daily-tasks?scope="
+                                f"{quote(link_scope, safe='')}"
+                            ),
+                        }
+                    ],
+                }
+            )
+        return {
+            "config": {"wide_screen_mode": True, "enable_forward": True},
+            "header": {
+                "template": "red" if int(sla_stats.get("late") or 0) else "blue",
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"{scope_label}每日工作汇总",
+                },
+            },
+            "elements": elements,
+        }
+
+    def _daily_report_supervisor_recipient(self, scope: str) -> dict[str, str]:
+        scope_code = self._water_scope_code(scope)
+        expected_position = WATER_CONSUMPTION_SUPERVISOR_POSITIONS.get(scope_code, "")
+        cached = getattr(self, "_permission_directory_cache", None)
+        if isinstance(cached, dict):
+            candidates = [
+                item
+                for item in cached.get("items") or []
+                if isinstance(item, dict)
+                and item.get("selectable")
+                and str(item.get("open_id") or "").strip()
+                and scope_code in (item.get("scopes") or [])
+                and str(item.get("position") or "").strip() == expected_position
+            ]
+            if len(candidates) == 1:
+                return {
+                    "name": str(candidates[0].get("name") or "").strip(),
+                    "open_id": str(candidates[0].get("open_id") or "").strip(),
+                }
+        return dict(WATER_CONSUMPTION_SUPERVISOR_FALLBACKS.get(scope_code) or {})
+
+    def _new_daily_work_report_document(
+        self,
+        *,
+        report_end: dt.datetime,
+    ) -> dict[str, Any]:
+        reports = {
+            scope: self.get_daily_work_report_snapshot(
+                scope=scope,
+                report_end=report_end,
+            )
+            for scope in DAILY_WORK_REPORT_SCOPES
+        }
+        full_report = self._combine_daily_work_reports(list(reports.values()))
+        public_base = self._critical_guard_public_base_url()
+        cards = {
+            scope: self.build_daily_work_report_card(
+                report,
+                scope_label=f"{scope}楼",
+                link_scope=scope,
+                public_base=public_base,
+            )
+            for scope, report in reports.items()
+        }
+        cards["ALL_AE"] = self.build_daily_work_report_card(
+            full_report,
+            scope_label="A-E楼全楼",
+            link_scope="ALL",
+            public_base=public_base,
+        )
+        deliveries: dict[str, dict[str, Any]] = {}
+        for scope in DAILY_WORK_REPORT_SCOPES:
+            recipient = self._daily_report_supervisor_recipient(scope)
+            deliveries[scope] = {
+                "scope": scope,
+                "recipient_name": str(recipient.get("name") or ""),
+                "open_id": str(recipient.get("open_id") or ""),
+                "card_key": scope,
+                "status": "pending",
+                "attempts": 0,
+                "last_error": "",
+            }
+        deliveries["H_FULL"] = {
+            "scope": "ALL_AE",
+            "recipient_name": "H楼值班账号",
+            "open_id": str(BUILDING_OPEN_ID_MAP.get("H") or ""),
+            "card_key": "ALL_AE",
+            "status": "pending",
+            "attempts": 0,
+            "last_error": "",
+        }
+        deliveries["LI_SHILONG"] = {
+            "scope": "ALL_AE",
+            "recipient_name": "李世龙",
+            "open_id": LI_SHILONG_OPEN_ID,
+            "card_key": "ALL_AE",
+            "status": "pending",
+            "attempts": 0,
+            "last_error": "",
+        }
+        report_key = report_end.strftime("%Y-%m-%d")
+        for delivery_key, delivery in deliveries.items():
+            delivery["message_uuid"] = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"clipflow:daily-work-report:{report_key}:{delivery_key}",
+                )
+            )
+        return {
+            "report_key": report_key,
+            "window_start": (report_end - dt.timedelta(days=1)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "window_end": report_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "reports": reports,
+            "full_report": full_report,
+            "cards": cards,
+            "deliveries": deliveries,
+            "status": "pending",
+        }
+
+    def send_daily_work_report_to_people(
+        self,
+        *,
+        scope: str,
+        date: str,
+        recipient_open_ids: list[str],
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        normalized_date = self._daily_task_date(date)
+        today = dt.date.today().isoformat()
+        if normalized_date != today:
+            raise PortalError("只能发送今日工作汇总。")
+        recipients = list(
+            dict.fromkeys(
+                str(item or "").strip() for item in recipient_open_ids if str(item or "").strip()
+            )
+        )
+        if not recipients:
+            raise PortalError("请至少选择一名发送人员。")
+        if len(recipients) > 20:
+            raise PortalError("一次最多发送给20人。")
+        people_by_open_id = {
+            str(person.get("open_id") or "").strip(): person
+            for person in self._load_signature_people()
+            if isinstance(person, dict) and str(person.get("open_id") or "").strip()
+        }
+        invalid = [open_id for open_id in recipients if open_id not in people_by_open_id]
+        if invalid:
+            raise PortalError("所选人员不在当前人员目录中，请重新选择。")
+        now = dt.datetime.now()
+        report_end = now.replace(
+            hour=DAILY_WORK_REPORT_SEND_TIME[0],
+            minute=DAILY_WORK_REPORT_SEND_TIME[1],
+            second=0,
+            microsecond=0,
+        )
+        stored = self._state_store.get_document(
+            DAILY_WORK_REPORT_NAMESPACE,
+            report_end.strftime("%Y-%m-%d"),
+        ) or {}
+        report_key = "ALL_AE" if normalized_scope == "ALL" else normalized_scope
+        stored_reports = stored.get("reports") if isinstance(stored, dict) else {}
+        stored_cards = stored.get("cards") if isinstance(stored, dict) else {}
+        if report_key == "ALL_AE":
+            report = stored.get("full_report") if isinstance(stored, dict) else None
+        else:
+            report = (
+                stored_reports.get(report_key)
+                if isinstance(stored_reports, dict)
+                else None
+            )
+        card = (
+            stored_cards.get(report_key)
+            if isinstance(stored_cards, dict)
+            else None
+        )
+        if not isinstance(report, dict) or not isinstance(card, dict):
+            report = self.get_daily_work_report_snapshot(
+                scope=normalized_scope,
+                report_end=report_end,
+            )
+            card = self.build_daily_work_report_card(
+                report,
+                scope_label=self._scope_label(normalized_scope),
+                link_scope=normalized_scope,
+            )
+        else:
+            report = copy.deepcopy(report)
+            card = copy.deepcopy(card)
+        stable_operation_id = str(operation_id or uuid.uuid4()).strip()
+        results: list[dict[str, Any]] = []
+        for open_id in recipients:
+            message_uuid = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"clipflow:manual-daily-report:{stable_operation_id}:{open_id}",
+                )
+            )
+            ok, message, _details = send_interactive_to_open_ids(
+                card,
+                [open_id],
+                message_uuid=message_uuid,
+            )
+            person = people_by_open_id[open_id]
+            results.append(
+                {
+                    "open_id": open_id,
+                    "name": str(person.get("name") or "").strip(),
+                    "ok": bool(ok),
+                    "message": str(message or ""),
+                }
+            )
+        sent_count = sum(1 for item in results if item.get("ok"))
+        if not sent_count:
+            errors = "；".join(
+                f"{item.get('name') or item.get('open_id')}：{item.get('message') or '发送失败'}"
+                for item in results
+            )
+            raise PortalError(f"今日工作汇总发送失败：{errors}")
+        return {
+            "scope": normalized_scope,
+            "date": normalized_date,
+            "sent_count": sent_count,
+            "failed_count": len(results) - sent_count,
+            "recipients": results,
+            "stats": dict(report.get("stats") or {}),
+        }
+
+    def process_daily_work_reports(
+        self,
+        *,
+        now: dt.datetime | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        now = now or dt.datetime.now()
+        report_end = now.replace(
+            hour=DAILY_WORK_REPORT_SEND_TIME[0],
+            minute=DAILY_WORK_REPORT_SEND_TIME[1],
+            second=0,
+            microsecond=0,
+        )
+        retry_end = now.replace(
+            hour=DAILY_WORK_REPORT_RETRY_END[0],
+            minute=DAILY_WORK_REPORT_RETRY_END[1],
+            second=59,
+            microsecond=999999,
+        )
+        if not force and not (report_end <= now <= retry_end):
+            return {"status": "not_due", "sent": 0, "failed": 0}
+        report_key = report_end.strftime("%Y-%m-%d")
+        get_document = getattr(self._state_store, "get_document")
+        put_document = getattr(self._state_store, "put_document")
+        with self._daily_report_lock:
+            document = get_document(DAILY_WORK_REPORT_NAMESPACE, report_key)
+            if not isinstance(document, dict) or not document.get("cards"):
+                document = self._new_daily_work_report_document(
+                    report_end=report_end
+                )
+                put_document(DAILY_WORK_REPORT_NAMESPACE, report_key, document)
+            deliveries = document.get("deliveries")
+            deliveries = deliveries if isinstance(deliveries, dict) else {}
+            cards = document.get("cards")
+            cards = cards if isinstance(cards, dict) else {}
+            sent = 0
+            failed = 0
+            for delivery_key, raw_delivery in deliveries.items():
+                if not isinstance(raw_delivery, dict):
+                    continue
+                delivery = raw_delivery
+                if delivery.get("status") == "sent":
+                    continue
+                open_id = str(delivery.get("open_id") or "").strip()
+                card = cards.get(str(delivery.get("card_key") or ""))
+                delivery["attempts"] = int(delivery.get("attempts") or 0) + 1
+                delivery["last_attempt_at"] = dt.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                if not open_id or not isinstance(card, dict):
+                    ok = False
+                    message = "收件人或卡片未配置"
+                else:
+                    try:
+                        ok, message, _results = send_interactive_to_open_ids(
+                            card,
+                            [open_id],
+                            message_uuid=str(delivery.get("message_uuid") or ""),
+                        )
+                    except Exception as exc:
+                        ok, message = False, str(exc)
+                if ok:
+                    delivery["status"] = "sent"
+                    delivery["sent_at"] = dt.datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    delivery["last_error"] = ""
+                    sent += 1
+                else:
+                    delivery["status"] = "pending"
+                    delivery["last_error"] = str(message or "发送失败")
+                    failed += 1
+                deliveries[delivery_key] = delivery
+                document["deliveries"] = deliveries
+                document["updated_at"] = dt.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                put_document(DAILY_WORK_REPORT_NAMESPACE, report_key, document)
+            pending = sum(
+                1
+                for item in deliveries.values()
+                if isinstance(item, dict) and item.get("status") != "sent"
+            )
+            document["status"] = "sent" if not pending else "pending"
+            document["updated_at"] = dt.datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            put_document(DAILY_WORK_REPORT_NAMESPACE, report_key, document)
+            return {
+                "status": document["status"],
+                "report_key": report_key,
+                "sent": sent,
+                "failed": failed,
+                "pending": pending,
+            }
 
     @staticmethod
     def _work_type_counts(items: list[dict[str, Any]]) -> dict[str, int]:
@@ -40883,6 +42287,16 @@ class MaintenancePortalService:
                 notice_type=str(prepared.get("notice_type") or ""),
             )
         if expected:
+            if (
+                str(prepared.get("polling_work_order_mode") or "")
+                == "local_fallback"
+                and str(prepared.get("action") or "").strip().lower() == "start"
+                and prepared.get("polling_work_order_required")
+            ):
+                expected = (
+                    f"{expected}\n"
+                    "【工单模式】局域网（公网工单不可用，已自动切换）"
+                )
             current = str(prepared.get("text") or "").strip()
             if current and current != expected:
                 logging.warning(

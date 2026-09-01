@@ -229,6 +229,67 @@ def _json_object(content: bytes) -> dict[str, Any]:
     return value
 
 
+def probe_polling_relay_health(
+    base_url: str,
+    *,
+    timeout: float = 2.0,
+    transport: PollingRelayTransport | None = None,
+) -> dict[str, Any]:
+    """Return a small, non-throwing compatibility probe for settings and starts."""
+    started = time.monotonic()
+    result: dict[str, Any] = {
+        "ready": False,
+        "service": "",
+        "protocol_version": 0,
+        "elapsed_ms": 0.0,
+        "error": "",
+    }
+    try:
+        root = str(base_url or "").strip().rstrip("/")
+        parsed = urllib.parse.urlsplit(root)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise PollingRelayConfigurationError("公网工单地址格式无效。")
+        response = (transport or UrllibPollingRelayTransport()).request(
+            "GET",
+            f"{root}/api/v1/health",
+            headers={"Accept": "application/json"},
+            body=b"",
+            timeout=max(0.2, float(timeout)),
+            max_bytes=64 * 1024,
+        )
+        if not 200 <= int(response.status) < 300:
+            raise PollingRelayHttpError(
+                int(response.status), f"公网工单健康检查返回 HTTP {response.status}。"
+            )
+        payload = _json_object(response.body)
+        result.update(
+            {
+                "service": str(payload.get("service") or ""),
+                "protocol_version": int(payload.get("protocol_version") or 0),
+            }
+        )
+        if result["service"] != "public_polling_relay":
+            raise PollingRelayProtocolError("公网地址返回的不是工单中继服务。")
+        if result["protocol_version"] != POLLING_RELAY_PROTOCOL_VERSION:
+            raise PollingRelayProtocolError("公网工单中继协议版本不兼容。")
+        if payload.get("ready") is not True:
+            raise PollingRelayProtocolError("公网工单服务尚未就绪。")
+        result["ready"] = True
+    except Exception as exc:
+        result["error"] = str(exc or "公网工单连接失败。")
+    finally:
+        result["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 1)
+    return result
+
+
 def _body_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -583,6 +644,7 @@ class PollingWorkOrderRelayConnector:
     ) -> None:
         relay = {
             "mode": "public_relay",
+            "relay_url": self.config.base_url,
             "public_group_id": str(document.get("public_group_id") or ""),
             "registration_state": str(document.get("registration_state") or ""),
             "operator_link": str(document.get("operator_link") or ""),
@@ -1650,4 +1712,5 @@ __all__ = [
     "PollingWorkOrderRelayConnector",
     "RelayResponse",
     "UrllibPollingRelayTransport",
+    "probe_polling_relay_health",
 ]

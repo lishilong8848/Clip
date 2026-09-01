@@ -27,7 +27,7 @@ Uvicorn 建议只监听回环地址，由一个 HTTPS 公网地址同时提供�
 - 时间字段是 Unix 秒。
 - 版本冲突返回 409；上游权威租约过期返回 503。
 - 公网页面不做 OAuth。角色来自能力链接会话，请求正文不能指定或切换角色。
-- `GET /api/v1/health` 必须返回 `service=public_polling_relay` 和 `protocol_version=1`。
+- `GET /api/v1/health` 必须返回 `service=public_polling_relay`、`protocol_version=1`、`ready`、`database_ready` 和 `upload_storage_ready`。数据库或上传目录不可用时返回503。
 
 ## 3. 能力链接与公网会话
 
@@ -364,7 +364,7 @@ Idempotency-Key: <12–128位 [A-Za-z0-9_-]>
 {"reason":"target_deleted"}
 ```
 
-立即撤销两条能力链接、所有 Cookie 会话、待处理命令和临时照片。重复取消可安全重试。
+立即撤销两条能力链接、所有 Cookie 会话和待处理命令，再清理临时照片及该工单的公网记录。文件暂时无法删除时保留已取消记录并由后台重试；清理完成后的重复取消返回404，对接方按已取消处理。
 
 ## 8. 公网程序状态流程
 
@@ -390,4 +390,3 @@ Idempotency-Key: <12–128位 [A-Za-z0-9_-]>
 - `bin/test_polling_work_order_relay.py`：公网端到端契约。
 
 正式验收必须使用两个独立浏览器会话走完：开始通告 → 两条角色链接 → 选择工单 → 倒计时 → 多照片 → 操作人/审核人确认 → 审核回退 → Excel 上传与精确 token 回读 → 允许结束 → 两条链接失效。
-

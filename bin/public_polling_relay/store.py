@@ -199,6 +199,22 @@ class RelayStore:
                     "ALTER TABLE authority_leases ADD COLUMN fencing_token TEXT NOT NULL DEFAULT ''"
                 )
 
+    def readiness(self) -> dict[str, bool]:
+        database_ready = False
+        try:
+            with self._connection() as connection:
+                database_ready = connection.execute("SELECT 1").fetchone() is not None
+        except Exception:
+            database_ready = False
+        upload_storage_ready = bool(
+            self.upload_root.is_dir() and os.access(self.upload_root, os.W_OK)
+        )
+        return {
+            "ready": database_ready and upload_storage_ready,
+            "database_ready": database_ready,
+            "upload_storage_ready": upload_storage_ready,
+        }
+
     @staticmethod
     def _row(row: sqlite3.Row | None) -> dict[str, Any]:
         return dict(row) if row is not None else {}
@@ -1421,9 +1437,47 @@ class RelayStore:
         self._delete_upload_paths(discarded_upload_paths)
         return self._group_from_row(updated)
 
+    def _purge_cancelled_group(self, public_group_id: str) -> bool:
+        with self._connection() as connection:
+            group = connection.execute(
+                "SELECT state FROM groups WHERE public_group_id=?",
+                (public_group_id,),
+            ).fetchone()
+            if not group:
+                return True
+            if str(group["state"]) != "cancelled":
+                return False
+            rows = connection.execute(
+                "SELECT path FROM uploads WHERE public_group_id=? AND path<>''",
+                (public_group_id,),
+            ).fetchall()
+        for row in rows:
+            path = Path(str(row["path"])).resolve()
+            if not path.is_relative_to(self.upload_root):
+                return False
+            if path.is_file():
+                try:
+                    path.unlink()
+                except OSError:
+                    return False
+        with self._transaction() as connection:
+            group = connection.execute(
+                "SELECT state FROM groups WHERE public_group_id=?",
+                (public_group_id,),
+            ).fetchone()
+            if not group:
+                return True
+            if str(group["state"]) != "cancelled":
+                return False
+            connection.execute("DELETE FROM sessions WHERE public_group_id=?", (public_group_id,))
+            connection.execute("DELETE FROM commands WHERE public_group_id=?", (public_group_id,))
+            connection.execute("DELETE FROM uploads WHERE public_group_id=?", (public_group_id,))
+            connection.execute("DELETE FROM links WHERE public_group_id=?", (public_group_id,))
+            connection.execute("DELETE FROM groups WHERE public_group_id=?", (public_group_id,))
+        return True
+
     def cancel_group(self, authority_id: str, public_group_id: str, *, reason: str) -> dict[str, Any]:
         now = time.time()
-        paths: list[Path] = []
         with self._transaction() as connection:
             group = connection.execute("SELECT * FROM groups WHERE public_group_id=?", (public_group_id,)).fetchone()
             if not group:
@@ -1449,20 +1503,17 @@ class RelayStore:
                 """,
                 (stable_json({"error_code": "group_cancelled", "error": str(reason or "工单已取消。")}), now, public_group_id),
             )
-            uploads = connection.execute(
-                "SELECT path FROM uploads WHERE public_group_id=? AND path<>''",
-                (public_group_id,),
-            ).fetchall()
-            paths = [Path(str(item["path"])).resolve() for item in uploads]
             connection.execute(
-                "UPDATE uploads SET status='cancelled', path='', updated_at=? WHERE public_group_id=?",
+                "UPDATE uploads SET status='cancelled', updated_at=? WHERE public_group_id=?",
                 (now, public_group_id),
             )
-        for path in paths:
-            if path.is_file() and path.is_relative_to(self.upload_root):
-                with contextlib.suppress(OSError):
-                    path.unlink()
-        return {"public_group_id": public_group_id, "state": "cancelled", "reason": str(reason or "")}
+        purged = self._purge_cancelled_group(public_group_id)
+        return {
+            "public_group_id": public_group_id,
+            "state": "cancelled",
+            "reason": str(reason or ""),
+            "purged": purged,
+        }
 
     def cleanup(self) -> None:
         now = time.time()
@@ -1498,3 +1549,12 @@ class RelayStore:
             if path.is_file() and path.is_relative_to(self.upload_root):
                 with contextlib.suppress(OSError):
                     path.unlink()
+        with self._connection() as connection:
+            cancelled_group_ids = [
+                str(row["public_group_id"])
+                for row in connection.execute(
+                    "SELECT public_group_id FROM groups WHERE state='cancelled'"
+                ).fetchall()
+            ]
+        for public_group_id in cancelled_group_ids:
+            self._purge_cancelled_group(public_group_id)

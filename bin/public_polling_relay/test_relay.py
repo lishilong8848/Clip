@@ -71,6 +71,15 @@ class RelayFlowTest(unittest.TestCase):
                 settings.public_base_url, "https://workorder.example.com"
             )
 
+    def test_health_reports_database_and_upload_readiness(self) -> None:
+        response = self.internal_client.get("/api/v1/health")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["database_ready"])
+        self.assertTrue(payload["upload_storage_ready"])
+        self.assertEqual(payload["protocol_version"], 1)
+
     def test_public_photo_dimension_and_step_count_limits(self) -> None:
         from PIL import Image
 
@@ -470,7 +479,14 @@ class RelayFlowTest(unittest.TestCase):
             payload={"reason": "target_deleted"},
         )
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertTrue(cancelled.json()["data"]["purged"])
         self.assertEqual(self.operator_client.get("/api/v1/work-orders/session").status_code, 401)
+        repeated_cancel = self._internal(
+            "POST",
+            "/api/v1/internal/groups/public-group-0001/cancel",
+            payload={"reason": "target_deleted"},
+        )
+        self.assertEqual(repeated_cancel.status_code, 404, repeated_cancel.text)
 
     def test_expired_photo_command_can_retry_without_duplicate_or_success_replay(self) -> None:
         self._lease()

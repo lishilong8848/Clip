@@ -1085,6 +1085,80 @@ class PollingWorkOrderTests(unittest.TestCase):
         relay_connector.assert_not_called()
         send_links.assert_called_once_with(group)
 
+    def test_unavailable_public_relay_fixes_start_to_local_fallback(self) -> None:
+        prepared = {
+            "work_type": "polling",
+            "notice_type": "设备轮巡",
+            "action": "start",
+            "status": "开始",
+            "title": "公网降级测试",
+            "polling_work_order_required": True,
+        }
+        with patch.object(
+            PortalRuntime,
+            "polling_work_order_public_relay_enabled",
+            return_value=True,
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_order_public_relay_health",
+            return_value={
+                "ready": False,
+                "error": "连接超时",
+                "checked_at": 123.0,
+                "url": "https://relay.example",
+            },
+        ):
+            resolved = PortalRuntime._resolve_polling_work_order_mode(prepared)
+        self.assertEqual(resolved["polling_work_order_mode"], "local_fallback")
+        self.assertEqual(resolved["polling_work_order_fallback_reason"], "连接超时")
+        text = PortalRuntime.service._synchronize_prepared_notice_text(resolved)["text"]
+        self.assertIn("【工单模式】局域网（公网工单不可用，已自动切换）", text)
+
+        manager = MagicMock()
+        group = {"target_record_id": "recFallbackStart", "state": "active"}
+        manager.create_group.return_value = group
+        with patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            PortalRuntime,
+            "_polling_work_order_public_base_url",
+            return_value="http://192.168.1.10:18766",
+        ), patch.object(
+            PortalRuntime, "polling_work_order_relay"
+        ) as relay_connector, patch.object(
+            PortalRuntime, "_send_polling_work_order_links"
+        ) as send_links:
+            PortalRuntime._create_polling_work_order_group(
+                resolved, "recFallbackStart"
+            )
+        self.assertNotIn("public_relay", manager.create_group.call_args.kwargs)
+        relay_connector.assert_not_called()
+        send_links.assert_called_once_with(group)
+
+    def test_work_order_mode_is_not_rechecked_after_it_is_fixed(self) -> None:
+        prepared = {
+            "work_type": "polling",
+            "action": "start",
+            "polling_work_order_required": True,
+        }
+        previous = {
+            "polling_work_order_mode": "local_fallback",
+            "polling_work_order_fallback_reason": "此前检测失败",
+            "polling_work_order_relay_checked_at": 123.0,
+            "polling_work_order_relay_url": "https://relay.example",
+        }
+        with patch.object(
+            PortalRuntime, "polling_work_order_public_relay_health"
+        ) as health:
+            resolved = PortalRuntime._resolve_polling_work_order_mode(
+                prepared, previous_prepared=previous
+            )
+        health.assert_not_called()
+        self.assertEqual(resolved["polling_work_order_mode"], "local_fallback")
+        self.assertEqual(
+            resolved["polling_work_order_fallback_reason"], "此前检测失败"
+        )
+
     def test_public_work_order_setting_selects_local_simulation_relay(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = LanPortalStateStore(Path(temp) / "state.sqlite3")

@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from PyQt6.QtWidgets import (
 
     QDialog,
@@ -73,11 +75,16 @@ class SettingsDialog(QDialog):
 
 
     settings_saved = pyqtSignal()
+    relay_health_test_finished = pyqtSignal(dict)
 
 
     def __init__(self, parent=None):
 
         super().__init__(parent)
+        self._relay_health_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="RelayHealthTest"
+        )
+        self.relay_health_test_finished.connect(self._on_relay_health_test_finished)
 
         self.setObjectName("SettingsWindow")
 
@@ -353,6 +360,18 @@ class SettingsDialog(QDialog):
         self.polling_work_order_public_relay_url_input.setMinimumHeight(34)
         lan_portal_layout.addWidget(public_relay_url_label)
         lan_portal_layout.addWidget(self.polling_work_order_public_relay_url_input)
+        relay_test_row = QHBoxLayout()
+        self.polling_work_order_public_relay_test_button = QPushButton("测试连接")
+        self.polling_work_order_public_relay_test_button.clicked.connect(
+            self._test_polling_work_order_public_relay
+        )
+        self.polling_work_order_public_relay_test_status = QLabel("尚未检测")
+        self.polling_work_order_public_relay_test_status.setWordWrap(True)
+        relay_test_row.addWidget(self.polling_work_order_public_relay_test_button)
+        relay_test_row.addWidget(
+            self.polling_work_order_public_relay_test_status, 1
+        )
+        lan_portal_layout.addLayout(relay_test_row)
         public_relay_hint = QLabel(
             "局域网模拟可使用 http://192.168.224.122:18767；正式公网必须填写 HTTPS 根地址。"
         )
@@ -622,6 +641,42 @@ class SettingsDialog(QDialog):
         except Exception:
             return False
 
+    def _test_polling_work_order_public_relay(self) -> None:
+        relay_url = self.polling_work_order_public_relay_url_input.text().strip().rstrip("/")
+        if not self._is_valid_polling_work_order_public_relay_url(relay_url):
+            show_toast_message(self, "❌ 请先填写有效的公网工单根地址", duration_ms=2200)
+            return
+        self.polling_work_order_public_relay_test_button.setEnabled(False)
+        self.polling_work_order_public_relay_test_status.setText("检测中...")
+
+        def run() -> None:
+            try:
+                from lan_bitable_template_portal.polling_work_order_relay import (
+                    probe_polling_relay_health,
+                )
+
+                result = probe_polling_relay_health(relay_url, timeout=2.0)
+            except Exception as exc:
+                result = {"ready": False, "error": str(exc), "elapsed_ms": 0.0}
+            try:
+                self.relay_health_test_finished.emit(result)
+            except RuntimeError:
+                pass
+
+        self._relay_health_executor.submit(run)
+
+    def _on_relay_health_test_finished(self, result: dict) -> None:
+        self.polling_work_order_public_relay_test_button.setEnabled(True)
+        elapsed = float((result or {}).get("elapsed_ms") or 0)
+        if (result or {}).get("ready") is True:
+            self.polling_work_order_public_relay_test_status.setText(
+                f"连接正常 · 协议 v{int(result.get('protocol_version') or 0)} · {elapsed:.0f}ms"
+            )
+            return
+        self.polling_work_order_public_relay_test_status.setText(
+            f"连接失败 · {str((result or {}).get('error') or '服务未就绪')}"
+        )
+
     def save_settings(self):
         """保存设置"""
         feishu_app_id = self.app_id_input.text().strip()
@@ -667,6 +722,16 @@ class SettingsDialog(QDialog):
             self.polling_work_order_public_relay_url_input.text().strip().rstrip("/")
             or DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL
         )
+        relay_url_block_reason = config.polling_work_order_relay_url_change_block_reason(
+            polling_work_order_public_relay_url
+        )
+        if relay_url_block_reason:
+            show_toast_message(
+                self,
+                f"❌ {relay_url_block_reason}",
+                duration_ms=3200,
+            )
+            return
         if not self._is_valid_lan_template_portal_host(lan_template_portal_host):
             show_toast_message(
                 self,

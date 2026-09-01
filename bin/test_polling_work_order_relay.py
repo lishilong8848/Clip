@@ -24,6 +24,7 @@ from lan_bitable_template_portal.polling_work_order_relay import (  # noqa: E402
     PollingRelayProtocolError,
     PollingWorkOrderRelayConnector,
     RelayResponse,
+    probe_polling_relay_health,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
@@ -347,6 +348,42 @@ def _config() -> PollingRelayConfig:
 
 
 class PollingWorkOrderRelayTests(unittest.TestCase):
+    def test_health_probe_requires_ready_matching_protocol(self) -> None:
+        class HealthTransport:
+            def __init__(self, payload: dict) -> None:
+                self.payload = payload
+
+            def request(self, *_args, **_kwargs) -> RelayResponse:
+                return RelayResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps(self.payload).encode(),
+                )
+
+        ready = probe_polling_relay_health(
+            "https://relay.example",
+            transport=HealthTransport(
+                {
+                    "service": "public_polling_relay",
+                    "protocol_version": 1,
+                    "ready": True,
+                }
+            ),
+        )
+        self.assertTrue(ready["ready"])
+        incompatible = probe_polling_relay_health(
+            "https://relay.example",
+            transport=HealthTransport(
+                {
+                    "service": "public_polling_relay",
+                    "protocol_version": 2,
+                    "ready": True,
+                }
+            ),
+        )
+        self.assertFalse(incompatible["ready"])
+        self.assertIn("版本不兼容", incompatible["error"])
+
     def test_reconcile_does_not_migrate_legacy_local_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")

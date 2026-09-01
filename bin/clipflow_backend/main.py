@@ -52,6 +52,7 @@ from clipflow_backend.api_models import (
     CriticalGuardScopeTemplateRequest,
     CriticalGuardTaskRequest,
     CriticalGuardWeatherPauseRequest,
+    DailyTaskSendRequest,
     DrillConfigurationRequest,
     DrillExecutionRequest,
     DrillGenerateRequest,
@@ -2119,6 +2120,31 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/daily-tasks/send")
+        async def daily_tasks_send(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, DailyTaskSendRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.send_daily_work_report_to_people,
+                    scope=scope,
+                    date=str(payload.get("date") or "").strip(),
+                    recipient_open_ids=list(
+                        payload.get("recipient_open_ids") or []
+                    ),
+                    operation_id=str(payload.get("operation_id") or "").strip(),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/api/records")
         @app.get("/api/workbench")
@@ -12706,6 +12732,29 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"轮巡工单附件重试失败: {exc}")
 
+    def _run_scheduled_daily_work_report(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            result = PortalRuntime.service.process_daily_work_reports()
+            if int((result or {}).get("failed") or 0):
+                log_warning(
+                    "每日工作汇总仍有发送失败项，将在截止时间前继续重试: "
+                    f"failed={result.get('failed')}, pending={result.get('pending')}"
+                )
+        except Exception as exc:
+            log_warning(f"每日工作汇总发送失败: {exc}")
+
+    def _run_scheduled_daily_report_recipient_refresh(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            PortalRuntime.service.get_permission_directory_people(
+                force_refresh=True
+            )
+        except Exception as exc:
+            log_warning(f"每日汇总主管目录预热失败，将使用兜底名单: {exc}")
+
     def _run_scheduled_polling_relay(self) -> None:
         if not PortalRuntime.polling_work_order_public_relay_should_run():
             return
@@ -13040,6 +13089,25 @@ class FastAPIPortalController:
             "interval",
             minutes=1,
             id="polling_work_orders",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_daily_work_report,
+            "interval",
+            minutes=1,
+            id="daily_work_report",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_daily_report_recipient_refresh,
+            "cron",
+            hour=17,
+            minute=40,
+            id="daily_report_recipient_refresh",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

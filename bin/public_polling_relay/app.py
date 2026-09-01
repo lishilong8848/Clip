@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -24,6 +25,7 @@ from .store import RelayError, RelayStore
 
 
 COOKIE_NAME = "wo_session"
+LOGGER = logging.getLogger("public_polling_relay")
 RELAY_PROTOCOL_VERSION = 1
 SINGLE_AUTHORITY_KEY = "EA118"
 MAX_JSON_BYTES = 1 * 1024 * 1024
@@ -367,6 +369,8 @@ def create_app(settings: RelaySettings) -> FastAPI:
 
     @app.exception_handler(RelayError)
     async def relay_error_handler(_request: Request, exc: RelayError) -> JSONResponse:
+        if exc.status_code >= 500 or exc.code == "authority_lease_busy":
+            LOGGER.warning("relay request failed: code=%s message=%s", exc.code, exc.message)
         headers = {"Retry-After": "5"} if exc.status_code == 503 else None
         return JSONResponse(
             {"ok": False, "error": exc.message, "error_code": exc.code},
@@ -430,13 +434,16 @@ def create_app(settings: RelaySettings) -> FastAPI:
         return SINGLE_AUTHORITY_KEY, body, lease
 
     @app.get("/api/v1/health")
-    async def health() -> dict[str, Any]:
-        return {
+    async def health() -> JSONResponse:
+        readiness = await asyncio.to_thread(store.readiness)
+        payload = {
             "ok": True,
             "service": "public_polling_relay",
             "protocol_version": RELAY_PROTOCOL_VERSION,
             "time": time.time(),
+            **readiness,
         }
+        return JSONResponse(payload, status_code=200 if readiness["ready"] else 503)
 
     @app.get("/polling-work-order")
     async def polling_page() -> HTMLResponse:
@@ -758,6 +765,7 @@ def create_app(settings: RelaySettings) -> FastAPI:
         registered["protocol_version"] = RELAY_PROTOCOL_VERSION
         registered["entry_url"] = f"{public_base_url}/polling-work-order"
         registered["entry_path"] = "/polling-work-order"
+        LOGGER.info("work order registered: group=%s", public_group_id)
         return _api_ok(registered)
 
     @app.get("/api/v1/internal/commands/lease")
@@ -870,7 +878,13 @@ def create_app(settings: RelaySettings) -> FastAPI:
             raise RelayError(404, "group_not_found", "工单不存在。")
         payload = _validated(CancelRequest, await _json_body(request))
         assert isinstance(payload, CancelRequest)
-        return _api_ok(store.cancel_group(authority_id, public_group_id, reason=payload.reason))
+        result = store.cancel_group(authority_id, public_group_id, reason=payload.reason)
+        LOGGER.info(
+            "work order cancelled: group=%s purged=%s",
+            public_group_id,
+            bool(result.get("purged")),
+        )
+        return _api_ok(result)
 
     return app
 
@@ -882,9 +896,13 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     import uvicorn
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    LOGGER.info("starting relay on %s:%s", args.host, args.port)
     uvicorn.run(create_app(RelaySettings.from_env()), host=args.host, port=args.port, access_log=False)
 
 
 if __name__ == "__main__":
     main()
-

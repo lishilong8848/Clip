@@ -789,11 +789,25 @@ class PollingWorkOrderService:
                 "created_at": now,
                 "updated_at": now,
             }
+            relay_mode = str(
+                prepared.get("polling_work_order_mode") or ""
+            ).strip()
+            if relay_mode not in {"public_relay", "local", "local_fallback"}:
+                relay_mode = "public_relay" if public_relay else "local"
+            group["relay"] = {
+                "mode": relay_mode,
+                "fallback_reason": str(
+                    prepared.get("polling_work_order_fallback_reason") or ""
+                ),
+                "relay_checked_at": float(
+                    prepared.get("polling_work_order_relay_checked_at") or 0
+                ),
+                "relay_url": str(
+                    prepared.get("polling_work_order_relay_url") or ""
+                ),
+            }
             if public_relay:
-                group["relay"] = {
-                    "mode": "public_relay",
-                    "registration_state": "registration_pending",
-                }
+                group["relay"]["registration_state"] = "registration_pending"
             self.state_store.put_document(
                 POLLING_WORK_ORDER_NAMESPACE, target_record_id, group
             )

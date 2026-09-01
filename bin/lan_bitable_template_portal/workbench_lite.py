@@ -891,6 +891,20 @@ def _polling_work_order_status(source: dict[str, Any], work_type: str) -> str:
     if not group_id:
         return ""
     state = str(source.get("polling_work_order_state") or "active").strip()
+    mode = str(source.get("polling_work_order_mode") or "local").strip()
+    mode_label = {
+        "public_relay": "公网工单",
+        "local_fallback": "公网不可用，已自动切换局域网",
+        "local": "局域网工单",
+    }.get(mode, "局域网工单")
+    relay_error = str(
+        source.get("polling_work_order_last_error")
+        or source.get("polling_work_order_fallback_reason")
+        or ""
+    ).strip()
+    relay_error_html = (
+        f'<p class="form-hint">{_e(relay_error)}</p>' if relay_error else ""
+    )
     operator_link = str(source.get("polling_work_order_operator_link") or "").strip()
     reviewer_link = str(source.get("polling_work_order_reviewer_link") or "").strip()
     link_buttons = "".join(
@@ -900,7 +914,8 @@ def _polling_work_order_status(source: dict[str, Any], work_type: str) -> str:
     )
     return f"""
       <section class="form-section polling-work-order-status">
-        <header><strong>{_e('维保工单' if work == 'maintenance' else '轮巡工单')}</strong><span>{_e(state)}</span></header>
+        <header><strong>{_e('维保工单' if work == 'maintenance' else '轮巡工单')}</strong><span>{_e(state)} · {_e(mode_label)}</span></header>
+        {relay_error_html}
         <div class="polling-sop-inline">{link_buttons}
           <button class="btn ghost" type="button" data-polling-resend-links="{_e(group_id)}">重发链接</button>
           <button class="btn ghost" type="button" data-polling-retry-upload="{_e(group_id)}">重试附件上传</button>
