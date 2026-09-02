@@ -25234,6 +25234,13 @@ class MaintenancePortalService:
     def _morning_meeting_normalized_title(value: Any) -> str:
         return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(value or "")).lower()
 
+    @staticmethod
+    def _morning_meeting_summary_date(now: dt.datetime) -> str:
+        day = now.date()
+        if now.hour < 9:
+            day -= dt.timedelta(days=1)
+        return day.isoformat()
+
     def _morning_meeting_candidate(
         self,
         item: dict[str, Any],
@@ -25421,13 +25428,15 @@ class MaintenancePortalService:
         prefer_generated: bool = True,
     ) -> dict[str, Any]:
         date_key = self._daily_task_date(date)
-        today = dt.datetime.now().astimezone().date()
+        now = dt.datetime.now().astimezone()
+        today = now.date()
         if date_key != today.isoformat():
             raise PortalConflictError("晨会表格只支持生成当天数据。")
+        summary_date_key = self._morning_meeting_summary_date(now)
         candidates = self._morning_meeting_merge_candidates(
             [
                 *self._morning_meeting_active_candidates(),
-                *self._morning_meeting_daily_candidates(date_key=date_key),
+                *self._morning_meeting_daily_candidates(date_key=summary_date_key),
             ]
         )
         work_type_order = {

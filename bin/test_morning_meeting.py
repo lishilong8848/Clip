@@ -228,6 +228,23 @@ class MorningMeetingTests(unittest.TestCase):
         with self.assertRaises(PortalConflictError):
             self._service().get_morning_meeting_preview(date="2020-01-01")
 
+    def test_summary_date_switches_at_nine(self) -> None:
+        previous_day = dt.date(2026, 9, 1).isoformat()
+        current_day = dt.date(2026, 9, 2).isoformat()
+
+        self.assertEqual(
+            MaintenancePortalService._morning_meeting_summary_date(
+                dt.datetime(2026, 9, 2, 8, 59, 59)
+            ),
+            previous_day,
+        )
+        self.assertEqual(
+            MaintenancePortalService._morning_meeting_summary_date(
+                dt.datetime(2026, 9, 2, 9, 0, 0)
+            ),
+            current_day,
+        )
+
     def test_generation_preserves_template_and_is_idempotent(self) -> None:
         service = self._service()
         date_key = dt.date.today().isoformat()
