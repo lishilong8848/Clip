@@ -267,9 +267,12 @@
         </div>
         <template v-else-if="morningModel">
           <div class="morning-weather-fields">
-            <label><span>天气</span><input v-model="morningModel.weather_condition" maxlength="40" /></label>
-            <label><span>干球温度（℃）</span><input v-model="morningModel.dry_bulb_temperature" type="number" min="-50" max="80" step="0.1" /></label>
-            <label><span>湿球温度（℃）</span><input v-model="morningModel.wet_bulb_temperature" type="number" min="-50" max="80" step="0.1" /></label>
+            <label><span>天气</span><input v-model="morningModel.weather_condition" :disabled="morningBusy" maxlength="40" @input="morningEnvironmentEdited.add('weather_condition')" /></label>
+            <label><span>干球温度（℃）</span><input v-model="morningModel.dry_bulb_temperature" :disabled="morningBusy" type="number" min="-50" max="80" step="0.1" @input="morningEnvironmentEdited.add('dry_bulb_temperature')" /></label>
+            <label><span>湿球温度（℃）</span><input v-model="morningModel.wet_bulb_temperature" :disabled="morningBusy" type="number" min="-50" max="80" step="0.1" @input="morningEnvironmentEdited.add('wet_bulb_temperature')" /></label>
+          </div>
+          <div v-if="morningEnvironmentLoading" class="morning-inline-state" role="status">
+            正在后台读取天气及干湿球温度，可先查看通告或手动填写。
           </div>
           <div v-if="morningWarnings.length" class="dialog-message warning" role="status">
             {{ morningWarnings.join('；') }}
@@ -291,7 +294,7 @@
               <Printer :size="16" /> 打印
             </button>
             <button type="button" class="btn primary" :disabled="morningBusy || !morningModel" @click="generateMorningMeeting">
-              <FileSpreadsheet :size="16" /> {{ morningBusy ? '生成中' : morningDownloadUrl ? '重新生成' : '生成表格' }}
+              <FileSpreadsheet :size="16" /> {{ morningBusy ? (morningDownloadUrl ? '重新读取天气并生成中' : '生成中') : morningDownloadUrl ? '重新生成' : '生成表格' }}
             </button>
           </div>
         </footer>
@@ -384,6 +387,10 @@ const morningBusy = ref(false);
 const morningError = ref("");
 const morningSuccess = ref("");
 const morningModel = ref<Dict | null>(null);
+const morningEnvironmentLoading = ref(false);
+const morningEnvironmentWarnings = ref<string[]>([]);
+const morningEnvironmentEdited = new Set<string>();
+let morningRequestController: AbortController | null = null;
 const morningDownloadUrl = ref("");
 const morningPrintUrl = ref("");
 const morningGeneratedAt = ref("");
@@ -449,11 +456,12 @@ const generatedText = computed(() => {
   if (!value) return "";
   return `更新于 ${value.slice(11, 16)}`;
 });
-const morningWarnings = computed(() => (
-  Array.isArray(morningModel.value?.warnings)
+const morningWarnings = computed(() => [
+  ...(Array.isArray(morningModel.value?.warnings)
     ? morningModel.value?.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
-    : []
-));
+    : []),
+  ...morningEnvironmentWarnings.value,
+]);
 
 function normalizeScope(value: string): string {
   const text = String(value || "").trim().toUpperCase();
@@ -532,6 +540,11 @@ function closeSendDialog(): void {
 
 async function openMorningMeeting(): Promise<void> {
   if (scopeCode.value !== "H" || selectedDate.value !== today || morningLoading.value) return;
+  stopMorningRequest();
+  const controller = new AbortController();
+  morningRequestController = controller;
+  morningEnvironmentEdited.clear();
+  morningEnvironmentWarnings.value = [];
   morningDialogOpen.value = true;
   morningLoading.value = true;
   morningError.value = "";
@@ -539,22 +552,52 @@ async function openMorningMeeting(): Promise<void> {
   try {
     const data = await requestJson(
       `/api/daily-tasks/morning-meeting/preview?date=${encodeURIComponent(selectedDate.value)}`,
-      { cache: "no-store", timeoutMs: 60_000 },
+      { cache: "no-store", timeoutMs: 60_000, signal: controller.signal },
     );
+    if (controller.signal.aborted) return;
     morningModel.value = data;
     morningDownloadUrl.value = String(data.download_url || "");
     morningPrintUrl.value = String(data.print_url || "");
     morningGeneratedAt.value = String(data.generated_at || "");
+    if (!data.generated && morningModel.value) void loadMorningEnvironment(morningModel.value, controller);
   } catch (error: any) {
+    if (controller.signal.aborted) return;
     morningModel.value = null;
     morningError.value = error?.message || "晨会数据读取失败。";
   } finally {
-    morningLoading.value = false;
+    if (morningRequestController === controller) morningLoading.value = false;
+  }
+}
+
+function stopMorningRequest(): void {
+  morningRequestController?.abort();
+  morningRequestController = null;
+  morningLoading.value = false;
+  morningEnvironmentLoading.value = false;
+}
+
+async function loadMorningEnvironment(model: Dict, controller: AbortController): Promise<void> {
+  morningEnvironmentLoading.value = true;
+  try {
+    const data = await requestJson(
+      `/api/daily-tasks/morning-meeting/preview?date=${encodeURIComponent(model.date)}&temperature_only=1`,
+      { cache: "no-store", timeoutMs: 25_000, signal: controller.signal },
+    );
+    if (controller.signal.aborted || morningModel.value !== model) return;
+    for (const key of ["weather_condition", "dry_bulb_temperature", "wet_bulb_temperature"]) {
+      if (!morningEnvironmentEdited.has(key) && data[key] != null) model[key] = data[key];
+    }
+    morningEnvironmentWarnings.value = Array.isArray(data.warnings) ? data.warnings : [];
+  } catch (error: any) {
+    if (!controller.signal.aborted) morningEnvironmentWarnings.value = [error?.message || "天气及干湿球温度读取失败，可稍后重新打开或手动填写。"];
+  } finally {
+    if (morningRequestController === controller) morningEnvironmentLoading.value = false;
   }
 }
 
 function closeMorningMeeting(): void {
   if (morningBusy.value) return;
+  stopMorningRequest();
   morningDialogOpen.value = false;
   morningError.value = "";
   morningSuccess.value = "";
@@ -562,6 +605,7 @@ function closeMorningMeeting(): void {
 
 async function generateMorningMeeting(): Promise<void> {
   if (morningBusy.value || !morningModel.value) return;
+  stopMorningRequest();
   morningBusy.value = true;
   morningError.value = "";
   morningSuccess.value = "";
@@ -579,6 +623,7 @@ async function generateMorningMeeting(): Promise<void> {
       }),
     });
     morningModel.value = data.model || morningModel.value;
+    morningEnvironmentWarnings.value = [];
     morningDownloadUrl.value = String(data.download_url || "");
     morningPrintUrl.value = String(data.print_url || "");
     morningGeneratedAt.value = String(data.generated_at || "");
@@ -715,6 +760,7 @@ onMounted(() => {
   else void loadTasks();
 });
 onBeforeUnmount(() => {
+  stopMorningRequest();
   requestGeneration += 1;
   requestController?.abort();
   morningPrintStyle?.remove();

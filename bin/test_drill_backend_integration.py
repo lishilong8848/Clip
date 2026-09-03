@@ -45,6 +45,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                     "name": "published.xlsx",
                 },
             },
+            {"drill_id": "restricted-drill", "status": "published", "assigned_scopes": ["A"]},
         ]
         drills = Mock()
         drills.list_definitions.return_value = definitions
@@ -95,6 +96,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                     headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
                 )
                 people_loader.assert_called_once_with(force=True)
+                drills.pending_counts.assert_called_once_with(definitions, ["E"])
                 other_building = client.get(
                     "/api/drills/bootstrap?scope=A&month=2026-08",
                     headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
@@ -111,6 +113,24 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                     "/api/drills/published-drill/execution?scope=E",
                     headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
                 )
+                listing = client.get(
+                    "/api/drills?scope=E&month=2026-08",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
+                )
+                for action in ("execution", "preview", "print-model", "download"):
+                    restricted = client.get(
+                        f"/api/drills/restricted-drill/{action}?scope=E",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
+                    )
+                    self.assertEqual(restricted.status_code, 403, restricted.text)
+                    self.assertIn("未分配", restricted.json()["error"])
+                with patch.object(controller, "_queue_drill_job") as enqueue:
+                    restricted = client.post(
+                        "/api/drills/restricted-drill/retry-sync?scope=E",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
+                    )
+                    self.assertGreaterEqual(restricted.status_code, 400)
+                    enqueue.assert_not_called()
             self.assertEqual(user.status_code, 200, user.text)
             self.assertEqual(
                 [item["drill_id"] for item in user.json()["data"]["drills"]],
@@ -125,14 +145,35 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             self.assertNotIn("path", user.json()["data"]["drills"][0]["source"])
             self.assertEqual(
                 {item["drill_id"] for item in admin.json()["data"]["drills"]},
-                {"draft-drill", "published-drill"},
+                {"draft-drill", "published-drill", "restricted-drill"},
             )
+            self.assertEqual(listing.status_code, 200, listing.text)
+            self.assertEqual([item["drill_id"] for item in listing.json()["data"]["items"]], ["published-drill"])
             self.assertEqual(denied.status_code, 403, denied.text)
             self.assertIn("尚未发布", denied.json()["error"])
             self.assertEqual(allowed.status_code, 200, allowed.text)
             drills.get_execution.assert_called_with(
-                "published-drill", "E", create=True
+                "published-drill", "E", create=False
             )
+            drills.create_definition.return_value = {"drill_id": "new", "assigned_scopes": ["A", "C"]}
+            created = client.post(
+                "/api/drills",
+                headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-admin"},
+                data={"name": "指定楼栋", "year": "2026", "month": "9", "assigned_scopes": '["A","C"]'},
+                files={"file": ("test.xlsx", b"test", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertEqual(drills.create_definition.call_args.kwargs["assigned_scopes"], ["A", "C"])
+            for scopes in ("[]", '["H"]', "not-json"):
+                with self.subTest(scopes=scopes):
+                    rejected = client.post(
+                        "/api/drills",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-admin"},
+                        data={"name": "指定楼栋", "year": "2026", "month": "9", "assigned_scopes": scopes},
+                        files={"file": ("test.xlsx", b"test")},
+                    )
+                    self.assertEqual(rejected.status_code, 400, rejected.text)
+            self.assertEqual(drills.create_definition.call_count, 1)
         finally:
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions = previous_sessions

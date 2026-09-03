@@ -19,6 +19,9 @@ for (const marker of [
   "MopSignaturePadModal",
   "stepSignerOptionLabels",
   "commanderPersonOptionLabels",
+  'v-model="uploadForm.assigned_scopes"',
+  'form.append("assigned_scopes", JSON.stringify(uploadForm.assigned_scopes))',
+  '演练已发布至 ${assignedScopeLabel',
   "printSheetStyle",
   "configBaseline",
   "beforeunload",
@@ -36,6 +39,30 @@ if (!app.includes('routePath.value === "/drill-management/print"')) throw new Er
 if (!home.includes('primaryAction: { key: "drill"')) throw new Error("首页演练入口未启用");
 if (page.includes("personAllowedForScope")) throw new Error("演练人员仍按楼栋过滤");
 if (!page.includes('query.set("refresh_people", "1")')) throw new Error("签名刷新未读取完整人员目录");
+if (!app.includes(':key="`${routePath}:${drillScope}:${routeParams.get(\'mode\') || \'\'}`"')) throw new Error("演练不同楼栋和管理入口仍共用旧页面状态");
+
+const drills = ref([
+  { drill_id: "a-only", status: "published", assigned_scopes: ["A"] },
+  { drill_id: "a-c", status: "published", assigned_scopes: ["A", "C"] },
+  { drill_id: "legacy", status: "published" },
+  { drill_id: "draft", status: "draft", assigned_scopes: ["A"] },
+  { drill_id: "cached-execution", status: "published", assigned_scopes: ["A"], execution: {} },
+]);
+const activeScope = ref("A"), viewMode = ref("admin"), selectedDrillId = ref("a-only");
+const listSelectors = page.slice(page.indexOf("const buildingDrills ="), page.indexOf("const sheetNames ="));
+const { buildingDrills, selectedDrill } = new Function("computed", "drills", "activeScope", "viewMode", "selectedDrillId",
+  `${ts.transpile(listSelectors)}\nreturn { buildingDrills, selectedDrill };`,
+)(computed, drills, activeScope, viewMode, selectedDrillId);
+assert.equal(selectedDrill.value.drill_id, "a-only", "管理员仍可查看全部演练");
+viewMode.value = "building";
+assert.deepEqual(buildingDrills.value.map(item => item.drill_id), ["a-only", "a-c", "legacy", "cached-execution"]);
+activeScope.value = "B";
+assert.deepEqual(buildingDrills.value.map(item => item.drill_id), ["legacy"], "接口返回前也不能闪现未分配的缓存演练");
+assert.equal(selectedDrill.value, null, "未分配演练详情也不可显示");
+activeScope.value = "C";
+assert.deepEqual(buildingDrills.value.map(item => item.drill_id), ["a-c", "legacy"], "多楼栋分配与旧演练保持兼容");
+viewMode.value = "admin";
+assert.equal(selectedDrill.value.drill_id, "a-only", "返回管理员入口仍可查看原演练");
 
 const directory = Array.from({ length: 602 }, (_, index) => ({
   record_id: `person-${index}`, name: `人员${index}`, building: index < 2 ? "E" : "A", employee_no: `job-${index}`,

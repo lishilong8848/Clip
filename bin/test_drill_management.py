@@ -9,6 +9,7 @@ import warnings
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
@@ -19,10 +20,14 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.drill_management import (  # noqa: E402
     DRILL_EXECUTION_NAMESPACE,
+    DrillError,
+    DrillForbiddenError,
     DrillConflictError,
     DrillManagementService,
     _horizontal_signature_layout,
     _parse_workbook,
+    _verify_generated_workbook,
+    _derived_values,
     build_time_chain,
     detect_drill_configuration,
     normalize_drill_signature_png,
@@ -51,6 +56,7 @@ def _fixture_xlsx(
     recognized: bool = True,
     with_drawing: bool = True,
     with_table_parts: bool = False,
+    shared_drawing: bool = False,
 ) -> bytes:
     record_title = "演练记录表" if recognized else "待配置记录"
     record_rows = [
@@ -108,6 +114,7 @@ def _fixture_xlsx(
     assessment_xml = worksheet(
         assessment_rows,
         ["D2:K4", "B5:C5", "D5:E5", "G5:K5", "B6:C6", "D6:E6", "H6:I6", "J6:K6", "B11:G11", "H11:K11"],
+        drawing_reference if shared_drawing else "",
     )
 
     def connector(row_zero: int) -> str:
@@ -212,6 +219,8 @@ def _fixture_xlsx(
                     "xl/media/logo.png": logo_output.getvalue(),
                 }
             )
+            if shared_drawing:
+                parts["xl/worksheets/_rels/sheet2.xml.rels"] = sheet_rels
         for name, content in parts.items():
             archive.writestr(name, content)
     return output.getvalue()
@@ -250,6 +259,109 @@ def _duplicate_workbook_part(source: bytes) -> bytes:
 
 
 class DrillManagementTests(unittest.TestCase):
+    def _ready_drill(self, service: DrillManagementService, source: bytes) -> tuple[dict, dict, dict]:
+        definition = service.create_definition(name="回归演练", year=2026, month=9, file_name="test.xlsx", source=source)
+        definition = service.publish(definition["drill_id"], expected_version=definition["version"])
+        people = [{"record_id": f"person-{index}", "name": f"测试{index}"} for index in range(1, 5)]
+        execution = service.save_execution(
+            definition["drill_id"], "A",
+            {
+                "drill_date": "2026-09-03", "first_start_time": "09:00",
+                "commander": people[0], "participants": people,
+                "step_signers": {str(step["row"]): [person["record_id"] for person in people[:step["signature_slots"]]] for step in definition["configuration"]["steps"]},
+            },
+            expected_version=0,
+        )
+        signatures = {person["record_id"]: normalize_drill_signature_png(_signature_png()) for person in people}
+        return definition, execution, signatures
+
+    def test_upload_ignores_out_of_range_empty_formatting_but_retains_visible_borders(self) -> None:
+        source = _replace_zip_part(
+            _fixture_xlsx(), "xl/worksheets/sheet1.xml",
+            lambda content: content.replace(
+                b"</sheetData>",
+                b'<row r="20"><c r="K20" s="1"/></row>'
+                + b"".join(f'<row r="{row}"><c r="XFD{row}" s="1"/></row>'.encode() for row in range(501, 40511))
+                + b"</sheetData>",
+            ).replace(b"</mergeCells>", b'<mergeCell ref="A100000:B100000"/></mergeCells>'),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            definition = service.create_definition(name="空格式", year=2026, month=9, file_name="test.xlsx", source=source)
+            source_path = Path(definition["source"]["path"])
+            self.assertEqual(source_path.read_bytes(), source)
+            sheet = _parse_workbook(source_path)["sheets"][0]
+            self.assertEqual(sheet["max_row"], 20)
+            self.assertEqual(sheet["max_col"], 11)
+            self.assertTrue(sheet["cell_styles"]["K20"])
+            self.assertNotIn("A100000:B100000", sheet["merges"])
+
+    def test_upload_still_rejects_out_of_range_formulas_without_cached_values(self) -> None:
+        source = _replace_zip_part(
+            _fixture_xlsx(), "xl/worksheets/sheet1.xml",
+            lambda content: content.replace(b"</sheetData>", b'<row r="501"><c r="A501"><f>1+1</f></c></row></sheetData>'),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            with self.assertRaisesRegex(DrillError, "A501.*最多支持 500 行"):
+                service.create_definition(name="越界公式", year=2026, month=9, file_name="test.xlsx", source=source)
+
+    def test_generated_workbook_can_be_reused_as_template_without_accumulating_signatures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            definition, _execution, signatures = self._ready_drill(service, _fixture_xlsx())
+            generated = service.generate(definition["drill_id"], "A", signatures=signatures)
+            reused = Path(generated["generated"]["path"]).read_bytes()
+            for _ in range(2):
+                definition, execution, signatures = self._ready_drill(service, reused)
+                generated = service.generate(definition["drill_id"], "A", signatures=signatures)
+                output = Path(generated["generated"]["path"])
+                _verify_generated_workbook(output, definition, _derived_values(definition, execution), signatures)
+                with zipfile.ZipFile(output) as archive:
+                    drawings = [ET.fromstring(archive.read(name)) for name in archive.namelist() if name.startswith("xl/drawings/drawing") and name.endswith(".xml")]
+                    self.assertEqual(sum(len(root.findall('.//{*}cxnSp')) for root in drawings), 5)
+                    self.assertEqual(sum(1 for root in drawings for prop in root.findall('.//{*}cNvPr') if prop.attrib.get('name') == '测试Logo'), 1)
+                reused = output.read_bytes()
+
+    def test_shared_drawing_is_detached_for_record_and_assessment_signatures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            definition, execution, signatures = self._ready_drill(service, _fixture_xlsx(shared_drawing=True))
+            generated = service.generate(definition["drill_id"], "A", signatures=signatures)
+            output = Path(generated["generated"]["path"])
+            sheets = _parse_workbook(output)["sheets"]
+            self.assertNotEqual(sheets[0]["drawing_path"], sheets[1]["drawing_path"])
+            _verify_generated_workbook(output, definition, _derived_values(definition, execution), signatures)
+
+    def test_failed_signature_verification_does_not_overwrite_previous_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            definition, _execution, signatures = self._ready_drill(service, _fixture_xlsx())
+            generated = service.generate(definition["drill_id"], "A", signatures=signatures)
+            output = Path(generated["generated"]["path"])
+            output.write_bytes(b"preserve-previous-good-file")
+            with patch("lan_bitable_template_portal.drill_management._verify_generated_workbook", side_effect=DrillError("签名图片数量不正确")):
+                with self.assertRaisesRegex(DrillError, "签名图片数量不正确"):
+                    service.generate(definition["drill_id"], "A", signatures=signatures)
+            self.assertEqual(output.read_bytes(), b"preserve-previous-good-file")
+            self.assertEqual(list(output.parent.glob("*.tmp")), [])
+
+    def test_assigned_scopes_control_obligations_and_execution_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            definition = service.create_definition(name="仅A和C", year=2026, month=9, file_name="test.xlsx", source=_fixture_xlsx(), assigned_scopes=["c", "A", "C"])
+            self.assertEqual(definition["assigned_scopes"], ["A", "C"])
+            definition = service.publish(definition["drill_id"], expected_version=definition["version"])
+            self.assertEqual(service.pending_counts([definition], ["A", "B", "C", "D", "E"]), {"A": 1, "B": 0, "C": 1, "D": 0, "E": 0})
+            self.assertEqual(service.get_execution(definition["drill_id"], "C", create=True)["scope"], "C")
+            with self.assertRaises(DrillForbiddenError):
+                service.get_execution(definition["drill_id"], "B", create=True)
+            with self.assertRaises(DrillForbiddenError):
+                service.save_execution(definition["drill_id"], "B", {}, expected_version=0)
+            for scopes in ([], ["H"], "A"):
+                with self.subTest(scopes=scopes), self.assertRaises(DrillError):
+                    service.create_definition(name="错误范围", year=2026, month=9, file_name="test.xlsx", source=_fixture_xlsx(), assigned_scopes=scopes)
+
     def test_pending_counts_use_published_execution_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")

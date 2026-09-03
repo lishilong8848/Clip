@@ -16,6 +16,7 @@ import uuid
 import warnings
 import zipfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
@@ -63,6 +64,18 @@ class DrillNotFoundError(DrillError):
 
 class DrillConflictError(DrillError):
     status_code = 409
+
+
+class DrillForbiddenError(DrillError):
+    status_code = 403
+
+
+def drill_assigned_scopes(definition: dict[str, Any]) -> list[str]:
+    scopes = definition.get("assigned_scopes", list(DRILL_SCOPES))
+    if not isinstance(scopes, (list, tuple)) or not scopes:
+        raise DrillError("请至少选择一个需要填写演练的楼栋。")
+    normalized = {_normalize_scope(scope) for scope in scopes}
+    return [scope for scope in DRILL_SCOPES if scope in normalized]
 
 
 def _now_text() -> str:
@@ -474,25 +487,31 @@ def _parse_workbook(
             cells: dict[str, str] = {}
             cell_styles: dict[str, dict[str, Any]] = {}
             max_row = max_col = 0
-            cell_nodes = root.findall(f".//{{{_MAIN_NS}}}c")
-            if len(cell_nodes) > DRILL_MAX_SOURCE_CELLS:
-                raise DrillError(
-                    f"工作表“{name}”单元格过多，最多支持 "
-                    f"{DRILL_MAX_SOURCE_CELLS} 个。"
-                )
-            for cell in cell_nodes:
+            populated_positions: set[tuple[int, int]] = set()
+            retained_cells = 0
+            for cell in root.iter(f"{{{_MAIN_NS}}}c"):
                 reference = str(cell.attrib.get("r") or "")
                 try:
                     row, col = _cell_parts(reference)
                 except DrillError:
                     continue
+                value = _cell_value(cell, strings)
+                has_content = bool(value.strip()) or cell.find(f"{{{_MAIN_NS}}}f") is not None
                 if row > DRILL_MAX_SOURCE_ROWS or col > DRILL_MAX_SOURCE_COLUMNS:
+                    if not has_content:
+                        # Excel/WPS 常把整行整列的空格式保存到文件中；不改源文件。
+                        continue
                     raise DrillError(
-                        f"工作表“{name}”超出支持范围，最多支持 "
+                        f"工作表“{name}”的有效单元格 {reference} 超出支持范围，最多支持 "
                         f"{DRILL_MAX_SOURCE_ROWS} 行、{DRILL_MAX_SOURCE_COLUMNS} 列。"
                     )
+                retained_cells += 1
+                if retained_cells > DRILL_MAX_SOURCE_CELLS:
+                    raise DrillError(f"工作表“{name}”有效区域单元格过多，最多支持 {DRILL_MAX_SOURCE_CELLS} 个。")
+                if has_content:
+                    populated_positions.add((row, col))
                 normalized_reference = reference.replace("$", "").upper()
-                cells[normalized_reference] = _cell_value(cell, strings)
+                cells[normalized_reference] = value
                 try:
                     style = style_catalog[int(cell.attrib.get("s") or 0)]
                 except (IndexError, TypeError, ValueError):
@@ -500,17 +519,21 @@ def _parse_workbook(
                 if style:
                     cell_styles[normalized_reference] = copy.deepcopy(style)
                 max_row, max_col = max(max_row, row), max(max_col, col)
-            merges = [
+            merge_references = [
                 str(item.attrib.get("ref") or "").replace("$", "")
                 for item in root.findall(f".//{{{_MAIN_NS}}}mergeCell")
                 if str(item.attrib.get("ref") or "").strip()
             ]
-            for reference in merges:
+            merges = []
+            for reference in merge_references:
                 row1, col1, row2, col2 = _range_bounds(reference)
                 if row2 > DRILL_MAX_SOURCE_ROWS or col2 > DRILL_MAX_SOURCE_COLUMNS:
+                    if not any(row1 <= row <= row2 and col1 <= col <= col2 for row, col in populated_positions):
+                        continue
                     raise DrillError(
                         f"工作表“{name}”的合并单元格超出支持范围。"
                     )
+                merges.append(reference)
                 max_row, max_col = max(max_row, row2), max(max_col, col2)
             default_row_height = 15.0
             sheet_format = root.find(f"{{{_MAIN_NS}}}sheetFormatPr")
@@ -523,7 +546,9 @@ def _parse_workbook(
             for row_node in root.findall(f".//{{{_MAIN_NS}}}row"):
                 if row_node.attrib.get("ht"):
                     try:
-                        row_heights[int(row_node.attrib.get("r") or 0)] = float(row_node.attrib["ht"])
+                        row_number = int(row_node.attrib.get("r") or 0)
+                        if 1 <= row_number <= DRILL_MAX_SOURCE_ROWS:
+                            row_heights[row_number] = float(row_node.attrib["ht"])
                     except (TypeError, ValueError):
                         pass
             default_col_width = 8.43
@@ -1542,6 +1567,8 @@ def _ensure_drawing_parts(
     archive: zipfile.ZipFile,
     sheet: dict[str, Any],
     sheet_root: ET.Element,
+    *,
+    detach: bool = False,
 ) -> tuple[str, ET.Element, str, ET.Element]:
     names = set(archive.namelist()) | set(additions) | set(replacements)
     sheet_path = str(sheet["path"])
@@ -1598,7 +1625,7 @@ def _ensure_drawing_parts(
         drawing_root = ET.Element(f"{{{_XDR_NS}}}wsDr")
     else:
         drawing_root = ET.fromstring(
-            replacements.get(drawing_path) or archive.read(drawing_path)
+            archive.read(drawing_path) if detach else replacements.get(drawing_path) or archive.read(drawing_path)
         )
     drawing_rels_path = _drawing_relationship_path(drawing_path)
     if drawing_rels_path in replacements:
@@ -1607,6 +1634,17 @@ def _ensure_drawing_parts(
         drawing_rels_root = ET.fromstring(archive.read(drawing_rels_path))
     else:
         drawing_rels_root = ET.Element(f"{{{_PKG_REL_NS}}}Relationships")
+    if detach:
+        # 复制工作表有时共用 drawing；选中的表必须各有自己的签名层。
+        drawing_rels_root = ET.fromstring(archive.read(drawing_rels_path)) if drawing_rels_path in archive.namelist() else ET.Element(f"{{{_PKG_REL_NS}}}Relationships")
+        indexes = [int(match.group(1)) for name in names if (match := re.fullmatch(r"xl/drawings/drawing(\d+)\.xml", name))]
+        drawing_path = f"xl/drawings/drawing{max(indexes or [0]) + 1}.xml"
+        drawing_rels_path = _drawing_relationship_path(drawing_path)
+        relation_id = str(drawing_node.attrib.get(f"{{{_DOC_REL_NS}}}id") or "")
+        relation = next((item for item in sheet_rels_root if item.attrib.get("Id") == relation_id), None)
+        if relation is None:
+            raise DrillError("演练工作表的绘图关系已损坏。")
+        relation.attrib["Target"] = posixpath.relpath(drawing_path, posixpath.dirname(sheet_path))
     replacements[sheet_rels_path] = ET.tostring(sheet_rels_root, encoding="utf-8", xml_declaration=True)
     return drawing_path, drawing_root, drawing_rels_path, drawing_rels_root
 
@@ -1720,6 +1758,11 @@ def _append_signature_anchor(
     ET.SubElement(anchor, f"{{{_XDR_NS}}}clientData")
 
 
+def _is_drill_signature_anchor(anchor: ET.Element) -> bool:
+    properties = anchor.find(f".//{{{_XDR_NS}}}cNvPr")
+    return properties is not None and str(properties.attrib.get("name") or "").startswith("演练签名-")
+
+
 def _patch_workbook(
     source_path: Path,
     output_path: Path,
@@ -1785,8 +1828,15 @@ def _patch_workbook(
                 archive,
                 current_sheet,
                 sheet_roots[current_sheet["path"]],
+                detach=bool(current_sheet.get("drawing_path")) and sum(
+                    item.get("drawing_path") == current_sheet.get("drawing_path")
+                    for item in workbook["sheets"]
+                ) > 1,
             )
             drawing_paths.append(drawing_path)
+            for anchor in list(drawing_root):
+                if _is_drill_signature_anchor(anchor):
+                    drawing_root.remove(anchor)
             existing_ids = [
                 int(item.attrib.get("id") or 0)
                 for item in drawing_root.findall(f".//{{{_XDR_NS}}}cNvPr")
@@ -1896,6 +1946,7 @@ def _patch_workbook(
                 for name, content in {**replacements, **additions}.items():
                     output.writestr(name, content, compress_type=zipfile.ZIP_DEFLATED)
             _validate_xlsx_archive(temporary)
+            _verify_generated_workbook(temporary, definition, derived, signatures)
             os.replace(temporary, output_path)
         finally:
             if temporary.exists():
@@ -1960,28 +2011,21 @@ def _verify_generated_workbook(
                 str(item.attrib.get("Id") or ""): item
                 for item in relationship_root.findall(f"{{{_PKG_REL_NS}}}Relationship")
             }
-            generated_anchors = []
-            for anchor in list(drawing_root):
-                properties = anchor.find(f".//{{{_XDR_NS}}}cNvPr")
-                if properties is not None and str(
-                    properties.attrib.get("name") or ""
-                ).startswith("演练签名-"):
-                    generated_anchors.append(anchor)
-            if len(generated_anchors) != sum(
-                len(item.get("signers") or []) for item in placements
-            ):
-                raise DrillError("生成文件中的签名图片数量不正确。")
-            expected_hashes = {
+            generated_anchors = [anchor for anchor in drawing_root if _is_drill_signature_anchor(anchor)]
+            expected_count = sum(len(item.get("signers") or []) for item in placements)
+            if len(generated_anchors) != expected_count:
+                raise DrillError(f"工作表“{sheet_name}”生成文件中的签名图片数量不正确（应有 {expected_count}，实际 {len(generated_anchors)}）。")
+            expected_hashes = Counter(
                 hashlib.sha256(signatures[record_id]).hexdigest()
-                for record_id in {
+                for record_id in [
                     str(person.get("record_id") or "")
                     for item in placements
                     for person in item.get("signers") or []
                     if str(person.get("record_id") or "")
-                }
-            }
+                ]
+            )
             used_relationships = set()
-            actual_hashes = set()
+            actual_hashes: Counter[str] = Counter()
             for anchor in generated_anchors:
                 blip = anchor.find(f".//{{{_A_NS}}}blip")
                 rel_id = (
@@ -2005,7 +2049,7 @@ def _verify_generated_workbook(
                 if not content.startswith(b"\x89PNG\r\n\x1a\n"):
                     raise DrillError("生成文件中的签名图片不是有效 PNG。")
                 used_relationships.add(rel_id)
-                actual_hashes.add(hashlib.sha256(content).hexdigest())
+                actual_hashes[hashlib.sha256(content).hexdigest()] += 1
             if (
                 len(used_relationships) != len(expected_hashes)
                 or actual_hashes != expected_hashes
@@ -2167,6 +2211,7 @@ class DrillManagementService:
             if normalized_month and marker != normalized_month:
                 continue
             result = copy.deepcopy(item)
+            result["assigned_scopes"] = drill_assigned_scopes(item)
             result["has_executions"] = str(result.get("drill_id") or "") in execution_ids
             result["configuration_locked"] = result["has_executions"]
             items.append(result)
@@ -2175,8 +2220,8 @@ class DrillManagementService:
     def pending_counts(
         self, definitions: list[dict[str, Any]], scopes: list[str] | tuple[str, ...]
     ) -> dict[str, int]:
-        published_ids = {
-            str(item.get("drill_id") or "")
+        published_scopes = {
+            str(item.get("drill_id") or ""): drill_assigned_scopes(item)
             for item in definitions
             if str(item.get("status") or "") == "published"
             and str(item.get("drill_id") or "")
@@ -2209,7 +2254,8 @@ class DrillManagementService:
         return {
             scope: sum(
                 needs_attention(executions.get((drill_id, scope)))
-                for drill_id in published_ids
+                for drill_id, assigned_scopes in published_scopes.items()
+                if scope in assigned_scopes
             )
             for scope in normalized_scopes
         }
@@ -2219,6 +2265,7 @@ class DrillManagementService:
         if not isinstance(item, dict):
             raise DrillNotFoundError("演练不存在。")
         result = copy.deepcopy(item)
+        result["assigned_scopes"] = drill_assigned_scopes(item)
         result["has_executions"] = self._has_execution(str(result.get("drill_id") or ""))
         result["configuration_locked"] = result["has_executions"]
         return result
@@ -2232,9 +2279,11 @@ class DrillManagementService:
         file_name: str,
         source: bytes | bytearray | BinaryIO,
         actor: str = "",
+        assigned_scopes: list[str] | None = None,
     ) -> dict[str, Any]:
         title = str(name or "").strip()
         normalized_year, normalized_month = _normalize_month(year, month)
+        scopes = drill_assigned_scopes({} if assigned_scopes is None else {"assigned_scopes": assigned_scopes})
         if not title or len(title) > 200:
             raise DrillError("演练名称不能为空且不能超过 200 个字符。")
         safe_name = _safe_file_name(file_name, "演练模板.xlsx")
@@ -2269,6 +2318,7 @@ class DrillManagementService:
                 "year": normalized_year,
                 "month": normalized_month,
                 "status": "draft",
+                "assigned_scopes": scopes,
                 "version": 1,
                 "source": {"path": str(source_path), "name": safe_name, "size": size, "sha256": digest},
                 "sheets": [{"name": str(item.get("name") or "")} for item in workbook.get("sheets") or []],
@@ -2339,6 +2389,8 @@ class DrillManagementService:
     def get_execution(self, drill_id: str, scope: str, *, create: bool = False) -> dict[str, Any]:
         definition = self.get_definition(drill_id)
         normalized_scope = _normalize_scope(scope)
+        if normalized_scope not in drill_assigned_scopes(definition):
+            raise DrillForbiddenError("该演练未分配给当前楼栋，无需填写。")
         key = _execution_key(drill_id, normalized_scope)
         execution = self.state_store.get_document(DRILL_EXECUTION_NAMESPACE, key)
         if not isinstance(execution, dict):
@@ -2602,9 +2654,6 @@ class DrillManagementService:
                 )
                 output_path = directory / "current.xlsx"
                 _patch_workbook(self._source_path(definition), output_path, definition, execution, derived, resolved)
-                _verify_generated_workbook(
-                    output_path, definition, derived, resolved
-                )
                 metadata = {"path": str(output_path), "name": file_name, "size": output_path.stat().st_size, "sha256": _file_sha256(output_path)}
                 execution.update(
                     {

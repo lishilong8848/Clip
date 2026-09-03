@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import math
 import os
+import struct
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
@@ -32,6 +33,11 @@ _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _TEMPLATE_B64 = Path(__file__).with_name("templates") / "EA118-H楼晨会.xlsx.b64"
 _SHEET_PATH = "xl/worksheets/sheet1.xml"
 _WORKBOOK_PATH = "xl/workbook.xml"
+_WEB_LOGO_PATH = Path(__file__).with_name("frontend") / "dist" / "assets" / "vnet-logo.png"
+_LOGO_MEDIA_PATH = "xl/media/image1.png"
+_LOGO_DRAWING_PATH = "xl/drawings/drawing1.xml"
+_DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+_DRAWING_MAIN_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _BASE_ROW_HEIGHTS = {4: 78.0, 5: 72.0, 6: 78.0, 7: 78.0, 8: 119.0, 9: 78.0, 10: 78.0}
 
 
@@ -68,6 +74,44 @@ def morning_meeting_template_bytes() -> bytes:
 
 def morning_meeting_file_name(day: dt.date) -> str:
     return f"EA118-H楼{day.month}月{day.day}日晨会.xlsx"
+
+
+def _web_logo() -> tuple[bytes, tuple[int, int]]:
+    try:
+        content = _WEB_LOGO_PATH.read_bytes()
+        if content[:8] != b"\x89PNG\r\n\x1a\n" or content[12:16] != b"IHDR":
+            raise ValueError("invalid PNG")
+        size = struct.unpack(">II", content[16:24])
+        if not all(0 < dimension <= 12000 for dimension in size):
+            raise ValueError("invalid PNG dimensions")
+        return content, size
+    except (OSError, ValueError, struct.error) as exc:
+        raise MorningMeetingError("网页 Logo 无法读取，请检查程序资源后重新生成晨会表格。") from exc
+
+
+def _patch_logo_drawing(content: bytes, size: tuple[int, int]) -> bytes:
+    root = ET.fromstring(content)
+    ns = {"xdr": _DRAWING_NS, "a": _DRAWING_MAIN_NS}
+    anchor = root.find("xdr:twoCellAnchor", ns)
+    if anchor is None:
+        raise MorningMeetingError("晨会模板缺少 Logo 定位信息。")
+    origin = anchor.find("xdr:from", ns)
+    picture = anchor.find("xdr:pic", ns)
+    extent = anchor.find("xdr:pic/xdr:spPr/a:xfrm/a:ext", ns)
+    if origin is None or picture is None or extent is None:
+        raise MorningMeetingError("晨会模板 Logo 定位信息不完整。")
+    # 只在模板原 Logo 区域内等比缩放，不随表格行高变化拉伸图片。
+    scale = min(int(extent.attrib["cx"]) / size[0], int(extent.attrib["cy"]) / size[1])
+    dimensions = {"cx": str(round(size[0] * scale)), "cy": str(round(size[1] * scale))}
+    extent.attrib.update(dimensions)
+    replacement = ET.Element(f"{{{_DRAWING_NS}}}oneCellAnchor")
+    replacement.append(origin)
+    ET.SubElement(replacement, f"{{{_DRAWING_NS}}}ext", dimensions)
+    replacement.append(picture)
+    ET.SubElement(replacement, f"{{{_DRAWING_NS}}}clientData")
+    root.remove(anchor)
+    root.insert(0, replacement)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def _cell(root: ET.Element, reference: str) -> ET.Element:
@@ -177,6 +221,7 @@ def build_morning_meeting_workbook(
     destination = Path(output_path).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     template = morning_meeting_template_bytes()
+    logo, logo_size = _web_logo()
     from io import BytesIO
 
     temporary_path: Path | None = None
@@ -197,6 +242,10 @@ def build_morning_meeting_workbook(
                     content = source.read(info.filename)
                     if info.filename == _SHEET_PATH:
                         content = _patch_sheet(content, model)
+                    elif info.filename == _LOGO_MEDIA_PATH:
+                        content = logo
+                    elif info.filename == _LOGO_DRAWING_PATH:
+                        content = _patch_logo_drawing(content, logo_size)
                     target.writestr(info, content)
         with zipfile.ZipFile(temporary_path) as generated:
             if generated.testzip() is not None:

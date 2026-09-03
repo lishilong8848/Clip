@@ -129,6 +129,7 @@
 
     <DrillManagementPage
       v-else-if="isDrillManagementPage"
+      :key="`${routePath}:${drillScope}:${routeParams.get('mode') || ''}`"
       :scope="drillScope"
       :scope-options="visibleScopeOptions"
       :is-admin="isAdmin"

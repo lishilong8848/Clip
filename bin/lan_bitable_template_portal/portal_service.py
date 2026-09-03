@@ -27,9 +27,10 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass, field as dataclass_field
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 import xml.etree.ElementTree as ET
 
 from upload_event_module.config import (
@@ -25409,36 +25410,135 @@ class MaintenancePortalService:
                 aliases[alias] = index
         return merged
 
-    def _morning_meeting_weather(self) -> tuple[dict[str, Any], list[str]]:
-        warnings: list[str] = []
-        state = self._state_store.get_critical_guard_weather_state()
-        snapshot = state.get("snapshot") if isinstance(state.get("snapshot"), dict) else {}
-        weather = snapshot.get("weather") if isinstance(snapshot.get("weather"), dict) else {}
-        if not weather:
-            warnings.append("本地暂无天气快照，可手动填写天气和温度。")
-        elif state.get("last_error"):
-            warnings.append("最近一次天气读取失败，当前显示最近成功快照，可手动修改。")
-        return (
-            {
-                "weather_condition": str(weather.get("condition") or ""),
-                "dry_bulb_temperature": weather.get("temperature"),
-                "wet_bulb_temperature": weather.get("wet_bulb"),
-                "weather_observed_at": str(weather.get("observed_at") or ""),
-            },
-            warnings,
+    @staticmethod
+    def _request_morning_meeting_environment(duty_date: str, duty_shift: str) -> dict[str, Any]:
+        # 交接班局域网接口不携带飞书凭据，也不跟随重定向或系统代理。
+        connection = HTTPConnection("192.168.224.157", 18765, timeout=5.0)
+        try:
+            connection.connect()
+            if connection.sock is None:
+                raise PortalError("环境接口连接未建立。")
+            connection.sock.settimeout(15.0)
+            query = urlencode({"duty_date": duty_date, "duty_shift": duty_shift})
+            connection.request("GET", f"/api/handover/review/environment?{query}", headers={"Accept": "application/json"})
+            response = connection.getresponse()
+            if response.status != 200:
+                detail = ""
+                with suppress(ValueError, UnicodeDecodeError):
+                    error = json.loads(response.read(8192))
+                    if isinstance(error, dict):
+                        detail = str(error.get("detail") or "")[:200]
+                hint = "；请检查交接班外网端是否已更新、重启并启用环境接口。" if response.status in {404, 409} else ""
+                raise PortalError(f"环境接口 HTTP {response.status}" + (f"：{detail}" if detail else "") + hint)
+            content = response.read(2 * 1024 * 1024 + 1)
+            if len(content) > 2 * 1024 * 1024:
+                raise PortalError("环境接口响应过大。")
+            payload = json.loads(content)
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                raise PortalError("环境接口未返回有效数据。")
+            return payload
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _morning_meeting_saved_temperature(value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        match = re.fullmatch(
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:℃|°\s*C|摄氏度|度|C)?",
+            str(value).strip().replace("−", "-"),
+            re.IGNORECASE,
         )
+        if match is None:
+            return None
+        number = float(match.group(1))
+        return number if math.isfinite(number) and -50 <= number <= 80 else None
+
+    def _morning_meeting_environment(
+        self, *, now: dt.datetime | None = None
+    ) -> tuple[dict[str, Any], list[str]]:
+        shanghai = dt.timezone(dt.timedelta(hours=8))
+        current = now if now is not None else dt.datetime.now(shanghai)
+        if current.tzinfo is not None:
+            current = current.astimezone(shanghai)
+        duty_date = self._morning_meeting_summary_date(current)
+        duty_shift = "day" if 9 <= current.hour < 18 else "night"
+        batch_key = f"{duty_date}|{duty_shift}"
+        data = {
+            "weather_condition": None,
+            "dry_bulb_temperature": None,
+            "wet_bulb_temperature": None,
+            "temperature_source": "handover_environment",
+            "temperature_duty_date": duty_date,
+            "temperature_duty_shift": duty_shift,
+            "temperature_updated_at": "",
+            "weather_fetched_at": "",
+        }
+        warnings: list[str] = []
+        try:
+            # 温度按需读取保存值，不复用其他接口或上一次查询的值。
+            payload = self._request_morning_meeting_environment(duty_date, duty_shift)
+            if payload.get("ok") is not True or payload.get("status") not in {"success", "partial", "unavailable"}:
+                raise PortalError("环境接口状态无效。")
+            if (
+                payload.get("duty_date") != duty_date
+                or payload.get("duty_shift") != duty_shift
+                or payload.get("batch_key") != batch_key
+                or payload.get("timezone") != "Asia/Shanghai"
+            ):
+                raise PortalError("环境接口返回日期、班次或时区不一致，未采用数据。")
+            values = payload.get("data")
+            if not isinstance(values, dict):
+                raise PortalError("环境接口缺少有效数据字段。")
+            weather = values.get("weather")
+            data["weather_condition"] = weather.strip()[:40] if isinstance(weather, str) and weather.strip() else None
+            for key, label in (("dry_bulb_temperature", "干球温度"), ("wet_bulb_temperature", "湿球温度")):
+                data[key] = self._morning_meeting_saved_temperature(values.get(key))
+                if data[key] is None:
+                    warnings.append(f"当班{label}暂无有效数据，可手动填写。")
+            if data["weather_condition"] is None:
+                warnings.append("当班天气暂无有效数据，可稍后重新读取或手动填写。")
+            sources = payload.get("sources") if isinstance(payload.get("sources"), dict) else {}
+            temperature_source = sources.get("temperature") if isinstance(sources.get("temperature"), dict) else {}
+            weather_source = sources.get("weather") if isinstance(sources.get("weather"), dict) else {}
+            data["temperature_updated_at"] = str(temperature_source.get("updated_at") or "")
+            data["weather_fetched_at"] = str(weather_source.get("fetched_at") or "")
+            warning_labels = {
+                "temperature_missing_or_invalid": "当班干球或湿球温度缺失或无效。",
+                "temperature_store_unavailable": "交接班温度数据库暂时不可读。",
+                "wet_bulb_exceeds_dry_bulb": "湿球温度高于干球温度，请核对保存值。",
+                "humidity_calculation_failed": "相对湿度计算失败，不影响已有天气和温度显示。",
+                "weather_disabled": "交接班程序未启用天气查询。",
+                "weather_refreshing": "天气正在刷新，可60秒后重新读取。",
+                "weather_unavailable": "天气上游暂时不可用，可稍后重新读取。",
+                "weather_window_unavailable": "天气数据无法覆盖当前班次，不使用其他日期天气替代。",
+            }
+            response_warnings = payload.get("warnings")
+            for code in response_warnings if isinstance(response_warnings, list) else []:
+                if isinstance(code, str):
+                    warnings.append(warning_labels.get(code, f"环境接口提示：{code[:200]}"))
+            shift_label = "白班" if duty_shift == "day" else "夜班"
+            warnings.append(f"数据来源：{duty_date}{shift_label}环境接口；天气为班次概况，温度为交接班保存值（非实时采集）。")
+        except Exception as exc:
+            detail = "环境接口请求超时（连接5秒、读取15秒）" if isinstance(exc, TimeoutError) else str(exc)
+            warnings.append(f"天气及干湿球读取失败：{detail} 可稍后重试或手动填写。")
+        return data, list(dict.fromkeys(warnings))
 
     def get_morning_meeting_preview(
         self,
         *,
         date: str = "",
         prefer_generated: bool = True,
+        temperature_only: bool = False,
     ) -> dict[str, Any]:
         date_key = self._daily_task_date(date)
         now = dt.datetime.now().astimezone()
         today = now.date()
         if date_key != today.isoformat():
             raise PortalConflictError("晨会表格只支持生成当天数据。")
+        if temperature_only:
+            environment, warnings = self._morning_meeting_environment(now=now)
+            return {"date": date_key, **environment, "warnings": warnings}
         summary_date_key = self._morning_meeting_summary_date(now)
         candidates = self._morning_meeting_merge_candidates(
             [
@@ -25482,18 +25582,20 @@ class MaintenancePortalService:
                     continue
                 seen_by_scope[scope].add(normalized)
                 rows[scope].append(title)
-        weather, weather_warnings = self._morning_meeting_weather()
         generated = self._state_store.get_document(
             MORNING_MEETING_NAMESPACE,
             date_key,
         ) or {}
         generated_path = Path(str(generated.get("file_path") or ""))
         generated_available = generated_path.is_file()
+        generated_model = generated.get("model") if isinstance(generated.get("model"), dict) else {}
         source_snapshot = self._state_store.get_source_scope_snapshot("ALL")
         updated_at = float(source_snapshot.get("updated_at") or 0)
         result = {
             "date": date_key,
-            **weather,
+            "weather_condition": None,
+            "dry_bulb_temperature": None,
+            "wet_bulb_temperature": None,
             "rows": [
                 {
                     "scope": scope,
@@ -25511,7 +25613,7 @@ class MaintenancePortalService:
             ),
             "warnings": list(
                 dict.fromkeys(
-                    [*self._current_load_warnings(), *weather_warnings]
+                    self._current_load_warnings()
                 )
             ),
             "generated": generated_available,
@@ -25527,15 +25629,10 @@ class MaintenancePortalService:
                 else ""
             ),
         }
-        generated_model = (
-            generated.get("model")
-            if isinstance(generated.get("model"), dict)
-            else {}
-        )
         if prefer_generated and generated_model and generated_path.is_file():
             result = {
                 **copy.deepcopy(generated_model),
-                "warnings": result["warnings"],
+                "warnings": list(dict.fromkeys([*result["warnings"], *(generated_model.get("warnings") or [])])),
                 "source_updated_at": result["source_updated_at"],
                 "generated": True,
                 "generated_at": str(generated.get("generated_at") or ""),
@@ -25584,6 +25681,25 @@ class MaintenancePortalService:
                 date=date_key,
                 prefer_generated=False,
             )
+            if existing_path.is_file():
+                environment, environment_warnings = self._morning_meeting_environment()
+                missing = [
+                    label for key, label in (
+                        ("weather_condition", "天气"),
+                        ("dry_bulb_temperature", "干球温度"),
+                        ("wet_bulb_temperature", "湿球温度"),
+                    ) if environment.get(key) is None
+                ]
+                if missing:
+                    raise PortalError(
+                        f"环境接口未取得有效的{'、'.join(missing)}，本次未重新生成，原文件已保留。"
+                        + " ".join(environment_warnings)
+                    )
+                weather_condition = environment["weather_condition"]
+                dry_bulb_temperature = environment["dry_bulb_temperature"]
+                wet_bulb_temperature = environment["wet_bulb_temperature"]
+                model.update(environment)
+                model["warnings"] = list(dict.fromkeys([*model.get("warnings", []), *environment_warnings]))
             model.update(
                 {
                     "weather_condition": str(weather_condition or "").strip()[:40],

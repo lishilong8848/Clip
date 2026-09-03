@@ -106,6 +106,16 @@
             <span>演练名称</span>
             <input v-model.trim="uploadForm.name" maxlength="160" required placeholder="请输入演练名称" />
           </label>
+          <fieldset class="drill-scope-picker wide" :disabled="busy">
+            <legend>需要填写的楼栋</legend>
+            <div>
+              <label v-for="building in ['A', 'B', 'C', 'D', 'E']" :key="building">
+                <input v-model="uploadForm.assigned_scopes" type="checkbox" :value="building" />
+                <span>{{ building }}楼</span>
+              </label>
+            </div>
+            <small>{{ uploadForm.assigned_scopes.length ? '未选中的楼栋无需填写本演练' : '请至少选择一个楼栋' }}</small>
+          </fieldset>
           <label class="file-drop wide" :class="{ active: uploadDragActive }" @dragover.prevent="uploadDragActive = true" @dragleave.prevent="uploadDragActive = false" @drop.prevent="handleUploadDrop">
             <input ref="uploadInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="handleUploadFile" />
             <FileSpreadsheet :size="24" />
@@ -114,7 +124,7 @@
           </label>
           <div class="form-actions wide">
             <button type="button" class="secondary-button" :disabled="busy" @click="resetUpload">取消</button>
-            <button type="submit" class="primary-button" :disabled="busy || !uploadFile">
+            <button type="submit" class="primary-button" :disabled="busy || !uploadFile || !uploadForm.assigned_scopes.length">
               <Loader2 v-if="uploading" :size="16" class="spinning" />
               {{ uploading ? "正在上传" : "上传并识别" }}
             </button>
@@ -133,6 +143,7 @@
             >
               <strong>{{ item.name || item.source?.name || "未命名演练" }}</strong>
               <span>{{ monthLabel(item.year, item.month) }}</span>
+              <span>填写楼栋：{{ assignedScopeLabel(item) }}</span>
               <small :class="statusClass(item.status)">{{ statusLabel(item.status) }}</small>
             </button>
             <div v-if="!drills.length" class="empty-inline">当前月份暂无演练文件</div>
@@ -144,6 +155,7 @@
                 <span>模板配置</span>
                 <h2>{{ selectedDrill.name }}</h2>
                 <small>{{ selectedDrill.source?.name }} · {{ formatBytes(selectedDrill.source?.size) }}</small>
+                <small>填写楼栋：{{ assignedScopeLabel(selectedDrill) }}</small>
               </div>
               <span :class="['status-chip', statusClass(selectedDrill.status)]">{{ statusLabel(selectedDrill.status) }}</span>
             </header>
@@ -254,7 +266,7 @@
                 {{ saving ? "保存中" : "保存配置" }}
               </button>
               <button type="button" class="primary-button" :disabled="configurationLocked || busy || selectedDrill.status === 'published'" @click="publishSelected">
-                <Send :size="16" /> 发布至 A–E 楼
+                <Send :size="16" /> 发布至 {{ assignedScopeLabel(selectedDrill) }}
               </button>
             </footer>
           </section>
@@ -689,6 +701,7 @@ const uploadForm = reactive({
   year: String(currentDate.getFullYear()),
   month: currentMonth,
   name: "",
+  assigned_scopes: ["A", "B", "C", "D", "E"],
 });
 let statusPollTimer: number | null = null;
 let statusPollKey = "";
@@ -767,8 +780,11 @@ const landingScopes = computed(() => {
   return ["A", "B", "C", "D", "E"].map((value) => ({ value, label: `${value}楼`, authorized: props.isAdmin || authorized.has(value), pending: 0 }));
 });
 const authorizedBuildingScopes = computed(() => landingScopes.value.filter((item: Dict) => item.authorized));
-const selectedDrill = computed(() => drills.value.find((item) => String(item.drill_id) === selectedDrillId.value) || null);
-const buildingDrills = computed(() => drills.value.filter((item) => item.status === "published" || item.execution || item.execution_status));
+const buildingDrills = computed(() => drills.value.filter((item) =>
+  (item.status === "published" || item.execution || item.execution_status)
+  && (item.assigned_scopes === undefined || Array.isArray(item.assigned_scopes) && item.assigned_scopes.includes(activeScope.value)),
+));
+const selectedDrill = computed(() => (viewMode.value === "building" ? buildingDrills.value : drills.value).find((item) => String(item.drill_id) === selectedDrillId.value) || null);
 const sheetNames = computed(() => (Array.isArray(selectedDrill.value?.sheets) ? selectedDrill.value?.sheets : []).map((item: Dict | string) => String(typeof item === "string" ? item : item.name || "")).filter(Boolean));
 const configSteps = computed<Dict[]>(() => Array.isArray(configDraft.value.steps) ? configDraft.value.steps : []);
 const assessmentScoreRows = computed<Dict[]>(() => Array.isArray(configDraft.value?.mapping?.assessment?.score_rows) ? configDraft.value.mapping.assessment.score_rows : []);
@@ -907,13 +923,14 @@ function resolveDiscardPrompt(confirmed: boolean): void {
 }
 
 async function loadBootstrap(): Promise<void> {
-  if (loading.value) return;
+  if (loading.value || disposed) return;
   loading.value = true;
   error.value = "";
   try {
     const query = new URLSearchParams({ month: selectedMonth.value });
     if (activeScope.value) query.set("scope", activeScope.value);
     const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "no-store" });
+    if (disposed) return;
     loadedMonth.value = selectedMonth.value;
     stablePageUrl = `${window.location.pathname}${window.location.search}`;
     bootstrap.value = data;
@@ -927,12 +944,13 @@ async function loadBootstrap(): Promise<void> {
     if (viewMode.value === "admin" && selectedDrill.value) resetConfigDraft(selectedDrill.value.configuration || {});
     if (viewMode.value === "building") {
       await Promise.all([loadPeople(), refreshList()]);
+      if (disposed) return;
       if (selectedDrillId.value && !buildingDrills.value.some((item) => String(item.drill_id) === selectedDrillId.value)) selectedDrillId.value = "";
       if (!selectedDrillId.value && buildingDrills.value.length) selectedDrillId.value = String(buildingDrills.value[0].drill_id || "");
       if (selectedDrillId.value) await loadExecution();
     }
   } catch (caught) {
-    setFailure(caught, "演练数据读取失败");
+    if (!disposed) setFailure(caught, "演练数据读取失败");
   } finally {
     loading.value = false;
   }
@@ -942,6 +960,7 @@ async function refreshList(): Promise<void> {
   const query = new URLSearchParams({ month: selectedMonth.value });
   if (activeScope.value) query.set("scope", activeScope.value);
   const data = await requestJson(`/api/drills?${query.toString()}`, { cache: "no-store" });
+  if (disposed) return;
   drills.value = arrayFrom(data.items || data.drills);
 }
 
@@ -1014,6 +1033,7 @@ async function loadExecution(options: { silent?: boolean } = {}): Promise<void> 
   try {
     const query = new URLSearchParams({ scope: activeScope.value, create: "1" });
     const data = await requestJson(`/api/drills/${encodeURIComponent(selectedDrillId.value)}/execution?${query.toString()}`, { cache: "no-store" });
+    if (disposed) return;
     const remoteDrill = apiResultDrill(data);
     if (remoteDrill) mergeDrill(remoteDrill);
     const incoming = normalizeExecution(data.execution || data.data || {}, selectedDrill.value, activeScope.value);
@@ -1036,7 +1056,7 @@ async function loadExecution(options: { silent?: boolean } = {}): Promise<void> 
     scheduleStatusPoll();
     if (!preserveDraft) await loadPreview(activeSheet.value, { silent: true });
   } catch (caught) {
-    if (!options.silent) setFailure(caught, "演练执行记录读取失败");
+    if (!disposed && !options.silent) setFailure(caught, "演练执行记录读取失败");
   } finally {
     if (!options.silent) loading.value = false;
   }
@@ -1638,11 +1658,16 @@ function resetUpload(): void {
   uploadOpen.value = false;
   uploadFile.value = null;
   uploadForm.name = "";
+  uploadForm.assigned_scopes = ["A", "B", "C", "D", "E"];
   if (uploadInput.value) uploadInput.value.value = "";
 }
 
 async function uploadDrill(): Promise<void> {
   if (!uploadFile.value || uploading.value) return;
+  if (!uploadForm.assigned_scopes.length) {
+    setNotice("请至少选择一个需要填写演练的楼栋。", "warning");
+    return;
+  }
   uploading.value = true;
   error.value = "";
   try {
@@ -1650,6 +1675,7 @@ async function uploadDrill(): Promise<void> {
     form.append("year", uploadForm.year);
     form.append("month", String(Number(uploadForm.month.split("-")[1] || 0)));
     form.append("name", uploadForm.name);
+    form.append("assigned_scopes", JSON.stringify(uploadForm.assigned_scopes));
     form.append("file", uploadFile.value);
     const data = await requestJson("/api/drills", { method: "POST", body: form, timeoutMs: 180_000 });
     selectedMonth.value = uploadForm.month;
@@ -1665,6 +1691,11 @@ async function uploadDrill(): Promise<void> {
   } finally {
     uploading.value = false;
   }
+}
+
+function assignedScopeLabel(drill: Dict): string {
+  const scopes = Array.isArray(drill.assigned_scopes) ? drill.assigned_scopes : ["A", "B", "C", "D", "E"];
+  return scopes.map((scope: string) => `${scope}楼`).join("、");
 }
 
 function mappingValue(path: string): string {
@@ -1720,7 +1751,7 @@ async function publishSelected(): Promise<void> {
       body: JSON.stringify({ expected_version: Number(selectedDrill.value.version || 0) }),
     });
     mergeDrill(apiResultDrill(data) || { ...selectedDrill.value, status: "published" });
-    setNotice("演练已发布至 A–E 楼", "success");
+    setNotice(`演练已发布至 ${assignedScopeLabel(selectedDrill.value || {})}`, "success");
   } catch (caught) {
     setFailure(caught, "演练发布失败");
   } finally {
@@ -2202,6 +2233,12 @@ input, select {
   background: #fff; color: #0f172a; font: inherit;
 }
 .wide { grid-column: 1 / -1; }
+.drill-scope-picker { margin: 0; padding: 10px 12px; border: 1px solid #d8e5f7; border-radius: 14px; }
+.drill-scope-picker legend { color: #475569; font-size: 12px; font-weight: 800; }
+.drill-scope-picker > div { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+.drill-scope-picker label { display: flex; align-items: center; gap: 6px; min-height: 36px; cursor: pointer; }
+.drill-scope-picker input { width: 16px; min-height: 16px; accent-color: #1e63ff; }
+.drill-scope-picker small { display: block; margin-top: 4px; color: #64748b; }
 .file-drop { min-height: 116px; place-items: center; align-content: center; border: 1px dashed #9cc7ff; border-radius: 17px; padding: 18px; background: #f5faff; color: #1e63ff; text-align: center; cursor: pointer; }
 .file-drop.active { background: #e6f1ff; box-shadow: 0 0 0 4px rgba(30,99,255,.12); }
 .file-drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }

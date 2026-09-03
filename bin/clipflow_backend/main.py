@@ -184,7 +184,9 @@ from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.drill_management import (
+    DrillForbiddenError,
     DrillManagementService,
+    drill_assigned_scopes,
     drill_signature_layout,
     normalize_drill_signature_png,
 )
@@ -1175,6 +1177,8 @@ class FastAPIPortalController:
         async def drill_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
+        @app.get("/daily-tasks")
+        @app.get("/daily-tasks/")
         @app.get("/daily-tasks/morning-meeting/print")
         @app.get("/daily-tasks/morning-meeting/print/")
         async def morning_meeting_print_page(request: Request):
@@ -2163,6 +2167,7 @@ class FastAPIPortalController:
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_morning_meeting_preview,
                     date=str(request.query_params.get("date") or "").strip(),
+                    temperature_only=request.query_params.get("temperature_only") == "1",
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3771,17 +3776,18 @@ class FastAPIPortalController:
                     month,
                     include_archived=False,
                 )
-                if requested_scope or not is_admin:
-                    definitions = [
-                        item
-                        for item in definitions
-                        if str(item.get("status") or "") == "published"
-                    ]
                 pending_counts = await asyncio.to_thread(
                     self._drills.pending_counts,
                     definitions,
                     scope_codes,
                 )
+                if requested_scope or not is_admin:
+                    definitions = [
+                        item
+                        for item in definitions
+                        if str(item.get("status") or "") == "published"
+                        and scope in drill_assigned_scopes(item)
+                    ]
                 people = (
                     await asyncio.to_thread(
                         self._drill_people,
@@ -3847,6 +3853,7 @@ class FastAPIPortalController:
                         item
                         for item in definitions
                         if str(item.get("status") or "") == "published"
+                        and scope in drill_assigned_scopes(item)
                     ]
                 items: list[dict[str, Any]] = []
                 for definition in definitions:
@@ -3877,12 +3884,19 @@ class FastAPIPortalController:
             name: str = Form(""),
             year: str = Form(""),
             month: str = Form(""),
+            assigned_scopes: str = Form(""),
         ):
             admin_response, session = self._require_admin_response(request)
             if admin_response is not None:
                 return admin_response
             try:
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                try:
+                    scopes = drill_assigned_scopes(
+                        {"assigned_scopes": json.loads(assigned_scopes)} if assigned_scopes else {}
+                    )
+                except json.JSONDecodeError as exc:
+                    raise PortalError("填写楼栋格式无效，请重新选择。") from exc
                 month_value = str(month or "").strip()
                 month_match = re.fullmatch(r"(\d{4})-(0?[1-9]|1[0-2])", month_value)
                 if month_match:
@@ -3908,6 +3922,7 @@ class FastAPIPortalController:
                     month=normalized_month,
                     file_name=str(file.filename or ""),
                     source=file.file,
+                    assigned_scopes=scopes,
                     actor=str(user.get("name") or user.get("open_id") or ""),
                 )
                 return self._drill_json_ok(request, session, data)
@@ -3986,7 +4001,7 @@ class FastAPIPortalController:
                     session, str(request.query_params.get("scope") or "")
                 )
                 definition = await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 execution = await asyncio.to_thread(
                     self._drills.get_execution,
@@ -4024,7 +4039,7 @@ class FastAPIPortalController:
                     if key != "expected_version"
                 }
                 definition = await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 self._validate_drill_people_payload(
                     scope,
@@ -4056,7 +4071,7 @@ class FastAPIPortalController:
                     session, str(request.query_params.get("scope") or "")
                 )
                 await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 model = await asyncio.to_thread(
                     self._drills.preview_model,
@@ -4083,7 +4098,7 @@ class FastAPIPortalController:
                     session, str(request.query_params.get("scope") or "")
                 )
                 await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 model = await asyncio.to_thread(
                     self._drills.print_model,
@@ -4113,7 +4128,7 @@ class FastAPIPortalController:
                     request, DrillGenerateRequest
                 )
                 definition = await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 execution = await asyncio.to_thread(
                     self._drills.get_execution, drill_id, scope, create=False
@@ -4170,7 +4185,7 @@ class FastAPIPortalController:
                     session, str(request.query_params.get("scope") or "")
                 )
                 await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 if not self._queue_drill_job(drill_id, scope, generate=False):
                     raise PortalError("演练文件正在生成或同步，请勿重复提交。")
@@ -4196,7 +4211,7 @@ class FastAPIPortalController:
                     session, str(request.query_params.get("scope") or "")
                 )
                 await asyncio.to_thread(
-                    self._require_drill_visible, session, drill_id
+                    self._require_drill_visible, session, drill_id, scope
                 )
                 path, file_name = await asyncio.to_thread(
                     self._drills.generated_file, drill_id, scope
@@ -10737,7 +10752,7 @@ class FastAPIPortalController:
         return normalized
 
     def _require_drill_visible(
-        self, session: dict, drill_id: str
+        self, session: dict, drill_id: str, scope: str = ""
     ) -> dict[str, Any]:
         definition = self._drills.get_definition(drill_id)
         if (
@@ -10745,6 +10760,8 @@ class FastAPIPortalController:
             and str(definition.get("status") or "") != "published"
         ):
             raise PortalError("演练尚未发布或已归档。")
+        if scope and scope not in drill_assigned_scopes(definition):
+            raise DrillForbiddenError("该演练未分配给当前楼栋，无需填写。")
         return definition
 
     def _drill_people(self, scope: str, *, refresh: bool = False) -> list[dict[str, Any]]:
