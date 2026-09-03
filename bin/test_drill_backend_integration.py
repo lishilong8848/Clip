@@ -82,9 +82,21 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             )
         client = TestClient(controller._build_app())
         try:
-            with patch.object(controller, "_drill_people", return_value=[]):
+            with patch.object(
+                PortalRuntime.service,
+                "_load_signature_people",
+                return_value=[
+                    {"record_id": "person-a", "name": "A楼人员", "building": "A楼"},
+                    {"record_id": "person-e", "name": "E楼人员", "building": "E楼"},
+                ],
+            ) as people_loader:
                 user = client.get(
-                    "/api/drills/bootstrap?scope=E&month=2026-08",
+                    "/api/drills/bootstrap?scope=E&month=2026-08&refresh_people=1",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
+                )
+                people_loader.assert_called_once_with(force=True)
+                other_building = client.get(
+                    "/api/drills/bootstrap?scope=A&month=2026-08",
                     headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-user"},
                 )
                 admin = client.get(
@@ -105,6 +117,11 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                 ["published-drill"],
             )
             self.assertEqual(user.json()["data"]["scopes"][0]["pending"], 1)
+            self.assertEqual(
+                [person["record_id"] for person in user.json()["data"]["people"]],
+                ["person-a", "person-e"],
+            )
+            self.assertEqual(other_building.status_code, 403, other_building.text)
             self.assertNotIn("path", user.json()["data"]["drills"][0]["source"])
             self.assertEqual(
                 {item["drill_id"] for item in admin.json()["data"]["drills"]},
@@ -309,13 +326,54 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(PortalError, "尚未发布"):
                 controller._require_drill_visible({}, "d1")
 
-    def test_ecc_role_is_an_allowed_candidate_without_building_text(self):
-        self.assertTrue(
-            FastAPIPortalController._drill_person_allowed(
-                {"building": "", "position": "ECC值班人员"},
-                "A",
+    def test_drill_people_include_all_buildings_beyond_first_500_without_raw_signatures(self):
+        controller = object.__new__(FastAPIPortalController)
+        people = [
+            {
+                "record_id": f"person-{index}",
+                "building": ("A楼", "E楼", "H楼", "110站", "")[index % 5],
+                "has_signature": index % 2 == 0,
+                "raw_fields": {"签名": "must-stay-private"},
+            }
+            for index in range(502)
+        ]
+        with patch.object(PortalRuntime.service, "_load_signature_people", return_value=people) as load:
+            for scope in ("A", "E", ""):
+                result = controller._drill_people(scope, refresh=True)
+                self.assertEqual(len(result), 502)
+                self.assertEqual(result[-1]["record_id"], "person-501")
+                self.assertTrue(all("raw_fields" not in person for person in result))
+            load.assert_called_with(force=True)
+        self.assertIn("raw_fields", people[0])
+
+    def test_cross_building_people_can_save_and_generate_but_still_require_valid_signatures(self):
+        controller = object.__new__(FastAPIPortalController)
+        people = [
+            {"record_id": "a", "name": "A楼指挥人", "building": "A楼", "has_signature": True},
+            {"record_id": "b", "name": "B楼参演人", "building": "B楼", "has_signature": True},
+        ]
+        definition = {"configuration": {"steps": [{"row": 13, "location": "ECC", "signature_slots": 2}]}}
+        execution = {
+            "commander": {"record_id": "a", "name": "不可采信的姓名"},
+            "participants": [{"record_id": "b"}],
+            "step_signers": {"13": ["a", "b"]},
+        }
+        with patch.object(PortalRuntime.service, "_load_signature_people", return_value=people):
+            controller._validate_drill_people_payload(
+                "E", definition, execution, require_complete=True, require_signatures=True,
             )
-        )
+            self.assertEqual(execution["commander"]["name"], "A楼指挥人")
+            self.assertEqual([person["record_id"] for person in execution["participants"]], ["a", "b"])
+            people[1]["has_signature"] = False
+            with self.assertRaisesRegex(PortalError, "尚未保存可用签名"):
+                controller._validate_drill_people_payload(
+                    "E", definition, execution, require_complete=True, require_signatures=True,
+                )
+            execution["participants"].append({"record_id": "deleted-person"})
+            with self.assertRaisesRegex(PortalError, "不存在或已离职"):
+                controller._validate_drill_people_payload(
+                    "E", definition, execution, require_complete=False, require_signatures=False,
+                )
 
     def test_drill_jobs_use_the_dedicated_single_worker_executor(self):
         controller = object.__new__(FastAPIPortalController)

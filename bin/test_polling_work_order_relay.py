@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
+from unittest.mock import MagicMock
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -22,6 +23,7 @@ from lan_bitable_template_portal.polling_work_order_relay import (  # noqa: E402
     PollingRelayConfig,
     PollingRelayConfigurationError,
     PollingRelayProtocolError,
+    PollingWorkOrderPublicClient,
     PollingWorkOrderRelayConnector,
     RelayResponse,
     probe_polling_relay_health,
@@ -348,6 +350,103 @@ def _config() -> PollingRelayConfig:
 
 
 class PollingWorkOrderRelayTests(unittest.TestCase):
+    def test_public_client_creates_independent_order_without_local_target_id(self) -> None:
+        captured: dict = {}
+
+        class CreateTransport:
+            def request(self, _method, _url, *, headers, body, **_kwargs) -> RelayResponse:
+                captured.update(json.loads(body.decode("utf-8")))
+                self.headers = headers
+                return RelayResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "data": {
+                                "public_group_id": "public_group_001",
+                                "operator_link": "https://relay.example/operator",
+                                "reviewer_link": "https://relay.example/reviewer",
+                            },
+                        }
+                    ).encode("utf-8"),
+                )
+
+        group = {
+            "target_record_id": "recMustStayLocal",
+            "work_type": "polling",
+            "title": "测试轮巡",
+            "scope": "E",
+            "sop_name": "SOP-1",
+            "operator": {"name": "操作人"},
+            "reviewer": {"name": "审核人"},
+            "runs": [{"run_index": 1, "from_unit": "1#", "to_unit": "2#"}],
+            "steps": [{"step_key": "1:1", "content": "执行", "time_limit_seconds": 3}],
+            "relay": {"mode": "public_service", "registration_state": "registration_pending"},
+        }
+        manager = MagicMock()
+        manager.get_group.side_effect = lambda _target: copy.deepcopy(group)
+
+        def update_relay(_target, changes):
+            group["relay"] = {**group["relay"], **copy.deepcopy(changes)}
+            return copy.deepcopy(group)
+
+        manager.update_relay.side_effect = update_relay
+        client = PollingWorkOrderPublicClient(
+            MagicMock(), manager, base_url="https://relay.example", transport=CreateTransport()
+        )
+        result = client.register_group("recMustStayLocal", force=True)
+        self.assertNotIn("target_record_id", captured)
+        self.assertRegex(captured["management_token_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("management_token", captured)
+        self.assertRegex(captured["links"]["operator"]["secret_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("secret", captured["links"]["operator"])
+        self.assertEqual(result["relay"]["registration_state"], "registered")
+        self.assertEqual(result["relay"]["public_group_id"], "public_group_001")
+
+    def test_public_client_rejects_ready_artifact_without_sha256(self) -> None:
+        class StatusTransport:
+            def request(self, *_args, **_kwargs) -> RelayResponse:
+                return RelayResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "data": {
+                                "state": "artifact_ready",
+                                "version": 2,
+                                "artifact": {"name": "result.xlsx"},
+                            },
+                        }
+                    ).encode("utf-8"),
+                )
+
+        group = {
+            "target_record_id": "recArtifact",
+            "state": "active",
+            "relay": {
+                "mode": "public_service",
+                "registration_state": "registered",
+                "public_group_id": "public_group_002",
+                "management_token": "management_token_1234567890abcdef",
+            },
+        }
+        manager = MagicMock()
+        manager.get_group.side_effect = lambda _target: copy.deepcopy(group)
+
+        def update_relay(_target, changes):
+            group["relay"] = {**group["relay"], **copy.deepcopy(changes)}
+            return copy.deepcopy(group)
+
+        manager.update_relay.side_effect = update_relay
+        client = PollingWorkOrderPublicClient(
+            MagicMock(), manager, base_url="https://relay.example", transport=StatusTransport()
+        )
+        result = client.sync_group("recArtifact", force=True)
+        manager.mark_public_artifact_ready.assert_not_called()
+        self.assertIn("校验值", result["relay"]["last_error"])
+
     def test_health_probe_requires_ready_matching_protocol(self) -> None:
         class HealthTransport:
             def __init__(self, payload: dict) -> None:
@@ -364,7 +463,7 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             "https://relay.example",
             transport=HealthTransport(
                 {
-                    "service": "public_polling_relay",
+                    "service": "public_polling_work_order",
                     "protocol_version": 1,
                     "ready": True,
                 }
@@ -375,7 +474,7 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             "https://relay.example",
             transport=HealthTransport(
                 {
-                    "service": "public_polling_relay",
+                    "service": "public_polling_work_order",
                     "protocol_version": 2,
                     "ready": True,
                 }

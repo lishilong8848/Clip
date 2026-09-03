@@ -3783,7 +3783,12 @@ class FastAPIPortalController:
                     scope_codes,
                 )
                 people = (
-                    await asyncio.to_thread(self._drill_people, scope)
+                    await asyncio.to_thread(
+                        self._drill_people,
+                        scope,
+                        refresh=str(request.query_params.get("refresh_people") or "").lower()
+                        in {"1", "true", "yes"},
+                    )
                     if scope
                     else []
                 )
@@ -10742,44 +10747,13 @@ class FastAPIPortalController:
             raise PortalError("演练尚未发布或已归档。")
         return definition
 
-    @staticmethod
-    def _drill_person_allowed(person: dict[str, Any], scope: str) -> bool:
-        building = str(
-            person.get("building") or person.get("scope_text") or ""
-        ).strip()
-        role_text = " ".join(
-            str(person.get(key) or "").strip()
-            for key in ("position", "role_name", "job_title")
-        ).upper()
-        codes = set(MaintenancePortalService._building_codes_from_value(building))
-        return bool(
-            scope in codes
-            or "H" in codes
-            or "ECC" in building.upper()
-            or "ECC" in role_text
-        )
-
     def _drill_people(self, scope: str, *, refresh: bool = False) -> list[dict[str, Any]]:
-        payload = PortalRuntime.service.signature_people(
-            scope="ALL",
-            limit=500,
-            refresh=refresh,
-        )
-        people = [
-            dict(item)
-            for item in (payload.get("people") or [])
+        # 楼栋只限制演练记录权限；人员使用完整在职目录，不按楼栋或分页上限截断。
+        return [
+            {key: value for key, value in item.items() if key != "raw_fields"}
+            for item in PortalRuntime.service._load_signature_people(force=refresh)
             if isinstance(item, dict)
         ]
-        if not scope:
-            return [
-                item
-                for item in people
-                if any(
-                    self._drill_person_allowed(item, code)
-                    for code in ("A", "B", "C", "D", "E")
-                )
-            ]
-        return [item for item in people if self._drill_person_allowed(item, scope)]
 
     @staticmethod
     def _drill_person_record_id(value: Any) -> str:
@@ -10834,7 +10808,7 @@ class FastAPIPortalController:
         missing = sorted(required_ids - set(people_by_id))
         if missing:
             raise PortalError(
-                "所选人员不存在、已离职或不属于当前楼栋/H楼："
+                "所选人员不存在或已离职，请刷新人员列表："
                 + "、".join(missing[:5])
             )
 

@@ -572,7 +572,7 @@ import {
 } from "lucide-vue-next";
 import { ApiError, requestJson, type Dict } from "../api/client";
 import { navigate } from "../navigation";
-import { fetchSignaturePeople, saveStaffSignature, sendStaffSignatureLink } from "../mopSignatureApi";
+import { saveStaffSignature, sendStaffSignatureLink } from "../mopSignatureApi";
 import { useMopSignatureCanvas } from "../useMopSignatureCanvas";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
@@ -788,9 +788,8 @@ const searchedPeople = computed(() => {
     : [];
 });
 const commanderPeople = computed(() => uniquePeople([
-  ...(peopleExpanded.value
-    ? people.value
-    : peopleSearch.value ? searchedPeople.value : currentBuildingPeople.value),
+  ...currentBuildingPeople.value,
+  ...people.value,
   ...(personById(commanderId.value) ? [personById(commanderId.value) as Dict] : []),
 ]));
 const commanderPersonOptionLabels = computed(() => commanderPeople.value.map(personOptionLabelFromPerson));
@@ -798,7 +797,7 @@ const filteredPeople = computed(() => {
   const source = peopleSearch.value
     ? searchedPeople.value
     : peopleExpanded.value ? people.value : currentBuildingPeople.value;
-  return source.slice(0, 60);
+  return source;
 });
 const missingSignaturePeople = computed(() => selectedParticipants.value.filter((person) => !person.has_signature));
 const executionStatusText = computed(() => statusLabel(execution.value?.status || "draft"));
@@ -919,8 +918,8 @@ async function loadBootstrap(): Promise<void> {
     stablePageUrl = `${window.location.pathname}${window.location.search}`;
     bootstrap.value = data;
     drills.value = arrayFrom(data.drills || data.items);
-    if (Array.isArray(data.people) && data.people.length) {
-      people.value = uniquePeople(data.people.filter((person: Dict) => personAllowedForScope(person, activeScope.value)));
+    if (Array.isArray(data.people)) {
+      people.value = uniquePeople(data.people);
       if (activeScope.value) peopleScopeLoaded.value = activeScope.value;
     }
     if (selectedDrillId.value && !selectedDrill.value) selectedDrillId.value = "";
@@ -975,18 +974,18 @@ async function loadPeople(options: { force?: boolean; refresh?: boolean } = {}):
   const scope = activeScope.value;
   if (!scope) return false;
   if (!options.force && peopleScopeLoaded.value === scope) return true;
-  const results = await Promise.allSettled([
-    fetchSignaturePeople({ scope, refresh: Boolean(options.refresh), limit: 500 }),
-    fetchSignaturePeople({ scope: "H", limit: 500 }),
-  ]);
-  if (!results.some((result) => result.status === "fulfilled")) {
+  try {
+    const query = new URLSearchParams({ scope, month: selectedMonth.value });
+    if (options.refresh) query.set("refresh_people", "1");
+    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "no-store" });
+    if (!Array.isArray(data.people)) throw new Error("人员目录响应不完整");
+    people.value = uniquePeople(data.people);
+    peopleScopeLoaded.value = scope;
+    return true;
+  } catch {
     if (options.force) throw new Error("人员签名状态刷新失败，请稍后重试。");
     return false;
   }
-  const combined = results.flatMap((result) => result.status === "fulfilled" && Array.isArray(result.value.people) ? result.value.people : []);
-  people.value = uniquePeople([...combined, ...people.value].filter((person) => personAllowedForScope(person, scope)));
-  peopleScopeLoaded.value = scope;
-  return true;
 }
 
 async function refreshSignaturePeople(): Promise<void> {
@@ -1092,22 +1091,6 @@ function personName(person: Dict | null | undefined): string {
 function personMeta(person: Dict): string {
   return [person.scope_text || person.scope || person.building || person.building_name, person.employee_no || person.staff_no || person.job_number, person.position || person.role_name || person.job_title]
     .map((item) => String(item || "").trim()).filter(Boolean).join(" · ") || "人员表";
-}
-
-function personAllowedForScope(person: Dict, scope: string): boolean {
-  if (!scope) return true;
-  const building = [person.building, person.scope_text, person.building_name, person.scope]
-    .map((item) => String(item || "").trim().toUpperCase())
-    .filter(Boolean)
-    .join(" ");
-  const role = [person.position, person.role_name, person.job_title]
-    .map((item) => String(item || "").trim().toUpperCase())
-    .filter(Boolean)
-    .join(" ");
-  if (!building && !role) return false;
-  if (building.includes("ECC") || role.includes("ECC")) return true;
-  const codes = new Set(building.match(/[ABCDEH](?=楼|\b)/g) || []);
-  return codes.has(scope) || codes.has("H");
 }
 
 function personBelongsToScope(person: Dict, scope: string): boolean {

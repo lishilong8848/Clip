@@ -184,7 +184,7 @@ class ConfigManager:
                 )
                 relay = payload.get("relay") if isinstance(payload.get("relay"), dict) else {}
                 if (
-                    str(relay.get("mode") or "") == "public_relay"
+                    str(relay.get("mode") or "") in {"public_service", "public_relay"}
                     and str(payload.get("state") or "")
                     in {"active", "upload_pending", "completed"}
                 ):

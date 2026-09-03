@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import assert from "node:assert/strict";
+import { computed, ref } from "vue";
+import ts from "typescript";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const page = readFileSync(resolve(root, "src/components/DrillManagementPage.vue"), "utf8");
@@ -31,5 +34,35 @@ if (page.includes('<VnetBackButton :disabled="busy"')) throw new Error("演练�
 if (/type="file"[^>]*\brequired\b/.test(page)) throw new Error("演练拖放文件输入仍被 required 拦截");
 if (!app.includes('routePath.value === "/drill-management/print"')) throw new Error("App 缺少演练打印路由");
 if (!home.includes('primaryAction: { key: "drill"')) throw new Error("首页演练入口未启用");
+if (page.includes("personAllowedForScope")) throw new Error("演练人员仍按楼栋过滤");
+if (!page.includes('query.set("refresh_people", "1")')) throw new Error("签名刷新未读取完整人员目录");
+
+const directory = Array.from({ length: 602 }, (_, index) => ({
+  record_id: `person-${index}`, name: `人员${index}`, building: index < 2 ? "E" : "A", employee_no: `job-${index}`,
+}));
+const people = ref(directory);
+const peopleSearch = ref("");
+const peopleExpanded = ref(false);
+const context = {
+  computed, people, peopleSearch, peopleExpanded, activeScope: ref("E"), commanderId: ref(""),
+  personBelongsToScope: (person, scope) => person.building === scope,
+  personName: (person) => person.name,
+  personMeta: (person) => `${person.building} ${person.employee_no}`,
+  personId: (person) => person.record_id,
+  personById: (id) => people.value.find((person) => person.record_id === id),
+  personOptionLabelFromPerson: (person) => person.record_id,
+  uniquePeople: (items) => [...new Map(items.map((person) => [person.record_id, person])).values()],
+};
+const selectors = page.slice(page.indexOf("const currentBuildingPeople ="), page.indexOf("const missingSignaturePeople ="));
+const evaluate = new Function(...Object.keys(context), `${ts.transpile(selectors)}\nreturn { filteredPeople, commanderPeople };`);
+const { filteredPeople, commanderPeople } = evaluate(...Object.values(context));
+assert.equal(filteredPeople.value.length, 2, "默认只展示本楼人员");
+assert.equal(commanderPeople.value.length, 602, "指挥人下拉搜索必须覆盖全部人员");
+peopleSearch.value = "job-601";
+assert.equal(filteredPeople.value[0]?.record_id, "person-601", "可搜索跨楼栋且位于第500条之后的人员");
+assert.equal(commanderPeople.value.length, 602, "参演人员搜索不能缩小指挥人候选");
+peopleSearch.value = "";
+peopleExpanded.value = true;
+assert.equal(filteredPeople.value.length, 602, "展开后不得截断其他人员");
 
 console.log("drill management static check passed");

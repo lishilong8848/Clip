@@ -222,9 +222,12 @@ class PortalRuntime:
             return True
         try:
             return any(
-                str((item.get("relay") or {}).get("mode") or "")
-                == "public_relay"
-                for item in cls.polling_work_orders().open_groups()
+                isinstance(item.get("payload"), dict)
+                and str(((item.get("payload") or {}).get("relay") or {}).get("mode") or "")
+                == "public_service"
+                and str(((item.get("payload") or {}).get("relay") or {}).get("registration_state") or "")
+                != "cancelled"
+                for item in cls.state_store.list_documents("polling_work_order")
                 if isinstance(item, dict)
             )
         except Exception:
@@ -267,7 +270,7 @@ class PortalRuntime:
             return prepared
         previous = previous_prepared if isinstance(previous_prepared, dict) else {}
         previous_mode = str(previous.get("polling_work_order_mode") or "").strip()
-        if previous_mode in {"public_relay", "local", "local_fallback"}:
+        if previous_mode in {"public_service", "public_relay", "local", "local_fallback"}:
             for key in (
                 "polling_work_order_mode",
                 "polling_work_order_fallback_reason",
@@ -286,13 +289,14 @@ class PortalRuntime:
         )
         prepared["polling_work_order_relay_url"] = str(health.get("url") or "")
         if health.get("ready") is True:
-            prepared["polling_work_order_mode"] = "public_relay"
+            prepared["polling_work_order_mode"] = "public_service"
             prepared.pop("polling_work_order_fallback_reason", None)
         else:
             prepared["polling_work_order_mode"] = "local_fallback"
             prepared["polling_work_order_fallback_reason"] = str(
                 health.get("error") or "公网工单不可用。"
             )
+        if prepared.get("polling_work_order_mode") == "local_fallback":
             log_warning(
                 "公网工单不可用，本次开始已固定切换局域网: "
                 f"{prepared['polling_work_order_fallback_reason']}"
@@ -304,9 +308,6 @@ class PortalRuntime:
         relay_url = cls._polling_work_order_public_relay_url()
         if not relay_url:
             raise PortalError("请先在设置中填写公网工单地址。")
-        relay_env = dict(os.environ)
-        relay_env["CLIPFLOW_POLLING_RELAY_ENABLED"] = "1"
-        relay_env["CLIPFLOW_POLLING_RELAY_URL"] = relay_url
         parsed = urlparse(relay_url)
         allow_insecure = False
         if parsed.scheme == "http":
@@ -317,32 +318,20 @@ class PortalRuntime:
                 with suppress(ValueError):
                     address = ipaddress.ip_address(host)
                     allow_insecure = address.is_loopback or address.is_private
-        relay_env["CLIPFLOW_POLLING_RELAY_ALLOW_INSECURE_HTTP"] = (
-            "1" if allow_insecure else "0"
-        )
         from .polling_work_order_relay import (
-            PollingRelayConfig,
-            PollingWorkOrderRelayConnector,
+            PollingWorkOrderPublicClient,
         )
-
-        relay_config = PollingRelayConfig.from_env(relay_env)
-        signature = "|".join(
-            (
-                relay_config.base_url,
-                str(relay_config.allow_insecure_http),
-                relay_config.connector_id,
-            )
-        )
+        signature = f"{relay_url}|{allow_insecure}"
         if (
             cls._polling_relay_connector is None
             or cls._polling_relay_connector.state_store is not cls.state_store
             or cls._polling_relay_connector_signature != signature
         ):
-            cls._polling_relay_connector = PollingWorkOrderRelayConnector(
+            cls._polling_relay_connector = PollingWorkOrderPublicClient(
                 cls.state_store,
                 cls.polling_work_orders(),
-                config=relay_config,
-                finalize_callback=cls.finalize_polling_work_order_group,
+                base_url=relay_url,
+                allow_insecure_http=allow_insecure,
             )
             cls._polling_relay_connector_signature = signature
         return cls._polling_relay_connector
@@ -1302,7 +1291,7 @@ class PortalRuntime:
     ) -> dict:
         manager = cls.polling_work_orders()
         relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
-        if str(relay_state.get("mode") or "") == "public_relay":
+        if str(relay_state.get("mode") or "") in {"public_service", "public_relay"}:
             connector = cls.polling_work_order_relay()
             if connector.enabled and str(
                 relay_state.get("registration_state") or ""
@@ -1409,16 +1398,16 @@ class PortalRuntime:
         selected_mode = str(
             prepared.get("polling_work_order_mode") or ""
         ).strip()
-        if selected_mode not in {"public_relay", "local", "local_fallback"}:
+        if selected_mode not in {"public_service", "public_relay", "local", "local_fallback"}:
             selected_mode = (
-                "public_relay"
+                "public_service"
                 if cls.polling_work_order_public_relay_enabled()
                 else "local"
             )
             prepared["polling_work_order_mode"] = selected_mode
         relay = (
             cls.polling_work_order_relay()
-            if selected_mode == "public_relay"
+            if selected_mode == "public_service"
             else None
         )
         use_public_relay = bool(relay and relay.enabled)
@@ -1438,7 +1427,14 @@ class PortalRuntime:
             **create_kwargs,
         )
         if group:
-            if not use_public_relay:
+            if use_public_relay:
+                relay.register_group(target_record_id, force=True)
+                group = cls.polling_work_orders().group_with_links(
+                    cls.polling_work_orders().get_group(target_record_id), ""
+                )
+                if group.get("operator_link") and group.get("reviewer_link"):
+                    cls._send_polling_work_order_links(group)
+            else:
                 cls._send_polling_work_order_links(group)
             prepared["polling_work_order_group_id"] = target_record_id
         return group
@@ -1470,6 +1466,12 @@ class PortalRuntime:
                 "error": "工单附件正在上传，请稍后刷新。",
             }
         try:
+            relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
+            public_service = str(relay_state.get("mode") or "") == "public_service"
+            if public_service and str(group.get("state") or "") == "active":
+                group = cls.polling_work_order_relay().sync_group(
+                    target_record_id, force=True
+                )
             group_state = str(group.get("state") or "")
             if group_state not in {"upload_pending", "completed"}:
                 return {"ok": False, "state": str(group.get("state") or ""), "error": "工单步骤尚未全部完成。"}
@@ -1505,7 +1507,11 @@ class PortalRuntime:
                     target_record_id, reason="target_terminal"
                 )
                 return {"ok": False, "state": "cancelled", "error": f"{label}通告已结束，工单已停止。"}
-            workbook = manager.build_execution_workbook(target_record_id)
+            workbook = (
+                cls.polling_work_order_relay().download_artifact(target_record_id)
+                if public_service
+                else manager.build_execution_workbook(target_record_id)
+            )
             uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
             previous_generated_tokens = {
                 str(token or "").strip()

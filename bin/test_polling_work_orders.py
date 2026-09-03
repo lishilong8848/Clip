@@ -1135,6 +1135,28 @@ class PollingWorkOrderTests(unittest.TestCase):
         relay_connector.assert_not_called()
         send_links.assert_called_once_with(group)
 
+    def test_ready_public_service_fixes_start_to_public_mode(self) -> None:
+        prepared = {
+            "work_type": "polling",
+            "action": "start",
+            "polling_work_order_required": True,
+        }
+        with patch.object(
+            PortalRuntime,
+            "polling_work_order_public_relay_enabled",
+            return_value=True,
+        ), patch.object(
+            PortalRuntime,
+            "polling_work_order_public_relay_health",
+            return_value={
+                "ready": True,
+                "checked_at": 123.0,
+                "url": "https://relay.example",
+            },
+        ):
+            resolved = PortalRuntime._resolve_polling_work_order_mode(dict(prepared))
+        self.assertEqual(resolved["polling_work_order_mode"], "public_service")
+
     def test_work_order_mode_is_not_rechecked_after_it_is_fixed(self) -> None:
         prepared = {
             "work_type": "polling",
@@ -1180,8 +1202,8 @@ class PollingWorkOrderTests(unittest.TestCase):
                 )
                 relay = PortalRuntime.polling_work_order_relay()
                 self.assertTrue(relay.enabled)
-                self.assertEqual(relay.config.base_url, "http://192.168.224.122:18767")
-                self.assertTrue(relay.config.allow_insecure_http)
+                self.assertEqual(relay.base_url, "http://192.168.224.122:18767")
+                self.assertTrue(relay.allow_insecure_http)
             finally:
                 PortalRuntime.state_store = previous_store
                 PortalRuntime._polling_relay_connector = previous_connector
@@ -1202,7 +1224,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                 {
                     "target_record_id": "recPublicStillRunning",
                     "state": "active",
-                    "relay": {"mode": "public_relay"},
+                    "relay": {"mode": "public_service", "registration_state": "registered"},
                 },
             )
             previous_store = PortalRuntime.state_store
@@ -1240,11 +1262,18 @@ class PollingWorkOrderTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
-    def test_polling_start_can_use_preserved_public_relay_path(self) -> None:
+    def test_polling_start_can_create_public_service_order(self) -> None:
         manager = MagicMock()
         relay = MagicMock(enabled=True)
         group = {"target_record_id": "recPublicStart", "state": "active"}
+        projected = {
+            **group,
+            "operator_link": "https://relay.example/operator",
+            "reviewer_link": "https://relay.example/reviewer",
+        }
         manager.create_group.return_value = group
+        manager.get_group.return_value = group
+        manager.group_with_links.return_value = projected
         prepared = {
             "work_type": "polling",
             "action": "start",
@@ -1267,10 +1296,11 @@ class PollingWorkOrderTests(unittest.TestCase):
             result = PortalRuntime._create_polling_work_order_group(
                 prepared, "recPublicStart"
             )
-        self.assertEqual(result, group)
+        self.assertEqual(result, projected)
         self.assertEqual(manager.create_group.call_args.kwargs["public_base_url"], "")
         self.assertTrue(manager.create_group.call_args.kwargs["public_relay"])
-        send_links.assert_not_called()
+        relay.register_group.assert_called_once_with("recPublicStart", force=True)
+        send_links.assert_called_once_with(projected)
 
     def test_existing_public_group_keeps_its_creation_mode_when_setting_is_off(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

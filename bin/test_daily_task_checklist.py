@@ -171,6 +171,24 @@ class _DailyTaskStore:
 
 
 class DailyTaskChecklistTests(unittest.TestCase):
+    @staticmethod
+    def _card_text(card: dict[str, Any]) -> str:
+        parts: list[str] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "content" and isinstance(item, str):
+                        parts.append(item)
+                    else:
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(card)
+        return "\n".join(parts)
+
     def _service(self) -> MaintenancePortalService:
         service = object.__new__(MaintenancePortalService)
         service._state_store = _DailyTaskStore()
@@ -264,9 +282,10 @@ class DailyTaskChecklistTests(unittest.TestCase):
             link_scope="E",
             public_base="",
         )
-        content = card["elements"][0]["text"]["content"]
-        self.assertIn("当期耗水量 12.5 t", content)
-        self.assertIn("当前数值 123.5 · 上次数值 120 · 变化率 +2.92%", content)
+        content = self._card_text(card)
+        self.assertIn("当期耗水量：12.5 t", content)
+        self.assertIn("当前数值：123.5，上次数值：120，变化率：+2.92%", content)
+        self.assertEqual(content.count("总水表水耗记录"), 1)
 
     def test_water_report_falls_back_to_same_type_previous_record(self) -> None:
         service = self._service()
@@ -529,7 +548,7 @@ class DailyTaskChecklistTests(unittest.TestCase):
             "stable-card-uuid",
         )
 
-    def test_empty_card_still_lists_every_summary_category(self) -> None:
+    def test_empty_card_keeps_compact_sections_without_text_separators(self) -> None:
         service = self._service()
         service._critical_guard_public_base_url = lambda: ""  # type: ignore[method-assign]
         report = {
@@ -544,12 +563,89 @@ class DailyTaskChecklistTests(unittest.TestCase):
         card = service.build_daily_work_report_card(
             report, scope_label="E楼", link_scope="E"
         )
-        content = card["elements"][0]["text"]["content"]
+        content = self._card_text(card)
 
-        self.assertIn(
-            "分类汇总** 通告 0 · 事件 0 · 检修 0 · 维护单 0 · 水耗 0",
-            content,
+        self.assertIn("分类概览", content)
+        self.assertIn("暂无事项", content)
+        self.assertIn("当前无进行中事项", content)
+        self.assertIn("当前无已完成事项", content)
+        self.assertNotIn("｜", content)
+        self.assertNotIn(" · ", content)
+
+    def test_single_and_full_cards_list_completed_item_names(self) -> None:
+        service = self._service()
+        completed = {
+            "task_id": "done-a",
+            "category": "notice",
+            "type_key": "maintenance",
+            "type_label": "维保通告",
+            "title": "A楼已完成维护",
+            "building": "A楼",
+            "status": "已结束",
+            "status_tone": "completed",
+            "sort_time": 2,
+        }
+        ongoing = {
+            "task_id": "doing-b",
+            "category": "notice",
+            "type_key": "change",
+            "type_label": "变更通告",
+            "title": "B楼进行中变更",
+            "building": "B楼",
+            "status": "进行中",
+            "status_tone": "ongoing",
+            "sort_time": 1,
+        }
+        single = {
+            "window_start": "start",
+            "window_end": "end",
+            "stats": service._daily_report_stats([completed, ongoing]),
+            "categories": service._daily_report_groups([completed, ongoing]),
+            "event_sla": {"stats": {}, "events": []},
+            "warnings": [],
+        }
+        single_text = self._card_text(
+            service.build_daily_work_report_card(
+                single,
+                scope_label="A楼",
+                link_scope="A",
+                public_base="",
+            )
         )
+        self.assertIn("已完成事项", single_text)
+        self.assertIn("A楼已完成维护", single_text)
+
+        full = service._combine_daily_work_reports(
+            [
+                {
+                    "scope": "A",
+                    "window_start": "start",
+                    "window_end": "end",
+                    "tasks": [completed],
+                    "event_sla": {"events": []},
+                    "warnings": [],
+                },
+                {
+                    "scope": "B",
+                    "window_start": "start",
+                    "window_end": "end",
+                    "tasks": [ongoing],
+                    "event_sla": {"events": []},
+                    "warnings": [],
+                },
+            ]
+        )
+        full_text = self._card_text(
+            service.build_daily_work_report_card(
+                full,
+                scope_label="A-E楼全楼",
+                link_scope="ALL",
+                public_base="",
+            )
+        )
+        self.assertIn("已完成事项", full_text)
+        self.assertIn("A楼已完成维护", full_text)
+        self.assertIn("B楼进行中变更", full_text)
 
     def test_full_report_groups_tasks_by_building_without_duplicates(self) -> None:
         service = self._service()
@@ -613,20 +709,12 @@ class DailyTaskChecklistTests(unittest.TestCase):
             link_scope="ALL",
             public_base="",
         )
-        content = card["elements"][0]["text"]["content"]
-        positions = [
-            content.index(f"**{label} ·")
-            for label in (
-                "A楼",
-                "B楼",
-                "C楼",
-                "D楼",
-                "E楼",
-                "跨楼栋/园区",
-                "楼栋待确认",
-            )
-        ]
-        self.assertEqual(positions, sorted(positions))
+        content = self._card_text(card)
+        self.assertIn("**A楼**", content)
+        self.assertIn("**跨楼栋/园区**", content)
+        self.assertIn("**楼栋待确认**", content)
+        self.assertIn("【C楼】【事件】C楼事件", content)
+        self.assertEqual(content.count("C楼事件"), 1)
         self.assertEqual(content.count("跨楼事项"), 1)
 
     def test_manual_all_report_builds_the_same_grouped_card(self) -> None:
@@ -668,10 +756,10 @@ class DailyTaskChecklistTests(unittest.TestCase):
                 operation_id="manual-all",
             )
 
-        content = sender.call_args.args[0]["elements"][0]["text"]["content"]
-        self.assertLess(content.index("**A楼 ·"), content.index("**E楼 ·"))
-        self.assertIn("**跨楼栋/园区 · 0项**", content)
-        self.assertIn("**楼栋待确认 · 0项**", content)
+        content = self._card_text(sender.call_args.args[0])
+        self.assertLess(content.index("**A楼**"), content.index("**E楼**"))
+        self.assertNotIn("｜", content)
+        self.assertNotIn(" · ", content)
 
     def test_manual_today_report_validates_people_and_sends_each_recipient(self) -> None:
         service = self._service()

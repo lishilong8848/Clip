@@ -893,6 +893,7 @@ def _polling_work_order_status(source: dict[str, Any], work_type: str) -> str:
     state = str(source.get("polling_work_order_state") or "active").strip()
     mode = str(source.get("polling_work_order_mode") or "local").strip()
     mode_label = {
+        "public_service": "公网工单",
         "public_relay": "公网工单",
         "local_fallback": "公网不可用，已自动切换局域网",
         "local": "局域网工单",

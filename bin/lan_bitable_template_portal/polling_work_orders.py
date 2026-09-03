@@ -792,7 +792,7 @@ class PollingWorkOrderService:
             relay_mode = str(
                 prepared.get("polling_work_order_mode") or ""
             ).strip()
-            if relay_mode not in {"public_relay", "local", "local_fallback"}:
+            if relay_mode not in {"public_service", "public_relay", "local", "local_fallback"}:
                 relay_mode = "public_relay" if public_relay else "local"
             group["relay"] = {
                 "mode": relay_mode,
@@ -819,7 +819,10 @@ class PollingWorkOrderService:
     def group_with_links(self, group: dict, public_base_url: str) -> dict:
         result = copy.deepcopy(group or {})
         relay = result.get("relay") if isinstance(result.get("relay"), dict) else {}
-        if str(relay.get("mode") or "") == "public_relay":
+        relay.pop("management_token", None)
+        relay.pop("link_credentials", None)
+        result["relay"] = relay
+        if str(relay.get("mode") or "") in {"public_service", "public_relay"}:
             if str(relay.get("registration_state") or "") == "registered":
                 result["operator_link"] = str(relay.get("operator_link") or "")
                 result["reviewer_link"] = str(relay.get("reviewer_link") or "")
@@ -1765,6 +1768,58 @@ class PollingWorkOrderService:
             and str((document.get("payload") or {}).get("state") or "")
             in {"active", "upload_pending", "completed"}
         ]
+
+    def update_relay(self, target_record_id: str, changes: dict) -> dict:
+        with self._lock:
+            group = self.get_group(target_record_id)
+            group["relay"] = {**dict(group.get("relay") or {}), **copy.deepcopy(changes or {})}
+            group["updated_at"] = self._now_text()
+            self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)
+        return group
+
+    def mark_public_artifact_ready(self, target_record_id: str) -> dict:
+        with self._lock:
+            group = self.get_group(target_record_id)
+            if str(group.get("state") or "") not in {"completed", "cancelled", "stopped"}:
+                group["state"] = "upload_pending"
+                group["last_error"] = ""
+                group["updated_at"] = self._now_text()
+                self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)
+        return group
+
+    def save_public_artifact(
+        self,
+        target_record_id: str,
+        *,
+        content: bytes,
+        name: str,
+        expected_sha256: str = "",
+    ) -> dict:
+        if not content or len(content) > POLLING_WORK_ORDER_MAX_BYTES:
+            raise PortalError("公网工单Excel为空或超过允许大小。")
+        digest = hashlib.sha256(content).hexdigest()
+        expected = str(expected_sha256 or "").strip().lower()
+        if expected and not hmac.compare_digest(digest, expected):
+            raise PortalError("公网工单Excel校验失败。")
+        safe_name = _safe_file_name(name)
+        if not safe_name.lower().endswith(".xlsx"):
+            safe_name += ".xlsx"
+        directory = self._group_directory(target_record_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = (directory / safe_name).resolve()
+        if not path.is_relative_to(directory):
+            raise PortalError("公网工单Excel路径无效。")
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with temporary.open("wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        return {"name": safe_name, "path": str(path), "size": len(content), "sha256": digest}
+
+    def cancel_and_get(self, target_record_id: str, *, reason: str) -> dict:
+        self.cancel_group(target_record_id, reason=reason)
+        return self.get_group(target_record_id)
 
     def mark_upload_result(
         self,

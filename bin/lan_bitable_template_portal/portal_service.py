@@ -24318,7 +24318,7 @@ class MaintenancePortalService:
             return "warning"
         if re.search(r"结束|完成|闭环|已上传|已录入", text):
             return "completed"
-        if re.search(r"进行中|处理中|维修中|更新|恢复", text):
+        if re.search(r"开始|进行中|处理中|维修中|更新|恢复", text):
             return "ongoing"
         return "neutral"
 
@@ -25108,7 +25108,8 @@ class MaintenancePortalService:
                 previous_value,
                 record.get("meter_value"),
             )
-            status = "需处理" if failed else "已录入"
+            large_change = bool(meter_change.get("requires_confirmation"))
+            status = "需处理" if failed else "变化较大" if large_change else "已录入"
             tasks.append(
                 {
                     "task_id": self._daily_task_id("water", record_id),
@@ -25126,7 +25127,13 @@ class MaintenancePortalService:
                         "水耗记录",
                     ),
                     "status": status,
-                    "status_tone": self._daily_task_status_tone(status),
+                    "status_tone": (
+                        "error"
+                        if failed
+                        else "warning"
+                        if large_change
+                        else "completed"
+                    ),
                     "time": self._daily_task_time_text(
                         sort_time,
                         all_day=not bool(actions),
@@ -26420,177 +26427,343 @@ class MaintenancePortalService:
         stats = report.get("stats") or {}
         event_sla = report.get("event_sla") or {}
         sla_stats = event_sla.get("stats") or {}
-        category_counts = {
-            str(item.get("label") or ""): int(item.get("count") or 0)
-            for item in report.get("categories") or []
-            if isinstance(item, dict)
-        }
-        lines = [
-            f"**统计周期** {str(report.get('window_start') or '')[:16]} 至 "
-            f"{str(report.get('window_end') or '')[:16]}",
-            f"**事项汇总** 共 {int(stats.get('total') or 0)} 项 · "
-            f"进行中 {int(stats.get('ongoing') or 0)} · "
-            f"已完成 {int(stats.get('completed') or 0)} · "
-            f"需关注 {int(stats.get('attention') or 0)}",
-            "**分类汇总** "
-            + " · ".join(
-                f"{label} {category_counts.get(label, 0)}"
-                for label in ("通告", "事件", "检修", "维护单", "水耗")
-            ),
-            f"**事件时效** 事件 {int(sla_stats.get('events') or 0)} · "
-            f"达标 {int(sla_stats.get('on_time') or 0)} · "
-            f"超时 {int(sla_stats.get('late') or 0)} · "
-            f"待发送 {int(sla_stats.get('pending') or 0)}",
-        ]
-        action_labels = {"start": "新增", "update": "更新", "end": "结束"}
-        omitted = 0
-
-        def append_events(events: list[dict[str, Any]], heading: str) -> None:
-            if not events:
-                return
-            lines.extend(["", f"**{heading}**"])
-            for event in events:
-                title = self._daily_report_markdown(event.get("title"))
-                level = self._daily_report_markdown(event.get("level"), limit=30)
-                occurrence = str(event.get("occurrence_time") or "")
-                lines.append(
-                    f"**{title}** · {level} · "
-                    f"{self._daily_report_markdown(event.get('status'), limit=20)}"
-                )
-                lines.append(f"　发生 {occurrence or '时间缺失'}")
-                for row in event.get("rows") or []:
-                    state = str(row.get("state") or "unknown")
-                    if state == "late":
-                        result_text = f"超时 {row.get('late_text') or '0分0秒'}"
-                    elif state == "on_time":
-                        result_text = "达标"
-                    else:
-                        result_text = "时间缺失，无法判定"
-                    lines.append(
-                        f"　第{int(row.get('number') or 0)}条 "
-                        f"{action_labels.get(str(row.get('action') or ''), '通告')} "
-                        f"{str(row.get('response_time') or '')[11:19]} · {result_text}"
-                    )
-                pending = event.get("pending")
-                if isinstance(pending, dict):
-                    deadline = str(pending.get("deadline") or "")
-                    lines.append(
-                        f"　第{int(pending.get('number') or 0)}条待发送"
-                        + (f" · 截止 {deadline[11:19]}" if deadline else "")
-                    )
-                for recover_time in event.get("recoveries") or []:
-                    lines.append(f"　恢复 {str(recover_time)[11:19]} · 不参与编号")
-                if event.get("historical_minute_precision"):
-                    lines.append("　注：历史时间精度至分钟，按00秒核算")
-
-        def append_tasks(groups: list[dict[str, Any]]) -> None:
-            nonlocal omitted
-            for group in groups:
-                if not isinstance(group, dict) or group.get("key") == "event":
-                    continue
-                group_tasks = [
-                    item
-                    for item in group.get("tasks") or []
-                    if isinstance(item, dict)
-                ]
-                if not group_tasks:
-                    continue
-                lines.extend(
-                    [
-                        "",
-                        f"**{self._daily_report_markdown(group.get('label'), limit=20)}"
-                        f" · {len(group_tasks)}项**",
-                    ]
-                )
-                for task in group_tasks:
-                    water_detail = ""
-                    if str(task.get("category") or "") == "water":
-                        water_parts = []
-                        if task.get("level"):
-                            water_parts.append(f"当期耗水量 {task.get('level')}")
-                        if "water_current_value" in task:
-                            water_parts.extend(
-                                [
-                                    f"当前数值 {task.get('water_current_value')}",
-                                    f"上次数值 {task.get('water_previous_value')}",
-                                    f"变化率 {task.get('water_change_ratio')}",
-                                ]
-                            )
-                        water_detail = " · ".join(water_parts)
-                    detail = " · ".join(
-                        item
-                        for item in (
-                            self._daily_report_markdown(task.get("time"), limit=10),
-                            self._daily_report_markdown(task.get("type_label"), limit=20),
-                            self._daily_report_markdown(task.get("title")),
-                            self._daily_report_markdown(task.get("status"), limit=20),
-                            self._daily_report_markdown(task.get("action_summary"), limit=50),
-                            self._daily_report_markdown(water_detail, limit=160),
-                        )
-                        if item
-                    )
-                    candidate = f"· {detail}"
-                    if len("\n".join(lines + [candidate])) > 22000:
-                        omitted += 1
-                        continue
-                    lines.append(candidate)
-
         building_sections = [
             item
             for item in report.get("building_sections") or []
             if isinstance(item, dict)
         ]
-        if building_sections:
-            for section in building_sections:
-                section_stats = section.get("stats") or {}
-                section_sla = section.get("event_sla") or {}
-                section_sla_stats = section_sla.get("stats") or {}
-                section_counts = {
-                    str(item.get("label") or ""): int(item.get("count") or 0)
-                    for item in section.get("categories") or []
-                    if isinstance(item, dict)
-                }
-                section_label = self._daily_report_markdown(
-                    section.get("label"), limit=30
-                )
-                lines.extend(
+        is_full_report = bool(building_sections)
+        type_labels = {
+            WORK_TYPE_MAINTENANCE: "维保",
+            WORK_TYPE_CHANGE: "变更",
+            WORK_TYPE_REPAIR: "检修",
+            WORK_TYPE_POLLING: "轮巡",
+            WORK_TYPE_ADJUST: "调整",
+            WORK_TYPE_POWER: "上下电",
+            "event": "事件",
+            "repair_project": "检修",
+            "mop": "维护单",
+            "water": "水耗",
+        }
+
+        def report_tasks(groups: Any) -> list[dict[str, Any]]:
+            return [
+                item
+                for group in groups or []
+                if isinstance(group, dict)
+                for item in group.get("tasks") or []
+                if isinstance(item, dict)
+            ]
+
+        def task_type(task: dict[str, Any]) -> str:
+            key = str(task.get("type_key") or task.get("category") or "")
+            return type_labels.get(
+                key,
+                self._daily_report_markdown(
+                    task.get("type_label") or task.get("category_label") or "事项",
+                    limit=20,
+                ).replace("通告", ""),
+            )
+
+        def water_detail(task: dict[str, Any]) -> str:
+            parts = []
+            if task.get("level"):
+                parts.append(f"当期耗水量：{task.get('level')}")
+            if "water_current_value" in task:
+                parts.extend(
                     [
-                        "",
-                        f"**{section_label} · {int(section_stats.get('total') or 0)}项**",
-                        f"进行中 {int(section_stats.get('ongoing') or 0)} · "
-                        f"已完成 {int(section_stats.get('completed') or 0)} · "
-                        f"需关注 {int(section_stats.get('attention') or 0)}",
-                        "分类 "
-                        + " · ".join(
-                            f"{label} {section_counts.get(label, 0)}"
-                            for label in ("通告", "事件", "检修", "维护单", "水耗")
-                        ),
-                        f"事件时效 达标 {int(section_sla_stats.get('on_time') or 0)} · "
-                        f"超时 {int(section_sla_stats.get('late') or 0)} · "
-                        f"待发送 {int(section_sla_stats.get('pending') or 0)}",
+                        f"当前数值：{task.get('water_current_value')}",
+                        f"上次数值：{task.get('water_previous_value')}",
+                        f"变化率：{task.get('water_change_ratio')}",
                     ]
                 )
-                append_events(
-                    list(section_sla.get("events") or []),
-                    f"{section_label}事件通告时效",
+            return "，".join(parts)
+
+        def task_detail(task: dict[str, Any]) -> str:
+            if str(task.get("category") or "") == "water":
+                return water_detail(task)
+            action = self._daily_report_markdown(
+                task.get("action_summary"), limit=60
+            )
+            if action.startswith("今日"):
+                action = action[2:]
+            action = action.replace(" ", "")
+            time_text = self._daily_report_markdown(task.get("time"), limit=10)
+            details = []
+            if time_text and action:
+                details.append(f"{time_text}{action}")
+            elif time_text or action:
+                details.append(time_text or action)
+            specialty = self._daily_report_markdown(
+                task.get("specialty"), limit=20
+            )
+            if specialty:
+                details.append(specialty)
+            return "，".join(details)
+
+        def task_line(task: dict[str, Any]) -> str:
+            detail = task_detail(task)
+            return (
+                f"【{task_type(task)}】"
+                f"{self._daily_report_markdown(task.get('title'))}"
+                + (f"\n{detail}" if detail else "")
+            )
+
+        focus_entries: list[str] = []
+        ongoing_entries: list[str] = []
+        completed_entries: list[str] = []
+        has_error = False
+
+        def collect(
+            tasks: list[dict[str, Any]],
+            events: list[dict[str, Any]],
+            *,
+            section_label: str = "",
+        ) -> None:
+            nonlocal has_error
+            prefix = f"【{section_label}】" if section_label else ""
+            focused_event_titles: set[str] = set()
+            for event in events:
+                title = self._daily_report_markdown(
+                    event.get("title") or "未命名事件"
                 )
-                append_tasks(list(section.get("categories") or []))
+                late_rows = [
+                    row
+                    for row in event.get("rows") or []
+                    if isinstance(row, dict) and row.get("state") == "late"
+                ]
+                pending = event.get("pending")
+                if not late_rows and not isinstance(pending, dict):
+                    continue
+                focused_event_titles.add(
+                    self._morning_meeting_normalized_title(title)
+                )
+                details = []
+                level = self._daily_report_markdown(event.get("level"), limit=30)
+                if level:
+                    details.append(f"等级：{level}")
+                occurrence = str(event.get("occurrence_time") or "")
+                if occurrence:
+                    details.append(f"发生时间：{occurrence[11:19]}")
+                details.extend(
+                    f"第{int(row.get('number') or 0)}条通告超时"
+                    f"{row.get('late_text') or '0分0秒'}"
+                    for row in late_rows
+                )
+                if isinstance(pending, dict):
+                    deadline = str(pending.get("deadline") or "")
+                    details.append(
+                        f"第{int(pending.get('number') or 0)}条待发送"
+                        + (f"，截止{deadline[11:19]}" if deadline else "")
+                    )
+                has_error = has_error or bool(late_rows)
+                focus_entries.append(
+                    f"{'🔴' if late_rows else '🟠'} "
+                    f"**{prefix}【事件】{title}**\n"
+                    + "\n".join(details)
+                )
+
+            ongoing: list[dict[str, Any]] = []
+            completed: list[dict[str, Any]] = []
+            for task in tasks:
+                category = str(task.get("category") or "")
+                tone = str(task.get("status_tone") or "")
+                title = self._daily_report_markdown(task.get("title"))
+                if (
+                    category == "event"
+                    and self._morning_meeting_normalized_title(title)
+                    in focused_event_titles
+                ):
+                    continue
+                if tone in {"warning", "error"}:
+                    has_error = has_error or tone == "error"
+                    detail = task_detail(task) or self._daily_report_markdown(
+                        task.get("status"), limit=30
+                    )
+                    focus_entries.append(
+                        f"{'🔴' if tone == 'error' else '🟠'} "
+                        f"**{prefix}【{task_type(task)}】"
+                        f"{title}**"
+                        + (f"\n{detail}" if detail else "")
+                    )
+                    continue
+                if tone == "completed":
+                    completed.append(task)
+                elif tone == "ongoing":
+                    ongoing.append(task)
+            if ongoing:
+                lines = [task_line(task) for task in ongoing]
+                ongoing_entries.append(
+                    (f"**{section_label}**\n" if section_label else "")
+                    + "\n".join(lines)
+                )
+            if completed:
+                lines = [task_line(task) for task in completed]
+                completed_entries.append(
+                    (f"**{section_label}**\n" if section_label else "")
+                    + "\n".join(lines)
+                )
+
+        if is_full_report:
+            for section in building_sections:
+                collect(
+                    list(section.get("tasks") or []),
+                    list((section.get("event_sla") or {}).get("events") or []),
+                    section_label=self._daily_report_markdown(
+                        section.get("label"), limit=30
+                    ),
+                )
         else:
-            append_events(list(event_sla.get("events") or []), "事件通告时效")
-            append_tasks(list(report.get("categories") or []))
-        if omitted:
-            lines.extend(["", f"还有 {omitted} 项详情请在每日任务页面查看。"])
-        if not int(stats.get("total") or 0):
-            lines.extend(["", "**本周期无事项记录**"])
-        warnings = [str(item) for item in report.get("warnings") or [] if str(item).strip()]
-        if warnings:
-            lines.extend(["", "**数据提示**", *[f"· {self._daily_report_markdown(item)}" for item in warnings]])
+            collect(
+                report_tasks(report.get("categories")),
+                list(event_sla.get("events") or []),
+            )
+
+        warnings = [
+            self._daily_report_markdown(item)
+            for item in report.get("warnings") or []
+            if str(item).strip()
+        ]
+        focus_entries.extend(f"🟠 **数据提示**\n{item}" for item in warnings)
+        attention_count = len(focus_entries)
+
+        def limited(entries: list[str], maximum: int) -> list[str]:
+            result: list[str] = []
+            length = 0
+            for entry in entries:
+                if length + len(entry) > maximum:
+                    break
+                result.append(entry)
+                length += len(entry)
+            omitted = len(entries) - len(result)
+            if omitted:
+                result.append(f"还有{omitted}项请在每日任务页面查看。")
+            return result
+
+        focus_entries = limited(focus_entries, 5000)
+        ongoing_entries = limited(ongoing_entries, 5000)
+        completed_entries = limited(completed_entries, 8000)
+
         elements: list[dict[str, Any]] = [
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": "\n".join(lines)},
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"{str(report.get('window_start') or '')[:16]}—"
+                        f"{str(report.get('window_end') or '')[:16]}"
+                        + (
+                            f"\n数据更新：{str(report.get('generated_at') or '')[11:16]}"
+                            if str(report.get("generated_at") or "")
+                            else ""
+                        )
+                    ),
+                },
             }
         ]
+
+        def metric(title: str, value: int) -> dict[str, Any]:
+            return {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{title}**\n{value}",
+                },
+            }
+
+        elements.append(
+            {
+                "tag": "div",
+                "fields": [
+                    metric("总事项", int(stats.get("total") or 0)),
+                    metric("已完成", int(stats.get("completed") or 0)),
+                    metric("进行中", int(stats.get("ongoing") or 0)),
+                    metric("需处理", attention_count),
+                ],
+            }
+        )
+
+        def add_section(
+            title: str,
+            entries: list[str],
+            *,
+            empty_text: str = "",
+        ) -> None:
+            if not entries and not empty_text:
+                return
+            elements.extend(
+                [
+                    {"tag": "hr"},
+                    {
+                        "tag": "div",
+                        "text": {"tag": "lark_md", "content": f"**{title}**"},
+                    },
+                ]
+            )
+            for entry in entries or [empty_text]:
+                elements.append(
+                    {
+                        "tag": "div",
+                        "text": {"tag": "lark_md", "content": entry},
+                    }
+                )
+
+        category_counts: dict[str, int] = {}
+        for task in report_tasks(report.get("categories")):
+            label = task_type(task)
+            category_counts[label] = category_counts.get(label, 0) + 1
+        ordered_labels = (
+            "维保",
+            "变更",
+            "检修",
+            "轮巡",
+            "调整",
+            "上下电",
+            "事件",
+            "维护单",
+            "水耗",
+        )
+        category_parts = [
+            f"{label}{category_counts[label]}"
+            for label in ordered_labels
+            if category_counts.get(label)
+        ]
+        category_lines = [
+            "　".join(category_parts[index : index + 4])
+            for index in range(0, len(category_parts), 4)
+        ]
+        add_section(
+            "分类概览",
+            ["\n".join(category_lines)] if category_lines else [],
+            empty_text="暂无事项",
+        )
+        add_section("异常与待办", focus_entries, empty_text="无异常事项")
+        add_section(
+            "进行中事项",
+            ongoing_entries,
+            empty_text="当前无进行中事项",
+        )
+        add_section(
+            "已完成事项",
+            completed_entries,
+            empty_text="当前无已完成事项",
+        )
+        if not is_full_report:
+            elements.append(
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": (
+                                f"事件时效：达标{int(sla_stats.get('on_time') or 0)}，"
+                                f"超时{int(sla_stats.get('late') or 0)}，"
+                                f"待发送{int(sla_stats.get('pending') or 0)}"
+                            ),
+                        }
+                    ],
+                }
+            )
         if public_base is None:
             public_base = self._critical_guard_public_base_url()
         if public_base:
@@ -26613,7 +26786,13 @@ class MaintenancePortalService:
         return {
             "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
-                "template": "red" if int(sla_stats.get("late") or 0) else "blue",
+                "template": (
+                    "red"
+                    if has_error
+                    else "orange"
+                    if focus_entries or ongoing_entries
+                    else "blue"
+                ),
                 "title": {
                     "tag": "plain_text",
                     "content": f"{scope_label}每日工作汇总",
