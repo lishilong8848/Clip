@@ -19,6 +19,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from lan_bitable_template_portal.drill_management import (  # noqa: E402
+    DRILL_DEFINITION_NAMESPACE,
     DRILL_EXECUTION_NAMESPACE,
     DrillError,
     DrillForbiddenError,
@@ -28,6 +29,7 @@ from lan_bitable_template_portal.drill_management import (  # noqa: E402
     _parse_workbook,
     _verify_generated_workbook,
     _derived_values,
+    _validate_execution,
     build_time_chain,
     detect_drill_configuration,
     normalize_drill_signature_png,
@@ -62,9 +64,10 @@ def _fixture_xlsx(
     record_rows = [
         _row(2, [("C2", record_title)]),
         _row(5, [("B5", "机房名称"), ("F5", "演练时间")]),
-        _row(6, [("B6", "演练名称")]),
-        _row(7, [("B7", "涉及区域"), ("C7", "ECC、IT包间")]),
-        _row(8, [("B8", "总指挥人")]),
+        _row(6, [("B6", "演练名称"), ("C6", "模板演练名称"), ("F6", "演练方式"), ("G6", "实操演练")]),
+        _row(7, [("B7", "涉及区域"), ("C7", "ECC、IT包间"), ("F7", "EOP支持文档"), ("G7", "模板EOP文档")]),
+        _row(8, [("B8", "总指挥人"), ("F8", "涉及专业"), ("G8", "配电")]),
+        _row(9, [("B9", "模拟场景（包括故障点与故障现象）"), ("C9", "模板模拟场景")]),
         _row(10, [("B10", "参演人员")]),
         _row(
             12,
@@ -87,7 +90,7 @@ def _fixture_xlsx(
     assessment_title = "演练评估表" if recognized else "待配置评估"
     assessment_rows = [
         _row(2, [("D2", assessment_title)]),
-        _row(5, [("B5", "演练名称"), ("F5", "演练日期")]),
+        _row(5, [("B5", "演练名称"), ("D5", "模板评估演练名称"), ("F5", "演练日期")]),
         _row(6, [("B6", "参演人员"), ("F6", "开始时间"), ("H6", "结束时间")]),
         _row(8, [("H8", "分值"), ("I8", "得分")]),
         _row(9, [("H9", "40")]),
@@ -107,7 +110,7 @@ def _fixture_xlsx(
     table_parts = '<tableParts count="0"/>' if with_table_parts else ""
     record_xml = worksheet(
         record_rows,
-        ["C2:I4", "C5:E5", "G5:I5", "C6:E6", "C10:I10", "D16:E16", "G16:I16", "C17:E17", "G17:I17"],
+        ["C2:I4", "C5:E5", "G5:I5", "C6:E6", "G6:I6", "C7:E7", "G7:I7", "G8:I8", "C9:I9", "C10:I10", "D16:E16", "G16:I16", "C17:E17", "G17:I17"],
         drawing_reference + table_parts,
     )
     record_xml = record_xml.replace('<c r="C2"', '<c r="C2" s="1"', 1)
@@ -259,6 +262,29 @@ def _duplicate_workbook_part(source: bytes) -> bytes:
 
 
 class DrillManagementTests(unittest.TestCase):
+    def test_step_signature_slots_allow_zero_or_partial_selection(self):
+        definition = {
+            "configuration": {
+                "steps": [{"row": 14, "signature_slots": 3, "location": "机房"}],
+            }
+        }
+        base = {
+            "drill_date": "2026-09-04",
+            "first_start_time": "09:00",
+            "commander": {"record_id": "p1", "name": "甲"},
+            "participants": [
+                {"record_id": "p1", "name": "甲"},
+                {"record_id": "p2", "name": "乙"},
+                {"record_id": "p3", "name": "丙"},
+                {"record_id": "p4", "name": "丁"},
+            ],
+        }
+        for selected in ([], ["p1"], ["p1", "p2"], ["p1", "p2", "p3"]):
+            execution = {**base, "step_signers": {"14": selected}}
+            self.assertEqual(_validate_execution(definition, execution), [])
+        too_many = {**base, "step_signers": {"14": ["p1", "p2", "p3", "p4"]}}
+        self.assertIn("最多选择 3 名执行人", "".join(_validate_execution(definition, too_many)))
+
     def _ready_drill(self, service: DrillManagementService, source: bytes) -> tuple[dict, dict, dict]:
         definition = service.create_definition(name="回归演练", year=2026, month=9, file_name="test.xlsx", source=source)
         definition = service.publish(definition["drill_id"], expected_version=definition["version"])
@@ -428,6 +454,56 @@ class DrillManagementTests(unittest.TestCase):
         timeline = build_time_chain("2026-08-27", "23:58", [3, 5])
         self.assertEqual(timeline[0]["end_at"], "2026-08-28T00:01")
         self.assertEqual(timeline[1]["start_time"], "00:01")
+
+    def test_existing_published_definition_recovers_scenario_without_changing_template_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            data_root = Path(temporary) / "drills"
+            service = DrillManagementService(store, data_root=data_root)
+            definition = service.create_definition(
+                name="系统演练名称",
+                year=2026,
+                month=9,
+                file_name="template.xlsx",
+                source=_fixture_xlsx(),
+            )
+            definition = service.publish(
+                definition["drill_id"], expected_version=definition["version"]
+            )
+            stored = store.get_document(DRILL_DEFINITION_NAMESPACE, definition["drill_id"])
+            stored["configuration"]["mapping"].pop("scenario", None)
+            stored["configuration"].pop("scenario_default_text", None)
+            store.put_document(DRILL_DEFINITION_NAMESPACE, definition["drill_id"], stored)
+
+            restarted = DrillManagementService(store, data_root=data_root)
+            recovered = restarted.get_definition(definition["drill_id"])
+            self.assertEqual(recovered["configuration"]["mapping"]["scenario"], "C9:I9")
+            execution = restarted.get_execution(definition["drill_id"], "A", create=True)
+            self.assertEqual(execution["simulation_scenario"], "模板模拟场景")
+
+    def test_assessment_scores_must_be_integers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(
+                LanPortalStateStore(Path(temporary) / "state.sqlite3"),
+                data_root=Path(temporary) / "drills",
+            )
+            definition = service.create_definition(
+                name="整数得分",
+                year=2026,
+                month=9,
+                file_name="template.xlsx",
+                source=_fixture_xlsx(),
+            )
+            configuration = definition["configuration"]
+            scores = configuration["mapping"]["assessment"]["score_rows"]
+            scores[0]["score"] = 39.5
+            scores[1]["score"] = 60.5
+            with self.assertRaisesRegex(DrillError, "分值必须为整数"):
+                service.save_configuration(
+                    definition["drill_id"],
+                    configuration,
+                    expected_version=definition["version"],
+                )
 
     def test_upload_rejects_sparse_rows_duplicate_parts_and_external_relationships(self) -> None:
         sparse = _replace_zip_part(
@@ -605,6 +681,7 @@ class DrillManagementTests(unittest.TestCase):
                 {
                     "drill_date": "2026-08-27",
                     "first_start_time": "09:00",
+                    "simulation_scenario": "修改后的模拟场景",
                     "commander": people[0],
                     "participants": people,
                     "step_signers": {
@@ -690,6 +767,7 @@ class DrillManagementTests(unittest.TestCase):
                 {
                     "drill_date": "2026-08-27",
                     "first_start_time": "09:00",
+                    "simulation_scenario": "修改后的模拟场景",
                     "commander": people[0],
                     "participants": people,
                     "step_signers": {
@@ -732,6 +810,13 @@ class DrillManagementTests(unittest.TestCase):
             self.assertEqual(record["cells"]["I13"], "符合【 √ 】 不符【   】")
             self.assertEqual(assessment["cells"]["I9"], "40")
             self.assertEqual(record["cells"]["C5"], "南通机房E楼")
+            self.assertEqual(record["cells"]["C6"], "模板演练名称")
+            self.assertEqual(record["cells"]["C7"], "ECC、IT包间")
+            self.assertEqual(record["cells"]["G6"], "实操演练")
+            self.assertEqual(record["cells"]["G7"], "模板EOP文档")
+            self.assertEqual(record["cells"]["G8"], "配电")
+            self.assertEqual(record["cells"]["C9"], "修改后的模拟场景")
+            self.assertEqual(assessment["cells"]["D5"], "模板评估演练名称")
             self.assertEqual(record["cells"]["C8"], "")
             self.assertEqual(record["cells"]["C10"], "")
             for reference in ("F13", "G13"):

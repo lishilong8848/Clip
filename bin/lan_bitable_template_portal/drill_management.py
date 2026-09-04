@@ -38,6 +38,7 @@ DRILL_MAX_SIGNATURE_PIXELS = 16_000_000
 DRILL_MAX_PREVIEW_IMAGE_BYTES = 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES_BYTES = 2 * 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES = 20
+DRILL_GENERATION_RULE_VERSION = 2
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -713,6 +714,7 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
         "drill_date": ("演练时间", "演练日期"),
         "drill_name": ("演练名称",),
         "area": ("涉及区域", "演练区域"),
+        "scenario": ("模拟场景（包括故障点与故障现象）", "模拟场景", "故障点与故障现象"),
         "commander": ("总指挥人", "指挥人"),
         "participants": ("参演人员",),
         "predicted_total": ("预估总用时",),
@@ -771,10 +773,12 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
     if missing:
         raise DrillError(f"工作表“{sheet.get('name')}”缺少必要标签：{', '.join(missing)}")
     predicted_target = _cell_target(mapping["predicted_total"]) if mapping.get("predicted_total") else ""
+    scenario_target = _cell_target(mapping["scenario"]) if mapping.get("scenario") else ""
     return {
         "mapping": mapping,
         "steps": steps,
         "predicted_total_text": str((sheet.get("cells") or {}).get(predicted_target) or ""),
+        "scenario_default_text": str((sheet.get("cells") or {}).get(scenario_target) or ""),
     }
 
 
@@ -786,6 +790,13 @@ def _number(value: Any) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def _integer_score(value: Any, cell: str) -> int:
+    score = _number(value)
+    if score is None or not score.is_integer():
+        raise DrillError(f"评估表 {cell} 的分值必须为整数。")
+    return int(score)
 
 
 def _detect_assessment_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
@@ -807,9 +818,10 @@ def _detect_assessment_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
     score_rows: list[dict[str, Any]] = []
     for row in range(score_header[0] + 1, last_row + 1):
         value_cell = _cell_ref(row, score_header[1])
-        score = _number((sheet.get("cells") or {}).get(value_cell))
-        if score is None:
+        raw_score = (sheet.get("cells") or {}).get(value_cell)
+        if _number(raw_score) is None:
             continue
+        score = _integer_score(raw_score, value_cell)
         score_rows.append(
             {
                 "row": row,
@@ -872,6 +884,7 @@ def detect_drill_configuration(workbook: dict[str, Any]) -> dict[str, Any]:
         },
         "steps": record_config["steps"],
         "predicted_total_text": record_config.get("predicted_total_text") or "",
+        "scenario_default_text": record_config.get("scenario_default_text") or "",
     }
 
 
@@ -905,6 +918,7 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         "drill_date",
         "drill_name",
         "area",
+        "scenario",
         "commander",
         "participants",
         "predicted_total",
@@ -990,11 +1004,12 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
             score_cell = str(raw.get("score_cell") or "").replace("$", "").upper()
             _validated_range(value_cell)
             _validated_range(score_cell)
-            score = _number(raw.get("score"))
-            if score is None:
-                score = _number((assessment.get("cells") or {}).get(value_cell))
-            if score is None:
+            raw_score = raw.get("score")
+            if _number(raw_score) is None:
+                raw_score = (assessment.get("cells") or {}).get(value_cell)
+            if _number(raw_score) is None:
                 raise DrillError(f"评估表 {value_cell} 缺少分值。")
+            score = _integer_score(raw_score, value_cell)
             score_rows.append(
                 {
                     "row": _cell_parts(value_cell)[0],
@@ -1073,6 +1088,8 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         raise DrillError("演练记录表至少需要一个演练步骤。")
     predicted_cell = _cell_target(mapping["predicted_total"])
     predicted_text = str((record.get("cells") or {}).get(predicted_cell) or "").strip()
+    scenario_cell = _cell_target(mapping["scenario"]) if mapping.get("scenario") else ""
+    scenario_text = str((record.get("cells") or {}).get(scenario_cell) or "")
     if predicted_text:
         predicted_minutes = parse_duration_minutes(predicted_text)
         configured_minutes = sum(int(item["duration_minutes"]) for item in normalized_steps)
@@ -1086,6 +1103,7 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         "mapping": {**mapping, "assessment": assessment_mapping},
         "steps": normalized_steps,
         "predicted_total_text": predicted_text,
+        "scenario_default_text": scenario_text,
     }
 
 
@@ -1154,10 +1172,13 @@ def _derived_values(
             raise
     record_values: dict[str, str | int | float] = {
         _cell_target(mapping["machine_room"]): f"南通机房{execution['scope']}楼",
-        _cell_target(mapping["drill_name"]): str(definition.get("name") or ""),
         _cell_target(mapping["commander"]): "",
         _cell_target(mapping["participants"]): "",
     }
+    if mapping.get("scenario"):
+        record_values[_cell_target(mapping["scenario"])] = str(
+            execution.get("simulation_scenario") or ""
+        )
     if drill_date:
         record_values[_cell_target(mapping["drill_date"])] = (
             f"{drill_date.year}年{drill_date.month}月{drill_date.day}日"
@@ -1176,7 +1197,6 @@ def _derived_values(
         record_values[_cell_target(mapping["actual_total"])] = total_text
     assessment = mapping["assessment"]
     assessment_values: dict[str, str | int | float] = {
-        _cell_target(assessment["drill_name"]): str(definition.get("name") or ""),
         _cell_target(assessment["participants"]): "",
         _cell_target(assessment["total_score"]): 100,
     }
@@ -1188,7 +1208,9 @@ def _derived_values(
         assessment_values[_cell_target(assessment["start_time"])] = timeline[0]["start_time"]
         assessment_values[_cell_target(assessment["end_time"])] = timeline[-1]["end_time"]
     for score_row in assessment.get("score_rows") or []:
-        assessment_values[str(score_row["score_cell"])] = score_row["score"]
+        assessment_values[str(score_row["score_cell"])] = _integer_score(
+            score_row["score"], str(score_row["value_cell"])
+        )
     signature_cells = [
         {
             "sheet_type": "record",
@@ -1264,8 +1286,8 @@ def _validate_execution(definition: dict[str, Any], execution: dict[str, Any]) -
     for step in definition.get("configuration", {}).get("steps") or []:
         row = int(step.get("row") or 0)
         assigned = [str(item or "") for item in step_signers.get(str(row), []) if str(item or "")]
-        if len(assigned) != int(step.get("signature_slots") or 0):
-            errors.append(f"第 {row} 行步骤需要选择 {int(step.get('signature_slots') or 0)} 名执行人。")
+        if len(assigned) > int(step.get("signature_slots") or 0):
+            errors.append(f"第 {row} 行步骤最多选择 {int(step.get('signature_slots') or 0)} 名执行人。")
             continue
         if len(assigned) != len(set(assigned)) or any(item not in selected for item in assigned):
             errors.append(f"第 {row} 行步骤执行人必须来自参演人员且不能重复。")
@@ -1964,6 +1986,16 @@ def _generated_value_matches(actual: Any, expected: Any) -> bool:
     )
 
 
+def _generation_is_current(execution: dict[str, Any]) -> bool:
+    generated = execution.get("generated") if isinstance(execution.get("generated"), dict) else {}
+    return (
+        int(execution.get("generated_version") or 0)
+        == int(execution.get("execution_version") or 0)
+        > 0
+        and int(generated.get("rule_version") or 0) == DRILL_GENERATION_RULE_VERSION
+    )
+
+
 def _verify_generated_workbook(
     output_path: Path,
     definition: dict[str, Any],
@@ -2175,6 +2207,44 @@ class DrillManagementService:
 
             data_root = get_data_file_path("drill_management")
         self.data_root = Path(data_root).resolve()
+        self._scenario_cache: dict[str, tuple[str, str]] = {}
+
+    def _with_scenario_mapping(self, definition: dict[str, Any]) -> dict[str, Any]:
+        result = copy.deepcopy(definition)
+        configuration = result.get("configuration")
+        if not isinstance(configuration, dict) or not configuration.get("record_sheet"):
+            return result
+        mapping = configuration.get("mapping")
+        if not isinstance(mapping, dict):
+            return result
+        if mapping.get("scenario") and "scenario_default_text" in configuration:
+            return result
+        drill_id = str(result.get("drill_id") or "")
+        cached = self._scenario_cache.get(drill_id)
+        if cached is None:
+            scenario_range = scenario_text = ""
+            try:
+                workbook = _parse_workbook(self._source_path(result))
+                record = _find_sheet(workbook, str(configuration.get("record_sheet") or ""))
+                scenario_range = _target_right(
+                    record,
+                    _find_label(
+                        record,
+                        ("模拟场景（包括故障点与故障现象）", "模拟场景", "故障点与故障现象"),
+                    ),
+                )
+                if scenario_range:
+                    scenario_text = str(
+                        (record.get("cells") or {}).get(_cell_target(scenario_range)) or ""
+                    )
+            except Exception:
+                pass
+            cached = (scenario_range, scenario_text)
+            self._scenario_cache[drill_id] = cached
+        if cached[0]:
+            mapping["scenario"] = cached[0]
+        configuration.setdefault("scenario_default_text", cached[1])
+        return result
 
     def _definition_directory(self, definition: dict[str, Any]) -> Path:
         year, month = _normalize_month(definition.get("year"), definition.get("month"))
@@ -2264,7 +2334,7 @@ class DrillManagementService:
         item = self.state_store.get_document(DRILL_DEFINITION_NAMESPACE, str(drill_id or "").strip())
         if not isinstance(item, dict):
             raise DrillNotFoundError("演练不存在。")
-        result = copy.deepcopy(item)
+        result = self._with_scenario_mapping(item)
         result["assigned_scopes"] = drill_assigned_scopes(item)
         result["has_executions"] = self._has_execution(str(result.get("drill_id") or ""))
         result["configuration_locked"] = result["has_executions"]
@@ -2407,6 +2477,10 @@ class DrillManagementService:
                 "status": "draft",
                 "drill_date": "",
                 "first_start_time": "",
+                "simulation_scenario": str(
+                    (definition.get("configuration") or {}).get("scenario_default_text")
+                    or ""
+                ),
                 "commander": {},
                 "participants": [],
                 "step_signers": {},
@@ -2417,6 +2491,14 @@ class DrillManagementService:
                 "created_at": now,
                 "updated_at": now,
             }
+        execution.setdefault(
+            "simulation_scenario",
+            str(
+                (definition.get("configuration") or {}).get("scenario_default_text")
+                or ""
+            ),
+        )
+        execution["generation_rule_current"] = _generation_is_current(execution)
         execution["definition_version"] = int(definition.get("version") or 0)
         return copy.deepcopy(execution)
 
@@ -2452,6 +2534,9 @@ class DrillManagementService:
                 **current,
                 "drill_date": str((payload or {}).get("drill_date") or "").strip(),
                 "first_start_time": str((payload or {}).get("first_start_time") or "").strip(),
+                "simulation_scenario": str(
+                    (payload or {}).get("simulation_scenario") or ""
+                ).strip()[:5000],
                 "commander": commander,
                 "participants": participants,
                 "step_signers": {
@@ -2533,9 +2618,7 @@ class DrillManagementService:
         if require_complete and errors:
             raise DrillConflictError(errors[0])
         configuration = definition["configuration"]
-        current = int(execution.get("generated_version") or 0) == int(
-            execution.get("execution_version") or 0
-        ) > 0
+        current = _generation_is_current(execution)
         workbook_path = self._source_path(definition)
         if current and prefer_generated:
             workbook_path, _file_name = self.generated_file(drill_id, scope)
@@ -2563,9 +2646,7 @@ class DrillManagementService:
             drill_id, scope, require_complete=True
         )
         if (
-            int(execution.get("generated_version") or 0)
-            != int(execution.get("execution_version") or 0)
-            or int(execution.get("generated_version") or 0) <= 0
+            not _generation_is_current(execution)
         ):
             raise DrillConflictError("演练内容已修改，请重新生成后打印。")
         normalized = str(sheet_type or "").strip().lower()
@@ -2654,12 +2735,19 @@ class DrillManagementService:
                 )
                 output_path = directory / "current.xlsx"
                 _patch_workbook(self._source_path(definition), output_path, definition, execution, derived, resolved)
-                metadata = {"path": str(output_path), "name": file_name, "size": output_path.stat().st_size, "sha256": _file_sha256(output_path)}
+                metadata = {
+                    "path": str(output_path),
+                    "name": file_name,
+                    "size": output_path.stat().st_size,
+                    "sha256": _file_sha256(output_path),
+                    "rule_version": DRILL_GENERATION_RULE_VERSION,
+                }
                 execution.update(
                     {
                         "status": "sync_pending",
                         "generated_version": int(execution.get("execution_version") or 0),
                         "generated": metadata,
+                        "generation_rule_current": True,
                         "last_error": "",
                         "version": int(execution.get("version") or 0) + 1,
                         "updated_at": _now_text(),
@@ -2679,8 +2767,8 @@ class DrillManagementService:
     def generated_file(self, drill_id: str, scope: str) -> tuple[Path, str]:
         definition = self.get_definition(drill_id)
         execution = self.get_execution(drill_id, scope)
-        if int(execution.get("generated_version") or 0) != int(execution.get("execution_version") or 0) or int(execution.get("generated_version") or 0) <= 0:
-            raise DrillConflictError("演练内容已修改，请重新生成后下载。")
+        if not _generation_is_current(execution):
+            raise DrillConflictError("演练生成规则已更新，请重新生成后下载。")
         generated = execution.get("generated") if isinstance(execution.get("generated"), dict) else {}
         path = Path(str(generated.get("path") or "")).resolve()
         directory = (self._definition_directory(definition) / _normalize_scope(scope)).resolve()
@@ -2702,6 +2790,7 @@ class DrillManagementService:
                 expected <= 0
                 or expected != int(execution.get("generated_version") or 0)
                 or expected != int(execution.get("execution_version") or 0)
+                or not _generation_is_current(execution)
             ):
                 raise DrillConflictError(
                     "演练内容已修改，旧版本文件不再同步，请重新生成。"

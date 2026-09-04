@@ -16,7 +16,7 @@ for (const marker of [
   "statusPollKey",
   "preserveDraft",
   "requestDiscardChanges",
-  "MopSignaturePadModal",
+  "refreshSignatureDirectory",
   "stepSignerOptionLabels",
   "commanderPersonOptionLabels",
   'v-model="uploadForm.assigned_scopes"',
@@ -33,6 +33,7 @@ for (const marker of [
   if (!page.includes(marker)) throw new Error(`DrillManagementPage 缺少稳定性保护: ${marker}`);
 }
 if (page.includes("window.confirm")) throw new Error("演练页面仍使用原生确认框");
+if (page.includes("MopSignaturePadModal") || page.includes("sendMissingSignatureLink")) throw new Error("演练页面仍含分散签名采集入口");
 if (page.includes('<VnetBackButton :disabled="busy"')) throw new Error("演练后台同步仍会锁住返回按钮");
 if (/type="file"[^>]*\brequired\b/.test(page)) throw new Error("演练拖放文件输入仍被 required 拦截");
 if (!app.includes('routePath.value === "/drill-management/print"')) throw new Error("App 缺少演练打印路由");
@@ -91,5 +92,9 @@ assert.equal(commanderPeople.value.length, 602, "参演人员搜索不能缩小�
 peopleSearch.value = "";
 peopleExpanded.value = true;
 assert.equal(filteredPeople.value.length, 602, "展开后不得截断其他人员");
+people.value = [...directory, { record_id: "external:temporary-1", name: "临时参演人", building: "A", employee_no: "temporary-job" }];
+peopleSearch.value = "临时参演人";
+assert.deepEqual(filteredPeople.value.map(person => person.record_id), ["external:temporary-1"], "跨楼栋临时签名人员可搜索");
+assert(commanderPeople.value.some(person => person.record_id === "external:temporary-1"), "临时签名人员也可选为指挥人");
 
 console.log("drill management static check passed");

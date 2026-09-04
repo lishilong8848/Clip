@@ -12,6 +12,10 @@
         <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
         {{ auth.user?.name || "已登录" }}
       </span>
+      <button v-if="auth.loggedIn && homeMode" type="button" class="btn ghost settings-entry"
+        aria-label="签名管理" title="签名管理" @click="emit('open-signatures')">
+        <Fingerprint :size="20" aria-hidden="true" />
+      </button>
       <label v-if="auth.loggedIn && isEventPage && visibleScopeOptions.length > 1" class="scope-switch">
         <b class="scope-icon" aria-hidden="true">楼</b>
         <span>当前楼栋</span>
@@ -49,7 +53,7 @@
 </template>
 
 <script setup lang="ts">
-import { LogOut, Settings, UserRound } from "lucide-vue-next";
+import { Fingerprint, LogOut, Settings, UserRound } from "lucide-vue-next";
 import RefreshDataMenu from "./RefreshDataMenu.vue";
 import type { LooseDict, ScopeOption } from "../types";
 
@@ -78,6 +82,7 @@ const emit = defineEmits<{
   "update:refreshMenuOpen": [value: boolean];
   "refresh-event": [];
   "open-admin": [];
+  "open-signatures": [];
   logout: [];
 }>();
 
@@ -413,6 +418,27 @@ header.app-topbar .settings-entry {
 
   header.app-topbar.home-mode .brand {
     width: 100%;
+  }
+
+  header.app-topbar.home-mode .topbar-actions {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  header.app-topbar.home-mode .user-chip {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding-inline: 10px;
+  }
+
+  header.app-topbar.home-mode .danger-text {
+    width: 38px;
+    min-width: 38px;
+    padding: 0;
+  }
+
+  header.app-topbar.home-mode .danger-text span {
+    display: none;
   }
 }
 

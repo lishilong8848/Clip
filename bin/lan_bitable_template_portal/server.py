@@ -3779,14 +3779,45 @@ class PortalRuntime:
             if warning not in self.service._load_warnings:
                 self.service._load_warnings.append(warning)
 
+    def _signature_management_response(self, parsed, method):
+        from .signature_management import dispatch, SignatureManagementError
+        try:
+            session = self._current_session()
+            payload = ({k: v[0] for k, v in parse_qs(parsed.query).items()} if method == "GET"
+                       else self._read_json_body(max_bytes=4 * 1024 * 1024))
+            if method == "GET" and self.headers.get("X-Signature-Token"):
+                payload["token"] = self.headers["X-Signature-Token"]
+            result = dispatch(
+                self.service.signature_management, method, parsed.path.rsplit("/", 1)[-1], payload,
+                actor=str(((session or {}).get("user") or {}).get("open_id") or ""),
+                is_admin=bool(session and PortalRuntime.auth_manager.is_admin(session)),
+                base_url=self._request_base_url(), send_text=_send_text_to_open_ids_guarded,
+            )
+            if isinstance(result, tuple):
+                return self._write_response(200, {"Content-Type": result[1], "Cache-Control": "private, no-store"}, result[0])
+            return self._send_json(200, {"ok": True, "data": result})
+        except SignatureManagementError as exc:
+            return self._send_json(exc.status, {"ok": False, "error": str(exc)})
+        except (PortalError, ValueError) as exc:
+            return self._send_json(400, {"ok": False, "error": str(exc)})
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/signatures/management/"):
+            return self._signature_management_response(parsed, "GET")
         if self._redirect_root_oauth_callback(parsed):
             return
+        if parsed.path.rstrip("/") == "/signature" and not any(
+            (parse_qs(parsed.query).get(key) or [""])[0]
+            for key in ("request_id", "record_id", "temporary_id")
+        ):
+            return self._send_redirect("/signature-management")
         if parsed.path in {
             "/",
             "/signature",
             "/signature/",
+            "/signature-management",
+            "/signature-management/",
             "/engineer/mop",
             "/engineer/mop/",
         }:
@@ -4435,6 +4466,8 @@ class PortalRuntime:
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/signatures/management/"):
+            return self._signature_management_response(parsed, "POST")
         if parsed.path == "/api/auth/logout":
             PortalRuntime.auth_manager.clear_session(
                 self._cookie_value(AUTH_COOKIE_NAME)
@@ -4497,7 +4530,9 @@ class PortalRuntime:
                 record_id = str(payload.get("record_id") or "")
                 link_token = str(payload.get("token") or "")
                 token_consumed = False
-                if session is None:
+                if not link_token:
+                    return self._send_json(403, {"ok": False, "error": "请从首页指纹入口发送签名链接。"})
+                if link_token:
                     token_consumed = self.service.consume_signature_link_token(
                         record_id=record_id,
                         token=link_token,
@@ -4512,7 +4547,7 @@ class PortalRuntime:
                         signer_name=str(payload.get("signer_name") or ""),
                         operator_open_id=str(user.get("open_id") or ""),
                         operator_name=str(user.get("name") or user.get("en_name") or ""),
-                        require_operator_match=session is not None,
+                        require_operator_match=False,
                     )
                 except Exception:
                     if token_consumed:
@@ -4525,76 +4560,16 @@ class PortalRuntime:
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/external/save":
-            session = self._require_auth_json()
-            if session is None:
-                return
-            try:
-                payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
-                scope = self._authorized_scope_or_error(
-                    session, str(payload.get("scope") or "ALL")
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = self.service.save_external_signature_for_person(
-                    record_id=str(payload.get("record_id") or ""),
-                    signature_png=str(payload.get("signature_png") or ""),
-                    signer_name=str(payload.get("signer_name") or ""),
-                    scope=scope,
-                    notice_key=str(payload.get("notice_key") or ""),
-                    role=str(payload.get("role") or "implementer"),
-                    operator_open_id=str(user.get("open_id") or ""),
-                )
-                return self._send_json(200, {"ok": True, "data": data})
-            except (PortalError, ValueError, json.JSONDecodeError) as exc:
-                return self._send_json(400, {"ok": False, "error": str(exc)})
+            return self._send_json(410, {"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"})
         if parsed.path == "/api/signatures/temporary/create":
-            session = self._require_auth_json()
-            if session is None:
-                return
-            try:
-                payload = self._read_json_body(max_bytes=64 * 1024)
-                scope = self._authorized_scope_or_error(
-                    session,
-                    str(payload.get("scope") or "ALL"),
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = self.service.create_temporary_signature_session(
-                    scope=scope,
-                    notice_key=str(payload.get("notice_key") or ""),
-                    role=str(payload.get("role") or "implementer"),
-                    notice_title=str(payload.get("notice_title") or ""),
-                    specialty=str(payload.get("specialty") or ""),
-                    display_name=str(payload.get("display_name") or ""),
-                    context_type=str(payload.get("context_type") or "mop"),
-                    origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
-                    origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
-                    created_by=str(user.get("open_id") or ""),
-                )
-                return self._send_json(200, {"ok": True, "data": data})
-            except (PortalError, ValueError, json.JSONDecodeError) as exc:
-                return self._send_json(400, {"ok": False, "error": str(exc)})
+            return self._send_json(410, {"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"})
         if parsed.path == "/api/signatures/temporary/save":
             try:
                 payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
                 temp_id = str(payload.get("temporary_id") or "")
                 token = str(payload.get("token") or "")
                 if not token:
-                    session = self._require_auth_json()
-                    if session is None:
-                        return
-                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
-                        temp_id=temp_id,
-                    )
-                    if not temp_session:
-                        raise PortalError("临时签名记录不存在。")
-                    self._authorized_scope_or_error(
-                        session,
-                        str(temp_session.get("scope") or "ALL"),
-                    )
-                    user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                    if str(temp_session.get("created_by") or "").strip() != str(
-                        user.get("open_id") or ""
-                    ).strip():
-                        raise PortalError("当前账号无权修改该临时签名。")
+                    return self._send_json(403, {"ok": False, "error": "请从首页指纹入口发送签名链接。"})
                 data = self.service.save_temporary_signature(
                     temp_id=temp_id,
                     token=token,
@@ -4604,65 +4579,7 @@ class PortalRuntime:
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/send-link":
-            session = self._require_auth_json()
-            if session is None:
-                return
-            try:
-                payload = self._read_json_body(max_bytes=64 * 1024)
-                scope = self._authorized_scope_or_error(
-                    session,
-                    str(payload.get("scope") or "ALL"),
-                )
-                data = self.service.build_signature_link_message(
-                    record_id=str(payload.get("record_id") or ""),
-                    signer_name=str(payload.get("signer_name") or ""),
-                    scope=scope,
-                    context_type=str(payload.get("context_type") or "mop"),
-                    context_title=str(payload.get("context_title") or ""),
-                    request_base_url=str(payload.get("request_base_url") or "")
-                    or self._request_base_url(),
-                    created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
-                )
-                ok, message, results = _send_text_to_open_ids_guarded(
-                    str(data.get("text") or ""),
-                    [str(data.get("open_id") or "")],
-                )
-                if not ok:
-                    failure_kind = next(
-                        (
-                            str(item.get("failure_kind") or "")
-                            for item in (results or [])
-                            if str(item.get("failure_kind") or "")
-                        ),
-                        "",
-                    )
-                    return self._send_json(
-                        400,
-                        {
-                            "ok": False,
-                            "error": message or "签名链接发送失败。",
-                            "data": {
-                                "person": data.get("person") or {},
-                                "link_url": data.get("link_url") or "",
-                                "results": results,
-                                "failure_kind": failure_kind,
-                            },
-                        },
-                    )
-                return self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "data": {
-                            "person": data.get("person") or {},
-                            "link_url": data.get("link_url") or "",
-                            "message": message,
-                            "results": results,
-                        },
-                    },
-                )
-            except (PortalError, ValueError, json.JSONDecodeError) as exc:
-                return self._send_json(400, {"ok": False, "error": str(exc)})
+            return self._send_json(410, {"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"})
         if parsed.path == "/api/signatures/usage-confirmations/send":
             session = self._require_auth_json()
             if session is None:
@@ -4723,113 +4640,7 @@ class PortalRuntime:
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/temporary/send-link":
-            session = self._require_auth_json()
-            if session is None:
-                return
-            try:
-                payload = self._read_json_body(max_bytes=64 * 1024)
-                scope = self._authorized_scope_or_error(
-                    session,
-                    str(payload.get("scope") or "ALL"),
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                temporary_id = str(payload.get("temporary_id") or "").strip()
-                recipient_open_ids = list(payload.get("recipient_open_ids") or [])
-                if temporary_id:
-                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
-                        temp_id=temporary_id,
-                    )
-                    if not temp_session:
-                        raise PortalError("临时签名记录不存在。")
-                    self._authorized_scope_or_error(
-                        session,
-                        str(temp_session.get("scope") or scope or "ALL"),
-                    )
-                    temp_payload = (
-                        temp_session.get("payload")
-                        if isinstance(temp_session.get("payload"), dict)
-                        else {}
-                    )
-                    if str(temp_payload.get("context_type") or "mop").strip().lower() == "critical_guard":
-                        current_open_id = str(user.get("open_id") or "").strip()
-                        if not current_open_id:
-                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
-                        recipient_open_ids = [current_open_id]
-                    data = self.service.build_existing_temporary_signature_link_message(
-                        temp_id=temporary_id,
-                        recipient_open_ids=recipient_open_ids,
-                        request_base_url=str(payload.get("request_base_url") or "")
-                        or self._request_base_url(),
-                    )
-                else:
-                    context_type = str(payload.get("context_type") or "mop").strip().lower()
-                    if context_type == "critical_guard":
-                        current_open_id = str(user.get("open_id") or "").strip()
-                        if not current_open_id:
-                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
-                        recipient_open_ids = [current_open_id]
-                    data = self.service.build_temporary_signature_link_message(
-                        scope=scope,
-                        notice_key=str(payload.get("notice_key") or ""),
-                        role=str(payload.get("role") or "implementer"),
-                        recipient_open_ids=recipient_open_ids,
-                        notice_title=str(payload.get("notice_title") or ""),
-                        specialty=str(payload.get("specialty") or ""),
-                        display_name=str(payload.get("display_name") or ""),
-                        context_type=context_type,
-                        origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
-                        origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
-                        request_base_url=str(payload.get("request_base_url") or "")
-                        or self._request_base_url(),
-                        created_by=str(user.get("open_id") or ""),
-                    )
-                open_ids = [
-                    str(item or "").strip()
-                    for item in (data.get("open_ids") or [])
-                    if str(item or "").strip()
-                ]
-                ok, message, results = _send_text_to_open_ids_guarded(
-                    str(data.get("text") or ""),
-                    open_ids,
-                )
-                if not ok:
-                    try:
-                        PortalRuntime.state_store.update_mop_temporary_signature_session(
-                            temp_id=str(data.get("temp_id") or ""),
-                            status="failed",
-                            payload_patch={"send_error": message or "签名链接发送失败。"},
-                        )
-                    except Exception:
-                        pass
-                    return self._send_json(
-                        400,
-                        {
-                            "ok": False,
-                            "error": message or "其他人员签名链接发送失败。",
-                            "data": {
-                                "signature": data.get("signature") or {},
-                                "link_url": data.get("link_url") or "",
-                                "results": results,
-                            },
-                        },
-                    )
-                return self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "data": {
-                            "signature": data.get("signature") or {},
-                            "link_url": data.get("link_url") or "",
-                            "message": message,
-                            "results": results,
-                        },
-                    },
-                )
-            except (PortalError, ValueError, json.JSONDecodeError) as exc:
-                return self._send_json(400, {"ok": False, "error": str(exc)})
-        session = self._require_auth_json()
-        if session is None:
-            return
+            return self._send_json(410, {"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"})
         if parsed.path == "/api/engineer/mop/bind":
             try:
                 payload = self._read_json_body(max_bytes=512 * 1024)

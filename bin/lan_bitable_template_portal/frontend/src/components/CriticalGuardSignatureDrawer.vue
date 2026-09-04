@@ -1,13 +1,13 @@
 <template>
   <Teleport to="body">
     <div v-if="open" class="guard-signature-backdrop" @click.self="requestClose">
-      <aside class="guard-signature-drawer" role="dialog" aria-modal="true" aria-label="检查人签名管理">
+      <aside class="guard-signature-drawer" role="dialog" aria-modal="true" aria-label="选择检查人签名">
         <header class="drawer-header">
           <div>
             <span>检查人签名</span>
             <strong>{{ taskTitle }} · 当前楼栋全部检查表</strong>
           </div>
-          <button type="button" class="icon-close" aria-label="关闭签名管理" @click="requestClose">
+          <button type="button" class="icon-close" aria-label="关闭检查人选择" @click="requestClose">
             <X :size="20" />
           </button>
         </header>
@@ -23,7 +23,7 @@
             公司人员 <span>{{ selectedCompany.length }}</span>
           </button>
           <button type="button" :class="{ active: activeTab === 'other' }" @click.stop="switchSourceTab('other')">
-            临时/外部人员 <span>{{ selectedOther.length + drafts.length }}</span>
+            临时/外部人员 <span>{{ selectedOther.length }}</span>
           </button>
         </nav>
 
@@ -37,7 +37,7 @@
               :selected-ids="selectedCompanyIds"
               :temporary-mapped-ids="temporaryMappedCompanyIds"
               :active-record-id="activePersonKey"
-              @refresh="loadCompanyPeople(true)"
+              @refresh="refreshAllSignatures"
               @select="toggleCompanyPerson"
             />
             <MopCompanySelectedSignatures
@@ -47,21 +47,12 @@
               :active-record-id="activePersonKey"
               :unsigned-count="companyPendingCount"
               :unsigned-signature-count="companyUnsignedCount"
-              :link-sending-by-id="companyLinkSending"
-              :link-sent-at-by-id="companyLinkSentAt"
-              :link-error-by-id="companyLinkErrors"
               :has-usable-signature="personReady"
               :person-key="personKey"
               :display-name="personName"
-              :link-title="companyLinkTitle"
-              :web-sign-disabled-reason="companyWebSignDisabledReason"
-              :bulk-link-sending="bulkLinkSending"
               :confirm-sending="confirmationSending"
               :confirmable-count="companyConfirmableCount"
               @activate="activatePerson"
-              @web-sign="openWebSignature"
-              @send-link="sendCompanyLink"
-              @send-unsigned-links="sendAllUnsignedCompanyLinks"
               @send-confirmations="sendAllUsageConfirmations"
               @remove="removeCompanyPerson"
             />
@@ -71,32 +62,16 @@
             v-show="activeTab === 'other'"
             role="inspector"
             :active="activeTab === 'other'"
-            :add-disabled-reason="addTemporaryDisabledReason"
             :display-rows="otherDisplayRows"
             :unsigned-count="otherPendingCount"
-            :temporary-link-sending-by-id="temporaryLinkSending"
-            :temporary-link-sent-at-by-id="temporaryLinkSentAt"
-            :temporary-link-error-by-id="temporaryLinkErrors"
-            :draft-sending-by-id="draftSending"
             :external-search="externalSearch"
             :external-loading="externalLoading"
             :external-status-text="externalStatusText"
             :external-people="externalPeople"
             :person-status-text="otherPersonStatusText"
-            :person-web-sign-disabled-reason="otherWebSignDisabledReason"
-            :draft-status-text="draftStatusText"
-            :draft-disabled-reason="draftDisabledReason"
-            @add-other="addTemporaryDraft"
-            @web-sign-person="openWebSignature"
-            @send-temp-person="sendExistingTemporaryLink"
             @remove-person="removeOtherPerson"
-            @update-draft-name="updateDraftName"
-            @ensure-draft-name="ensureDraftName"
-            @web-sign-draft="openDraftWebSignature"
-            @send-draft-link="sendDraftTemporaryLink"
-            @remove-draft="removeDraft"
             @update:external-search="externalSearch = $event"
-            @refresh-external="loadExternalPeople(true)"
+            @refresh-external="refreshAllSignatures"
             @add-external="addExternalPerson"
           />
         </div>
@@ -108,56 +83,25 @@
         </footer>
       </aside>
 
-      <MopSignaturePadModal
-        :open="Boolean(activePadPerson)"
-        :title="`${personName(activePadPerson || {})} · 网页手写签名`"
-        role-label="检查人"
-        :saving="padSaving"
-        :message="padMessage"
-        :message-type="padMessageType"
-        :save-disabled-reason="padSaveDisabledReason"
-        @close="closeSignaturePad"
-        @clear="signatureCanvas.clear"
-        @save="saveWebSignature"
-      >
-        <div class="signature-canvas-shell">
-          <canvas
-            ref="signatureCanvasRef"
-            aria-label="检查人手写签名区域"
-            @pointerdown="signatureCanvas.startDraw($event, !padSaving)"
-            @pointermove="signatureCanvas.moveDraw"
-            @pointerup="signatureCanvas.endDraw"
-            @pointercancel="signatureCanvas.endDraw"
-            @pointerleave="signatureCanvas.endDraw"
-          ></canvas>
-          <span v-if="!signatureHasInk">请在此处手写签名</span>
-        </div>
-      </MopSignaturePadModal>
     </div>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { UsersRound, X } from "lucide-vue-next";
 import type { Dict } from "../api/client";
 import {
-  createTemporarySignatureSession,
+  refreshSignatureDirectory,
+  refreshedSignaturePerson,
   fetchExternalSignaturePeople,
   fetchSignaturePeople,
   fetchTemporarySignatures,
-  saveExternalSignature,
-  saveStaffSignature,
-  saveTemporarySignature,
   sendSignatureUsageConfirmations,
-  sendStaffSignatureLink,
-  sendTemporarySignatureLink,
 } from "../mopSignatureApi";
-import { useMopSignatureCanvas } from "../useMopSignatureCanvas";
 import MopCompanySelectedSignatures from "./MopCompanySelectedSignatures.vue";
 import MopCompanySignaturePicker from "./MopCompanySignaturePicker.vue";
 import MopOtherSignatureManager from "./MopOtherSignatureManager.vue";
-import MopSignaturePadModal from "./MopSignaturePadModal.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -183,30 +127,14 @@ const companyTotal = ref(0);
 const selectedCompany = ref<Dict[]>([]);
 const selectedOther = ref<Dict[]>([]);
 const temporaryPeople = ref<Dict[]>([]);
-const drafts = ref<Dict[]>([]);
 const externalSearch = ref("");
 const externalPeople = ref<Dict[]>([]);
 const externalLoading = ref(false);
 const externalTotal = ref(0);
-const companyLinkSending = ref<Record<string, boolean>>({});
-const companyLinkSentAt = ref<Record<string, string>>({});
-const companyLinkErrors = ref<Record<string, string>>({});
-const temporaryLinkSending = ref<Record<string, boolean>>({});
-const temporaryLinkSentAt = ref<Record<string, string>>({});
-const temporaryLinkErrors = ref<Record<string, string>>({});
-const draftSending = ref<Record<string, boolean>>({});
-const bulkLinkSending = ref(false);
 const confirmationSending = ref(false);
 const activePersonKey = ref("");
-const activePadPerson = ref<Dict | null>(null);
-const padSaving = ref(false);
-const padMessage = ref("");
-const padMessageType = ref("info");
 const statusMessage = ref("");
 const statusTone = ref("info");
-const signatureCanvas = useMopSignatureCanvas();
-const signatureCanvasRef = signatureCanvas.canvasRef;
-const signatureHasInk = signatureCanvas.hasInk;
 let companySearchTimer: ReturnType<typeof setTimeout> | null = null;
 let externalSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -218,9 +146,8 @@ let pendingStatusRefreshInFlight = false;
 
 const currentOpenId = computed(() => String(props.currentUserOpenId || "").trim());
 
-type CompanyLinkOutcome = "sent" | "converted" | "converted_failed" | "failed";
 const temporaryMappedCompanyIds = computed(() => companyPeople.value
-  .filter((item) => findMatchingPerson(item, selectedOther.value) || findMatchingDraft(item))
+  .filter((item) => findMatchingPerson(item, selectedOther.value))
   .map((item) => String(item.record_id || "").trim())
   .filter(Boolean));
 const selectedCompanyIds = computed(() => {
@@ -236,8 +163,8 @@ const selectedPeople = computed(() => [...selectedCompany.value, ...selectedOthe
 const selectedCount = computed(() => selectedPeople.value.length);
 const readyCount = computed(() => selectedPeople.value.filter(personReady).length);
 const pendingCount = computed(() => Math.max(0, selectedCount.value - readyCount.value));
-const totalSignerCount = computed(() => selectedCount.value + drafts.value.length);
-const totalPendingCount = computed(() => pendingCount.value + drafts.value.length);
+const totalSignerCount = computed(() => selectedCount.value);
+const totalPendingCount = computed(() => pendingCount.value);
 const companyUnsignedCount = computed(() => selectedCompany.value.filter((item) => !personHasStoredSignature(item)).length);
 const companyPendingCount = computed(() => selectedCompany.value.filter((item) => !personReady(item)).length);
 const companyConfirmableCount = computed(() => selectedCompany.value.filter((item) => (
@@ -246,7 +173,7 @@ const companyConfirmableCount = computed(() => selectedCompany.value.filter((ite
   && String(item.open_id || "").trim()
   && String(item.open_id || "").trim() !== currentOpenId.value
 )).length);
-const otherPendingCount = computed(() => selectedOther.value.filter((item) => !personReady(item)).length + drafts.value.length);
+const otherPendingCount = computed(() => selectedOther.value.filter((item) => !personReady(item)).length);
 const companyStatusText = computed(() => {
   if (companyLoading.value) return "搜索中";
   if (!companyPeople.value.length) return companySearch.value.trim() ? "暂未找到人员" : "暂无人员";
@@ -261,13 +188,6 @@ const externalStatusText = computed(() => {
     ? `已找到 ${externalTotal.value} 人`
     : `已显示 ${externalPeople.value.length}/${externalTotal.value} 人`;
 });
-const addTemporaryDisabledReason = computed(() => props.contextKey ? "" : "请先打开检查表。" );
-const padSaveDisabledReason = computed(() => {
-  if (padSaving.value) return "签名保存中";
-  if (!activePadPerson.value) return "未选择签名人员";
-  if (!signatureHasInk.value) return "请先手写签名";
-  return "";
-});
 const otherDisplayRows = computed(() => [
   ...selectedOther.value.map((person) => ({
     kind: "person",
@@ -276,14 +196,6 @@ const otherDisplayRows = computed(() => [
     draft: {},
     signed: personReady(person),
     display_name: personName(person),
-  })),
-  ...drafts.value.map((draft) => ({
-    kind: "draft",
-    row_key: `draft:${String(draft.draft_id || "")}`,
-    person: {},
-    draft,
-    signed: false,
-    display_name: String(draft.display_name || ""),
   })),
 ]);
 
@@ -324,10 +236,6 @@ function findMatchingPerson(companyPerson: Dict, candidates: Dict[]): Dict | und
   return candidates.find((item) => personOriginMatches(companyPerson, item));
 }
 
-function findMatchingDraft(companyPerson: Dict): Dict | undefined {
-  return drafts.value.find((item) => personOriginMatches(companyPerson, item));
-}
-
 function withCompanyOrigin(person: Dict, companyPerson: Dict): Dict {
   return {
     ...person,
@@ -340,16 +248,18 @@ function reconcileDuplicateSelections(): boolean {
   let changed = false;
   const retainedCompany: Dict[] = [];
   for (const companyPerson of selectedCompany.value) {
+    if (companyPerson.has_signature) {
+      retainedCompany.push(companyPerson);
+      continue;
+    }
     const matchedOther = findMatchingPerson(companyPerson, selectedOther.value)
       || findMatchingPerson(companyPerson, temporaryPeople.value)
       || findMatchingPerson(companyPerson, externalPeople.value);
-    const matchedDraft = findMatchingDraft(companyPerson);
-    if (!matchedOther && !matchedDraft) {
+    if (!matchedOther) {
       retainedCompany.push(companyPerson);
       continue;
     }
     if (matchedOther) replaceOrAddOther(withCompanyOrigin(matchedOther, companyPerson));
-    if (matchedDraft) Object.assign(matchedDraft, withCompanyOrigin(matchedDraft, companyPerson));
     changed = true;
   }
   if (changed) selectedCompany.value = retainedCompany;
@@ -385,7 +295,6 @@ function initializeSelection(): void {
   const initial = clonePeople(props.initialSigners);
   selectedCompany.value = initial.filter((item) => String(item.source || "staff") === "staff");
   selectedOther.value = initial.filter((item) => ["temporary", "external"].includes(String(item.source || "")) || item.temp_id);
-  drafts.value = [];
   activePersonKey.value = "";
 }
 
@@ -394,6 +303,28 @@ function loadContextIsCurrent(generation: number, scope: string, contextKey: str
     && props.open
     && props.scope === scope
     && props.contextKey === contextKey;
+}
+
+async function refreshAllSignatures(): Promise<void> {
+  if (companyLoading.value || externalLoading.value) return;
+  const generation = loadGeneration, requestScope = props.scope, context = props.contextKey;
+  ++companyLoadSequence; ++externalLoadSequence;
+  companyLoading.value = true; externalLoading.value = true;
+  try {
+    const data = await refreshSignatureDirectory();
+    if (!loadContextIsCurrent(generation, requestScope, context)) return;
+    const selected = [...selectedCompany.value, ...selectedOther.value].map((p) => refreshedSignaturePerson(p, data));
+    const unique = [...new Map(selected.map((p) => [personKey(p), p])).values()];
+    selectedCompany.value = unique.filter((p) => !p.source || p.source === "staff");
+    selectedOther.value = unique.filter((p) => p.source === "external" || p.source === "temporary");
+    companyPeople.value = (data.people || []).filter((p: Dict) => p.source === "staff");
+    externalPeople.value = (data.people || []).filter((p: Dict) => p.source === "external");
+    companyTotal.value = companyPeople.value.length;
+    externalTotal.value = externalPeople.value.length;
+    emitStatusRefresh();
+    setStatus(Object.values(data.sources || {}).some((s: any) => !s.ok) ? "部分人员表刷新失败，保留上次数据。" : "两张人员表签名已刷新，已保留检查人选择。", "success");
+  } catch (error: any) { setStatus(error.message || "刷新失败，已保留原选择。", "error"); }
+  finally { companyLoading.value = false; externalLoading.value = false; }
 }
 
 async function loadCompanyPeople(refresh = false, silent = false): Promise<void> {
@@ -554,14 +485,6 @@ function toggleCompanyPerson(recordId: string): void {
     return;
   }
 
-  const draftMatch = findMatchingDraft(person);
-  if (draftMatch) {
-    Object.assign(draftMatch, withCompanyOrigin(draftMatch, person));
-    activeTab.value = "other";
-    setStatus(`${personName(person)} 已对应待处理的临时人员，请在临时/外部人员中完成签名。`, "info");
-    return;
-  }
-
   const knownTemporaryMatch = findMatchingPerson(person, temporaryPeople.value);
   if (knownTemporaryMatch) {
     if (selectedCount.value >= 50) return setStatus("每个任务每栋楼最多选择 50 名检查人。", "error");
@@ -596,148 +519,8 @@ function activatePerson(person: Dict): void {
   activePersonKey.value = personKey(person);
 }
 
-function companyWebSignDisabledReason(person: Dict | null | undefined): string {
-  if (!person?.record_id) return "人员记录不完整";
-  if (!currentOpenId.value) return "当前登录账号缺少 openid";
-  if (String(person.open_id || "") !== currentOpenId.value) return "网页手写只能签当前登录用户本人";
-  return "";
-}
-
-function companyLinkTitle(person: Dict): string {
-  if (!String(person.open_id || "").trim()) return "该人员缺少 openid，无法发送链接";
-  return personHasStoredSignature(person) ? "发送重新签名链接" : "发送签名链接";
-}
-
 function switchSourceTab(tab: "company" | "other"): void {
   activeTab.value = tab;
-}
-
-function isBotUnavailableFailure(value: any): boolean {
-  const payload = value?.payload && typeof value.payload === "object" ? value.payload : {};
-  const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
-  const results = Array.isArray(data.results)
-    ? data.results
-    : Array.isArray(value?.results)
-      ? value.results
-      : [];
-  const failureKinds = [
-    value?.failure_kind,
-    data.failure_kind,
-    ...results.map((item: Dict) => item?.failure_kind),
-  ].map((item) => String(item || "").trim().toLowerCase());
-  if (failureKinds.includes("bot_unavailable")) return true;
-  const text = [
-    value?.message,
-    value?.error,
-    payload?.error,
-    data?.message,
-    ...results.map((item: Dict) => item?.message),
-  ].map((item) => String(item || "")).join(" ");
-  return /bot\s+has\s+no\s+availability|no\s+availability\s+to\s+this\s+user|机器人对该用户不可用/i.test(text);
-}
-
-async function convertThirdPartyCompanyPerson(person: Dict): Promise<CompanyLinkOutcome> {
-  const recordId = String(person.record_id || "").trim();
-  const displayName = personName(person);
-  let temporaryPerson: Dict;
-  try {
-    temporaryPerson = {
-      ...(await createTemporarySignatureSession({
-        scope: props.scope,
-        noticeKey: props.contextKey,
-        noticeTitle: props.taskTitle,
-        specialty: "",
-        role: "inspector",
-        displayName,
-        contextType: "critical_guard",
-        originStaffRecordId: recordId,
-        originStaffOpenId: String(person.open_id || "").trim(),
-      })),
-      source: "temporary",
-      role: "inspector",
-    };
-  } catch (error: any) {
-    companyLinkErrors.value = {
-      ...companyLinkErrors.value,
-      [recordId]: error?.message || "转为临时人员失败",
-    };
-    setStatus(`${displayName} 无法接收机器人消息，转为临时人员失败：${error?.message || "请稍后重试"}`, "error");
-    return "failed";
-  }
-
-  selectedCompany.value = selectedCompany.value.filter((item) => personKey(item) !== personKey(person));
-  replaceOrAddOther(temporaryPerson);
-  if (activePersonKey.value === personKey(person)) activePersonKey.value = "";
-  const companyErrors = { ...companyLinkErrors.value };
-  delete companyErrors[recordId];
-  companyLinkErrors.value = companyErrors;
-  activeTab.value = "other";
-  emitSelectionChanged();
-
-  const sent = await sendExistingTemporaryLink(temporaryPerson, true);
-  if (sent) {
-    setStatus(
-      `${displayName} 无法接收机器人消息，已转为临时人员；签名链接已自动发送给当前登录人，请在当前登录人的手机上让该人员完成签字。`,
-      "warning",
-    );
-    return "converted";
-  }
-  setStatus(
-    `${displayName} 已转为临时人员，但签名链接发送给当前登录人失败，请确认当前登录账号可以接收机器人消息后重试。`,
-    "error",
-  );
-  return "converted_failed";
-}
-
-async function sendCompanyLink(person: Dict): Promise<CompanyLinkOutcome> {
-  const recordId = String(person.record_id || "");
-  if (!recordId || companyLinkSending.value[recordId]) return "failed";
-  companyLinkSending.value = { ...companyLinkSending.value, [recordId]: true };
-  try {
-    await sendStaffSignatureLink(recordId, personName(person), props.scope, "critical_guard", props.taskTitle);
-    companyLinkSentAt.value = { ...companyLinkSentAt.value, [recordId]: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) };
-    const errors = { ...companyLinkErrors.value };
-    delete errors[recordId];
-    companyLinkErrors.value = errors;
-    setStatus(`${personName(person)} 的签名链接已发送。`, "success");
-    return "sent";
-  } catch (error: any) {
-    if (isBotUnavailableFailure(error)) {
-      return await convertThirdPartyCompanyPerson(person);
-    }
-    companyLinkErrors.value = { ...companyLinkErrors.value, [recordId]: error?.message || "发送失败" };
-    setStatus(error?.message || `${personName(person)} 的签名链接发送失败。`, "error");
-    return "failed";
-  } finally {
-    const next = { ...companyLinkSending.value };
-    delete next[recordId];
-    companyLinkSending.value = next;
-  }
-}
-
-async function sendAllUnsignedCompanyLinks(): Promise<void> {
-  if (bulkLinkSending.value) return;
-  const people = selectedCompany.value.filter((item) => !personHasStoredSignature(item));
-  if (!people.length) return;
-  bulkLinkSending.value = true;
-  let success = 0;
-  let converted = 0;
-  let convertedFailed = 0;
-  for (const person of people) {
-    const outcome = await sendCompanyLink(person);
-    if (outcome === "sent") success += 1;
-    else if (outcome === "converted") converted += 1;
-    else if (outcome === "converted_failed") convertedFailed += 1;
-  }
-  bulkLinkSending.value = false;
-  if (converted || convertedFailed) {
-    const parts = [`公司人员链接已发送 ${success} 人`];
-    if (converted) parts.push(`${converted} 名第三方人员已转为临时人员并自动把链接发给当前登录人`);
-    if (convertedFailed) parts.push(`${convertedFailed} 名第三方人员已转为临时人员但链接发送失败`);
-    setStatus(`${parts.join("；")}。请在当前登录人的手机上完成临时人员签字。`, convertedFailed ? "error" : "warning");
-    return;
-  }
-  setStatus(`签名链接已发送 ${success}/${people.length} 人。`, success === people.length ? "success" : "warning");
 }
 
 async function sendAllUsageConfirmations(): Promise<void> {
@@ -759,30 +542,13 @@ async function sendAllUsageConfirmations(): Promise<void> {
       contextType: "critical_guard",
       signatures: targets.map((item) => ({ source: "staff", role: "inspector", record_id: item.record_id })),
     });
-    const results = Array.isArray(data.results) ? data.results : [];
-    const unavailableResults = results.filter((item: Dict) => !item.ok && isBotUnavailableFailure(item));
-    let converted = 0;
-    let convertedFailed = 0;
-    for (const result of unavailableResults) {
-      const person = selectedCompany.value.find((item) => (
-        String(item.record_id || "") === String(result.record_id || "")
-        || String(item.open_id || "") === String(result.open_id || "")
-      ));
-      if (!person) continue;
-      const outcome = await convertThirdPartyCompanyPerson(person);
-      if (outcome === "converted") converted += 1;
-      else if (outcome === "converted_failed") convertedFailed += 1;
-    }
-    const otherFailed = Math.max(0, Number(data.failed_count || 0) - converted - convertedFailed);
-    if (converted || convertedFailed) {
-      const parts = [`确认请求已发送 ${Number(data.sent_count || 0)} 人`];
-      if (converted) parts.push(`${converted} 名第三方人员已转为临时人员，链接已自动发送给当前登录人`);
-      if (convertedFailed) parts.push(`${convertedFailed} 名第三方人员临时链接发送失败`);
-      if (otherFailed) parts.push(`${otherFailed} 人发送失败`);
-      setStatus(`${parts.join("；")}。请在当前登录人的手机上完成临时人员签字。`, convertedFailed || otherFailed ? "error" : "warning");
-    } else {
-      setStatus(`确认请求已发送 ${Number(data.sent_count || 0)} 人。`, Number(data.failed_count || 0) ? "warning" : "success");
-    }
+    const failed = Number(data.failed_count || 0);
+    setStatus(
+      failed
+        ? `确认请求已发送 ${Number(data.sent_count || 0)} 人，${failed} 人发送失败；签名新增或重签请使用首页指纹入口。`
+        : `确认请求已发送 ${Number(data.sent_count || 0)} 人。`,
+      failed ? "warning" : "success",
+    );
     await loadCompanyPeople(false, true);
   } catch (error: any) {
     setStatus(error?.message || "确认请求发送失败。", "error");
@@ -791,46 +557,9 @@ async function sendAllUsageConfirmations(): Promise<void> {
   }
 }
 
-function addTemporaryDraft(): void {
-  if (selectedCount.value + drafts.value.length >= 50) return setStatus("每个任务每栋楼最多选择 50 名检查人。", "error");
-  const nextNumber = selectedOther.value.filter((item) => String(item.source || "") === "temporary").length + drafts.value.length + 1;
-  drafts.value.push({ draft_id: `draft_${Date.now()}_${Math.random().toString(16).slice(2)}`, display_name: `临时人员${nextNumber}`, status: "draft" });
-}
-
-function updateDraftName(draftId: string, value: string): void {
-  const draft = drafts.value.find((item) => String(item.draft_id || "") === draftId);
-  if (draft) draft.display_name = value;
-}
-
-function ensureDraftName(draft: Dict): void {
-  if (String(draft.display_name || "").trim()) return;
-  const index = drafts.value.findIndex((item) => item === draft);
-  draft.display_name = `临时人员${Math.max(1, index + 1)}`;
-}
-
-function removeDraft(draftId: string): void {
-  drafts.value = drafts.value.filter((item) => String(item.draft_id || "") !== draftId);
-}
-
-function draftStatusText(draft: Dict): string {
-  return draftSending.value[String(draft.draft_id || "")] ? "发送中" : "待发送";
-}
-
-function draftDisabledReason(draft: Dict): string {
-  if (draftSending.value[String(draft.draft_id || "")]) return "正在发送";
-  if (!currentOpenId.value) return "当前登录账号缺少 openid";
-  return "";
-}
-
 function otherPersonStatusText(person: Dict): string {
   if (String(person.source || "") === "external") return "已有外部签名，可直接使用";
   return personReady(person) ? "临时人员已签名" : "等待现场签名";
-}
-
-function otherWebSignDisabledReason(person: Dict): string {
-  if (String(person.source || "") === "temporary" && !person.temp_id) return "临时签名会话不完整";
-  if (String(person.source || "") === "external" && !person.record_id) return "外部签名记录不完整";
-  return "";
 }
 
 function replaceOrAddOther(person: Dict): void {
@@ -852,184 +581,12 @@ function addExternalPerson(person: Dict): void {
   emitSelectionChanged();
 }
 
-async function createTemporaryFromDraft(draft: Dict): Promise<Dict> {
-  const signature = await createTemporarySignatureSession({
-    scope: props.scope,
-    noticeKey: props.contextKey,
-    noticeTitle: props.taskTitle,
-    specialty: "",
-    role: "inspector",
-    displayName: String(draft.display_name || "").trim(),
-    contextType: "critical_guard",
-    originStaffRecordId: String(draft.origin_staff_record_id || "").trim(),
-    originStaffOpenId: String(draft.origin_staff_open_id || "").trim(),
-  });
-  return { ...signature, source: "temporary", role: "inspector" };
-}
-
-async function openDraftWebSignature(draft: Dict): Promise<void> {
-  const draftId = String(draft.draft_id || "");
-  if (draftSending.value[draftId]) return;
-  draftSending.value = { ...draftSending.value, [draftId]: true };
-  try {
-    const person = await createTemporaryFromDraft(draft);
-    replaceOrAddOther(person);
-    removeDraft(draftId);
-    emitSelectionChanged();
-    openWebSignature(person);
-  } catch (error: any) {
-    setStatus(error?.message || "临时签名创建失败。", "error");
-  } finally {
-    const next = { ...draftSending.value };
-    delete next[draftId];
-    draftSending.value = next;
-  }
-}
-
-async function sendDraftTemporaryLink(draft: Dict): Promise<void> {
-  const draftId = String(draft.draft_id || "");
-  if (draftDisabledReason(draft)) return;
-  draftSending.value = { ...draftSending.value, [draftId]: true };
-  try {
-    const data = await sendTemporarySignatureLink({
-      scope: props.scope,
-      noticeKey: props.contextKey,
-      noticeTitle: props.taskTitle,
-      role: "inspector",
-      displayName: String(draft.display_name || "").trim(),
-      recipientOpenIds: [currentOpenId.value],
-      contextType: "critical_guard",
-      originStaffRecordId: String(draft.origin_staff_record_id || "").trim(),
-      originStaffOpenId: String(draft.origin_staff_open_id || "").trim(),
-    });
-    const person = { ...(data.signature || {}), source: "temporary", role: "inspector" };
-    replaceOrAddOther(person);
-    removeDraft(draftId);
-    emitSelectionChanged();
-    setStatus(`${personName(person)} 的签名链接已发送给当前登录人，请在当前登录人的手机上完成现场签字。`, "success");
-  } catch (error: any) {
-    setStatus(error?.message || "临时签名链接发送失败。", "error");
-  } finally {
-    const next = { ...draftSending.value };
-    delete next[draftId];
-    draftSending.value = next;
-  }
-}
-
-async function sendExistingTemporaryLink(person: Dict, silentStatus = false): Promise<boolean> {
-  const tempId = String(person.temp_id || "");
-  if (!tempId || temporaryLinkSending.value[tempId]) return false;
-  if (!currentOpenId.value) {
-    temporaryLinkErrors.value = { ...temporaryLinkErrors.value, [tempId]: "当前登录账号缺少 openid" };
-    if (!silentStatus) setStatus("当前登录账号缺少 openid，无法接收临时签名链接。", "error");
-    return false;
-  }
-  temporaryLinkSending.value = { ...temporaryLinkSending.value, [tempId]: true };
-  try {
-    const data = await sendTemporarySignatureLink({
-      temporaryId: tempId,
-      scope: props.scope,
-      recipientOpenIds: [currentOpenId.value],
-      contextType: "critical_guard",
-    });
-    replaceOrAddOther({ ...person, ...(data.signature || {}), source: "temporary", role: "inspector" });
-    temporaryLinkSentAt.value = { ...temporaryLinkSentAt.value, [tempId]: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) };
-    const errors = { ...temporaryLinkErrors.value };
-    delete errors[tempId];
-    temporaryLinkErrors.value = errors;
-    emitStatusRefresh();
-    if (!silentStatus) {
-      setStatus(`${personName(person)} 的签名链接已发送给当前登录人，请在当前登录人的手机上完成现场签字。`, "success");
-    }
-    return true;
-  } catch (error: any) {
-    temporaryLinkErrors.value = { ...temporaryLinkErrors.value, [tempId]: error?.message || "发送失败" };
-    if (!silentStatus) setStatus(error?.message || "临时签名链接发送失败。", "error");
-    return false;
-  } finally {
-    const next = { ...temporaryLinkSending.value };
-    delete next[tempId];
-    temporaryLinkSending.value = next;
-  }
-}
-
-function openWebSignature(person: Dict): void {
-  const source = String(person.source || "staff");
-  if (source === "staff") {
-    const reason = companyWebSignDisabledReason(person);
-    if (reason) return setStatus(reason, "warning");
-  }
-  activePadPerson.value = person;
-  padMessage.value = "";
-  padMessageType.value = "info";
-  signatureCanvas.clear();
-  signatureCanvas.resetInk();
-  void nextTick(() => {
-    signatureCanvas.resize();
-    signatureCanvas.observe();
-  });
-}
-
-function closeSignaturePad(): void {
-  if (padSaving.value) return;
-  activePadPerson.value = null;
-  signatureCanvas.disconnect();
-  signatureCanvas.clear();
-}
-
-async function saveWebSignature(): Promise<void> {
-  const person = activePadPerson.value;
-  if (!person || padSaveDisabledReason.value) return;
-  const png = signatureCanvas.dataUrl();
-  padSaving.value = true;
-  try {
-    const source = String(person.source || "staff");
-    let saved: Dict;
-    if (source === "temporary" || person.temp_id) {
-      saved = await saveTemporarySignature(String(person.temp_id || ""), png);
-      replaceOrAddOther({ ...person, ...saved, source: "temporary", role: "inspector", ready: true });
-    } else if (source === "external") {
-      saved = await saveExternalSignature(
-        String(person.record_id || ""),
-        personName(person),
-        png,
-        props.scope,
-        props.contextKey,
-        "inspector",
-      );
-      replaceOrAddOther({ ...person, ...saved, source: "external", role: "inspector", usage_confirmed: true, ready: true });
-    } else {
-      saved = await saveStaffSignature(String(person.record_id || ""), personName(person), png);
-      const index = selectedCompany.value.findIndex((item) => String(item.record_id || "") === String(person.record_id || ""));
-      if (index >= 0) selectedCompany.value[index] = protectedSigner({ ...selectedCompany.value[index], ...saved, source: "staff", role: "inspector", usage_confirmed: true, is_current_user: true, ready: true });
-    }
-    emitSelectionChanged();
-    padMessage.value = "签名已保存。";
-    padMessageType.value = "success";
-    setStatus(`${personName(person)} 的签名已保存。`, "success");
-    activePadPerson.value = null;
-    signatureCanvas.disconnect();
-    signatureCanvas.clear();
-  } catch (error: any) {
-    padMessage.value = error?.message || "签名保存失败。";
-    padMessageType.value = "failed";
-  } finally {
-    padSaving.value = false;
-  }
-}
-
 function requestClose(): void {
-  if (padSaving.value) return;
-  if (drafts.value.length) {
-    activeTab.value = "other";
-    setStatus("请先为新增临时人员选择网页签名或发送链接，也可以移除该人员。", "warning");
-    return;
-  }
   emit("close");
 }
 
 function handleKeydown(event: KeyboardEvent): void {
-  if (props.open && event.key === "Escape" && !activePadPerson.value) requestClose();
+  if (props.open && event.key === "Escape") requestClose();
 }
 
 watch(() => [props.open, props.scope, props.contextKey] as const, ([open]) => {
@@ -1073,7 +630,6 @@ onBeforeUnmount(() => {
   if (companySearchTimer) clearTimeout(companySearchTimer);
   if (externalSearchTimer) clearTimeout(externalSearchTimer);
   stopPolling();
-  signatureCanvas.disconnect();
   window.removeEventListener("keydown", handleKeydown);
 });
 </script>

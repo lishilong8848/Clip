@@ -128,7 +128,7 @@
               :selected-ids="signatureSelectedRecords[signatureRole] || []"
               :active-record-id="activeSignatureRecordId"
               compact
-              @refresh="loadSignaturePeople()"
+              @refresh="refreshAllSignatures"
               @select="selectSignaturePerson"
             />
             <div class="sign-canvas-card signature-zone">
@@ -142,21 +142,12 @@
                 :active-record-id="activeSignatureRecordId"
                 :unsigned-count="selectedFormalSignatureNotReadyCount(signatureRole)"
                 :unsigned-signature-count="selectedFormalSignatureMissingSignatureCount(signatureRole)"
-                :link-sending-by-id="signatureLinkSendingById"
-                :link-sent-at-by-id="signatureLinkSentAtById"
-                :link-error-by-id="signatureLinkErrorById"
                 :has-usable-signature="personReadyForMop"
                 :person-key="signaturePersonKey"
                 :display-name="signaturePersonDisplayName"
-                :link-title="personSignatureLinkTitle"
-                :web-sign-disabled-reason="staffSignatureWebSignDisabledReason"
-                :bulk-link-sending="signatureBulkLinkSending"
                 :confirm-sending="signatureUsageConfirmSending"
                 :confirmable-count="signatureUsageConfirmationCount(signatureRole)"
                 @activate="activateSelectedSignaturePerson"
-                @web-sign="openSignaturePadForPerson"
-                @send-link="sendSignatureLinkForPerson"
-                @send-unsigned-links="sendUnsignedSignatureLinksForRole(signatureRole)"
                 @send-confirmations="sendSignatureUsageConfirmationsForRole(signatureRole)"
                 @remove="removeSignaturePerson(signatureRole, $event)"
               />
@@ -172,30 +163,14 @@
             <MopOtherSignatureManager
               v-model:external-search="externalSignatureSearch"
               :role="signatureRole"
-              :add-disabled-reason="addOtherSignatureDisabledReason"
               :display-rows="currentRoleOtherSignatureDisplayRows"
               :unsigned-count="currentRoleOtherSignatureUnsignedCount"
-              :temporary-link-sending-by-id="temporarySignatureLinkSendingById"
-              :temporary-link-sent-at-by-id="temporarySignatureLinkSentAtById"
-              :temporary-link-error-by-id="temporarySignatureLinkErrorById"
-              :draft-sending-by-id="temporarySignatureSendingByDraft"
               :external-loading="externalSignatureLoading"
               :external-status-text="externalSignatureSearchStatus"
               :external-people="externalSignaturePeople"
               :person-status-text="otherSignaturePersonStatusText"
-              :person-web-sign-disabled-reason="otherSignatureWebSignDisabledReason"
-              :draft-status-text="otherSignatureDraftStatusText"
-              :draft-disabled-reason="temporarySignatureRowDisabledReason"
-              @add-other="addOtherSignatureDraft"
-              @web-sign-person="openSignaturePadForPerson"
-              @send-temp-person="sendTemporarySignatureLinkForPerson"
               @remove-person="removeSignaturePerson(signatureRole, $event)"
-              @update-draft-name="updateOtherSignatureDraftName"
-              @ensure-draft-name="ensureOtherSignatureDraftName"
-              @web-sign-draft="openSignaturePadForDraft"
-              @send-draft-link="sendTemporarySignatureLinkForDraft"
-              @remove-draft="removeOtherSignatureDraft"
-              @refresh-external="loadExternalSignaturePeople()"
+              @refresh-external="refreshAllSignatures"
               @add-external="addExternalSignaturePerson"
             />
           </div>
@@ -214,44 +189,6 @@
             />
           </div>
         </section>
-        <MopSignaturePadModal
-          :open="signaturePadOpen"
-          :title="activeSignaturePerson?.name || '手写签名'"
-          :role-label="signatureRole === 'auditor' ? '维护审核人' : '维护实施人'"
-          :saving="signatureSaving"
-          :message="signatureMessage"
-          :message-type="signatureMessageType"
-          :save-disabled-reason="saveSignatureDisabledReason"
-          @close="closeSignaturePad"
-          @clear="clearSignatureCanvas"
-          @save="saveMopSignature"
-        >
-            <div class="mop-sign-canvas signature-pad-canvas" :class="{ disabled: !activeSignaturePerson }">
-              <button type="button"
-                class="sign-clear-inline"
-                :disabled="signatureSaving"
-                @click="clearSignatureCanvas"
-              >
-                清空
-              </button>
-              <div
-                v-if="personHasUsableSignature(activeSignaturePerson) && !signatureHasInk"
-                class="sign-placeholder protected-signature-status"
-              >
-                已有签名已加密保护，重新手写后可更新
-              </div>
-              <canvas
-                ref="signatureCanvasRef"
-                aria-label="MOP手写签名区域"
-                @pointerdown="startSignatureDraw"
-                @pointermove="moveSignatureDraw"
-                @pointerup="endSignatureDraw"
-                @pointercancel="endSignatureDraw"
-                @pointerleave="endSignatureDraw"
-              ></canvas>
-              <div v-if="!signatureHasInk && !personHasUsableSignature(activeSignaturePerson)" class="sign-placeholder">在此处手写签名</div>
-            </div>
-        </MopSignaturePadModal>
         <MopSheetTabs
           v-model="activeSheetName"
           :sheets="preview.sheets || []"
@@ -399,8 +336,6 @@ import {
 import {
   buildMopSignaturePayload as buildMopSignaturePayloadFromPeople,
   mopPersonHasUsableSignature,
-  otherSignatureDraftPriority,
-  otherSignatureDraftStatusText,
   otherSignaturePersonPriority,
   otherSignaturePersonStatusText,
   signaturePersonDisplayName,
@@ -432,16 +367,12 @@ import {
   uploadSignedMopDisabledReason as resolveUploadSignedMopDisabledReason,
 } from "../mopUploadReadiness";
 import {
-  createTemporarySignatureSession,
+  refreshSignatureDirectory,
+  refreshedSignaturePerson,
   fetchExternalSignaturePeople,
   fetchSignaturePeople,
   fetchTemporarySignatures,
-  saveExternalSignature,
-  saveStaffSignature,
-  saveTemporarySignature,
   sendSignatureUsageConfirmations,
-  sendStaffSignatureLink,
-  sendTemporarySignatureLink,
 } from "../mopSignatureApi";
 import { useMopEditSessionLock } from "../useMopEditSessionLock";
 import { useMopCellSelection } from "../useMopCellSelection";
@@ -449,7 +380,6 @@ import { useMopSheetEditing } from "../useMopSheetEditing";
 import { useMopSignatureSelection } from "../useMopSignatureSelection";
 import { useGuardedPolling } from "../useGuardedPolling";
 import { useLocalMopUpload } from "../useLocalMopUpload";
-import { useMopSignatureCanvas } from "../useMopSignatureCanvas";
 import MopBindingWorkspace from "./MopBindingWorkspace.vue";
 import MopCompanySelectedSignatures from "./MopCompanySelectedSignatures.vue";
 import type { MopCellPopoverMode } from "./MopCellPopover.vue";
@@ -463,7 +393,6 @@ import MopPreviewHeader from "./MopPreviewHeader.vue";
 import MopSheetPreviewTable from "./MopSheetPreviewTable.vue";
 import MopSheetStatusPanel from "./MopSheetStatusPanel.vue";
 import MopSheetTabs from "./MopSheetTabs.vue";
-import MopSignaturePadModal from "./MopSignaturePadModal.vue";
 import MopSignatureRoleSummary, {
   type MopSignatureRole,
   type MopSignatureRoleSummaryItem,
@@ -515,22 +444,16 @@ const signaturePeople = shallowRef<Dict[]>([]);
 const {
   signaturePeopleById,
   temporarySignatures,
-  otherSignatureDrafts,
   hiddenOtherSignatureKeys,
   signatureSelectedRecords,
   rememberSignaturePeople,
-  updateRememberedSignaturePerson,
   selectSignaturePerson: selectSignaturePersonByRole,
   removeSignaturePerson: removeSignaturePersonByRole,
   unhideSignatureKey,
-  unhideSignaturePerson,
   selectedFormalSignaturePeople,
   selectedTemporarySignaturePeople,
   selectedSignaturePeople,
   selectedTemporarySignatureUnsignedCount,
-  nextOtherSignatureDisplayName,
-  ensureOtherSignatureDraftName: ensureOtherSignatureDraftNameByRole,
-  updateOtherSignatureDraftName,
   resetOtherSignatures,
   resetSignatureSelection,
 } = useMopSignatureSelection(signaturePeople, {
@@ -543,20 +466,9 @@ const externalSignaturePeopleTotal = ref(0);
 const externalSignatureLoading = ref(false);
 const signaturePeopleTotal = ref(0);
 const signatureLoading = ref(false);
-const signatureSaving = ref(false);
-const signatureLinkSendingById = ref<Record<string, boolean>>({});
-const signatureLinkSentAtById = ref<Record<string, string>>({});
-const signatureLinkErrorById = ref<Record<string, string>>({});
-const signatureBulkLinkSending = ref(false);
 const signatureUsageConfirmSending = ref(false);
-const temporarySignatureLinkSendingById = ref<Record<string, boolean>>({});
-const temporarySignatureLinkSentAtById = ref<Record<string, string>>({});
-const temporarySignatureLinkErrorById = ref<Record<string, string>>({});
 const signatureManagerOpen = ref(false);
 const signatureManagerRef = ref<HTMLElement | null>(null);
-const signaturePadOpen = ref(false);
-const signaturePadTarget = ref<Dict | null>(null);
-const temporarySignatureSendingByDraft = ref<Record<string, boolean>>({});
 const mopFillSaving = ref(false);
 const mopUploadSaving = ref(false);
 const mopResetting = ref(false);
@@ -577,9 +489,6 @@ const signatureMessage = ref("");
 const signatureMessageType = ref("");
 const mopUploadMessage = ref("");
 const mopUploadMessageType = ref<"info" | "success" | "failed">("info");
-const signatureCanvas = useMopSignatureCanvas();
-const signatureCanvasRef = signatureCanvas.canvasRef;
-const signatureHasInk = signatureCanvas.hasInk;
 let signatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let externalSignatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let signatureSearchRequestSeq = 0;
@@ -823,24 +732,11 @@ const signatureTaskSummaryText = computed(() => {
   if (unsignedSelectedSignatureCount.value > 0) items.push(`${unsignedSelectedSignatureCount.value} 人待处理`);
   return items.length ? items.join(" · ") : "签名已齐全，可写入 MOP";
 });
-const activeSignaturePerson = computed(() => (
-  signaturePadTarget.value
-  || selectedFormalSignaturePeople(signatureRole.value).find((item) => item.record_id === activeSignatureRecordId.value)
-  || null
-));
 const currentUserOpenId = computed(() => String(currentAuthUser.value?.open_id || "").trim());
 function isCurrentUserSignaturePerson(person: Dict | null | undefined): boolean {
   const personOpenId = String(person?.open_id || "").trim();
   return Boolean(personOpenId && currentUserOpenId.value && personOpenId === currentUserOpenId.value);
 }
-function staffSignatureWebSignDisabledReason(person: Dict | null | undefined): string {
-  if (!String(person?.record_id || "").trim()) return "该人员资料不完整，无法网页手写";
-  if (!isCurrentUserSignaturePerson(person)) return "网页手写只能保存当前登录用户本人的签名，请发送签名链接给对方";
-  return "";
-}
-const currentRoleOtherSignatureDrafts = computed(() => (
-  otherSignatureDrafts.value.filter((item) => String(item.role || "") === signatureRole.value)
-));
 const currentRoleOtherSignaturePeople = computed(() => (
   selectedTemporarySignaturePeople(signatureRole.value)
 ));
@@ -855,17 +751,7 @@ const currentRoleOtherSignatureDisplayRows = computed(() => {
     priority: otherSignaturePersonPriority(person),
     original_index: index,
   }));
-  const draftRows = currentRoleOtherSignatureDrafts.value.map((draft, index) => ({
-    kind: "draft",
-    row_key: `draft:${String(draft.draft_id || index)}`,
-    person: {} as Dict,
-    draft,
-    signed: false,
-    display_name: temporarySignatureDisplayName(draft, index),
-    priority: otherSignatureDraftPriority(draft),
-    original_index: currentRoleOtherSignaturePeople.value.length + index,
-  }));
-  return [...peopleRows, ...draftRows].sort((left, right) => {
+  return peopleRows.sort((left, right) => {
     if (left.priority !== right.priority) return left.priority - right.priority;
     const leftNo = temporarySignatureDisplayNumber(left.display_name);
     const rightNo = temporarySignatureDisplayNumber(right.display_name);
@@ -878,34 +764,11 @@ const currentRoleOtherSignatureDisplayRows = computed(() => {
 const currentRoleOtherSignatureUnsignedCount = computed(() => (
   currentRoleOtherSignatureDisplayRows.value.filter((row) => !row.signed).length
 ));
-const addOtherSignatureDisabledReason = computed(() => {
-  if (!selectedNotice.value) return "请先选择左侧维保通告";
-  if (!selectedNotice.value.notice_key) return "当前通告缺少记忆键，无法创建临时签名";
-  return "";
-});
 const allSelectedSignaturePeople = computed(() => [
   ...selectedSignaturePeople("implementer"),
   ...selectedSignaturePeople("auditor"),
 ]);
 const allSelectedSignaturesReady = computed(() => allSelectedSignaturePeople.value.every((person) => personReadyForMop(person)));
-const openSignaturePadDisabledReason = computed(() => {
-  if (signatureSaving.value) return "";
-  if (!activeSignaturePerson.value) return "请先选择签名人员";
-  const source = String(activeSignaturePerson.value.source || "");
-  if (source === "temporary" || activeSignaturePerson.value.temp_id) {
-    if (!activeSignaturePerson.value.temp_id) return "该临时人员签名会话不完整，无法手写签名";
-    return "";
-  }
-  if (!activeSignaturePerson.value.record_id) return "该人员资料不完整，无法手写签名";
-  const staffReason = staffSignatureWebSignDisabledReason(activeSignaturePerson.value);
-  if (staffReason) return staffReason;
-  return "";
-});
-const saveSignatureDisabledReason = computed(() => {
-  if (!activeSignaturePerson.value) return "请先选择签名人员";
-  if (!signatureHasInk.value) return "请先在签名区域手写签名";
-  return "";
-});
 const canFillMopSignatures = computed(() => {
   if (!preview.value?.local_file?.path || !activeSheet.value) return false;
   return allSelectedSignaturesReady.value;
@@ -1730,7 +1593,6 @@ function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
     updateTemporarySignaturePolling();
     updateFormalSignaturePolling();
     signatureRole.value = "implementer";
-    clearSignatureCanvas();
   }
 }
 
@@ -1937,138 +1799,9 @@ function selectedFormalSignatureRejectedCount(role: MopSignatureRole): number {
   return selectedFormalSignaturePeople(role).filter((person) => Boolean(person?.usage_rejected)).length;
 }
 
-function resizeSignatureCanvas(): void {
-  signatureCanvas.resize();
-}
-
-function ensureSignatureCanvasObserver(): void {
-  signatureCanvas.observe();
-}
-
-function disconnectSignatureCanvasObserver(): void {
-  signatureCanvas.disconnect();
-}
-
-async function openSignaturePad(): Promise<void> {
-  if (openSignaturePadDisabledReason.value) return;
-  signatureMessage.value = "";
-  signatureMessageType.value = "";
-  signatureCanvas.resetInk();
-  signaturePadOpen.value = true;
-  await nextTick();
-  disconnectSignatureCanvasObserver();
-  ensureSignatureCanvasObserver();
-  resizeSignatureCanvas();
-}
-
-async function openSignaturePadForPerson(person: Dict): Promise<void> {
-  const source = String(person?.source || "");
-  const tempId = String(person?.temp_id || "").trim();
-  const recordId = String(person?.record_id || "").trim();
-  if (source === "external") {
-    if (!recordId) return;
-    signaturePadTarget.value = person;
-  } else if (source === "temporary" || tempId) {
-    if (!tempId) return;
-    signaturePadTarget.value = person;
-  } else {
-    if (!recordId) return;
-    const disabledReason = staffSignatureWebSignDisabledReason(person);
-    if (disabledReason) {
-      signatureMessage.value = disabledReason;
-      signatureMessageType.value = "failed";
-      return;
-    }
-    signaturePadTarget.value = null;
-    setActiveSignaturePerson(recordId);
-  }
-  await nextTick();
-  await openSignaturePad();
-}
-
-function otherSignatureWebSignDisabledReason(person: Dict): string {
-  const source = String(person?.source || "");
-  if (source === "external") {
-    return String(person?.record_id || "").trim() ? "" : "该外部人员资料不完整，无法网页手写";
-  }
-  return String(person?.temp_id || "").trim() ? "" : "该临时人员签名会话不完整，无法网页手写";
-}
-
-async function openSignaturePadForDraft(draft: Dict): Promise<void> {
-  const draftId = String(draft?.draft_id || "").trim();
-  if (!draftId) return;
-  const role = String(draft.role || signatureRole.value) === "auditor" ? "auditor" : "implementer";
-  const displayName = String(draft.display_name || "").trim() || nextOtherSignatureDisplayName(role);
-  temporarySignatureSendingByDraft.value = {
-    ...temporarySignatureSendingByDraft.value,
-    [draftId]: true,
-  };
-  otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
-    String(item.draft_id || "") === draftId
-      ? { ...item, display_name: displayName, status: "sending", error: "" }
-      : item
-  ));
-  try {
-    const data = await createTemporarySignatureSession({
-      scope: scope.value,
-      noticeKey: selectedNotice.value?.notice_key || "",
-      noticeTitle: selectedNotice.value?.title || "",
-      specialty: selectedNoticeSpecialty.value,
-      role,
-      displayName,
-    });
-    if (data) {
-      mergeTemporarySignatures([data]);
-      unhideSignaturePerson(data);
-      otherSignatureDrafts.value = otherSignatureDrafts.value.filter((item) => String(item.draft_id || "") !== draftId);
-      signaturePadTarget.value = data;
-      updateTemporarySignaturePolling();
-      await nextTick();
-      await openSignaturePad();
-    }
-  } catch (error) {
-    otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
-      String(item.draft_id || "") === draftId
-        ? { ...item, status: "failed", error: error instanceof Error ? error.message : "创建临时签名失败" }
-        : item
-    ));
-    signatureMessage.value = error instanceof Error ? error.message : "创建临时签名失败";
-    signatureMessageType.value = "failed";
-  } finally {
-    const next = { ...temporarySignatureSendingByDraft.value };
-    delete next[draftId];
-    temporarySignatureSendingByDraft.value = next;
-  }
-}
-
-function closeSignaturePad(): void {
-  signatureCanvas.stopDrawing();
-  signaturePadOpen.value = false;
-  signatureCanvas.resetInk();
-  signaturePadTarget.value = null;
-  disconnectSignatureCanvasObserver();
-}
-
 function closeMopTransientUi(): void {
   mopCellSelection.clear();
-  if (signaturePadOpen.value) closeSignaturePad();
   closeSignatureManager();
-}
-
-function startSignatureDraw(event: PointerEvent): void {
-  signatureCanvas.startDraw(event, Boolean(activeSignaturePerson.value && !signatureSaving.value));
-}
-
-function moveSignatureDraw(event: PointerEvent): void {
-  signatureCanvas.moveDraw(event);
-}
-
-function endSignatureDraw(event: PointerEvent): void {
-  signatureCanvas.endDraw(event);
-}
-
-function clearSignatureCanvas(): void {
-  signatureCanvas.clear();
 }
 
 function selectSignaturePerson(recordId: string): void {
@@ -2076,7 +1809,6 @@ function selectSignaturePerson(recordId: string): void {
   clearMopOutputState();
   signatureMessage.value = "";
   signatureMessageType.value = "";
-  clearSignatureCanvas();
   updateFormalSignaturePolling();
 }
 
@@ -2087,11 +1819,6 @@ function setActiveSignaturePerson(recordId: string): void {
 function removeSignaturePerson(role: "implementer" | "auditor", recordId: string): void {
   removeSignaturePersonByRole(role, recordId);
   clearMopOutputState();
-  clearSignatureCanvas();
-}
-
-function ensureOtherSignatureDraftName(draft: Dict): void {
-  ensureOtherSignatureDraftNameByRole(draft, signatureRole.value);
 }
 
 function activateSelectedSignaturePerson(person: Dict): void {
@@ -2169,7 +1896,7 @@ function closeSignatureManager(): void {
 }
 
 function handleSignatureManagerKeydown(event: KeyboardEvent): void {
-  if (!signatureManagerOpen.value || signaturePadOpen.value) return;
+  if (!signatureManagerOpen.value) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -2214,6 +1941,41 @@ function scheduleSignaturePeopleSearch(): void {
   }, 300);
 }
 
+async function refreshAllSignatures(): Promise<void> {
+  if (signatureLoading.value || externalSignatureLoading.value) return;
+  const context = selectedNotice.value?.notice_key;
+  const requestScope = scope.value;
+  signatureLoading.value = true; externalSignatureLoading.value = true;
+  ++signatureSearchRequestSeq; ++externalSignatureSearchRequestSeq;
+  try {
+    const data = await refreshSignatureDirectory();
+    if (context !== selectedNotice.value?.notice_key || requestScope !== scope.value) return;
+    const nextOther: Dict[] = [];
+    for (const role of ["implementer", "auditor"] as MopSignatureRole[]) {
+      const original = selectedSignaturePeople(role);
+      const refreshed = original.map((person) => refreshedSignaturePerson({ ...person, role }, data));
+      const formal = refreshed.filter((person) => person.source !== "external" && person.source !== "temporary");
+      rememberSignaturePeople(formal);
+      signatureSelectedRecords.value[role] = [...new Set(formal.map((person) => String(person.record_id)))];
+      nextOther.push(...refreshed.filter((person) => person.source === "external" || person.source === "temporary"));
+    }
+    const byKey = new Map(nextOther.map((person) => [person.role + ":" + signaturePersonKey(person), person]));
+    temporarySignatures.value = [...byKey.values()];
+    signaturePeople.value = (data.people || []).filter((p: Dict) => p.source === "staff");
+    externalSignaturePeople.value = (data.people || []).filter((p: Dict) => p.source === "external");
+    signaturePeopleTotal.value = signaturePeople.value.length;
+    externalSignaturePeopleTotal.value = externalSignaturePeople.value.length;
+    rememberSignaturePeople(signaturePeople.value);
+    signatureMessage.value = Object.values(data.sources || {}).some((s: any) => !s.ok)
+      ? "部分人员表刷新失败，保留上次数据。"
+      : "正式表和临时表签名已刷新，已保留人员选择。";
+    signatureMessageType.value = "info";
+  } catch (error: any) {
+    signatureMessage.value = error.message || "签名刷新失败，已保留原选择。";
+    signatureMessageType.value = "failed";
+  } finally { signatureLoading.value = false; externalSignatureLoading.value = false; }
+}
+
 async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<void> {
   const requestSeq = ++signatureSearchRequestSeq;
   signatureLoading.value = true;
@@ -2244,72 +2006,7 @@ async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<
   } finally {
     if (requestSeq === signatureSearchRequestSeq) {
       signatureLoading.value = false;
-      await nextTick();
-      resizeSignatureCanvas();
     }
-  }
-}
-
-async function saveMopSignature(): Promise<void> {
-  if (!activeSignaturePerson.value || !signatureHasInk.value) return;
-  signatureSaving.value = true;
-  signatureMessage.value = "";
-  signatureMessageType.value = "";
-  try {
-    const target = activeSignaturePerson.value;
-    const source = String(target.source || "");
-    const tempId = String(target.temp_id || "").trim();
-    const signatureImage = signatureCanvas.dataUrl();
-    if (source === "temporary" || tempId) {
-      const data = await saveTemporarySignature(tempId, signatureImage);
-      if (data) mergeTemporarySignatures([data]);
-      unhideSignaturePerson(data || target);
-      signatureMessage.value = `${data?.display_name || data?.name || target.name || "临时人员"} 已保存签名。`;
-      updateTemporarySignaturePolling();
-    } else if (source === "external") {
-      const data = await saveExternalSignature(
-        String(target.record_id || ""),
-        String(target.name || target.display_name || ""),
-        signatureImage,
-        scope.value,
-        signatureUsageNoticeKey.value,
-        signatureRole.value,
-      );
-      const merged = { ...target, ...data, source: "external", role: target.role || signatureRole.value };
-      mergeTemporarySignatures([merged]);
-      unhideSignaturePerson(merged);
-      externalSignaturePeople.value = externalSignaturePeople.value.map((item) => (
-        String(item.record_id || "") === String(target.record_id || "") ? { ...item, ...data, source: "external" } : item
-      ));
-      signatureMessage.value = `${data.name || data.display_name || target.name || "其他人员"} 已保存签名。`;
-    } else {
-      const data = await saveStaffSignature(
-        String(target.record_id || ""),
-        String(target.name || ""),
-        signatureImage,
-      );
-      signatureMessage.value = `${data.name || target.name || "签名"} 已保存到签名库。`;
-      updateRememberedSignaturePerson(target.record_id, {
-        has_signature: true,
-        signature_count: 1,
-        signature_preview_url: "",
-        signature_version: data.signature_version || target.signature_version || "",
-      });
-      updateFormalSignaturePolling();
-      const notificationWarning = String(data.notification_warning || "").trim();
-      if (notificationWarning) {
-        warnings.value = [...new Set([...warnings.value, notificationWarning])];
-      }
-    }
-    clearMopOutputState();
-    signatureMessageType.value = "success";
-    clearSignatureCanvas();
-    closeSignaturePad();
-  } catch (error) {
-    signatureMessage.value = error instanceof Error ? error.message : "保存签名失败";
-    signatureMessageType.value = "failed";
-  } finally {
-    signatureSaving.value = false;
   }
 }
 
@@ -2408,9 +2105,6 @@ async function resetMopSigning(): Promise<void> {
     activeSheetName.value = String(sheets[0]?.name || activeSheetName.value || "");
     signatureMessage.value = "已删除旧签名文件，并重新下载干净 MOP。";
     signatureMessageType.value = "success";
-    await nextTick();
-    ensureSignatureCanvasObserver();
-    resizeSignatureCanvas();
   } catch (error) {
     signatureMessage.value = error instanceof Error ? error.message : "重新下载干净 MOP 失败";
     signatureMessageType.value = "failed";
@@ -2419,27 +2113,8 @@ async function resetMopSigning(): Promise<void> {
   }
 }
 
-function personSignatureLinkTitle(person: Dict): string {
-  if (!String(person?.record_id || "").trim()) return "该人员资料不完整，无法发送链接";
-  return personHasUsableSignature(person)
-    ? "重新发送签名链接；新签名保存前，原签名仍可继续使用"
-    : "发送签名链接";
-}
-
-function shortClockText(date = new Date()): string {
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  return `${hour}:${minute}`;
-}
-
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
-}
-
-function unsignedStaffSignaturePeople(role: MopSignatureRole): Dict[] {
-  return selectedFormalSignaturePeople(role)
-    .filter((person) => !personHasUsableSignature(person))
-    .filter((person) => String(person.record_id || "").trim());
 }
 
 function staffSignaturesRequiringConfirmation(role: MopSignatureRole): Dict[] {
@@ -2455,65 +2130,6 @@ function staffSignaturesRequiringConfirmation(role: MopSignatureRole): Dict[] {
 
 function signatureUsageConfirmationCount(role: MopSignatureRole): number {
   return staffSignaturesRequiringConfirmation(role).length;
-}
-
-async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Promise<boolean> {
-  const recordId = String(person?.record_id || "").trim();
-  if (!recordId) return false;
-  signatureLinkSendingById.value = {
-    ...signatureLinkSendingById.value,
-    [recordId]: true,
-  };
-  signatureMessage.value = "";
-  signatureMessageType.value = "";
-  try {
-    const data = await sendStaffSignatureLink(recordId, String(person.name || ""), scope.value);
-    const resultPerson = data.person || person;
-    signatureLinkSentAtById.value = {
-      ...signatureLinkSentAtById.value,
-      [recordId]: shortClockText(),
-    };
-    const errors = { ...signatureLinkErrorById.value };
-    delete errors[recordId];
-    signatureLinkErrorById.value = errors;
-    signatureMessage.value = forceResign
-      ? `已给 ${resultPerson.name || person.name || "该人员"} 发送重新签名链接；新签名前原签名仍有效。`
-      : `签名链接已发送给 ${resultPerson.name || person.name || "该人员"}。`;
-    signatureMessageType.value = "success";
-    updateFormalSignaturePolling();
-    return true;
-  } catch (error) {
-    const messageText = errorMessage(error, "发送签名链接失败");
-    signatureLinkErrorById.value = {
-      ...signatureLinkErrorById.value,
-      [recordId]: messageText,
-    };
-    signatureMessage.value = messageText;
-    signatureMessageType.value = "failed";
-    return false;
-  } finally {
-    const next = { ...signatureLinkSendingById.value };
-    delete next[recordId];
-    signatureLinkSendingById.value = next;
-  }
-}
-
-async function sendUnsignedSignatureLinksForRole(role: MopSignatureRole): Promise<void> {
-  const people = unsignedStaffSignaturePeople(role);
-  if (!people.length || signatureBulkLinkSending.value) return;
-  signatureBulkLinkSending.value = true;
-  let okCount = 0;
-  try {
-    for (const person of people) {
-      if (await sendSignatureLinkForPerson(person, false)) okCount += 1;
-    }
-    signatureMessage.value = okCount === people.length
-      ? `已发送 ${okCount} 个待签名链接。`
-      : `已发送 ${okCount}/${people.length} 个待签名链接，请查看失败项。`;
-    signatureMessageType.value = okCount ? "success" : "failed";
-  } finally {
-    signatureBulkLinkSending.value = false;
-  }
 }
 
 async function sendSignatureUsageConfirmationsForRole(role: MopSignatureRole): Promise<void> {
@@ -2546,52 +2162,6 @@ async function sendSignatureUsageConfirmationsForRole(role: MopSignatureRole): P
     signatureMessageType.value = "failed";
   } finally {
     signatureUsageConfirmSending.value = false;
-  }
-}
-
-async function sendTemporarySignatureLinkForPerson(person: Dict): Promise<boolean> {
-  const tempId = String(person?.temp_id || "").trim();
-  if (!tempId) return false;
-  temporarySignatureLinkSendingById.value = {
-    ...temporarySignatureLinkSendingById.value,
-    [tempId]: true,
-  };
-  signatureMessage.value = "";
-  signatureMessageType.value = "";
-  try {
-    const data = await sendTemporarySignatureLink({
-      temporaryId: tempId,
-      scope: scope.value,
-    });
-    if (data.signature) {
-      mergeTemporarySignatures([data.signature]);
-      unhideSignaturePerson(data.signature);
-      clearMopOutputState();
-    }
-    temporarySignatureLinkSentAtById.value = {
-      ...temporarySignatureLinkSentAtById.value,
-      [tempId]: shortClockText(),
-    };
-    const errors = { ...temporarySignatureLinkErrorById.value };
-    delete errors[tempId];
-    temporarySignatureLinkErrorById.value = errors;
-    updateTemporarySignaturePolling();
-    signatureMessage.value = `${temporarySignatureDisplayName(person)} 签名链接已发送。`;
-    signatureMessageType.value = "success";
-    return true;
-  } catch (error) {
-    const messageText = errorMessage(error, "发送临时人员签名链接失败");
-    temporarySignatureLinkErrorById.value = {
-      ...temporarySignatureLinkErrorById.value,
-      [tempId]: messageText,
-    };
-    signatureMessage.value = messageText;
-    signatureMessageType.value = "failed";
-    return false;
-  } finally {
-    const next = { ...temporarySignatureLinkSendingById.value };
-    delete next[tempId];
-    temporarySignatureLinkSendingById.value = next;
   }
 }
 
@@ -2705,39 +2275,6 @@ function addExternalSignaturePerson(person: Dict): void {
   signatureMessageType.value = "success";
 }
 
-function addOtherSignatureDraft(): void {
-  if (addOtherSignatureDisabledReason.value) return;
-  const draftId = `other-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const role = signatureRole.value;
-  otherSignatureDrafts.value = [
-    ...otherSignatureDrafts.value,
-    {
-      draft_id: draftId,
-      role,
-      display_name: nextOtherSignatureDisplayName(role),
-      status: "draft",
-      error: "",
-    },
-  ];
-  clearMopOutputState();
-  signatureSourceTab.value = "temporary";
-}
-
-function removeOtherSignatureDraft(draftId: string): void {
-  otherSignatureDrafts.value = otherSignatureDrafts.value.filter((item) => String(item.draft_id || "") !== draftId);
-  clearMopOutputState();
-}
-
-function temporarySignatureRowDisabledReason(draft: Dict): string {
-  if (temporarySignatureSendingByDraft.value[String(draft.draft_id || "")]) return "";
-  if (!selectedNotice.value) return "请先选择左侧维保通告";
-  if (!selectedNotice.value.notice_key) return "当前通告缺少记忆键，无法创建临时签名";
-  const recipients = selectedFormalSignaturePeople("implementer").filter((person) => String(person.open_id || "").trim());
-  if (!recipients.length) return "请先选择带飞书身份的维护实施人";
-  if (String(draft.status || "") === "sent") return "签名链接已发送";
-  return "";
-}
-
 function selectedPendingFormalSignaturePeople(): Dict[] {
   return [
     ...selectedFormalSignaturePeople("implementer"),
@@ -2786,73 +2323,6 @@ function updateFormalSignaturePolling(): void {
 
 function updateTemporarySignaturePolling(): void {
   temporarySignaturePolling.update(temporarySignaturePollNeeded());
-}
-
-async function sendTemporarySignatureLinkForDraft(draft: Dict): Promise<void> {
-  const draftId = String(draft?.draft_id || "").trim();
-  if (!draftId || temporarySignatureRowDisabledReason(draft)) return;
-  const role = String(draft.role || signatureRole.value) === "auditor" ? "auditor" : "implementer";
-  const displayName = String(draft.display_name || "").trim() || nextOtherSignatureDisplayName(role);
-  const recipients = [
-    ...new Set(
-      selectedFormalSignaturePeople("implementer")
-        .map((person) => String(person.open_id || "").trim())
-        .filter(Boolean),
-    ),
-  ];
-  temporarySignatureSendingByDraft.value = {
-    ...temporarySignatureSendingByDraft.value,
-    [draftId]: true,
-  };
-  otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
-    String(item.draft_id || "") === draftId
-      ? { ...item, display_name: displayName, status: "sending", error: "" }
-      : item
-  ));
-  signatureMessage.value = "";
-  signatureMessageType.value = "";
-  try {
-    const data = await sendTemporarySignatureLink({
-      scope: scope.value,
-      noticeKey: selectedNotice.value?.notice_key || "",
-      noticeTitle: selectedNotice.value?.title || "",
-      specialty: selectedNoticeSpecialty.value,
-      role,
-      displayName,
-      recipientOpenIds: recipients,
-    });
-    if (data.signature) {
-      mergeTemporarySignatures([data.signature]);
-      unhideSignaturePerson(data.signature);
-      const tempId = String(data.signature.temp_id || "").trim();
-      if (tempId) {
-        temporarySignatureLinkSentAtById.value = {
-          ...temporarySignatureLinkSentAtById.value,
-          [tempId]: shortClockText(),
-        };
-        const errors = { ...temporarySignatureLinkErrorById.value };
-        delete errors[tempId];
-        temporarySignatureLinkErrorById.value = errors;
-      }
-    }
-    otherSignatureDrafts.value = otherSignatureDrafts.value.filter((item) => String(item.draft_id || "") !== draftId);
-    updateTemporarySignaturePolling();
-    signatureMessage.value = `${role === "auditor" ? "维护审核人" : "维护实施人"}${displayName}签名链接已发送。`;
-    signatureMessageType.value = "success";
-  } catch (error) {
-    const messageText = errorMessage(error, "发送失败");
-    otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
-      String(item.draft_id || "") === draftId
-        ? { ...item, status: "failed", error: messageText }
-        : item
-    ));
-    signatureMessage.value = errorMessage(error, "发送其他人员签名链接失败");
-    signatureMessageType.value = "failed";
-  } finally {
-    const next = { ...temporarySignatureSendingByDraft.value };
-    delete next[draftId];
-    temporarySignatureSendingByDraft.value = next;
-  }
 }
 
 function applyNoticeBinding(notice: Dict): boolean {
@@ -3133,9 +2603,6 @@ async function startMopPreview(): Promise<void> {
     if (Array.isArray(data.warnings)) {
       warnings.value = [...new Set([...warnings.value, ...data.warnings.map((item: unknown) => String(item))])];
     }
-    await nextTick();
-    ensureSignatureCanvasObserver();
-    resizeSignatureCanvas();
     if (!signaturePeople.value.length) {
       void loadSignaturePeople();
     }
@@ -3187,7 +2654,6 @@ watch(previewMode, () => {
 });
 
 onMounted(() => {
-  ensureSignatureCanvasObserver();
   window.addEventListener("scroll", scheduleActiveMopCellOverlayPosition, true);
   window.addEventListener("resize", scheduleActiveMopCellOverlayPosition);
   if (props.loggedIn) void loadPage();
@@ -3219,15 +2685,12 @@ onBeforeUnmount(() => {
     window.cancelAnimationFrame(activeMopCellOverlayFrame);
     activeMopCellOverlayFrame = 0;
   }
-  disconnectSignatureCanvasObserver();
   releaseMopEditSession();
 });
 
 watch(signatureRole, () => {
   signatureMessage.value = "";
   signatureMessageType.value = "";
-  clearSignatureCanvas();
-  void nextTick(() => resizeSignatureCanvas());
 });
 
 watch(signatureSelectedRecords, () => {

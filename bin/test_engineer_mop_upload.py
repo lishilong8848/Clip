@@ -59,12 +59,14 @@ class FakeMopUploadService(MaintenancePortalService):
                 "record_id": "person-1",
                 "name": "实施人",
                 "open_id": "ou_impl",
+                "can_receive_message": True,
                 "has_signature": True,
             },
             {
                 "record_id": "person-2",
                 "name": "审核人",
                 "open_id": "" if self.missing_auditor_open_id else "ou_audit",
+                "can_receive_message": not self.missing_auditor_open_id,
                 "has_signature": True,
             },
         ]

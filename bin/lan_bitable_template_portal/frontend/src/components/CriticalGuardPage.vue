@@ -341,7 +341,7 @@
                     <strong>{{ signerSummaryText }}</strong>
                   </div>
                   <button type="button" class="manage-signature-button" :disabled="templateOutdated" @click="signatureDrawerOpen = true">
-                    <PenLine :size="15" /> 管理签名
+                    <PenLine :size="15" /> 选择签名人员
                   </button>
                 </div>
               </div>

@@ -216,7 +216,7 @@
                       <td>{{ item.row }}</td>
                       <td><input v-model.trim="item.value_cell" :disabled="configurationLocked || busy" aria-label="分值单元格" /></td>
                       <td><input v-model.trim="item.score_cell" :disabled="configurationLocked || busy" aria-label="得分单元格" /></td>
-                      <td><input v-model.number="item.score" type="number" min="0" max="100" step="0.5" :disabled="configurationLocked || busy" aria-label="分值" /></td>
+                      <td><input v-model.number="item.score" type="number" min="0" max="100" step="1" :disabled="configurationLocked || busy" aria-label="分值" /></td>
                     </tr>
                   </tbody>
                 </table>
@@ -358,6 +358,17 @@
                 </label>
               </div>
 
+              <label v-if="selectedDrill?.configuration?.mapping?.scenario" class="scenario-field">
+                <span>模拟场景（包括故障点与故障现象）</span>
+                <textarea
+                  v-model="execution.simulation_scenario"
+                  rows="3"
+                  maxlength="5000"
+                  :disabled="busy"
+                  @input="markDirty"
+                />
+              </label>
+
               <section class="people-panel">
                 <header>
                   <div><Users :size="18" /><strong>参演人员</strong><span>{{ participantIds.length }}/10</span></div>
@@ -407,8 +418,7 @@
                         :label="`步骤${stepIndex(step)}执行人${slot}`"
                         :model-value="personOptionLabel(stepSignerIds(step.row)[slot - 1] || '')"
                         :options="stepSignerOptionLabels(step.row, slot - 1)"
-                        :disabled="busy || (isEccStep(step) && slot === 1)"
-                        required
+                        :disabled="busy"
                         @update:model-value="updateStepSigner(step, slot - 1, $event)"
                       />
                     </label>
@@ -423,7 +433,7 @@
                 title="存在缺失签名"
                 :text="`${missingSignaturePeople.map(personName).join('、')} 尚未保存签名，可保存草稿，但生成前必须补齐。`"
               />
-              <div v-if="missingSignaturePeople.length" class="signature-actions">
+              <div class="signature-actions">
                 <button
                   type="button"
                   class="secondary-button compact"
@@ -431,27 +441,7 @@
                   @click="refreshSignaturePeople"
                 >
                   <RefreshCw :size="15" :class="{ spinning: peopleRefreshing }" />
-                  {{ peopleRefreshing ? "正在刷新" : "刷新签名状态" }}
-                </button>
-                <button
-                  v-for="person in missingSignaturePeople"
-                  :key="personId(person)"
-                  type="button"
-                  class="secondary-button compact"
-                  :disabled="Boolean(signatureLinkBusy[personId(person)])"
-                  @click="sendMissingSignatureLink(person)"
-                >
-                  <Send :size="15" /> {{ signatureLinkBusy[personId(person)] ? "发送中" : `发送${personName(person)}签名链接` }}
-                </button>
-                <button
-                  v-for="person in missingSignaturePeople.filter(isCurrentUserPerson)"
-                  :key="`web-sign-${personId(person)}`"
-                  type="button"
-                  class="primary-button compact"
-                  :disabled="signatureSaving"
-                  @click="openSignaturePad(person)"
-                >
-                  <PenLine :size="15" /> {{ `手写补录${personName(person)}签名` }}
+                  {{ peopleRefreshing ? "正在刷新" : "刷新签名" }}
                 </button>
               </div>
 
@@ -509,32 +499,6 @@
       @resolve="resolveDiscardPrompt"
     />
 
-    <MopSignaturePadModal
-      :open="Boolean(signaturePadPerson)"
-      :title="signaturePadPerson ? personName(signaturePadPerson) : '手写签名'"
-      role-label="演练人员签名"
-      :saving="signatureSaving"
-      :message="signaturePadMessage"
-      :message-type="signaturePadMessageType"
-      :save-disabled-reason="signatureHasInk ? '' : '请先在签名区域手写签名'"
-      @close="closeSignaturePad"
-      @clear="clearSignatureCanvas"
-      @save="saveDrillSignature"
-    >
-      <div class="drill-signature-canvas">
-        <button type="button" class="sign-clear-inline" :disabled="signatureSaving" @click="clearSignatureCanvas">清空</button>
-        <canvas
-          ref="signatureCanvasRef"
-          aria-label="演练人员手写签名区域"
-          @pointerdown="startSignatureDraw"
-          @pointermove="moveSignatureDraw"
-          @pointerup="endSignatureDraw"
-          @pointercancel="endSignatureDraw"
-          @pointerleave="endSignatureDraw"
-        ></canvas>
-        <div v-if="!signatureHasInk" class="sign-placeholder">在此处手写签名</div>
-      </div>
-    </MopSignaturePadModal>
 
     <ConfirmDialog
       :open="Boolean(deleteTarget)"
@@ -573,7 +537,6 @@ import {
   ListChecks,
   Loader2,
   Printer,
-  PenLine,
   RefreshCw,
   Save,
   Send,
@@ -584,11 +547,9 @@ import {
 } from "lucide-vue-next";
 import { ApiError, requestJson, type Dict } from "../api/client";
 import { navigate } from "../navigation";
-import { saveStaffSignature, sendStaffSignatureLink } from "../mopSignatureApi";
-import { useMopSignatureCanvas } from "../useMopSignatureCanvas";
+import { refreshSignatureDirectory } from "../mopSignatureApi";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
-import MopSignaturePadModal from "./MopSignaturePadModal.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
 
@@ -686,14 +647,6 @@ const peopleExpanded = ref(false);
 const lastSavedAt = ref("");
 const deleteTarget = ref<Dict | null>(null);
 const discardPrompt = ref<DiscardPrompt | null>(null);
-const signatureLinkBusy = ref<Record<string, boolean>>({});
-const signaturePadPerson = ref<Dict | null>(null);
-const signatureSaving = ref(false);
-const signaturePadMessage = ref("");
-const signaturePadMessageType = ref("");
-const signatureCanvas = useMopSignatureCanvas();
-const signatureCanvasRef = signatureCanvas.canvasRef;
-const signatureHasInk = signatureCanvas.hasInk;
 const peopleScopeLoaded = ref("");
 const configBaseline = ref("{}");
 const activeSheet = ref<SheetKind>(routeParams.get("sheet") === "assessment" ? "assessment" : "record");
@@ -717,6 +670,7 @@ const recordMappingFields: MappingField[] = [
   { path: "mapping.drill_date", label: "演练日期" },
   { path: "mapping.drill_name", label: "演练名称" },
   { path: "mapping.area", label: "涉及区域" },
+  { path: "mapping.scenario", label: "模拟场景" },
   { path: "mapping.commander", label: "总指挥人" },
   { path: "mapping.participants", label: "参演人员" },
   { path: "mapping.predicted_total", label: "预估总用时" },
@@ -744,6 +698,7 @@ const assessmentMappingFields: MappingField[] = [
   { path: "mapping.assessment.end_time", label: "结束时间" },
   { path: "mapping.assessment.total_score", label: "总分" },
 ];
+const blankStepSignerOption = "留空（事后签名）";
 
 const activeScope = computed(() => normalizeBuilding(props.scope || routeParams.get("scope") || ""));
 const printSheet = computed<SheetKind>(() => routeParams.get("sheet") === "assessment" ? "assessment" : "record");
@@ -755,7 +710,7 @@ const viewMode = computed<"landing" | "admin" | "building">(() => {
 const pageTitle = computed(() => viewMode.value === "admin" ? "模板与发布" : viewMode.value === "building" ? `${activeScope.value}楼演练` : "选择入口");
 const adminDirty = computed(() => Boolean(selectedDrill.value && JSON.stringify(configDraft.value) !== configBaseline.value));
 const hasUnsavedChanges = computed(() => dirty.value || adminDirty.value);
-const busy = computed(() => loading.value || saving.value || uploading.value || generating.value || peopleRefreshing.value || ["queued", "generating", "syncing"].includes(String(execution.value?.status || "")));
+const busy = computed(() => loading.value || saving.value || uploading.value || generating.value || ["queued", "generating", "syncing"].includes(String(execution.value?.status || "")));
 const landingScopes = computed(() => {
   const source = Array.isArray(bootstrap.value?.scopes) ? bootstrap.value?.scopes : [];
   if (source.length) {
@@ -795,7 +750,7 @@ const executionSteps = computed<Dict[]>(() => {
 const configurationLocked = computed(() => Boolean(selectedDrill.value?.configuration_locked || selectedDrill.value?.has_executions));
 const commanderId = computed(() => String(execution.value?.commander?.record_id || ""));
 const participantIds = computed<string[]>(() => (Array.isArray(execution.value?.participants) ? execution.value?.participants : []).map((person: Dict) => personId(person)).filter(Boolean));
-const selectedParticipants = computed<Dict[]>(() => participantIds.value.map((id) => people.value.find((person) => personId(person) === id) || execution.value?.participants?.find((person: Dict) => personId(person) === id) || { record_id: id, name: id }));
+const selectedParticipants = computed<Dict[]>(() => participantIds.value.map((id) => personById(id) || execution.value?.participants?.find((person: Dict) => personId(person) === id) || { record_id: id, name: id }));
 const currentBuildingPeople = computed(() => people.value.filter((person) => personBelongsToScope(person, activeScope.value)));
 const searchedPeople = computed(() => {
   const query = peopleSearch.value.toLocaleLowerCase("zh-CN");
@@ -817,7 +772,7 @@ const filteredPeople = computed(() => {
 });
 const missingSignaturePeople = computed(() => selectedParticipants.value.filter((person) => !person.has_signature));
 const executionStatusText = computed(() => statusLabel(execution.value?.status || "draft"));
-const generationCurrent = computed(() => Number(execution.value?.generated_version || 0) > 0 && Number(execution.value?.generated_version || 0) === Number(execution.value?.execution_version || execution.value?.version || 0));
+const generationCurrent = computed(() => execution.value?.generation_rule_current !== false && Number(execution.value?.generated_version || 0) > 0 && Number(execution.value?.generated_version || 0) === Number(execution.value?.execution_version || execution.value?.version || 0));
 const canUseGeneratedFile = computed(() => Boolean(execution.value?.generated && generationCurrent.value && !dirty.value));
 const generatedDisabledReason = computed(() => canUseGeneratedFile.value ? "" : dirty.value || !generationCurrent.value ? "内容已修改，请重新生成后使用。" : "尚未生成演练文件。" );
 const generateValidationErrors = computed(() => validateExecution());
@@ -1011,7 +966,16 @@ async function refreshSignaturePeople(): Promise<void> {
   if (peopleRefreshing.value || !activeScope.value) return;
   peopleRefreshing.value = true;
   try {
-    await loadPeople({ force: true, refresh: true });
+    const scopeAtStart = activeScope.value;
+    const data = await refreshSignatureDirectory();
+    if (disposed || activeScope.value !== scopeAtStart) return;
+    people.value = uniquePeople((data.people || []).map((p: Dict) => ({
+      ...p, source_record_id: p.record_id, record_id: p.source === "external" ? "external:" + p.record_id : p.record_id,
+    })));
+    if (Object.values(data.sources || {}).some((item: any) => !item.ok)) {
+      setNotice("部分人员表刷新失败，已保留上次数据，请稍后重试。", "warning");
+      return;
+    }
     const pending = missingSignaturePeople.value.length;
     setNotice(
       pending ? "签名状态已刷新，仍有人员未完成签名。" : "签名状态已刷新，可生成演练文件。",
@@ -1073,6 +1037,7 @@ function normalizeExecution(value: Dict, drill: Dict | null, scope: string): Dic
   next.status ||= "draft";
   next.drill_date ||= today;
   next.first_start_time ||= "09:00";
+  next.simulation_scenario = String(next.simulation_scenario ?? drill?.configuration?.scenario_default_text ?? "");
   next.commander = next.commander && typeof next.commander === "object" ? next.commander : {};
   next.participants = Array.isArray(next.participants) ? next.participants : [];
   next.step_signers = next.step_signers && typeof next.step_signers === "object" ? next.step_signers : {};
@@ -1095,7 +1060,6 @@ function ensureExecutionSelectionShape(): void {
     const count = Math.max(1, Number(step.signature_slots || 1));
     const ids = arrayFrom(execution.value.step_signers[key]).map(String).filter(Boolean).slice(0, count);
     while (ids.length < count) ids.push("");
-    if (isEccStep(step) && commanderId.value) ids[0] = commanderId.value;
     execution.value.step_signers[key] = ids;
   }
 }
@@ -1109,7 +1073,7 @@ function personName(person: Dict | null | undefined): string {
 }
 
 function personMeta(person: Dict): string {
-  return [person.scope_text || person.scope || person.building || person.building_name, person.employee_no || person.staff_no || person.job_number, person.position || person.role_name || person.job_title]
+  return [person.source === "external" || personId(person).startsWith("external:") ? "临时人员签名" : "正式人员", person.scope_text || person.scope || person.building || person.building_name, person.employee_no || person.staff_no || person.job_number, person.position || person.role_name || person.job_title]
     .map((item) => String(item || "").trim()).filter(Boolean).join(" · ") || "人员表";
 }
 
@@ -1136,7 +1100,9 @@ function uniquePeople(items: Dict[]): Dict[] {
 }
 
 function personById(id: string): Dict | null {
-  return people.value.find((person) => personId(person) === String(id || "")) || null;
+  const person = people.value.find((person) => personId(person) === String(id || "")
+    || (person.record_aliases || []).includes(id.startsWith("external:") ? id : "staff:" + id));
+  return person ? { ...person, record_id: id } : null;
 }
 
 function personOptionLabelFromPerson(person: Dict): string {
@@ -1152,10 +1118,6 @@ function personFromOptionLabel(label: string): Dict | null {
   return people.value.find((person) => personOptionLabelFromPerson(person) === label) || null;
 }
 
-function isCurrentUserPerson(person: Dict): boolean {
-  const currentOpenId = String(props.currentUser?.open_id || "").trim();
-  return Boolean(currentOpenId && currentOpenId === String(person.open_id || "").trim());
-}
 
 function selectCommanderByLabel(label: string): void {
   if (!execution.value) return;
@@ -1170,7 +1132,6 @@ function selectCommanderByLabel(label: string): void {
   ].slice(0, 10);
   for (const step of executionSteps.value) {
     const ids = stepSignerIds(step.row).map((id) => id === oldId ? "" : id);
-    if (isEccStep(step)) ids[0] = nextId;
     execution.value.step_signers[String(step.row)] = ids;
   }
   markDirty();
@@ -1212,13 +1173,20 @@ function stepSignerOptionLabels(row: unknown, slot: number): string[] {
   const ids = stepSignerIds(row);
   const current = String(ids[slot] || "");
   const occupied = new Set(ids.filter((id, index) => index !== slot && id));
-  return selectedParticipants.value
+  return [blankStepSignerOption, ...selectedParticipants.value
     .filter((person) => personId(person) === current || !occupied.has(personId(person)))
-    .map(personOptionLabelFromPerson);
+    .map(personOptionLabelFromPerson)];
 }
 
 function updateStepSigner(step: Dict, slot: number, label: string): void {
   if (!execution.value) return;
+  if (label === blankStepSignerOption) {
+    const ids = stepSignerIds(step.row);
+    ids[slot] = "";
+    execution.value.step_signers[String(step.row)] = ids;
+    markDirty();
+    return;
+  }
   const person = personFromOptionLabel(label);
   if (!person) return;
   const id = personId(person);
@@ -1256,7 +1224,7 @@ function validateExecution(): string[] {
   for (const step of executionSteps.value) {
     const needed = Math.max(1, Number(step.signature_slots || 1));
     const ids = stepSignerIds(step.row).filter(Boolean);
-    if (ids.length !== needed || new Set(ids).size !== needed) errors.push(`步骤 ${stepIndex(step)} 需要选择 ${needed} 名不同的执行人`);
+    if (ids.length > needed || new Set(ids).size !== ids.length) errors.push(`步骤 ${stepIndex(step)} 最多选择 ${needed} 名不同的执行人`);
   }
   if (missingSignaturePeople.value.length) errors.push(`${missingSignaturePeople.value.map(personName).join("、")}尚未保存签名`);
   return errors;
@@ -1268,6 +1236,7 @@ function buildExecutionPayload(): Dict {
     expected_version: Number(execution.value.version || 0),
     drill_date: execution.value.drill_date,
     first_start_time: execution.value.first_start_time,
+    simulation_scenario: String(execution.value.simulation_scenario || ""),
     commander: compactPerson(execution.value.commander || {}),
     participants: selectedParticipants.value.map(compactPerson),
     step_signers: deepClone(execution.value.step_signers || {}),
@@ -1386,91 +1355,6 @@ function clearStatusPoll(resetKey = false): void {
   }
 }
 
-async function sendMissingSignatureLink(person: Dict): Promise<void> {
-  const id = personId(person);
-  if (!id || signatureLinkBusy.value[id]) return;
-  signatureLinkBusy.value = { ...signatureLinkBusy.value, [id]: true };
-  try {
-    await sendStaffSignatureLink(id, personName(person), activeScope.value, "drill", String(selectedDrill.value?.name || "演练管理"));
-    setNotice(`${personName(person)}的签名链接已发送`, "success");
-  } catch (caught) {
-    setFailure(caught, "签名链接发送失败");
-  } finally {
-    const next = { ...signatureLinkBusy.value };
-    delete next[id];
-    signatureLinkBusy.value = next;
-  }
-}
-
-async function openSignaturePad(person: Dict): Promise<void> {
-  if (!isCurrentUserPerson(person)) {
-    setNotice("网页手写只能保存当前登录账号本人的签名，请向该人员发送签名链接。", "warning");
-    return;
-  }
-  signaturePadPerson.value = person;
-  signaturePadMessage.value = "";
-  signaturePadMessageType.value = "";
-  signatureCanvas.resetInk();
-  await nextTick();
-  signatureCanvas.disconnect();
-  signatureCanvas.observe();
-  signatureCanvas.resize();
-}
-
-function closeSignaturePad(): void {
-  if (signatureSaving.value) return;
-  signatureCanvas.stopDrawing();
-  signatureCanvas.disconnect();
-  signatureCanvas.resetInk();
-  signaturePadPerson.value = null;
-}
-
-function clearSignatureCanvas(): void {
-  signatureCanvas.clear();
-}
-
-function startSignatureDraw(event: PointerEvent): void {
-  signatureCanvas.startDraw(event, Boolean(signaturePadPerson.value && !signatureSaving.value));
-}
-
-function moveSignatureDraw(event: PointerEvent): void {
-  signatureCanvas.moveDraw(event);
-}
-
-function endSignatureDraw(event: PointerEvent): void {
-  signatureCanvas.endDraw(event);
-}
-
-async function saveDrillSignature(): Promise<void> {
-  const person = signaturePadPerson.value;
-  if (!person || !signatureHasInk.value || signatureSaving.value) return;
-  signatureSaving.value = true;
-  signaturePadMessage.value = "";
-  signaturePadMessageType.value = "";
-  try {
-    await saveStaffSignature(personId(person), personName(person), signatureCanvas.dataUrl());
-    people.value = people.value.map((item) => personId(item) === personId(person)
-      ? { ...item, has_signature: true, signature_count: 1 }
-      : item);
-    signaturePadMessage.value = `${personName(person)}的签名已保存。`;
-    signaturePadMessageType.value = "success";
-    signatureCanvas.clear();
-    signatureCanvas.disconnect();
-    signaturePadPerson.value = null;
-    try {
-      await loadPeople({ force: true, refresh: true });
-    } catch {
-      // The confirmed local state is enough; the next manual refresh will reconcile the list.
-    }
-    await loadPreview(activeSheet.value, { silent: true });
-    setNotice(`${personName(person)}的签名已保存，可继续生成演练文件。`, "success");
-  } catch (caught) {
-    signaturePadMessage.value = caught instanceof Error ? caught.message : "保存签名失败";
-    signaturePadMessageType.value = "failed";
-  } finally {
-    signatureSaving.value = false;
-  }
-}
 
 async function loadPreview(sheet: SheetKind, options: { silent?: boolean } = {}): Promise<void> {
   if (!selectedDrillId.value || !activeScope.value) return;
@@ -2228,10 +2112,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 }
 label { display: grid; gap: 6px; min-width: 0; color: #475569; font-size: 12px; font-weight: 800; }
 label > span b { color: #e11d48; }
-input, select {
+input, select, textarea {
   width: 100%; min-height: 42px; border: 1px solid #d8e5f7; border-radius: 14px; padding: 0 11px;
   background: #fff; color: #0f172a; font: inherit;
 }
+textarea { resize: vertical; min-height: 82px; padding-block: 10px; line-height: 1.6; }
+.scenario-field { border: 1px solid #dbe7f5; border-radius: 17px; padding: 14px; background: #fbfdff; }
 .wide { grid-column: 1 / -1; }
 .drill-scope-picker { margin: 0; padding: 10px 12px; border: 1px solid #d8e5f7; border-radius: 14px; }
 .drill-scope-picker legend { color: #475569; font-size: 12px; font-weight: 800; }

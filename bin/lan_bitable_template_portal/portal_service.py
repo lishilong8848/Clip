@@ -1435,6 +1435,8 @@ class MaintenancePortalService:
         self._engineer_mop_cache: dict[str, Any] | None = None
         self._signature_people_cache_lock = threading.RLock()
         self._signature_people_cache: dict[str, Any] | None = None
+        from .signature_management import SignatureManagement
+        self._signature_management = SignatureManagement(self)
         self._external_signature_people_cache_lock = threading.RLock()
         self._external_signature_people_cache: dict[str, Any] | None = None
         self._water_consumption_refresh_lock = threading.Lock()
@@ -1473,6 +1475,13 @@ class MaintenancePortalService:
         self._jobs: dict[str, dict[str, Any]] = self._load_action_jobs_from_state()
         self._handover_password_reset: dict[str, Any] | None = None
         self._ensure_signature_crypto_ready()
+
+    @property
+    def signature_management(self):
+        if not hasattr(self, "_signature_management"):
+            from .signature_management import SignatureManagement
+            self._signature_management = SignatureManagement(self)
+        return self._signature_management
 
     def _ensure_signature_crypto_ready(self) -> None:
         try:
@@ -29660,6 +29669,29 @@ class MaintenancePortalService:
             work_summary = {}
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         source_work_type = self._record_source_work_type(record)
+        source_event_id = ""
+        event_title = ""
+        if work_type == WORK_TYPE_REPAIR:
+            raw_fields = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            display_fields = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            event_ids = self._repair_management_record_ids(
+                raw_fields.get("关联事件单")
+                or display_fields.get("关联事件单")
+            )
+            source_event_id = event_ids[0] if event_ids else ""
+            event_title = self._repair_management_plain_text(
+                display_fields.get("事件描述")
+                or display_fields.get("故障发生现象描述")
+                or display_fields.get("故障维修原因")
+            )
         source_progress = self._source_record_progress(record)
         local_status = str(work_summary.get("status") or "").strip()
         if local_status == "已结束" or work_summary.get("ended_at"):
@@ -29684,6 +29716,12 @@ class MaintenancePortalService:
         return {
             "record_id": record_id,
             "source_record_id": record_id,
+            "repair_management_record_id": (
+                record_id if work_type == WORK_TYPE_REPAIR else ""
+            ),
+            "source_event_id": source_event_id,
+            "related_event_record_id": source_event_id,
+            "event_title": event_title,
             "source_work_type": source_work_type,
             "converted_from_work_type": str(record.get("converted_from_work_type") or ""),
             "converted_to_work_type": str(record.get("converted_to_work_type") or ""),
@@ -32697,6 +32735,53 @@ class MaintenancePortalService:
             else target_record.get("fields")
         )
         target_fields = target_fields if isinstance(target_fields, dict) else {}
+        if work_type == WORK_TYPE_REPAIR:
+            target_raw_fields = (
+                target_record.get("raw_fields")
+                if isinstance(target_record.get("raw_fields"), dict)
+                else {}
+            )
+            summary_ids = self._repair_management_record_ids(
+                target_raw_fields.get(REPAIR_TARGET_SUMMARY_ID_FIELD_NAME)
+                or target_fields.get(REPAIR_TARGET_SUMMARY_ID_FIELD_NAME)
+            )
+            summary_id = (
+                (summary_ids or [""])[0]
+                or str(payload.get("repair_management_record_id") or "").strip()
+                or canonical_source_record_id(payload)
+            )
+            if summary_id.startswith("rec"):
+                payload["source_record_id"] = summary_id
+                payload["repair_management_record_id"] = summary_id
+                try:
+                    project = self._repair_relation_snapshot_records(
+                        REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                        [summary_id],
+                    ).get(summary_id, {})
+                except Exception:
+                    project = {}
+                project_raw = (
+                    project.get("raw_fields")
+                    if isinstance(project.get("raw_fields"), dict)
+                    else {}
+                )
+                project_display = (
+                    project.get("display_fields")
+                    if isinstance(project.get("display_fields"), dict)
+                    else {}
+                )
+                event_ids = self._repair_management_record_ids(
+                    project_raw.get("关联事件单")
+                    or project_display.get("关联事件单")
+                )
+                if event_ids:
+                    payload["source_event_id"] = event_ids[0]
+                    payload["related_event_record_id"] = event_ids[0]
+                    payload["event_title"] = self._repair_management_plain_text(
+                        project_display.get("事件描述")
+                        or project_display.get("故障发生现象描述")
+                        or project_display.get("故障维修原因")
+                    )
         site_photos = target_fields.get("过程现场图片")
         payload["site_photos"] = copy.deepcopy(site_photos) if isinstance(site_photos, list) else []
         payload["site_photo_count"] = len(payload["site_photos"])
@@ -36612,6 +36697,7 @@ class MaintenancePortalService:
         source: str,
         open_id: str = "",
         employee_no: str = "",
+        before_write: Any = None,
     ) -> tuple[str, dict[str, Any]]:
         aad = self._signature_crypto.build_aad(
             app_token=SIGNATURE_APP_TOKEN,
@@ -36630,6 +36716,8 @@ class MaintenancePortalService:
             encrypted_bytes=encrypted_bytes,
             file_name=encrypted_signature_file_name(display_name),
         )
+        if before_write is not None:
+            before_write(file_token, metadata)
         try:
             self._patch_record_fields(
                 app_token=SIGNATURE_APP_TOKEN,
@@ -37620,6 +37708,10 @@ class MaintenancePortalService:
                     signature_crypto_metadata
                 )
                 building = self._mop_field_text(fields, ["楼栋", "机楼/专业"])
+                account_nature = self._mop_field_text(fields, ["账号性质"])
+                can_receive_message = bool(
+                    open_id and account_nature.strip().upper() == "VNET"
+                )
                 has_signature = bool(signature_version and portable_signature)
                 person = {
                     "record_id": record_id,
@@ -37632,8 +37724,10 @@ class MaintenancePortalService:
                     "position": self._mop_field_text(fields, ["岗位"]),
                     "team": self._mop_field_text(fields, ["班组"]),
                     "shift": self._mop_field_text(fields, ["班次"]),
+                    "account_nature": account_nature,
+                    "can_receive_message": can_receive_message,
                     "has_signature": has_signature,
-                    "signature_count": len(attachments) if has_signature else 0,
+                    "signature_count": len(attachments),
                     "signature_version": signature_version,
                     "signature_crypto_version": signature_crypto_version,
                     "portable_signature": portable_signature,
@@ -37684,7 +37778,8 @@ class MaintenancePortalService:
         record_id = str(record_id or "").strip()
         notice_key = str(notice_key or "").strip()
         operator_open_id = str(operator_open_id or "").strip()
-        people = self._load_signature_people(force=bool(refresh or record_id))
+        people = (self._load_signature_people(force=True) if record_id else
+                  [p for p in self.signature_management.directory(refresh=refresh)["people"] if p["source"] == "staff"])
         self._maybe_start_daily_attachment_cache_refresh()
 
         def matches_query(person: dict[str, Any]) -> bool:
@@ -37726,9 +37821,10 @@ class MaintenancePortalService:
             for person in limited:
                 signer_record_id = str(person.get("record_id") or "").strip()
                 signer_open_id = str(person.get("open_id") or "").strip()
+                can_receive_message = bool(person.get("can_receive_message"))
                 confirmed = bool(
-                    signer_open_id
-                    and signer_open_id == operator_open_id
+                    not can_receive_message
+                    or (signer_open_id and signer_open_id == operator_open_id)
                 )
                 usage_status = "confirmed" if confirmed else ""
                 if notice_key and not confirmed and signer_record_id and signer_open_id:
@@ -37745,6 +37841,8 @@ class MaintenancePortalService:
                 person["usage_confirmed"] = confirmed
                 person["usage_rejected"] = rejected
                 person["usage_confirmation_required"] = bool(
+                    can_receive_message
+                    and
                     signer_open_id
                     and signer_open_id != operator_open_id
                     and not confirmed
@@ -37808,10 +37906,8 @@ class MaintenancePortalService:
                     )
                     for attachment in self._extract_signature_attachments(fields)
                 ]
-                if not attachments:
-                    continue
-                first_signature = attachments[0]
-                signature_version = self._signature_attachment_version(first_signature)
+                first_signature = attachments[0] if attachments else {}
+                signature_version = self._signature_attachment_version(first_signature) if first_signature else ""
                 signature_crypto_metadata = self._signature_crypto.metadata_from_field(
                     fields.get(TEMP_SIGNATURE_KEY_FIELD)
                 )
@@ -37838,12 +37934,14 @@ class MaintenancePortalService:
                         "specialty": specialty,
                         "employee_no": self._mop_field_text(fields, [TEMP_SIGNATURE_EMPLOYEE_NO_FIELD, "工号"]),
                         "certificate": self._mop_field_text(fields, [TEMP_SIGNATURE_CERT_FIELD, "持证"]),
-                        "has_signature": bool(portable_signature),
+                        "has_signature": bool(signature_version and portable_signature),
                         "signature_count": len(attachments),
                         "signature_version": signature_version,
                         "signature_crypto_version": signature_crypto_version,
                         "portable_signature": portable_signature,
-                        "signature_requires_resign": bool(not portable_signature),
+                        "signature_requires_resign": bool(signature_version and not portable_signature),
+                        "origin_staff_record_id": self._mop_field_text(fields, ["来源正式人员ID"]),
+                        "historical_record_ids": re.findall(r"rec[A-Za-z0-9]+", self._mop_field_text(fields, ["历史临时人员ID"])),
                         "latest_publish_time": latest_publish_time,
                         "raw_fields": fields,
                     }
@@ -37872,6 +37970,22 @@ class MaintenancePortalService:
             }
         return people
 
+    def drill_signature_people(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+        result = []
+        for row in self.signature_management.directory(refresh=refresh)["people"]:
+            person = dict(row)
+            rid = str(person["record_id"])
+            person["source_record_id"] = rid
+            person["record_id"] = f"external:{rid}" if person["source"] == "external" else rid
+            result.append(person)
+        return result
+
+    def drill_signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
+        record_id = str(record_id or "").strip()
+        if record_id.startswith("external:"):
+            return self.external_signature_image_bytes(record_id=record_id.split(":", 1)[1])
+        return self.signature_image_bytes(record_id=record_id)
+
     def temporary_signature_people(
         self,
         *,
@@ -37883,7 +37997,7 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope or "ALL")
         query_text = re.sub(r"\s+", "", str(query or "")).lower()
-        people = self._load_external_signature_people(force=bool(refresh))
+        people = [p for p in self.signature_management.directory(refresh=refresh)["people"] if p["source"] == "external"]
 
         def matches_query(person: dict[str, Any]) -> bool:
             if not query_text:
@@ -38143,6 +38257,10 @@ class MaintenancePortalService:
             )
         if not person:
             raise PortalError("签名人员记录不存在。")
+        if not person.get("has_signature"):
+            effective = self.signature_management.directory()["resolved"].get(f"staff:{record_id}")
+            if effective and effective.get("source") == "external" and effective.get("has_signature"):
+                return self.external_signature_image_bytes(record_id=effective["record_id"])
         fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
         attachments = [
             self._attachment_with_cache_context(
@@ -38174,12 +38292,22 @@ class MaintenancePortalService:
         if not record_id:
             raise PortalError("缺少其他人员签名记录。")
         people = self._load_external_signature_people(force=False)
+        aliases = [row for row in people if record_id in (row.get("historical_record_ids") or []) and row.get("record_id") != record_id]
+        if len(aliases) > 1:
+            raise PortalError("历史签名ID对应多个记录，请管理员核对。")
+        if aliases:
+            record_id = str(aliases[0]["record_id"])
         person = next(
             (item for item in people if str(item.get("record_id") or "") == record_id),
             None,
         )
         if not person:
             people = self._load_external_signature_people(force=True)
+            aliases = [row for row in people if record_id in (row.get("historical_record_ids") or []) and row.get("record_id") != record_id]
+            if len(aliases) > 1:
+                raise PortalError("历史签名ID对应多个记录，请管理员核对。")
+            if aliases:
+                record_id = str(aliases[0]["record_id"])
             person = next(
                 (item for item in people if str(item.get("record_id") or "") == record_id),
                 None,
@@ -38457,6 +38585,13 @@ class MaintenancePortalService:
                 skipped.append({"record_id": record_id, "reason": "签名人员记录不存在"})
                 continue
             person_open_id = str(person.get("open_id") or "").strip()
+            if not person.get("can_receive_message"):
+                skipped.append({
+                    "record_id": record_id,
+                    "name": person.get("name") or "",
+                    "reason": "账号性质不是VNET，不直接发送消息",
+                })
+                continue
             if not person_open_id:
                 skipped.append({"record_id": record_id, "name": person.get("name") or "", "reason": "缺少 openid"})
                 continue
@@ -38854,6 +38989,12 @@ class MaintenancePortalService:
         return result
 
     def save_temporary_signature(
+        self, *, temp_id: str, token: str, signature_png: str,
+    ) -> dict[str, Any]:
+        with self.signature_management.lock("legacy:" + str(temp_id)):
+            return self._save_temporary_signature_locked(temp_id=temp_id, token=token, signature_png=signature_png)
+
+    def _save_temporary_signature_locked(
         self,
         *,
         temp_id: str,
@@ -38868,6 +39009,10 @@ class MaintenancePortalService:
         )
         if not session:
             raise PortalError("临时签名链接无效或已过期。")
+        if str(session.get("status") or "") == "signed":
+            return self._public_temporary_signature_session(session)
+        if str(session.get("status") or "") == "creating" and not session.get("temporary_record_id"):
+            raise PortalError("上次人员创建结果待核验，请从首页指纹入口选择已有人员重新签名。")
         signature_bytes = self._transparent_signature_png(
             self._decode_signature_png(signature_png)
         )
@@ -38909,6 +39054,19 @@ class MaintenancePortalService:
         if specialty_values:
             fields[TEMP_SIGNATURE_SPECIALTY_FIELD] = specialty_values
         existing_record_id = str(session.get("temporary_record_id") or "").strip()
+        if not existing_record_id:
+            origin = str(payload.get("origin_staff_record_id") or "").strip()
+            people = self._load_external_signature_people(force=True)
+            matched = [p for p in people if origin and p.get("origin_staff_record_id") == origin]
+            if len(matched) > 1:
+                raise PortalConflictError("正式人员关联多个临时记录，请从指纹入口核对。")
+            if matched:
+                existing_record_id = str(matched[0]["record_id"])
+            elif any(str(p.get("name") or "").strip() == display_name for p in people):
+                raise PortalConflictError("已有同名临时人员，请从首页指纹入口核对并选择，不能重复新建。")
+            if origin:
+                self.signature_management.ensure_fields()
+                fields["来源正式人员ID"] = origin
         created_new_record = False
         if existing_record_id:
             self._patch_record_fields(
@@ -38919,6 +39077,9 @@ class MaintenancePortalService:
             )
             record_id = existing_record_id
         else:
+            self._state_store.update_mop_temporary_signature_session(
+                temp_id=str(session["temp_id"]), status="creating",
+            )
             created = self._create_record_fields(
                 app_token=SIGNATURE_APP_TOKEN,
                 table_id=TEMP_SIGNATURE_TABLE_ID,
@@ -38930,7 +39091,21 @@ class MaintenancePortalService:
             if not record_id:
                 raise PortalError("临时签名保存成功但未返回记录 ID。")
             created_new_record = True
+        self._state_store.update_mop_temporary_signature_session(
+            temp_id=str(session["temp_id"]), status="pending", temporary_record_id=record_id,
+        )
         safe_name = self._safe_mop_path_part(display_name, "temporary")
+        media_prepared = False
+        def remember_prepared(file_token: str, metadata: dict[str, Any]) -> None:
+            nonlocal media_prepared
+            media_prepared = True
+            self._state_store.update_mop_temporary_signature_session(
+                temp_id=str(session["temp_id"]),
+                payload_patch={
+                    "prepared_signature_file_token": file_token,
+                    "prepared_signature_crypto": metadata,
+                },
+            )
         try:
             file_token, metadata = self._save_encrypted_signature_record(
                 table_id=TEMP_SIGNATURE_TABLE_ID,
@@ -38940,15 +39115,22 @@ class MaintenancePortalService:
                 signature_bytes=signature_bytes,
                 display_name=safe_name,
                 source="temporary",
+                before_write=remember_prepared,
             )
         except Exception:
-            if created_new_record:
+            if created_new_record and not media_prepared:
                 with suppress(Exception):
                     self._delete_record_fields(
                         app_token=SIGNATURE_APP_TOKEN,
                         table_id=TEMP_SIGNATURE_TABLE_ID,
                         record_id=record_id,
                     )
+                self._state_store.update_mop_temporary_signature_session(
+                    temp_id=str(session["temp_id"]),
+                    status="failed",
+                    clear_temporary_record_id=True,
+                )
+            # Once media is prepared, keep the known record: a timeout may follow a successful write.
             raise
         updated = self._state_store.update_mop_temporary_signature_session(
             temp_id=str(session.get("temp_id") or ""),
@@ -40512,6 +40694,7 @@ class MaintenancePortalService:
         checkboxes = [item for item in (checkboxes or []) if isinstance(item, dict)]
         cell_edits = [item for item in (cell_edits or []) if isinstance(item, dict)]
         signatures = [item for item in (signatures or []) if isinstance(item, dict)]
+        signatures = self.signature_management.references(signatures)
         if not signatures:
             raise PortalError("请选择至少一个维护实施人或维护审核人签名。")
         signature_context_key = str(signature_context_key or notice_key or "").strip()
@@ -40781,6 +40964,7 @@ class MaintenancePortalService:
         notice_key: str,
         operator_open_id: str,
     ) -> list[dict[str, Any]]:
+        signatures = self.signature_management.references(signatures)
         role_to_label = {
             "implementer": "维护实施人",
             "auditor": "维护审核人",
@@ -40864,7 +41048,11 @@ class MaintenancePortalService:
                 {
                     "record_id": record_id,
                     "name": str(person.get("name") or record_id),
-                    "open_id": str(person.get("open_id") or "").strip(),
+                    "open_id": (
+                        str(person.get("open_id") or "").strip()
+                        if person.get("can_receive_message")
+                        else ""
+                    ),
                     "roles": [role for role in ("implementer", "auditor") if role in roles],
                     "role_labels": role_labels,
                 }
@@ -40909,6 +41097,8 @@ class MaintenancePortalService:
             person = people_by_id.get(record_id)
             if not person:
                 raise PortalError("签名人员记录不存在，请刷新后重试。")
+            if not person.get("can_receive_message"):
+                continue
             person_open_id = str(person.get("open_id") or "").strip()
             if person_open_id == operator_open_id:
                 continue
@@ -41146,6 +41336,7 @@ class MaintenancePortalService:
             raise PortalError("当前账号无权上传该楼栋的 MOP。")
 
         signature_items = [item for item in (signatures or []) if isinstance(item, dict)]
+        signature_items = self.signature_management.references(signature_items)
         signature_context_key = str(signature_context_key or notice_key or "").strip()
         self._ensure_mop_staff_signature_usage_confirmed(
             signatures=signature_items,
@@ -41172,7 +41363,7 @@ class MaintenancePortalService:
             fields=fields or [],
             checkboxes=checkboxes or [],
             cell_edits=cell_edits or [],
-            signatures=signatures or [],
+            signatures=signature_items,
         )
         file_token = self._upload_bitable_file(
             file_path=str(filled.get("path") or ""),
@@ -45292,6 +45483,7 @@ class MaintenancePortalService:
         references = self._normalize_critical_guard_signature_references(signatures)
         if not references:
             return []
+        references = self.signature_management.references(references)
         scope = str(response.get("scope") or "").strip().upper()
         notice_key = self._critical_guard_signature_context(response)
         operator_open_id = str(operator_open_id or "").strip()
@@ -45342,12 +45534,21 @@ class MaintenancePortalService:
                     raise PortalError("公司检查人记录不存在，请刷新人员后重新选择。")
                 signer_open_id = str(person.get("open_id") or "").strip()
                 usage_status = ""
+                can_receive_message = bool(person.get("can_receive_message"))
                 usage_confirmed = bool(
-                    operator_open_id
-                    and signer_open_id
-                    and signer_open_id == operator_open_id
+                    not can_receive_message
+                    or (
+                        operator_open_id
+                        and signer_open_id
+                        and signer_open_id == operator_open_id
+                    )
                 )
-                if not usage_confirmed and operator_open_id and signer_open_id:
+                if (
+                    can_receive_message
+                    and not usage_confirmed
+                    and operator_open_id
+                    and signer_open_id
+                ):
                     usage_status = self._state_store.mop_signature_usage_status(
                         scope=scope,
                         notice_key=notice_key,
@@ -45381,7 +45582,8 @@ class MaintenancePortalService:
                         "usage_rejected": usage_status == "rejected",
                         "usage_confirmation_pending": usage_status == "pending",
                         "usage_confirmation_required": bool(
-                            signer_open_id
+                            can_receive_message
+                            and signer_open_id
                             and signer_open_id != operator_open_id
                             and not usage_confirmed
                             and usage_status != "rejected"

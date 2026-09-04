@@ -72,6 +72,12 @@
           <small v-else>{{ linkMode ? "读取中" : "未选择" }}</small>
         </div>
 
+        <div v-if="managedRequestId && (!selectedPerson || selectedPerson.status === 'completed')" class="signature-terminal" role="status" aria-live="polite">
+          <strong>{{ loading ? "正在核验签名链接" : selectedPerson?.status === "completed" ? "签名已完成" : "签名链接已失效" }}</strong>
+          <span>{{ loading ? "请稍候…" : message || "请从签名管理重新发送链接。" }}</span>
+        </div>
+
+        <template v-else>
         <div class="canvas-wrap" :class="{ disabled: !selectedPerson }">
           <button type="button"
             v-if="selectedPerson"
@@ -99,6 +105,9 @@
         </div>
 
         <div class="signature-actions">
+          <label v-if="managedRequestId && selectedPerson?.status !== 'completed'" class="signature-action-hint">
+            <input v-model="confirmedSelf" type="checkbox" />我确认由 {{ selectedPerson?.name }} 本人签名
+          </label>
           <button type="button" class="btn blue" :disabled="Boolean(saveDisabledReason)" :title="saveDisabledReason" @click="saveSignature">
             {{ saving ? "保存中" : (temporaryMode ? "保存临时签名" : "保存到签名表") }}
           </button>
@@ -107,6 +116,7 @@
             {{ linkMode ? "已保存" : temporaryMode ? "已保存" : "已有签名" }}
           </span>
         </div>
+        </template>
       </section>
     </section>
   </section>
@@ -124,13 +134,24 @@ const params = new URLSearchParams(window.location.search);
 const query = ref(params.get("q") || params.get("name") || "");
 const requestedRecordId = ref(params.get("record_id") || "");
 const requestedTemporaryId = ref(params.get("temporary_id") || "");
-const linkToken = ref(params.get("token") || "");
+const managedRequestId = params.get("request_id") || "";
+const confirmedSelf = ref(false);
+const fragmentToken = new URLSearchParams(window.location.hash.slice(1)).get("token") || "";
+const tokenStorageKey = "signature-request:" + managedRequestId;
+let savedToken = "";
+try { if (managedRequestId) savedToken = sessionStorage.getItem(tokenStorageKey) || ""; } catch { /* storage may be disabled */ }
+const linkToken = ref(fragmentToken || params.get("token") || savedToken);
+if (managedRequestId && fragmentToken) {
+  let stored = false;
+  try { sessionStorage.setItem(tokenStorageKey, fragmentToken); stored = true; } catch { /* keep token in fragment */ }
+  if (stored) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+}
 const temporaryMode = computed(() => Boolean(requestedTemporaryId.value));
-const linkMode = computed(() => Boolean(requestedRecordId.value || requestedTemporaryId.value));
+const linkMode = computed(() => Boolean(managedRequestId || requestedRecordId.value || requestedTemporaryId.value));
 const people = ref<Dict[]>([]);
 const totalCount = ref(0);
 const selectedRecordId = ref("");
-const loading = ref(false);
+const loading = ref(Boolean(managedRequestId));
 const saving = ref(false);
 const message = ref("");
 const messageType = ref<"success" | "failed" | "info">("info");
@@ -159,6 +180,8 @@ const searchStatusText = computed(() => {
 });
 const saveDisabledReason = computed(() => {
   if (saving.value) return "正在保存签名，请稍候。";
+  if (managedRequestId && selectedPerson.value?.status === "completed") return "签名已保存，重新签名请重新申请链接。";
+  if (managedRequestId && !confirmedSelf.value) return "请确认由所示人员本人签名。";
   if (!selectedPerson.value) return "请先选择签名人员。";
   if (!hasInk.value) return "请先在签名区手写签名。";
   return "";
@@ -203,6 +226,16 @@ async function loadPeople(options: { silent?: boolean } = {}): Promise<void> {
   const requestSeq = ++peopleRequestSeq;
   loading.value = true;
   try {
+    if (managedRequestId) {
+      const query = new URLSearchParams({ request_id: managedRequestId });
+      const data = await requestJson("/api/signatures/management/request?" + query, { headers: { "X-Signature-Token": linkToken.value } });
+      if (requestSeq !== peopleRequestSeq) return;
+      people.value = [{ ...data, record_id: managedRequestId, has_signature: data.status === "completed" }];
+      selectedRecordId.value = managedRequestId;
+      totalCount.value = 1;
+      if (data.status === "completed") setMessage("签名已保存，无需重复提交。", "success");
+      return;
+    }
     if (temporaryMode.value) {
       const url = new URL("/api/signatures/temporary/session", window.location.origin);
       url.searchParams.set("temporary_id", requestedTemporaryId.value);
@@ -367,11 +400,16 @@ function clearCanvas(): void {
 }
 
 async function saveSignature(): Promise<void> {
-  if (!selectedPerson.value || !canvasRef.value || !hasInk.value) return;
+  if (!selectedPerson.value || !canvasRef.value || !hasInk.value || saveDisabledReason.value) return;
   saving.value = true;
   try {
     const signaturePng = canvasRef.value.toDataURL("image/png");
-    const data = temporaryMode.value
+    const data = managedRequestId
+      ? await requestJson("/api/signatures/management/submit", {
+        method: "POST",
+        body: JSON.stringify({ request_id: managedRequestId, token: linkToken.value, signature_png: signaturePng, confirmed_self: confirmedSelf.value }),
+      })
+      : temporaryMode.value
       ? await requestJson("/api/signatures/temporary/save", {
         method: "POST",
         body: JSON.stringify({
@@ -405,16 +443,20 @@ async function saveSignature(): Promise<void> {
 }
 
 onMounted(async () => {
+  if (!linkMode.value || !linkToken.value) {
+    window.location.replace("/signature-management");
+    return;
+  }
   if (linkMode.value) {
     document.body.classList.add("signature-link-active");
   }
+  await loadPeople({ silent: linkMode.value });
   await nextTick();
   resizeCanvas();
   if (canvasRef.value && "ResizeObserver" in window) {
     resizeObserver = new ResizeObserver(() => resizeCanvas());
     resizeObserver.observe(canvasRef.value);
   }
-  await loadPeople({ silent: linkMode.value });
 });
 
 onBeforeUnmount(() => {
@@ -690,6 +732,22 @@ watch(query, () => {
   background: #dcfce7;
   color: #15803d;
 }
+
+.signature-terminal {
+  display: grid;
+  min-height: 260px;
+  place-content: center;
+  gap: 10px;
+  border: 1px solid #bbf7d0;
+  border-radius: 20px;
+  background: #f0fdf4;
+  padding: 28px;
+  color: #166534;
+  text-align: center;
+}
+
+.signature-terminal strong { font-size: 22px; }
+.signature-terminal span { color: #4b6b58; font-size: 13px; }
 
 .canvas-wrap {
   position: relative;

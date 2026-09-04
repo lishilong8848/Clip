@@ -37158,6 +37158,58 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【概述】巡检发现A楼空调压差过大", projected["text"])
             self.assertNotIn("rec_event_remote_text", projected["text"])
 
+    def test_repair_source_and_target_snapshot_keep_linked_event_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            project = {
+                "record_id": "rec_repair_project",
+                "work_type": WORK_TYPE_REPAIR,
+                "notice_type": "设备检修",
+                "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                "display_fields": {
+                    "维修名称": "E楼空调检修",
+                    "事件描述": "E楼空调高压告警",
+                    "所属数据中心/楼栋-使用": "E楼",
+                },
+                "raw_fields": {"关联事件单": ["rec_linked_event"]},
+            }
+            serialized = service._serialize_record(project)
+            self.assertEqual(serialized["source_event_id"], "rec_linked_event")
+            self.assertEqual(
+                serialized["repair_management_record_id"], "rec_repair_project"
+            )
+
+            service._repair_relation_snapshot_records = (  # type: ignore[method-assign]
+                lambda source_key, record_ids: {
+                    "rec_repair_project": project
+                }
+                if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                and "rec_repair_project" in record_ids
+                else {}
+            )
+            projected = service._target_snapshot_active_payload(
+                work_type=WORK_TYPE_REPAIR,
+                notice_type="设备检修",
+                target_record={
+                    "record_id": "rec_repair_target",
+                    "display_fields": {
+                        "检修状态": "开始",
+                        "名称（标题）": "E楼空调检修",
+                        "楼栋": "E楼",
+                        REPAIR_TARGET_SUMMARY_ID_FIELD_NAME: "rec_repair_project",
+                    },
+                    "raw_fields": {
+                        REPAIR_TARGET_SUMMARY_ID_FIELD_NAME: "rec_repair_project"
+                    },
+                },
+            )
+            self.assertEqual(projected["source_record_id"], "rec_repair_project")
+            self.assertEqual(
+                projected["repair_management_record_id"], "rec_repair_project"
+            )
+            self.assertEqual(projected["source_event_id"], "rec_linked_event")
+            self.assertEqual(projected["event_title"], "E楼空调高压告警")
+
     def test_event_target_snapshot_preserves_unsent_update_and_end(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))

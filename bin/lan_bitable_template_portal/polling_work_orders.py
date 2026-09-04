@@ -466,10 +466,13 @@ class PollingWorkOrderService:
         )
         if not person:
             raise PortalError("所选人员已不在当前人员表，请重新选择。")
-        return {
+        result = {
             key: str(person.get(key) or "").strip()
-            for key in ("record_id", "name", "open_id", "employee_no", "building", "position", "shift")
+            for key in ("record_id", "name", "open_id", "employee_no", "building", "position", "shift", "account_nature")
         }
+        if person.get("can_receive_message") is False:
+            result["open_id"] = ""
+        return result
 
     def prepare_start(
         self,

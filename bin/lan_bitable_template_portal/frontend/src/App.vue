@@ -1,5 +1,8 @@
 <template>
-  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }">
+  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }" @dragstart.capture="preventSignatureImageDrag">
+    <div v-if="!isDrillPrintPage && !isMorningMeetingPrintPage" class="security-watermark" aria-hidden="true">
+      <span v-for="index in 30" :key="index">{{ watermarkText }}</span>
+    </div>
     <AppTopbar
       v-if="!signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
       :brand-logo-src="brandLogoSrc"
@@ -20,6 +23,7 @@
       @update:refresh-menu-open="refreshMenuOpen = $event"
       @refresh-event="refreshEvent"
       @open-admin="showAdminTools = true"
+      @open-signatures="navigateHard('/signature-management')"
       @logout="logout"
     />
 
@@ -53,6 +57,11 @@
     <SignaturePage
       v-else-if="isSignaturePage"
       :default-scope="currentScope"
+    />
+
+    <SignatureManagementPage
+      v-else-if="isSignatureManagementPage"
+      :checking="authChecking" :logged-in="auth.loggedIn" :login-url="auth.loginUrl" :is-admin="isAdmin"
     />
 
     <EngineerMopPage
@@ -190,6 +199,7 @@ const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
 const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
+const SignatureManagementPage = asyncPage(() => import("./components/SignatureManagementPage.vue"));
 const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
 const WaterManagementPage = asyncPage(() => import("./components/WaterManagementPage.vue"));
 const CriticalGuardPage = asyncPage(() => import("./components/CriticalGuardPage.vue"));
@@ -265,6 +275,7 @@ const repairModuleComponent = computed(() => (
   isRepairStatusPage.value ? RepairStatusPage : RepairManagementPage
 ));
 const isSignaturePage = computed(() => routePath.value === "/signature");
+const isSignatureManagementPage = computed(() => routePath.value === "/signature-management");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks" || routePath.value === "/daily-tasks/morning-meeting/print");
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
@@ -285,8 +296,10 @@ const criticalGuardScope = computed(() => {
   return raw ? normalizeScopeValue(raw, "") : "";
 });
 const drillScope = computed(() => normalizeScopeValue(routeParams.value.get("scope") || "", ""));
-const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
+const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("request_id") || routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+const watermarkDate = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const watermarkText = computed(() => `内部资料 · ${String(auth.user?.name || "VNET").trim()} · ${watermarkDate}`);
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const repairModuleProps = computed(() => (
   isRepairStatusPage.value
@@ -328,6 +341,7 @@ const headerSubtitle = computed(() => {
   if (isRepairManagementPage.value) return `${scopeLabel(currentScope.value)} · 检修管理`;
   if (isRepairStatusPage.value) return `${scopeLabel(currentScope.value)} · 检修状态`;
   if (isSignaturePage.value) return "线上签名 · 手机手写保存";
+  if (isSignatureManagementPage.value) return "人员中心 · 统一签名管理";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
@@ -350,6 +364,15 @@ const connectionNotice = computed(() => null as null | { tone?: string; text: st
 
 function normalizedPath(): string {
   return window.location.pathname.replace(/\/$/, "") || "/";
+}
+
+function preventSignatureImageDrag(event: DragEvent): void {
+  const image = event.target instanceof HTMLImageElement ? event.target : null;
+  if (!image) return;
+  const source = String(image.currentSrc || image.src || "");
+  if (source.includes("/api/signatures/") || String(image.alt || "").includes("签名")) {
+    event.preventDefault();
+  }
 }
 
 function normalizeScopeValue(value: string | null | undefined, fallback = "ALL"): string {
@@ -800,6 +823,52 @@ onBeforeUnmount(() => {
   background: #eef3f8;
   color: #0f172a;
   font-family: "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.security-watermark {
+  position: fixed;
+  inset: 92px 0 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(180px, 1fr));
+  grid-auto-rows: 132px;
+  align-items: center;
+  justify-items: center;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.055;
+}
+
+.security-watermark span {
+  color: #0a4ea8;
+  font-size: 15px;
+  font-weight: 850;
+  white-space: nowrap;
+  transform: rotate(-22deg);
+}
+
+.signature-link-shell .security-watermark {
+  inset: 0;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+}
+
+:global(img[src*="/api/signatures/"]) {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+@media (max-width: 760px) {
+  .security-watermark {
+    grid-template-columns: repeat(3, minmax(150px, 1fr));
+    grid-auto-rows: 110px;
+  }
+}
+
+@media print {
+  .security-watermark {
+    display: none;
+  }
 }
 
 .app-shell.signature-link-shell {

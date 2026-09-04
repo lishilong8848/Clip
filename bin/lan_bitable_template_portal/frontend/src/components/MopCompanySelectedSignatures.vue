@@ -7,13 +7,6 @@
       </div>
       <div class="bulk-actions">
         <button type="button"
-          :disabled="!unsignedSignatureCount || bulkLinkSending"
-          title="给当前角色下所有未签名公司人员发送签名链接"
-          @click="emit('send-unsigned-links')"
-        >
-          {{ bulkLinkSending ? "发送中" : `发送未签名 ${unsignedSignatureCount}` }}
-        </button>
-        <button type="button"
           :disabled="!confirmableCount || confirmSending"
           title="向已签名但尚未确认的人员发送本次使用确认"
           @click="emit('send-confirmations')"
@@ -55,26 +48,11 @@
         </button>
         <button type="button" class="person-summary" @click="emit('activate', person)">
           <strong>{{ displayName(person) }}</strong>
-          <small :class="{ failed: Boolean(linkErrorById[person.record_id]) }">
+          <small>
             {{ personStatus(person) }}
           </small>
         </button>
         <div class="task-actions">
-          <button type="button"
-            :disabled="Boolean(webSignDisabledReason(person))"
-            :title="webSignDisabledReason(person) || '在当前网页手写并保存到该人员签名库'"
-            @click="emit('web-sign', person)"
-          >
-            {{ personHasStoredSignature(person) ? "网页重签" : "网页手写" }}
-          </button>
-          <button type="button"
-            class="link-action"
-            :disabled="Boolean(linkSendingById[person.record_id]) || !person.record_id"
-            :title="linkTitle(person)"
-            @click="emit('send-link', person, personHasStoredSignature(person))"
-          >
-            {{ linkSendingById[person.record_id] ? "发送中" : (personHasStoredSignature(person) ? "重发链接" : "发送链接") }}
-          </button>
           <button type="button" class="remove-action" @click="emit('remove', personKey(person))">移除</button>
         </div>
       </article>
@@ -96,15 +74,9 @@ const props = defineProps<{
   activeRecordId: string;
   unsignedCount: number;
   unsignedSignatureCount: number;
-  linkSendingById: Record<string, boolean>;
-  linkSentAtById: Record<string, string>;
-  linkErrorById: Record<string, string>;
   hasUsableSignature: (person: Dict | null | undefined) => boolean;
   personKey: (person: Dict) => string;
   displayName: (person: Dict) => string;
-  linkTitle: (person: Dict) => string;
-  webSignDisabledReason: (person: Dict | null | undefined) => string;
-  bulkLinkSending: boolean;
   confirmSending: boolean;
   confirmableCount: number;
   readyTargetLabel?: string;
@@ -112,9 +84,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   activate: [person: Dict];
-  "web-sign": [person: Dict];
-  "send-link": [person: Dict, forceResign: boolean];
-  "send-unsigned-links": [];
   "send-confirmations": [];
   remove: [personKey: string];
 }>();
@@ -163,15 +132,12 @@ function personHasStoredSignature(person: Dict | null | undefined): boolean {
 }
 
 function personStatus(person: Dict): string {
-  const recordId = String(person?.record_id || "");
-  if (props.linkErrorById[recordId]) return `发送失败：${props.linkErrorById[recordId]}`;
   if (person?.usage_rejected) return "已拒绝本次使用";
   if (props.hasUsableSignature(person)) return person?.usage_confirmed
     ? `已确认，可写入${props.readyTargetLabel || "MOP"}`
     : "当前登录人签名，可直接使用";
   if (personHasStoredSignature(person)) return "已有签名，等待本人确认";
-  if (props.linkSentAtById[recordId]) return `签名链接已发送 ${props.linkSentAtById[recordId]}`;
-  return "尚未签名";
+  return person?.signature_reason || "尚未签名，请从首页指纹入口处理后刷新";
 }
 </script>
 

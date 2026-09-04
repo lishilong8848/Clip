@@ -20,7 +20,7 @@
           title="重新读取签名人员"
           @click="emit('refresh')"
         >
-          {{ loading ? "读取中" : "刷新" }}
+          {{ loading ? "读取中" : "刷新签名" }}
         </button>
       </div>
       <small class="search-inline-status">{{ statusText }}</small>
@@ -50,7 +50,7 @@
           {{ person.position || person.team || "签名人员" }}
         </small>
         <em :class="{ ok: personHasUsableSignature(person), temporary: temporaryMappedIds.includes(String(person.record_id || '')) }">
-          {{ temporaryMappedIds.includes(String(person.record_id || '')) ? "临时/外部" : personHasUsableSignature(person) ? "已有签名" : "待签名" }}
+          {{ temporaryMappedIds.includes(String(person.record_id || '')) ? "临时/外部" : personHasUsableSignature(person) ? "已有签名" : person.signature_requires_resign ? "需重新签名" : "未签名" }}
         </em>
       </button>
       <div v-if="!loading && !people.length" class="empty-box compact">

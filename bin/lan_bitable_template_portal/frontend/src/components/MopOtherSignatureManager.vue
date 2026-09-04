@@ -5,17 +5,7 @@
         <strong>当前临时/外部人员</strong>
         <small :class="summaryTone">{{ summaryText }}</small>
       </div>
-      <button type="button"
-        class="add-person-button"
-        :disabled="Boolean(addDisabledReason)"
-        :title="addDisabledReason"
-        @click="emit('add-other')"
-      >
-        添加临时人员
-      </button>
     </header>
-
-    <p v-if="addDisabledReason" class="other-signature-disabled">{{ addDisabledReason }}</p>
 
     <div v-if="displayRows.length" class="task-toolbar">
       <input v-model="taskSearch" type="search" placeholder="搜索临时/外部人员" />
@@ -35,7 +25,6 @@
     <div v-if="visibleRows.length" class="other-signature-task-list">
       <template v-for="row in visibleRows" :key="row.row_key">
         <article
-          v-if="row.kind === 'person'"
           :class="{ ready: row.signed, pending: !row.signed }"
         >
           <div class="signature-preview">
@@ -43,67 +32,12 @@
           </div>
           <div class="person-summary">
             <strong>{{ row.display_name }}</strong>
-            <small :class="{ failed: Boolean(row.person?.temp_id && temporaryLinkErrorById[row.person.temp_id]) }">
+            <small>
               {{ personStatus(row) }}
             </small>
           </div>
           <div class="task-actions">
-            <button type="button"
-              :disabled="Boolean(personWebSignDisabledReason(row.person))"
-              :title="personWebSignDisabledReason(row.person)"
-              @click="emit('web-sign-person', row.person)"
-            >
-              {{ row.signed ? "网页重签" : "网页签名" }}
-            </button>
-            <button type="button"
-              v-if="row.person.source !== 'external'"
-              class="link-action"
-              :disabled="Boolean(temporaryLinkSendingById[row.person.temp_id]) || !row.person.temp_id"
-              :title="row.person.temp_id ? '重新发送该临时人员签名链接' : '该临时人员签名会话不完整，无法发送链接'"
-              @click="emit('send-temp-person', row.person)"
-            >
-              {{ temporaryLinkSendingById[row.person.temp_id] ? "发送中" : (row.signed ? "重发链接" : "发送链接") }}
-            </button>
             <button type="button" class="remove-action" @click="emit('remove-person', signaturePersonKey(row.person))">
-              移除
-            </button>
-          </div>
-        </article>
-
-        <article v-else class="draft pending">
-          <div class="signature-preview">
-            <span>{{ draftStatusText(row.draft) }}</span>
-          </div>
-          <div class="person-summary draft-name">
-            <input
-              :value="row.draft.display_name"
-              placeholder="姓名可不填，默认临时人员N"
-              :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
-              @input="emit('update-draft-name', String(row.draft.draft_id || ''), ($event.target as HTMLInputElement).value)"
-              @blur="emit('ensure-draft-name', row.draft)"
-            />
-            <small v-if="row.draft.error" class="failed">{{ row.draft.error }}</small>
-            <small v-else-if="draftDisabledReason(row.draft)" class="failed">
-              {{ draftDisabledReason(row.draft) }}
-            </small>
-            <small v-else>可网页签名或发送链接</small>
-          </div>
-          <div class="task-actions">
-            <button type="button"
-              :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
-              @click="emit('web-sign-draft', row.draft)"
-            >
-              网页签名
-            </button>
-            <button type="button"
-              class="link-action"
-              :disabled="Boolean(draftDisabledReason(row.draft))"
-              :title="draftDisabledReason(row.draft)"
-              @click="emit('send-draft-link', row.draft)"
-            >
-              {{ draftSendingById[String(row.draft.draft_id || '')] ? "发送中" : "发送链接" }}
-            </button>
-            <button type="button" class="remove-action" @click="emit('remove-draft', String(row.draft.draft_id || ''))">
               移除
             </button>
           </div>
@@ -138,7 +72,7 @@
               title="重新读取其他人员签名"
               @click="emit('refresh-external')"
             >
-              {{ externalLoading ? "读取中" : "刷新" }}
+              {{ externalLoading ? "读取中" : "刷新签名" }}
             </button>
           </div>
           <small>{{ externalStatusText }}</small>
@@ -147,15 +81,17 @@
           <button type="button"
             v-for="person in externalPeople"
             :key="String(person.record_id || person.name || '')"
+            :disabled="!person.has_signature"
+            :title="person.signature_reason || (!person.has_signature ? '请在首页指纹入口完成签名后刷新' : '选择该签名')"
             @click="chooseExternal(person)"
           >
-            <span class="protected-signature">已签名</span>
+            <span class="protected-signature">{{ person.has_signature ? '已签名' : person.signature_requires_resign ? '需重新签名' : '未签名' }}</span>
             <span>
               <strong>{{ person.name || "其他人员" }}</strong>
               <small>
                 <template v-if="person.building">{{ person.building }} · </template>
                 <template v-if="person.specialty">{{ person.specialty }} · </template>
-                已保存
+                {{ person.has_signature ? '已有签名' : '请先完成签名' }}
               </small>
             </span>
             <em>加入</em>
@@ -175,47 +111,30 @@ type OtherSignatureRow = {
   kind: string;
   row_key: string;
   person: Dict;
-  draft: Dict;
   signed: boolean;
   display_name: string;
 };
 
 const props = defineProps<{
   role: SignatureRole;
-  addDisabledReason: string;
   displayRows: OtherSignatureRow[];
   unsignedCount: number;
-  temporaryLinkSendingById: Record<string, boolean>;
-  temporaryLinkSentAtById: Record<string, string>;
-  temporaryLinkErrorById: Record<string, string>;
-  draftSendingById: Record<string, boolean>;
   externalSearch: string;
   externalLoading: boolean;
   externalStatusText: string;
   externalPeople: Dict[];
   personStatusText: (person: Dict) => string;
-  personWebSignDisabledReason: (person: Dict) => string;
-  draftStatusText: (draft: Dict) => string;
-  draftDisabledReason: (draft: Dict) => string;
   active?: boolean;
 }>();
 
 const emit = defineEmits<{
-  "add-other": [];
-  "web-sign-person": [person: Dict];
-  "send-temp-person": [person: Dict];
   "remove-person": [key: string];
-  "update-draft-name": [draftId: string, value: string];
-  "ensure-draft-name": [draft: Dict];
-  "web-sign-draft": [draft: Dict];
-  "send-draft-link": [draft: Dict];
-  "remove-draft": [draftId: string];
   "update:externalSearch": [value: string];
   "refresh-external": [];
   "add-external": [person: Dict];
 }>();
 
-const externalReuseOpen = ref(false);
+const externalReuseOpen = ref(true);
 const taskSearch = ref("");
 const taskFilter = ref<"all" | "unsigned" | "signed">("all");
 const signedCount = computed(() => Math.max(0, props.displayRows.length - props.unsignedCount));
@@ -242,7 +161,6 @@ const visibleRows = computed(() => {
       row.person?.display_name,
       row.person?.building,
       row.person?.specialty,
-      row.draft?.display_name,
     ].some((value) => String(value || "").toLowerCase().includes(query));
   });
 });
@@ -270,12 +188,7 @@ function signaturePersonKey(person: Dict): string {
 }
 
 function personStatus(row: OtherSignatureRow): string {
-  const tempId = String(row.person?.temp_id || "");
-  if (tempId && props.temporaryLinkErrorById[tempId]) return `发送失败：${props.temporaryLinkErrorById[tempId]}`;
-  if (tempId && props.temporaryLinkSentAtById[tempId] && !row.signed) {
-    return `签名链接已发送 ${props.temporaryLinkSentAtById[tempId]}`;
-  }
-  return props.personStatusText(row.person);
+  return row.person?.signature_reason || props.personStatusText(row.person);
 }
 </script>
 

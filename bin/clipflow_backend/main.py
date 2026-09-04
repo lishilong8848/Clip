@@ -1186,7 +1186,14 @@ class FastAPIPortalController:
 
         @app.get("/signature")
         @app.get("/signature/")
+        @app.get("/signature-management")
+        @app.get("/signature-management/")
         async def signature_page(request: Request):
+            if request.url.path.rstrip("/") == "/signature" and not any(
+                request.query_params.get(key)
+                for key in ("request_id", "record_id", "temporary_id")
+            ):
+                return Response(status_code=302, headers={"Location": "/signature-management"})
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/assets/{asset_path:path}")
@@ -2646,6 +2653,39 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.api_route("/api/signatures/management/{operation}", methods=["GET", "POST"])
+        async def signature_management(operation: str, request: Request):
+            from lan_bitable_template_portal.signature_management import dispatch, SignatureManagementError
+            try:
+                session = self._current_session(request)
+                user = (session or {}).get("user") or {}
+                if request.method == "GET":
+                    payload = dict(request.query_params)
+                    if request.headers.get("x-signature-token"):
+                        payload["token"] = request.headers["x-signature-token"]
+                else:
+                    raw = bytearray()
+                    async for chunk in request.stream():
+                        raw.extend(chunk)
+                        if len(raw) > 4 * 1024 * 1024:
+                            raise SignatureManagementError("请求体过大。", 413)
+                    payload = json.loads(raw)
+                    if not isinstance(payload, dict):
+                        raise SignatureManagementError("请求必须是JSON对象。")
+                data = await asyncio.to_thread(
+                    dispatch, PortalRuntime.service.signature_management, request.method, operation, payload,
+                    actor=str(user.get("open_id") or ""),
+                    is_admin=bool(session and PortalRuntime.auth_manager.is_admin(session)),
+                    base_url=self._request_base_url(request), send_text=_send_text_to_open_ids_guarded,
+                )
+                if isinstance(data, tuple):
+                    return Response(content=data[0], media_type=data[1], headers={"Cache-Control": "private, no-store"})
+                return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
+            except SignatureManagementError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/signatures/people")
         async def signatures_people(request: Request):
             try:
@@ -2751,7 +2791,9 @@ class FastAPIPortalController:
                 record_id = str(payload.get("record_id") or "")
                 link_token = str(payload.get("token") or "")
                 token_consumed = False
-                if session is None:
+                if not link_token:
+                    return JSONResponse({"ok": False, "error": "请从首页指纹入口发送签名链接。"}, status_code=403)
+                if link_token:
                     token_consumed = await asyncio.to_thread(
                         PortalRuntime.service.consume_signature_link_token,
                         record_id=record_id,
@@ -2774,7 +2816,7 @@ class FastAPIPortalController:
                             or ((session or {}).get("user") or {}).get("en_name")
                             or ""
                         ),
-                        require_operator_match=bool(session is not None),
+                        require_operator_match=False,
                     )
                 except Exception:
                     if token_consumed:
@@ -2790,69 +2832,11 @@ class FastAPIPortalController:
 
         @app.post("/api/signatures/external/save")
         async def external_signatures_save(request: Request):
-            session = self._current_session(request)
-            if session is None:
-                return self._auth_required_response()
-            try:
-                payload = (
-                    await self._read_model_request(
-                        request,
-                        ExternalSignatureSaveRequest,
-                        max_bytes=4 * 1024 * 1024,
-                    )
-                ).to_payload()
-                scope = self._authorized_scope_or_error(
-                    session, str(payload.get("scope") or "ALL")
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.save_external_signature_for_person,
-                    record_id=str(payload.get("record_id") or ""),
-                    signature_png=str(payload.get("signature_png") or ""),
-                    signer_name=str(payload.get("signer_name") or ""),
-                    scope=scope,
-                    notice_key=str(payload.get("notice_key") or ""),
-                    role=str(payload.get("role") or "implementer"),
-                    operator_open_id=str(user.get("open_id") or ""),
-                )
-                return {"ok": True, "data": data}
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=400)
+            return JSONResponse({"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"}, status_code=410)
 
         @app.post("/api/signatures/temporary/create")
         async def temporary_signature_create(request: Request):
-            session = self._current_session(request)
-            if session is None:
-                return self._auth_required_response()
-            try:
-                payload = (
-                    await self._read_model_request(
-                        request,
-                        TemporarySignatureCreateRequest,
-                        max_bytes=64 * 1024,
-                    )
-                ).to_payload()
-                scope = self._authorized_scope_or_error(
-                    session,
-                    str(payload.get("scope") or "ALL"),
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.create_temporary_signature_session,
-                    scope=scope,
-                    notice_key=str(payload.get("notice_key") or ""),
-                    role=str(payload.get("role") or "implementer"),
-                    notice_title=str(payload.get("notice_title") or ""),
-                    specialty=str(payload.get("specialty") or ""),
-                    display_name=str(payload.get("display_name") or ""),
-                    context_type=str(payload.get("context_type") or "mop"),
-                    origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
-                    origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
-                    created_by=str(user.get("open_id") or ""),
-                )
-                return {"ok": True, "data": data}
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=400)
+            return JSONResponse({"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"}, status_code=410)
 
         @app.post("/api/signatures/temporary/save")
         async def temporary_signature_save(request: Request):
@@ -2867,23 +2851,7 @@ class FastAPIPortalController:
                 temp_id = str(payload.get("temporary_id") or "")
                 token = str(payload.get("token") or "")
                 if not token:
-                    session = self._current_session(request)
-                    if session is None:
-                        return self._auth_required_response()
-                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
-                        temp_id=temp_id,
-                    )
-                    if not temp_session:
-                        raise PortalError("临时签名记录不存在。")
-                    self._authorized_scope_or_error(
-                        session,
-                        str(temp_session.get("scope") or "ALL"),
-                    )
-                    user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                    if str(temp_session.get("created_by") or "").strip() != str(
-                        user.get("open_id") or ""
-                    ).strip():
-                        raise PortalError("当前账号无权修改该临时签名。")
+                    return JSONResponse({"ok": False, "error": "请从首页指纹入口发送签名链接。"}, status_code=403)
                 data = await asyncio.to_thread(
                     PortalRuntime.service.save_temporary_signature,
                     temp_id=temp_id,
@@ -2896,70 +2864,7 @@ class FastAPIPortalController:
 
         @app.post("/api/signatures/send-link")
         async def signatures_send_link(request: Request):
-            session = self._current_session(request)
-            if session is None:
-                return self._auth_required_response()
-            try:
-                payload = (
-                    await self._read_model_request(
-                        request,
-                        SignatureSendLinkRequest,
-                        max_bytes=64 * 1024,
-                    )
-                ).to_payload()
-                scope = self._authorized_scope_or_error(
-                    session,
-                    str(payload.get("scope") or "ALL"),
-                )
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.build_signature_link_message,
-                    record_id=str(payload.get("record_id") or ""),
-                    signer_name=str(payload.get("signer_name") or ""),
-                    scope=scope,
-                    context_type=str(payload.get("context_type") or "mop"),
-                    context_title=str(payload.get("context_title") or ""),
-                    request_base_url=str(payload.get("request_base_url") or "")
-                    or self._request_base_url(request),
-                    created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
-                )
-                ok, message, results = await asyncio.to_thread(
-                    _send_text_to_open_ids_guarded,
-                    str(data.get("text") or ""),
-                    [str(data.get("open_id") or "")],
-                )
-                if not ok:
-                    failure_kind = next(
-                        (
-                            str(item.get("failure_kind") or "")
-                            for item in (results or [])
-                            if str(item.get("failure_kind") or "")
-                        ),
-                        "",
-                    )
-                    return JSONResponse(
-                        {
-                            "ok": False,
-                            "error": message or "签名链接发送失败。",
-                            "data": {
-                                "person": data.get("person") or {},
-                                "link_url": data.get("link_url") or "",
-                                "results": results,
-                                "failure_kind": failure_kind,
-                            },
-                        },
-                        status_code=400,
-                    )
-                return {
-                    "ok": True,
-                    "data": {
-                        "person": data.get("person") or {},
-                        "link_url": data.get("link_url") or "",
-                        "message": message,
-                        "results": results,
-                    },
-                }
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=400)
+            return JSONResponse({"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"}, status_code=410)
 
         @app.post("/api/signatures/usage-confirmations/send")
         async def signatures_usage_confirmations_send(request: Request):
@@ -3072,114 +2977,7 @@ class FastAPIPortalController:
 
         @app.post("/api/signatures/temporary/send-link")
         async def temporary_signature_send_link(request: Request):
-            session = self._current_session(request)
-            if session is None:
-                return self._auth_required_response()
-            try:
-                payload = (
-                    await self._read_model_request(
-                        request,
-                        TemporarySignatureSendLinkRequest,
-                        max_bytes=64 * 1024,
-                    )
-                ).to_payload()
-                scope = self._authorized_scope_or_error(
-                    session,
-                    str(payload.get("scope") or "ALL"),
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                temporary_id = str(payload.get("temporary_id") or "").strip()
-                recipient_open_ids = list(payload.get("recipient_open_ids") or [])
-                if temporary_id:
-                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
-                        temp_id=temporary_id,
-                    )
-                    if not temp_session:
-                        raise PortalError("临时签名记录不存在。")
-                    self._authorized_scope_or_error(
-                        session,
-                        str(temp_session.get("scope") or scope or "ALL"),
-                    )
-                    temp_payload = (
-                        temp_session.get("payload")
-                        if isinstance(temp_session.get("payload"), dict)
-                        else {}
-                    )
-                    if str(temp_payload.get("context_type") or "mop").strip().lower() == "critical_guard":
-                        current_open_id = str(user.get("open_id") or "").strip()
-                        if not current_open_id:
-                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
-                        recipient_open_ids = [current_open_id]
-                    data = await asyncio.to_thread(
-                        PortalRuntime.service.build_existing_temporary_signature_link_message,
-                        temp_id=temporary_id,
-                        recipient_open_ids=recipient_open_ids,
-                        request_base_url=str(payload.get("request_base_url") or "")
-                        or self._request_base_url(request),
-                    )
-                else:
-                    context_type = str(payload.get("context_type") or "mop").strip().lower()
-                    if context_type == "critical_guard":
-                        current_open_id = str(user.get("open_id") or "").strip()
-                        if not current_open_id:
-                            raise PortalError("当前登录账号缺少 openid，无法接收临时签名链接。")
-                        recipient_open_ids = [current_open_id]
-                    data = await asyncio.to_thread(
-                        PortalRuntime.service.build_temporary_signature_link_message,
-                        scope=scope,
-                        notice_key=str(payload.get("notice_key") or ""),
-                        role=str(payload.get("role") or "implementer"),
-                        recipient_open_ids=recipient_open_ids,
-                        notice_title=str(payload.get("notice_title") or ""),
-                        specialty=str(payload.get("specialty") or ""),
-                        display_name=str(payload.get("display_name") or ""),
-                        context_type=context_type,
-                        origin_staff_record_id=str(payload.get("origin_staff_record_id") or ""),
-                        origin_staff_open_id=str(payload.get("origin_staff_open_id") or ""),
-                        request_base_url=str(payload.get("request_base_url") or "")
-                        or self._request_base_url(request),
-                        created_by=str(user.get("open_id") or ""),
-                    )
-                open_ids = [
-                    str(item or "").strip()
-                    for item in (data.get("open_ids") or [])
-                    if str(item or "").strip()
-                ]
-                ok, message, results = await asyncio.to_thread(
-                    _send_text_to_open_ids_guarded,
-                    str(data.get("text") or ""),
-                    open_ids,
-                )
-                if not ok:
-                    with suppress(Exception):
-                        PortalRuntime.state_store.update_mop_temporary_signature_session(
-                            temp_id=str(data.get("temp_id") or ""),
-                            status="failed",
-                            payload_patch={"send_error": message or "签名链接发送失败。"},
-                        )
-                    return JSONResponse(
-                        {
-                            "ok": False,
-                            "error": message or "其他人员签名链接发送失败。",
-                            "data": {
-                                "signature": data.get("signature") or {},
-                                "link_url": data.get("link_url") or "",
-                                "results": results,
-                            },
-                        },
-                        status_code=400,
-                    )
-                return {
-                    "ok": True,
-                    "data": {
-                        "signature": data.get("signature") or {},
-                        "link_url": data.get("link_url") or "",
-                        "message": message,
-                        "results": results,
-                    },
-                }
-            except Exception as exc:
-                return self._portal_error_response(exc, default_status=400)
+            return JSONResponse({"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"}, status_code=410)
 
         @app.get("/api/admin/mop-settings")
         async def admin_mop_settings(request: Request):
@@ -10765,12 +10563,8 @@ class FastAPIPortalController:
         return definition
 
     def _drill_people(self, scope: str, *, refresh: bool = False) -> list[dict[str, Any]]:
-        # 楼栋只限制演练记录权限；人员使用完整在职目录，不按楼栋或分页上限截断。
-        return [
-            {key: value for key, value in item.items() if key != "raw_fields"}
-            for item in PortalRuntime.service._load_signature_people(force=refresh)
-            if isinstance(item, dict)
-        ]
+        # 楼栋只限制演练记录权限；两类签名人员均可搜索，不截断目录。
+        return PortalRuntime.service.drill_signature_people(refresh=refresh)
 
     @staticmethod
     def _drill_person_record_id(value: Any) -> str:
@@ -10808,6 +10602,12 @@ class FastAPIPortalController:
             if str(item.get("record_id") or "").strip()
         }
         required_ids = set(participant_ids)
+        def add_signature_aliases():
+            for person in people:
+                for alias in person.get("record_aliases") or []:
+                    alias_id = str(alias).removeprefix("staff:")
+                    people_by_id.setdefault(alias_id, person)
+        add_signature_aliases()
         raw_step_signers = execution.get("step_signers")
         step_signers = raw_step_signers if isinstance(raw_step_signers, dict) else {}
         for values in step_signers.values():
@@ -10822,10 +10622,11 @@ class FastAPIPortalController:
                 for item in people
                 if str(item.get("record_id") or "").strip()
             }
+        add_signature_aliases()
         missing = sorted(required_ids - set(people_by_id))
         if missing:
             raise PortalError(
-                "所选人员不存在或已离职，请刷新人员列表："
+                "所选人员已不在当前候选目录，请刷新并重新选择（同名优先保留有签名项）："
                 + "、".join(missing[:5])
             )
 
@@ -10849,9 +10650,9 @@ class FastAPIPortalController:
                 for item in (step_signers.get(row) or [])
             ]
             values = [item for item in values if item]
-            if require_complete and len(values) != slots:
+            if len(values) > slots:
                 raise PortalError(
-                    f"演练步骤第 {row or '?'} 行需要选择 {slots} 名执行人。"
+                    f"演练步骤第 {row or '?'} 行最多选择 {slots} 名执行人。"
                 )
             if len(values) != len(set(values)):
                 raise PortalError(f"演练步骤第 {row or '?'} 行不能重复选择同一人。")
@@ -10859,9 +10660,7 @@ class FastAPIPortalController:
                 raise PortalError(
                     f"演练步骤第 {row or '?'} 行执行人必须来自参演人员。"
                 )
-            if require_complete and "ECC" in str(step.get("location") or "").upper() and (
-                not values or values[0] != commander_id
-            ):
+            if require_complete and values and "ECC" in str(step.get("location") or "").upper() and values[0] != commander_id:
                 raise PortalError(
                     f"演练步骤第 {row or '?'} 行位置包含 ECC，第一位必须是指挥人。"
                 )
@@ -10925,7 +10724,7 @@ class FastAPIPortalController:
             for signer in signers:
                 record_id = str(signer.get("record_id") or "").strip()
                 try:
-                    signature_bytes = PortalRuntime.service.signature_image_bytes(
+                    signature_bytes = PortalRuntime.service.drill_signature_image_bytes(
                         record_id=record_id
                     )[0]
                     signature_bytes = normalize_drill_signature_png(signature_bytes)
@@ -11017,7 +10816,7 @@ class FastAPIPortalController:
                 )
 
                 def signature_resolver(record_id: str) -> bytes:
-                    return PortalRuntime.service.signature_image_bytes(
+                    return PortalRuntime.service.drill_signature_image_bytes(
                         record_id=record_id
                     )[0]
 

@@ -83,7 +83,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             )
         client = TestClient(controller._build_app())
         try:
-            with patch.object(
+            with patch.object(PortalRuntime.service, "_load_external_signature_people", return_value=[]), patch.object(
                 PortalRuntime.service,
                 "_load_signature_people",
                 return_value=[
@@ -304,7 +304,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         image.save(output, format="PNG")
         previous_service = PortalRuntime.service
         PortalRuntime.service = Mock()
-        PortalRuntime.service.signature_image_bytes.return_value = (
+        PortalRuntime.service.drill_signature_image_bytes.return_value = (
             output.getvalue(),
             "image/png",
         )
@@ -378,7 +378,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             }
             for index in range(502)
         ]
-        with patch.object(PortalRuntime.service, "_load_signature_people", return_value=people) as load:
+        with patch.object(PortalRuntime.service, "_load_external_signature_people", return_value=[]), patch.object(PortalRuntime.service, "_load_signature_people", return_value=people) as load:
             for scope in ("A", "E", ""):
                 result = controller._drill_people(scope, refresh=True)
                 self.assertEqual(len(result), 502)
@@ -399,7 +399,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             "participants": [{"record_id": "b"}],
             "step_signers": {"13": ["a", "b"]},
         }
-        with patch.object(PortalRuntime.service, "_load_signature_people", return_value=people):
+        with patch.object(PortalRuntime.service, "_load_external_signature_people", return_value=[]), patch.object(PortalRuntime.service, "_load_signature_people", return_value=people):
             controller._validate_drill_people_payload(
                 "E", definition, execution, require_complete=True, require_signatures=True,
             )
@@ -411,7 +411,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                     "E", definition, execution, require_complete=True, require_signatures=True,
                 )
             execution["participants"].append({"record_id": "deleted-person"})
-            with self.assertRaisesRegex(PortalError, "不存在或已离职"):
+            with self.assertRaisesRegex(PortalError, "不在当前候选目录"):
                 controller._validate_drill_people_payload(
                     "E", definition, execution, require_complete=False, require_signatures=False,
                 )
@@ -440,6 +440,78 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             3,
         )
         controller._background_executor.submit.assert_not_called()
+
+    def test_drill_directory_prefers_signed_people_but_keeps_distinct_namesakes(self):
+        service = object.__new__(MaintenancePortalService)
+        staff = [
+            {"record_id": "s1", "name": "张 三", "building": "E楼", "employee_no": "001", "has_signature": False, "raw_fields": {"secret": "private"}},
+            {"record_id": "s2", "name": "李四", "building": "E楼", "has_signature": True},
+            {"record_id": "s3", "name": "王五", "building": "B楼", "employee_no": "002", "has_signature": False},
+            {"record_id": "s4", "name": "赵六", "building": "A楼", "has_signature": False},
+            {"record_id": "s5", "name": "同名", "building": "E楼", "has_signature": False},
+            {"record_id": "s6", "name": "同名", "building": "E楼", "has_signature": False},
+            {"record_id": "same-id", "name": "正式独立人员", "has_signature": True},
+        ]
+        external = [
+            {"record_id": "e1", "name": "张三", "building": "南通E楼", "employee_no": "001", "has_signature": True, "signature_file_token": "private-token", "origin_staff_record_id": "s1"},
+            {"record_id": "e2", "name": "李四", "building": "E楼", "has_signature": True, "origin_staff_record_id": "s2"},
+            {"record_id": "e3", "name": "王五", "building": "B楼", "employee_no": "999", "has_signature": True},
+            {"record_id": "e4", "name": "赵六", "building": "C楼", "has_signature": True},
+            {"record_id": "e5", "name": "同名", "building": "E楼", "has_signature": True},
+            {"record_id": "same-id", "name": "临时独立人员", "has_signature": True},
+            {"record_id": "unsigned", "name": "临时需补签", "has_signature": False},
+        ]
+        with patch.object(service, "_load_signature_people", return_value=staff) as load_staff, patch.object(service, "_load_external_signature_people", return_value=external) as load_external:
+            people = service.drill_signature_people(refresh=True)
+        load_staff.assert_called_once_with(force=True)
+        load_external.assert_called_once_with(force=True)
+        ids = {person["record_id"] for person in people}
+        self.assertNotIn("s1", ids)
+        self.assertIn("external:e1", ids)
+        self.assertIn("s2", ids)
+        self.assertNotIn("external:e2", ids)
+        self.assertTrue({"s3", "external:e3", "s4", "external:e4", "s5", "s6", "external:e5", "same-id", "external:same-id"}.issubset(ids))
+        self.assertIn("external:unsigned", ids)
+        self.assertTrue(all("raw_fields" not in person and "signature_file_token" not in person for person in people))
+        self.assertEqual(staff[0]["record_id"], "s1")
+        self.assertIn("raw_fields", staff[0])
+
+    def test_temporary_drill_signatures_validate_preview_and_generate_from_correct_source(self):
+        from PIL import Image
+        service = object.__new__(MaintenancePortalService)
+        controller = object.__new__(FastAPIPortalController)
+        controller._drill_jobs_lock = threading.RLock()
+        controller._drill_jobs = {("drill", "E")}
+        controller._drills = Mock()
+        controller._sync_drill_output = Mock()
+        definition = {"configuration": {"steps": [{"row": 13, "location": "ECC", "signature_slots": 2}]}}
+        execution = {"commander": {"record_id": "external:temp", "name": "不可采信的姓名"}, "participants": [{"record_id": "staff"}], "step_signers": {"13": ["external:temp", "staff"]}}
+        controller._drills.get_definition.return_value = definition
+        controller._drills.get_execution.return_value = execution
+        png = io.BytesIO()
+        Image.new("RGBA", (40, 20), (0, 0, 0, 255)).save(png, format="PNG")
+        signature = (png.getvalue(), "image/png")
+        staff = [{"record_id": "staff", "name": "正式参演人", "has_signature": True}]
+        external = [{"record_id": "temp", "name": "临时指挥人", "has_signature": True}]
+        with patch.object(PortalRuntime, "service", service), patch.object(service, "_load_signature_people", return_value=staff), patch.object(service, "_load_external_signature_people", return_value=external), patch.object(service, "signature_image_bytes", return_value=signature) as staff_image, patch.object(service, "external_signature_image_bytes", return_value=signature) as external_image:
+            controller._validate_drill_people_payload("E", definition, execution, require_complete=True, require_signatures=True)
+            self.assertEqual(execution["commander"]["name"], "临时指挥人")
+            preview = controller._attach_drill_signature_composites({"signature_cells": [{"range": "H13", "signers": execution["participants"], "width_px": 100, "height_px": 80}]}, required=True)
+            self.assertTrue(preview["signature_cells"][0]["image_data_url"].startswith("data:image/png;base64,"))
+            external_image.assert_called_with(record_id="temp")
+            staff_image.assert_called_with(record_id="staff")
+            def generate(_drill_id, _scope, *, signature_resolver, **kwargs):
+                self.assertEqual(signature_resolver("external:temp"), signature[0])
+                self.assertEqual(signature_resolver("staff"), signature[0])
+            controller._drills.generate.side_effect = generate
+            controller._run_drill_job("drill", "E", True, 1)
+            controller._drills.generate.assert_called_once()
+            controller._sync_drill_output.assert_called_once_with("drill", "E")
+            self.assertEqual(external_image.call_count, 2)
+            self.assertEqual(staff_image.call_count, 2)
+            external_image.side_effect = PortalError("临时签名读取失败")
+            with self.assertRaisesRegex(PortalError, "无法读取临时指挥人的签名"):
+                controller._attach_drill_signature_composites({"signature_cells": [{"range": "H13", "signers": [execution["commander"]]}]}, required=True)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,19 @@
 import { requestJson, type Dict } from "./api/client";
 
+export function refreshSignatureDirectory(): Promise<Dict> {
+  return requestJson("/api/signatures/management/refresh", { method: "POST", body: "{}" });
+}
+
+export function refreshedSignaturePerson(person: Dict, snapshot: Dict): Dict {
+  const source = person.source === "external" || person.source === "temporary" ? "external" : "staff";
+  if (!person.record_id || !snapshot.sources?.[source]?.ok) return person;
+  const effective = snapshot.resolved?.[source + ":" + person.record_id];
+  if (!effective) return { ...person, has_signature: false, signature_reason: "人员记录已不存在，请核对。" };
+  return { ...person, ...effective, role: person.role,
+    ...(effective.source !== person.source ? { temp_id: "", usage_confirmed: false, usage_status: "" } : {}),
+  };
+}
+
 export type SignaturePeopleQuery = {
   scope: string;
   q?: string;
@@ -30,67 +44,6 @@ export function fetchExternalSignaturePeople(query: SignaturePeopleQuery): Promi
   return requestJson(`/api/signatures/temporary/people?${params.toString()}`);
 }
 
-export function saveTemporarySignature(temporaryId: string, signaturePng: string): Promise<Dict> {
-  return requestJson("/api/signatures/temporary/save", {
-    method: "POST",
-    body: JSON.stringify({
-      temporary_id: temporaryId,
-      signature_png: signaturePng,
-    }),
-  });
-}
-
-export function saveExternalSignature(
-  recordId: string,
-  signerName: string,
-  signaturePng: string,
-  scope: string,
-  noticeKey: string,
-  role: string,
-): Promise<Dict> {
-  return requestJson("/api/signatures/external/save", {
-    method: "POST",
-    body: JSON.stringify({
-      record_id: recordId,
-      signer_name: signerName,
-      signature_png: signaturePng,
-      scope,
-      notice_key: noticeKey,
-      role,
-    }),
-  });
-}
-
-export function saveStaffSignature(recordId: string, signerName: string, signaturePng: string): Promise<Dict> {
-  return requestJson("/api/signatures/save", {
-    method: "POST",
-    body: JSON.stringify({
-      record_id: recordId,
-      signer_name: signerName,
-      signature_png: signaturePng,
-    }),
-  });
-}
-
-export function sendStaffSignatureLink(
-  recordId: string,
-  signerName: string,
-  scope: string,
-  contextType = "mop",
-  contextTitle = "",
-): Promise<Dict> {
-  return requestJson("/api/signatures/send-link", {
-    method: "POST",
-    body: JSON.stringify({
-      record_id: recordId,
-      signer_name: signerName,
-      scope,
-      context_type: contextType,
-      context_title: contextTitle,
-    }),
-  });
-}
-
 export function sendSignatureUsageConfirmations(payload: {
   scope: string;
   noticeKey: string;
@@ -109,65 +62,6 @@ export function sendSignatureUsageConfirmations(payload: {
       context_type: payload.contextType || "mop",
       signatures: payload.signatures,
     }),
-  });
-}
-
-export function createTemporarySignatureSession(payload: {
-  scope: string;
-  noticeKey: string;
-  noticeTitle: string;
-  specialty: string;
-  role: string;
-  displayName: string;
-  contextType?: string;
-  originStaffRecordId?: string;
-  originStaffOpenId?: string;
-}): Promise<Dict> {
-  return requestJson("/api/signatures/temporary/create", {
-    method: "POST",
-    body: JSON.stringify({
-      scope: payload.scope,
-      notice_key: payload.noticeKey,
-      notice_title: payload.noticeTitle,
-      specialty: payload.specialty,
-      role: payload.role,
-      display_name: payload.displayName,
-      context_type: payload.contextType || "mop",
-      origin_staff_record_id: payload.originStaffRecordId || "",
-      origin_staff_open_id: payload.originStaffOpenId || "",
-    }),
-  });
-}
-
-export function sendTemporarySignatureLink(payload: {
-  temporaryId?: string;
-  scope: string;
-  noticeKey?: string;
-  noticeTitle?: string;
-  specialty?: string;
-  role?: string;
-  displayName?: string;
-  recipientOpenIds?: string[];
-  contextType?: string;
-  originStaffRecordId?: string;
-  originStaffOpenId?: string;
-}): Promise<Dict> {
-  const body: Dict = {
-    scope: payload.scope,
-  };
-  if (payload.temporaryId) body.temporary_id = payload.temporaryId;
-  if (payload.noticeKey !== undefined) body.notice_key = payload.noticeKey;
-  if (payload.noticeTitle !== undefined) body.notice_title = payload.noticeTitle;
-  if (payload.specialty !== undefined) body.specialty = payload.specialty;
-  if (payload.role !== undefined) body.role = payload.role;
-  if (payload.displayName !== undefined) body.display_name = payload.displayName;
-  if (payload.originStaffRecordId !== undefined) body.origin_staff_record_id = payload.originStaffRecordId;
-  if (payload.originStaffOpenId !== undefined) body.origin_staff_open_id = payload.originStaffOpenId;
-  if (payload.recipientOpenIds) body.recipient_open_ids = payload.recipientOpenIds;
-  if (payload.contextType) body.context_type = payload.contextType;
-  return requestJson("/api/signatures/temporary/send-link", {
-    method: "POST",
-    body: JSON.stringify(body),
   });
 }
 

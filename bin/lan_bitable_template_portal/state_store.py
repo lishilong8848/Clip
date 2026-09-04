@@ -11271,6 +11271,7 @@ class LanPortalStateStore:
         status: str = "",
         temporary_record_id: str = "",
         signature_file_token: str = "",
+        clear_temporary_record_id: bool = False,
         payload_patch: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         temp_id = self._text(temp_id)
@@ -11292,7 +11293,11 @@ class LanPortalStateStore:
                 if isinstance(payload_patch, dict):
                     payload.update(payload_patch)
                 next_status = self._text(status) or self._text(row["status"])
-                next_record_id = self._text(temporary_record_id) or self._text(row["temporary_record_id"])
+                next_record_id = (
+                    ""
+                    if clear_temporary_record_id
+                    else self._text(temporary_record_id) or self._text(row["temporary_record_id"])
+                )
                 next_file_token = self._text(signature_file_token) or self._text(row["signature_file_token"])
                 conn.execute(
                     """

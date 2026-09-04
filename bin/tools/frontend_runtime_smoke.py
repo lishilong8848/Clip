@@ -27,6 +27,33 @@ from lan_bitable_template_portal.server import PortalRuntime, find_available_por
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
+class _SmokeSignatureManagement:
+    def people(self, _payload: dict | None = None) -> dict:
+        now = time.time()
+        return {
+            "people": [
+                {
+                    "person_key": "staff:smoke-person",
+                    "record_id": "smoke-person",
+                    "source": "staff",
+                    "name": "烟测人员",
+                    "employee_no": "S001",
+                    "building": "A楼",
+                    "signature_status": "unsigned",
+                    "has_signature": False,
+                }
+            ],
+            "count": 1,
+            "page": 1,
+            "page_size": 50,
+            "counts": {"signed": 0, "unsigned": 1, "resign": 0},
+            "sources": {
+                "staff": {"ok": True, "loaded_at": now, "error": ""},
+                "external": {"ok": True, "loaded_at": now, "error": ""},
+            },
+        }
+
+
 class _SmokePortalService:
     _last_loaded_at = "smoke"
     _last_loaded_ts = 0.0
@@ -35,6 +62,7 @@ class _SmokePortalService:
     def __init__(self) -> None:
         self._jobs: dict[str, dict] = {}
         self._created_repair_followups: dict[str, list[dict]] = {}
+        self.signature_management = _SmokeSignatureManagement()
 
     def _normalize_scope(self, scope: str) -> str:
         text = str(scope or "").strip().upper()
@@ -2116,6 +2144,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (!datalistProbe.specialties.includes('电气') || !datalistProbe.cycles.includes('/')) {{
               throw new Error(`lite datalist options missing: ${{JSON.stringify(datalistProbe)}}`);
             }}
+            const smokeWorkOrderExempt = page.locator('#lite-polling-work-order-exempt');
+            if (await smokeWorkOrderExempt.count() === 1) await smokeWorkOrderExempt.check();
             const smokeSendButton = page.getByRole('button', {{ name: /发送.*开始/ }});
             await smokeSendButton.waitFor({{ timeout: 10000 }});
             await page.evaluate(() => {{
