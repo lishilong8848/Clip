@@ -197,6 +197,9 @@ class PollingWorkOrderService:
                 raise PortalError(f"第 {index + 1} 个 SOP 步骤内容过长。")
             operator_required = _flag(raw.get("operator_required"))
             reviewer_required = _flag(raw.get("reviewer_required"))
+            photo_required = (
+                True if "photo_required" not in raw else _flag(raw.get("photo_required"))
+            )
             if not operator_required and not reviewer_required:
                 raise PortalError(
                     f"第 {index + 1} 个 SOP 步骤至少需要操作人或现场审核人确认。"
@@ -218,6 +221,7 @@ class PollingWorkOrderService:
                     "content": content,
                     "operator_required": operator_required,
                     "reviewer_required": reviewer_required,
+                    "photo_required": photo_required,
                     "time_limit_seconds": time_limit_seconds,
                 }
             )
@@ -272,13 +276,19 @@ class PollingWorkOrderService:
         return self._public_sop(sop)
 
     def _sync_unstarted_work_order_limits(self, sop: dict) -> None:
-        limits_by_id = {
-            str(step.get("step_id") or ""): int(step.get("time_limit_seconds") or 0)
+        settings_by_id = {
+            str(step.get("step_id") or ""): (
+                int(step.get("time_limit_seconds") or 0),
+                self._step_photo_required(step),
+            )
             for step in sop.get("steps") or []
             if str(step.get("step_id") or "")
         }
-        limits_by_index = {
-            index: int(step.get("time_limit_seconds") or 0)
+        settings_by_index = {
+            index: (
+                int(step.get("time_limit_seconds") or 0),
+                self._step_photo_required(step),
+            )
             for index, step in enumerate(sop.get("steps") or [], start=1)
         }
         for document in self.state_store.list_documents(POLLING_WORK_ORDER_NAMESPACE):
@@ -302,12 +312,17 @@ class PollingWorkOrderService:
                 if int(step.get("run_index") or 0) in started_runs:
                     continue
                 sop_step_id = str(step.get("sop_step_id") or "")
-                limit = limits_by_id.get(sop_step_id) if sop_step_id else None
+                settings = settings_by_id.get(sop_step_id) if sop_step_id else None
                 if not sop_step_id:
-                    limit = limits_by_index.get(int(step.get("step_index") or 0))
-                if limit is not None and int(step.get("time_limit_seconds") or 0) != limit:
-                    step["time_limit_seconds"] = limit
-                    changed = True
+                    settings = settings_by_index.get(int(step.get("step_index") or 0))
+                if settings is not None:
+                    limit, photo_required = settings
+                    if int(step.get("time_limit_seconds") or 0) != limit:
+                        step["time_limit_seconds"] = limit
+                        changed = True
+                    if self._step_photo_required(step) != photo_required:
+                        step["photo_required"] = photo_required
+                        changed = True
             if changed:
                 group["steps"] = steps
                 group["updated_at"] = self._now_text()
@@ -748,6 +763,7 @@ class PollingWorkOrderService:
                             "content": content,
                             "operator_required": bool(template_step.get("operator_required")),
                             "reviewer_required": bool(template_step.get("reviewer_required")),
+                            "photo_required": self._step_photo_required(template_step),
                             "time_limit_seconds": int(
                                 template_step.get("time_limit_seconds") or 0
                             ),
@@ -846,6 +862,7 @@ class PollingWorkOrderService:
     @staticmethod
     def _step_public(step: dict, current_index: int) -> dict:
         result = copy.deepcopy(step)
+        result["photo_required"] = PollingWorkOrderService._step_photo_required(result)
         index = int(result.get("global_index") or 0)
         result["position"] = "current" if index == current_index else "previous" if index < current_index else "next"
         result["operator_confirmed"] = bool(result.pop("operator_confirmation", {}))
@@ -882,6 +899,10 @@ class PollingWorkOrderService:
             not step.get("reviewer_required")
             or bool(step.get("reviewer_confirmation"))
         )
+
+    @staticmethod
+    def _step_photo_required(step: dict) -> bool:
+        return True if "photo_required" not in step else _flag(step.get("photo_required"))
 
     def _step_has_local_photo(self, group: dict, step: dict) -> bool:
         photo_root = (
@@ -1230,7 +1251,13 @@ class PollingWorkOrderService:
                 raise PortalConflictError("当前步骤不需要该角色确认。")
             if role == "reviewer" and step.get("operator_required") and not step.get("operator_confirmation"):
                 raise PortalConflictError("请先等待操作人确认。")
-            if not self._step_has_local_photo(group, step):
+            relay_mode = str((group.get("relay") or {}).get("mode") or "")
+            photo_required = (
+                True
+                if relay_mode in {"public_service", "public_relay"}
+                else self._step_photo_required(step)
+            )
+            if photo_required and not self._step_has_local_photo(group, step):
                 raise PortalConflictError("请先拍摄并上传当前步骤照片。")
             if not step.get(f"{role}_confirmation"):
                 step[f"{role}_confirmation"] = {

@@ -66,6 +66,8 @@ class PublicPollingRelayFrontendTests(unittest.TestCase):
         self.assertIn("X-Content-SHA256", page)
         self.assertIn("回退上一步", page)
         self.assertIn("noopener noreferrer", page)
+        self.assertNotIn("photoRequired", page)
+        self.assertNotIn("无需拍照", page)
 
     def test_embedded_javascript_parses(self) -> None:
         node = shutil.which("node")
@@ -89,4 +91,3 @@ class PublicPollingRelayFrontendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -271,7 +271,7 @@ class SignatureManagement:
             for person in data[source]
         }
         latest = {r["key"]: r["payload"] for r in self.store.list_documents(PERSON_NS)}
-        requests = {r["key"]: r["payload"] for r in self.store.list_documents(REQUEST_NS)}
+        request_by_id = {r["key"]: r["payload"] for r in self.store.list_documents(REQUEST_NS)}
         for row in rows:
             effective = data["resolved"].get(row["person_key"], row)
             row["effective_person_key"] = effective["person_key"]
@@ -281,7 +281,7 @@ class SignatureManagement:
                 (raw_by_key.get(row["person_key"]) or {}).get("raw_fields") or {}
             )
             request_id = (latest.get(row["person_key"]) or {}).get("request_id")
-            request = requests.get(request_id) if request_id else None
+            request = request_by_id.get(request_id) if request_id else None
             row["request"] = self._public_request(request) if request else None
         counts = {state: sum(p["signature_status"] == state for p in rows) for state in ("signed", "unsigned", "resign")}
         rows = [p for p in rows if

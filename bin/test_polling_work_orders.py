@@ -50,6 +50,50 @@ def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> by
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_step_photo_requirement_is_configurable_and_legacy_default_is_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            service = PollingWorkOrderService(LanPortalStateStore(root / "state.sqlite3"))
+            service.sop_root = root / "sops"
+            service.work_order_root = root / "orders"
+            sop = service.save_sop({
+                "scope": "A", "name": "拍照规则测试",
+                "steps": [
+                    {"content": "无需拍照步骤", "operator_required": True, "photo_required": False},
+                    {"content": "旧步骤默认拍照", "operator_required": True},
+                ],
+            })
+            self.assertEqual([step["photo_required"] for step in sop["steps"]], [False, True])
+            sop = service.add_sop_attachment(
+                sop["sop_id"], file_name="SOP.txt", content=b"sop",
+                expected_version=sop["version"],
+            )
+            prepared = service.prepare_start({
+                "work_type": "polling", "scope": "A", "action": "start",
+                "_web_action_request": True, "polling_sop_id": sop["sop_id"],
+                "polling_sop_version": sop["version"], "polling_run_count": 1,
+                "polling_runs": [{"from_unit": "1#", "to_unit": "2#"}],
+                "polling_operator_record_id": "operator",
+                "polling_reviewer_record_id": "reviewer",
+            }, job_id="photo-rule", people=[
+                {"record_id": "operator", "name": "操作员"},
+                {"record_id": "reviewer", "name": "审核员"},
+            ])
+            group = service.create_group(prepared, target_record_id="recPhotoRule", title="测试", public_base_url="")
+            token = service.role_token("recPhotoRule", "operator")
+            session = service.activate(token, run_index=1, expected_version=group["version"])
+            stored = service.get_group("recPhotoRule")
+            stored["relay"]["mode"] = "public_relay"
+            service.state_store.put_document("polling_work_order", "recPhotoRule", stored)
+            with self.assertRaisesRegex(Exception, "请先拍摄并上传"):
+                service.confirm(token, step_key="1:1", expected_version=session["version"])
+            stored["relay"]["mode"] = "local"
+            service.state_store.put_document("polling_work_order", "recPhotoRule", stored)
+            session = service.confirm(token, step_key="1:1", expected_version=session["version"])
+            self.assertEqual(session["steps"][1]["photo_required"], True)
+            with self.assertRaisesRegex(Exception, "请先拍摄并上传"):
+                service.confirm(token, step_key="1:2", expected_version=session["version"])
+
     def test_maintenance_and_polling_share_sops_and_build_generic_work_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -500,9 +544,11 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("继续添加照片", steps)
         self.assertIn("操作照片 ${photoCount} 张", steps)
         self.assertIn("操作照片待拍", steps)
+        self.assertIn("无需拍照", steps)
+        self.assertIn("photoRequired=step.photo_required!==false", steps)
         self.assertIn("回退上一步", steps)
         self.assertIn("/api/polling-work-orders/rollback", steps)
-        self.assertIn("上一步需重新倒计时、拍照并确认", steps)
+        self.assertIn("请按步骤要求重新执行并确认", steps)
         self.assertIn("busy=false;if(current&&!navigating)render(current)", steps)
         self.assertIn("capture','environment", steps)
         self.assertIn("image.loading='eager'", steps)
@@ -797,6 +843,8 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("后续工单不能再选择前面已使用的设备编号", html)
         self.assertIn("时间限制（秒）", html)
         self.assertIn("time_limit_seconds", html)
+        self.assertIn("是否需要拍照", html)
+        self.assertIn("photo_required", html)
         self.assertIn("SOP 已加载，正在读取人员", html)
         self.assertIn("人员加载失败", html)
         self.assertIn("SOP 加载失败", html)
