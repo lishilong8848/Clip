@@ -235,6 +235,7 @@ class FakeWorkOrders:
                         "content": "执行步骤",
                         "operator_required": True,
                         "reviewer_required": True,
+                        "photo_required": False,
                         "time_limit_seconds": 0,
                         "photos": [],
                     }
@@ -757,6 +758,9 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
                     "sha256"
                 ],
                 hashlib.sha256(b"new-photo").hexdigest(),
+            )
+            self.assertFalse(
+                staged["projection"]["operator"]["steps"][0]["photo_required"]
             )
 
     def test_executing_photo_command_recovers_without_repeating_local_action(self) -> None:

@@ -13,7 +13,9 @@ import tempfile
 import time
 import unittest
 import zipfile
+import copy
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 BIN = Path(__file__).resolve().parent
@@ -84,10 +86,6 @@ class PollingWorkOrderTests(unittest.TestCase):
             session = service.activate(token, run_index=1, expected_version=group["version"])
             stored = service.get_group("recPhotoRule")
             stored["relay"]["mode"] = "public_relay"
-            service.state_store.put_document("polling_work_order", "recPhotoRule", stored)
-            with self.assertRaisesRegex(Exception, "请先拍摄并上传"):
-                service.confirm(token, step_key="1:1", expected_version=session["version"])
-            stored["relay"]["mode"] = "local"
             service.state_store.put_document("polling_work_order", "recPhotoRule", stored)
             session = service.confirm(token, step_key="1:1", expected_version=session["version"])
             self.assertEqual(session["steps"][1]["photo_required"], True)
@@ -1091,6 +1089,48 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
         self.assertEqual(send.call_count, 4)
         self.assertGreater(notifications["operator"]["next_retry_at"], time.time())
+
+    def test_concurrent_automatic_link_send_only_notifies_each_role_once(self) -> None:
+        manager = MagicMock()
+        state = {
+            "target_record_id": "recNotifyConcurrent",
+            "title": "轮巡测试",
+            "sop_name": "SOP",
+            "runs": [{}],
+            "operator": {"name": "操作员", "open_id": "ou_op"},
+            "reviewer": {"name": "审核员", "open_id": "ou_re"},
+            "initiator_open_id": "ou_sender",
+            "operator_link": "https://relay.example/op",
+            "reviewer_link": "https://relay.example/re",
+            "notifications": {},
+        }
+        manager.group_with_links.side_effect = lambda group, _base: copy.deepcopy(group)
+        manager.get_group.side_effect = lambda _record_id: copy.deepcopy(state)
+
+        def save_notifications(_record_id, notifications):
+            state["notifications"] = copy.deepcopy(notifications)
+            return copy.deepcopy(state)
+
+        manager.update_notifications.side_effect = save_notifications
+
+        def send(_text, _open_ids):
+            time.sleep(0.02)
+            return True, "ok", []
+
+        with patch.object(
+            PortalRuntime, "polling_work_orders", return_value=manager
+        ), patch.object(
+            PortalRuntime, "_polling_work_order_public_base_url", return_value=""
+        ), patch.object(
+            portal_server, "_send_text_to_open_ids_guarded", side_effect=send
+        ) as send_mock, ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(
+                lambda _index: PortalRuntime._send_polling_work_order_links(copy.deepcopy(state)),
+                range(2),
+            ))
+
+        self.assertEqual(send_mock.call_count, 2)
+        self.assertEqual(manager.update_notifications.call_count, 1)
 
     def test_polling_start_creates_lan_group_and_sends_lan_links(self) -> None:
         manager = MagicMock()

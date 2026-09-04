@@ -578,7 +578,13 @@ class PollingWorkOrderService:
             str(request_payload.get("polling_reviewer_record_id") or ""),
             allow_h_duty=True,
         )
-        if operator["record_id"] == reviewer["record_id"]:
+        if (
+            operator["record_id"] == reviewer["record_id"]
+            or (
+                operator.get("open_id")
+                and operator.get("open_id") == reviewer.get("open_id")
+            )
+        ):
             raise PortalError("操作人和现场审核人不能是同一人。")
         pending_root = (self.work_order_root / "pending").resolve()
         staging = (pending_root / re.sub(r"[^A-Za-z0-9_-]", "_", job_id)).resolve()
@@ -1251,13 +1257,7 @@ class PollingWorkOrderService:
                 raise PortalConflictError("当前步骤不需要该角色确认。")
             if role == "reviewer" and step.get("operator_required") and not step.get("operator_confirmation"):
                 raise PortalConflictError("请先等待操作人确认。")
-            relay_mode = str((group.get("relay") or {}).get("mode") or "")
-            photo_required = (
-                True
-                if relay_mode in {"public_service", "public_relay"}
-                else self._step_photo_required(step)
-            )
-            if photo_required and not self._step_has_local_photo(group, step):
+            if self._step_photo_required(step) and not self._step_has_local_photo(group, step):
                 raise PortalConflictError("请先拍摄并上传当前步骤照片。")
             if not step.get(f"{role}_confirmation"):
                 step[f"{role}_confirmation"] = {

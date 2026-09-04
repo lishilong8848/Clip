@@ -584,6 +584,7 @@ class PollingWorkOrderRelayConnector:
                         "content",
                         "operator_required",
                         "reviewer_required",
+                        "photo_required",
                         "time_limit_seconds",
                         "position",
                         "operator_confirmed",

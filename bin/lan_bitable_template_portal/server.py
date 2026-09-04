@@ -1290,6 +1290,39 @@ class PortalRuntime:
         force: bool = False,
     ) -> dict:
         manager = cls.polling_work_orders()
+        group = manager.group_with_links(
+            group,
+            cls._polling_work_order_public_base_url(),
+        )
+        target_record_id = str(group.get("target_record_id") or "").strip()
+        lock = cls._local_upload_lock_for_key(
+            f"polling-work-order-links:{target_record_id or 'unknown'}"
+        )
+        with lock:
+            if target_record_id:
+                try:
+                    latest = manager.get_group(target_record_id)
+                except Exception:
+                    latest = None
+                if isinstance(latest, dict):
+                    group = manager.group_with_links(
+                        latest,
+                        cls._polling_work_order_public_base_url(),
+                    )
+            return cls._send_polling_work_order_links_locked(
+                manager,
+                group,
+                force=force,
+            )
+
+    @classmethod
+    def _send_polling_work_order_links_locked(
+        cls,
+        manager: PollingWorkOrderService,
+        group: dict,
+        *,
+        force: bool = False,
+    ) -> dict:
         relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
         if str(relay_state.get("mode") or "") in {"public_service", "public_relay"}:
             connector = cls.polling_work_order_relay()
@@ -1297,10 +1330,6 @@ class PortalRuntime:
                 relay_state.get("registration_state") or ""
             ) != "registered":
                 raise PortalConflictError("公网工单正在注册，请稍后重试发送链接。")
-        group = manager.group_with_links(
-            group,
-            cls._polling_work_order_public_base_url(),
-        )
         notifications = dict(group.get("notifications") or {})
         initiator_open_id = str(group.get("initiator_open_id") or "").strip()
         work_order_label = cls._work_order_label(group)
