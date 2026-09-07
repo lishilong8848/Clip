@@ -68,6 +68,14 @@
         {{ uploadedAtText }}
       </span>
       <button type="button"
+        class="btn mop-download"
+        :disabled="downloadDisabled"
+        :title="downloadDisabledReason || '下载包含当前填写内容和签名的 MOP'"
+        @click="emit('download')"
+      >
+        {{ downloadSaving ? "生成中" : "下载文件" }}
+      </button>
+      <button type="button"
         class="btn blue floating-upload-signed-mop"
         :disabled="disabled"
         :title="disabledReason"
@@ -105,6 +113,9 @@ const props = defineProps<{
   disabledReason?: string;
   statusMessage?: string;
   statusTone?: "info" | "success" | "failed";
+  downloadDisabled?: boolean;
+  downloadDisabledReason?: string;
+  downloadSaving?: boolean;
 }>();
 
 const readyCount = computed(() => props.items.filter((item) => item.ready).length);
@@ -158,10 +169,23 @@ watch(missingCount, (count) => {
 
 const emit = defineEmits<{
   upload: [];
+  download: [];
 }>();
 </script>
 
 <style scoped>
+.mop-download {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mop-download:disabled { opacity: .55; cursor: not-allowed; }
 .floating-upload-box {
   position: static;
   z-index: auto;

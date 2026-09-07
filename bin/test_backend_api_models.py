@@ -508,6 +508,42 @@ class _FakeMopSignatureRouteService:
 
 
 class BackendApiModelTests(unittest.TestCase):
+    def test_mop_download_uses_authenticated_fill_and_returns_attachment(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        session_id = "mop-download-test"
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id, "user": {"name": "下载测试", "open_id": "ou_test"},
+                "role": "engineer", "allowed_scopes": ["A"], "expires_at": 9999999999,
+            }
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                file = Path(tmpdir) / "当前填写MOP.xlsx"
+                file.write_bytes(b"workbook-with-current-signatures")
+                with patch.object(PortalRuntime.service, "fill_engineer_mop_file", return_value={"path": str(file), "file_name": file.name}) as fill:
+                    client = TestClient(controller._build_app())
+                    body = {"scope": "A", "sheet_name": "填写页", "cell_edits": [{"row": 1, "col": 2, "value": "当前填写"}]}
+                    unauthorized = client.post("/api/engineer/mop/fill?download=1", json=body)
+                    self.assertEqual(unauthorized.status_code, 401)
+                    fill.assert_not_called()
+                    denied = client.post("/api/engineer/mop/fill?download=1", json=body,
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"})
+                    self.assertEqual(denied.status_code, 403)
+                    fill.assert_not_called()
+                    with patch.object(controller, "_authorized_scope_or_error", return_value="A"):
+                        response = client.post("/api/engineer/mop/fill?download=1", json=body,
+                            headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.content, file.read_bytes())
+                    self.assertIn("attachment;", response.headers["content-disposition"])
+                    self.assertEqual(response.headers["cache-control"], "no-store")
+                    self.assertEqual(fill.call_args.kwargs["operator_open_id"], "ou_test")
+                    self.assertEqual(fill.call_args.kwargs["cell_edits"], body["cell_edits"])
+        finally:
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+
     def test_signature_images_are_never_exposed_to_browser(self):
         client = TestClient(
             FastAPIPortalController(host="127.0.0.1", port=18766)._build_app()

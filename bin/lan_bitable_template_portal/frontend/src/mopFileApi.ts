@@ -1,4 +1,4 @@
-import { requestJson, type Dict } from "./api/client";
+import { downloadFile, requestJson, type Dict } from "./api/client";
 
 const MOP_BOOTSTRAP_CACHE_TTL_MS = 10_000;
 const mopBootstrapCache = new Map<string, { expiresAt: number; data: Dict }>();
@@ -127,6 +127,12 @@ export function fillEngineerMop(payload: Dict): Promise<Dict> {
   return requestJson("/api/engineer/mop/fill", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function downloadFilledEngineerMop(payload: Dict): Promise<void> {
+  return downloadFile("/api/engineer/mop/fill?download=1", {
+    method: "POST", body: JSON.stringify(payload), timeoutMs: 180_000,
   });
 }
 

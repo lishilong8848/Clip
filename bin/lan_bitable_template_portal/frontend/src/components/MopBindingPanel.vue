@@ -95,18 +95,15 @@
         @click="triggerLocalFileInput"
         @keydown.enter.prevent="triggerLocalFileInput"
         @keydown.space.prevent="triggerLocalFileInput"
-        @dragenter.prevent="localDragActive = true"
-        @dragover.prevent="localDragActive = true"
-        @dragleave.prevent="localDragActive = false"
-        @drop.prevent="handleLocalDrop"
-        @paste="handleLocalPaste"
+        @dragenter="handleLocalDragEnter"
+        @dragleave="handleLocalDragLeave"
       >
         <input
           ref="localFileInput"
           class="local-mop-file-input"
           type="file"
           accept=".xlsx,.xlsm,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.ms-excel"
-          :disabled="localUploadBusy"
+          :disabled="localUploadBusy || busy"
           @click.stop
           @change="handleLocalInput"
         />
@@ -123,7 +120,7 @@
         </div>
         <button type="button"
           class="local-upload-button"
-          :disabled="localUploadBusy"
+          :disabled="localUploadBusy || busy"
           @click.stop="triggerLocalFileInput"
         >
           选择文件
@@ -134,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { Dict } from "../api/client";
 import MopSelectedFileCard from "./MopSelectedFileCard.vue";
 
@@ -170,6 +167,7 @@ const emit = defineEmits<{
 
 const localFileInput = ref<HTMLInputElement | null>(null);
 const localDragActive = ref(false);
+let localDragDepth = 0;
 
 const selectedAttachmentModel = computed({
   get: () => props.selectedAttachmentToken,
@@ -194,7 +192,7 @@ const localUploadHint = computed(() => {
   if (props.localUploadBusy) return "识别中";
   if (props.localUploadStatus === "success") return "已选中";
   if (props.localUploadStatus === "failed") return "上传失败";
-  return ".xlsx / .xlsm / .xls";
+  return "选择、拖入或 Ctrl+V 粘贴文件（.xlsx / .xlsm / .xls，最大20MB）";
 });
 
 function recommended(mop: Dict): boolean {
@@ -208,7 +206,7 @@ function recommendationReason(mop: Dict): string {
 }
 
 function triggerLocalFileInput(): void {
-  if (props.localUploadBusy) return;
+  if (props.localUploadBusy || props.busy) return;
   localFileInput.value?.click();
 }
 
@@ -218,7 +216,11 @@ function firstValidExcelFile(files: FileList | File[] | null | undefined): File 
 }
 
 function submitLocalFile(file: File | null): void {
-  if (!file || props.localUploadBusy) return;
+  if (!file || props.localUploadBusy || props.busy) return;
+  if (!props.selectedNotice) {
+    emit("upload-local-invalid", "请先选择一条维保通告。");
+    return;
+  }
   emit("upload-local", file);
 }
 
@@ -234,24 +236,69 @@ function handleLocalInput(event: Event): void {
 }
 
 function handleLocalDrop(event: DragEvent): void {
+  if (event.defaultPrevented || !isFileTransfer(event.dataTransfer)) return;
+  event.preventDefault();
+  localDragDepth = 0;
   localDragActive.value = false;
-  const file = firstValidExcelFile(event.dataTransfer?.files);
-  if (!file) {
-    emit("upload-local-invalid", "请拖入 xlsx、xlsm 或 xls 格式的 Excel 文件。");
-    return;
-  }
-  submitLocalFile(file);
+  submitTransferredFile(event.dataTransfer);
 }
 
 function handleLocalPaste(event: ClipboardEvent): void {
-  const file = firstValidExcelFile(event.clipboardData?.files);
-  if (!file) {
-    emit("upload-local-invalid", "请粘贴 Excel 文件，普通文本或图片不能作为 MOP 表格。");
+  if (event.defaultPrevented || !isFileTransfer(event.clipboardData)) return;
+  event.preventDefault();
+  submitTransferredFile(event.clipboardData);
+}
+
+function isFileTransfer(data: DataTransfer | null): boolean {
+  return Boolean(data && (data.files?.length || Array.from(data.types || []).includes("Files")
+    || Array.from(data.items || []).some((item) => item.kind === "file")));
+}
+
+function submitTransferredFile(data: DataTransfer | null): void {
+  if (props.localUploadBusy || props.busy) return;
+  const files = Array.from(data?.files || []);
+  if (!files.length) {
+    for (const item of Array.from(data?.items || [])) {
+      const file = item.kind === "file" ? item.getAsFile() : null;
+      if (file) files.push(file);
+    }
+  }
+  if (files.length !== 1 || !firstValidExcelFile(files)) {
+    emit("upload-local-invalid", "请每次拖入或粘贴一个 xlsx、xlsm 或 xls 文件。");
     return;
   }
-  event.preventDefault();
-  submitLocalFile(file);
+  submitLocalFile(files[0]);
 }
+
+function handlePageDragOver(event: DragEvent): void {
+  if (!isFileTransfer(event.dataTransfer)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = props.localUploadBusy || props.busy ? "none" : "copy";
+}
+
+function handleLocalDragEnter(event: DragEvent): void {
+  if (!isFileTransfer(event.dataTransfer)) return;
+  event.preventDefault();
+  localDragDepth += 1;
+  localDragActive.value = true;
+}
+
+function handleLocalDragLeave(): void {
+  localDragDepth = Math.max(0, localDragDepth - 1);
+  localDragActive.value = localDragDepth > 0;
+}
+
+// The binding panel unmounts when the sheet editor opens, leaving cell/text paste unchanged.
+onMounted(() => {
+  document.addEventListener("paste", handleLocalPaste);
+  document.addEventListener("dragover", handlePageDragOver);
+  document.addEventListener("drop", handleLocalDrop);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("paste", handleLocalPaste);
+  document.removeEventListener("dragover", handlePageDragOver);
+  document.removeEventListener("drop", handleLocalDrop);
+});
 </script>
 
 <style scoped>

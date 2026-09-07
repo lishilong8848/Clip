@@ -167,6 +167,47 @@ export async function requestJson(
 
 export type RemoteSourceRefreshKind = "maintenance" | "repair" | "change" | "event";
 
+export async function downloadFile(path: string, options: ApiRequestOptions = {}): Promise<void> {
+  const { timeoutMs = 180_000, ...fetchOptions } = options;
+  const requestSignal = requestSignalWithTimeout(fetchOptions.signal, timeoutMs);
+  try {
+    const response = await fetch(path, {
+      ...fetchOptions, credentials: fetchOptions.credentials || "same-origin",
+      headers: buildHeaders(fetchOptions), signal: requestSignal.signal,
+    });
+    if (!response.ok || response.headers.get("Content-Type")?.includes("json")) {
+      const payload = await response.json().catch(() => ({} as Dict));
+      const authRequired = response.status === 401 || Boolean(payload.auth_required);
+      const message = String(payload.error || (authRequired ? "登录已过期，请重新登录。" : `下载失败（HTTP ${response.status}）`));
+      if (authRequired) {
+        const detail = authExpiredDetail(message, payload);
+        window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
+        scheduleAuthRedirect(String(detail.login_url || ""));
+      }
+      throw new ApiError(message, { status: response.status, payload, authRequired });
+    }
+    const blob = await response.blob();
+    if (!blob.size) throw new ApiError("下载文件为空，请重试。");
+    const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get("Content-Disposition") || "")?.[1];
+    const fileName = encodedName ? decodeURIComponent(encodedName) : "下载文件";
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (error) {
+    if (requestSignal.signal.aborted) {
+      throw new ApiError(requestSignal.timedOut() ? "文件生成或下载超时，请稍后重试。" : "下载已取消。");
+    }
+    throw error;
+  } finally {
+    requestSignal.cleanup();
+  }
+}
+
 type RemoteSourceRefreshOptions = {
   scope?: string;
   month?: string;

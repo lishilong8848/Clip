@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, quote, urlencode
 
 import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from clipflow_backend.preflight import (
     build_backend_preflight_report as _build_backend_preflight_report,
@@ -2579,6 +2579,11 @@ class FastAPIPortalController:
                     audit_metadata={"file_name": payload.get("mop_file_name")},
                     **fill_kwargs,
                 )
+                if request.query_params.get("download") == "1":
+                    return FileResponse(
+                        path=str(data["path"]), filename=str(data["file_name"]),
+                        headers={"Cache-Control": "no-store"},
+                    )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)

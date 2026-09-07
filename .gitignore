@@ -69,3 +69,4 @@ bin/config.json.legacy_conflict_20260212_113720
 bin/crash_trace.log.legacy_conflict_20260212_113720
 bin/history.json.legacy_conflict_20260212_113720
 bin/upload_event_module/app_log.txt
+/output/

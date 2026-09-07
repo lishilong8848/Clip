@@ -39230,7 +39230,39 @@ class MaintenancePortalService:
 
     @classmethod
     def _mop_signature_max_height_px(cls, worksheet: Any, *, row: int) -> int:
-        return max(1, int(round(cls._mop_worksheet_row_height_px(worksheet, row=row) * 1.5)))
+        return max(1, cls._mop_worksheet_row_height_px(worksheet, row=row) - 4)
+
+    @classmethod
+    def _mop_signature_cell_bounds(cls, worksheet: Any, *, row: int, col: int) -> tuple[int, int, int, int]:
+        """Anchor and pixel bounds of the actual signing cell, including merged rows/columns."""
+        from openpyxl.utils.cell import column_index_from_string
+
+        min_row = max_row = row
+        min_col = max_col = col
+        coordinate = f"{cls._column_label(col)}{row}"
+        for merged in worksheet.merged_cells.ranges:
+            if coordinate in merged:
+                min_col, min_row, max_col, max_row = merged.bounds
+                break
+        widths = []
+        for column in range(min_col, max_col + 1):
+            dimension = worksheet.column_dimensions.get(cls._column_label(column))
+            if dimension is None:
+                dimension = next((item for item in worksheet.column_dimensions.values()
+                    if (item.min or column_index_from_string(item.index)) <= column
+                    <= (item.max or column_index_from_string(item.index))), None)
+            width = getattr(dimension, "width", None)
+            if width is None:
+                width = worksheet.sheet_format.defaultColWidth or 8.43
+            width = float(width)
+            pixels = int(width * 12) if width < 1 else int(width * 7 + 5)
+            widths.append(0 if getattr(dimension, "hidden", False) else max(0, pixels))
+        height = sum(cls._mop_worksheet_row_height_px(worksheet, row=r)
+            for r in range(min_row, max_row + 1)
+            if not getattr(worksheet.row_dimensions.get(r), "hidden", False))
+        if sum(widths) <= 0 or height <= 0:
+            raise PortalError("签名单元格处于隐藏行或列，请先调整表格后重新上传。")
+        return min_row, min_col, sum(widths), height
 
     @classmethod
     def _mop_signature_target_column(cls, worksheet: Any, *, row: int, label_col: int) -> int:
@@ -40675,6 +40707,9 @@ class MaintenancePortalService:
         try:
             from openpyxl import load_workbook
             from openpyxl.drawing.image import Image as ExcelImage
+            from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+            from openpyxl.drawing.xdr import XDRPositiveSize2D
+            from openpyxl.utils.units import pixels_to_EMU
             from PIL import Image
         except Exception as exc:  # pragma: no cover - dependency bootstrap should provide these.
             raise PortalError("缺少 openpyxl/Pillow 依赖，无法生成已签名 MOP。") from exc
@@ -40732,7 +40767,7 @@ class MaintenancePortalService:
         if missing_roles:
             raise PortalError("当前 Sheet 未识别到对应签名位置，请切换到非封面填写页。")
 
-        workbook = load_workbook(source_path)
+        workbook = load_workbook(source_path, keep_vba=source_path.suffix.lower() == ".xlsm")
         worksheet = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
         protected_cells: set[tuple[int, int]] = set()
         for checkbox in checkboxes:
@@ -40820,7 +40855,12 @@ class MaintenancePortalService:
                     row=base_row,
                     label_col=label_col,
                 )
-                max_signature_height = self._mop_signature_max_height_px(worksheet, row=base_row)
+                base_row, base_col, cell_width, cell_height = self._mop_signature_cell_bounds(
+                    worksheet, row=base_row, col=base_col,
+                )
+                padding = min(2, (cell_width - 1) // 2, (cell_height - 1) // 2)
+                max_signature_width = max(1, cell_width - padding * 2)
+                max_signature_height = max(1, cell_height - padding * 2)
                 role_images = []
                 for signature in role_signatures:
                     source = str(signature.get("source") or "").strip()
@@ -40833,16 +40873,17 @@ class MaintenancePortalService:
                     else:
                         image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
                     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-                    max_width, max_height = 150, max_signature_height
+                    max_width, max_height = max_signature_width, max_signature_height
                     ratio = min(max_width / max(1, image.width), max_height / max(1, image.height), 1.0)
                     if ratio < 1.0:
                         image = image.resize(
-                            (max(1, int(image.width * ratio)), max(1, int(image.height * ratio)))
+                            (max(1, int(image.width * ratio)), max(1, int(image.height * ratio))),
+                            Image.Resampling.LANCZOS,
                         )
                     role_images.append(image)
                 if not role_images:
                     continue
-                gap = 8
+                gap = 4
                 combined_width = max(1, sum(image.width for image in role_images) + gap * (len(role_images) - 1))
                 combined_height = max(1, max(image.height for image in role_images))
                 combined = Image.new("RGBA", (combined_width, combined_height), (255, 255, 255, 0))
@@ -40850,6 +40891,12 @@ class MaintenancePortalService:
                 for image in role_images:
                     combined.alpha_composite(image, (offset_x, max(0, (combined_height - image.height) // 2)))
                     offset_x += image.width + gap
+                ratio = min(max_signature_width / combined.width, max_signature_height / combined.height, 1.0)
+                if ratio < 1:
+                    combined = combined.resize(
+                        (max(1, int(combined.width * ratio)), max(1, int(combined.height * ratio))),
+                        Image.Resampling.LANCZOS,
+                    )
                 temp = tempfile.NamedTemporaryFile(delete=False, suffix=".png", prefix="clipflow_mop_signature_")
                 temp.close()
                 combined.save(temp.name, format="PNG")
@@ -40857,7 +40904,15 @@ class MaintenancePortalService:
                 excel_image = ExcelImage(temp.name)
                 excel_image.width = combined.width
                 excel_image.height = combined.height
-                worksheet.add_image(excel_image, f"{self._column_label(base_col)}{base_row}")
+                excel_image.anchor = OneCellAnchor(
+                    _from=AnchorMarker(
+                        col=base_col - 1, row=base_row - 1,
+                        colOff=pixels_to_EMU(padding),
+                        rowOff=pixels_to_EMU((cell_height - combined.height) // 2),
+                    ),
+                    ext=XDRPositiveSize2D(pixels_to_EMU(combined.width), pixels_to_EMU(combined.height)),
+                )
+                worksheet.add_image(excel_image)
                 inserted += len(role_images)
             if not inserted:
                 raise PortalError("没有可插入的签名。")

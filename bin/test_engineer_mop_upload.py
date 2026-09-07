@@ -677,8 +677,60 @@ class EngineerMopUploadTests(unittest.TestCase):
         sheet.row_dimensions[1].height = 15
         sheet.row_dimensions[2].height = 24
 
-        self.assertEqual(MaintenancePortalService._mop_signature_max_height_px(sheet, row=1), 30)
-        self.assertEqual(MaintenancePortalService._mop_signature_max_height_px(sheet, row=2), 48)
+        self.assertEqual(MaintenancePortalService._mop_signature_max_height_px(sheet, row=1), 16)
+        self.assertEqual(MaintenancePortalService._mop_signature_max_height_px(sheet, row=2), 28)
+
+    def test_generated_mop_signatures_fit_single_and_merged_cells(self):
+        import io
+        from openpyxl import Workbook, load_workbook
+        from PIL import Image, ImageDraw
+
+        signature = Image.new("RGBA", (320, 150), "white")
+        ImageDraw.Draw(signature).line((5, 140, 150, 5, 310, 125), fill="black", width=9)
+        buffer = io.BytesIO()
+        signature.save(buffer, format="PNG")
+        for merged, count in ((False, 1), (False, 8), (True, 1), (True, 8)):
+            with self.subTest(merged=merged, count=count), tempfile.TemporaryDirectory() as tmpdir:
+                service = FakeMopUploadService(tmpdir)
+                service._signature_management = SimpleNamespace(references=lambda items: items)
+                service._ensure_mop_staff_signature_usage_confirmed = lambda **kwargs: None
+                service._ensure_mop_non_staff_signature_context = lambda **kwargs: None
+                service.signature_image_bytes = lambda **kwargs: (buffer.getvalue(), "image/png")
+                workbook = Workbook()
+                sheet = workbook.active
+                sheet.title = "MOP"
+                sheet.merge_cells("A2:B2")
+                sheet["A2"] = "维护实施人："
+                sheet.column_dimensions["C"].width = 3
+                sheet.column_dimensions["D"].width = 5
+                sheet.row_dimensions[2].height = 12
+                sheet.row_dimensions[3].height = 9
+                if merged:
+                    sheet.merge_cells("C2:D3")
+                source = Path(tmpdir) / "mop.xlsx"
+                workbook.save(source)
+                fields = [{"label": "维护实施人", "row": 1, "label_col": 0, "value_col": 2}]
+                with patch("lan_bitable_template_portal.portal_service.get_data_file_path", side_effect=lambda name: str(Path(tmpdir) / name)):
+                    result = MaintenancePortalService.fill_engineer_mop_file(
+                        service, scope="A", local_file_path=str(source), sheet_name="MOP", fields=fields,
+                        signatures=[{"role": "implementer", "record_id": f"person-{i}"} for i in range(count)],
+                    )
+                output = load_workbook(result["path"])
+                signed = output["MOP"]
+                self.assertEqual(result["inserted"], count)
+                self.assertEqual(signed["A2"].value, "维护实施人：")
+                self.assertEqual(signed.row_dimensions[2].height, 12)
+                self.assertEqual(len(signed._images), 1)
+                anchor = signed._images[0].anchor
+                row, col, width, height = service._mop_signature_cell_bounds(signed, row=2, col=3)
+                self.assertEqual((anchor._from.row, anchor._from.col), (row-1, col-1))
+                self.assertGreater(anchor.ext.cx, 0)
+                self.assertGreater(anchor.ext.cy, 0)
+                self.assertLessEqual(anchor._from.colOff + anchor.ext.cx, width * 9525)
+                self.assertLessEqual(anchor._from.rowOff + anchor.ext.cy, height * 9525)
+                self.assertGreaterEqual(anchor._from.colOff, 0)
+                self.assertGreaterEqual(anchor._from.rowOff, 0)
+                output.close()
 
     def test_mop_preview_includes_row_heights_for_signature_preview(self):
         with tempfile.TemporaryDirectory() as tmpdir:

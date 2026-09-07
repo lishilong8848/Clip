@@ -254,6 +254,10 @@
           :disabled-reason="uploadSignedMopDisabledReason"
           :status-message="mopUploadMessage"
           :status-tone="mopUploadMessageType"
+          :download-disabled="mopUploadSaving || mopFillSaving || mopResetting || Boolean(fillMopDisabledReason)"
+          :download-disabled-reason="fillMopDisabledReason"
+          :download-saving="mopFillSaving"
+          @download="downloadMopFile"
           @upload="uploadSignedMop"
         />
       </section>
@@ -303,6 +307,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { Dict } from "../api/client";
 import {
   bindEngineerMop,
+  downloadFilledEngineerMop,
   fetchEngineerMopBootstrap,
   fillEngineerMop,
   previewEngineerMop,
@@ -1849,7 +1854,7 @@ function activeSheetRowHeightPx(rowIndex: number): number {
 }
 
 function signatureMaxHeightPx(rowIndex: number): number {
-  return Math.max(1, Math.round(activeSheetRowHeightPx(rowIndex) * 1.5));
+  return Math.max(1, activeSheetRowHeightPx(rowIndex) - 4);
 }
 
 function signatureCellStyle(rowIndex: number): Record<string, string> {
@@ -2007,6 +2012,23 @@ async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<
     if (requestSeq === signatureSearchRequestSeq) {
       signatureLoading.value = false;
     }
+  }
+}
+
+async function downloadMopFile(): Promise<void> {
+  if (mopUploadSaving.value || mopFillSaving.value || mopResetting.value || fillMopDisabledReason.value) return;
+  mopFillSaving.value = true;
+  mopUploadMessage.value = "正在生成当前填写内容和签名，请稍候。";
+  mopUploadMessageType.value = "info";
+  try {
+    await downloadFilledEngineerMop(buildMopRequestPayload());
+    mopUploadMessage.value = "最新 MOP 已生成，浏览器已开始下载。";
+    mopUploadMessageType.value = "success";
+  } catch (error) {
+    mopUploadMessage.value = error instanceof Error ? error.message : "下载 MOP 失败";
+    mopUploadMessageType.value = "failed";
+  } finally {
+    mopFillSaving.value = false;
   }
 }
 
@@ -2522,6 +2544,7 @@ function upsertMopCandidate(candidate: Dict): void {
 }
 
 async function uploadLocalMopFile(file: File): Promise<void> {
+  if (localMopUploadBusy.value || openMopBusy.value) return;
   if (!selectedNotice.value) {
     handleLocalMopUploadInvalid("请先选择一条维保通告。");
     return;
@@ -2536,6 +2559,8 @@ async function uploadLocalMopFile(file: File): Promise<void> {
     return;
   }
   localMopUpload.begin();
+  const requestScope = scope.value;
+  const requestNoticeKey = selectedNoticeKey.value;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
   try {
@@ -2546,6 +2571,10 @@ async function uploadLocalMopFile(file: File): Promise<void> {
     formData.append("notice_key", String(selectedNotice.value.notice_key || ""));
     formData.append("notice_title", String(selectedNotice.value.title || ""));
     const data = await uploadLocalEngineerMop(formData);
+    if (scope.value !== requestScope || selectedNoticeKey.value !== requestNoticeKey) {
+      localMopUpload.reset();
+      return;
+    }
     const candidate = data.local_mop_candidate || {};
     const recordId = String(candidate.record_id || "");
     if (!recordId) throw new Error("本地 MOP 上传成功但未返回可选记录。");

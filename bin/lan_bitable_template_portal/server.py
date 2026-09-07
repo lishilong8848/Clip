@@ -21,7 +21,7 @@ from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
 from .portal_service import (
@@ -4703,6 +4703,16 @@ class PortalRuntime:
                     **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
                     operator_open_id=str(user.get("open_id") or ""),
                 )
+                if parse_qs(parsed.query).get("download", [""])[0] == "1":
+                    return self._write_response(
+                        200,
+                        {
+                            "Content-Type": mimetypes.guess_type(str(data["file_name"]))[0] or "application/octet-stream",
+                            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(str(data["file_name"]), safe=""),
+                            "Cache-Control": "no-store",
+                        },
+                        Path(str(data["path"])).read_bytes(),
+                    )
                 return self._send_json(
                     200,
                     {
