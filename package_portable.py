@@ -106,6 +106,8 @@ EXCLUDE_TOP_LEVEL = {
 
     ".vscode",
 
+    "output",
+
     "__pycache__",
 
     "build_output",
@@ -127,6 +129,8 @@ EXCLUDE_DIR_NAMES = {
     ".vite",
 
     "node_modules",
+
+    "public_polling_relay",
 
     "__pycache__",
 
@@ -1388,10 +1392,6 @@ def _run_packaging_preflight_tests() -> None:
             (PROJECT_ROOT / "bin" / "upload_event_module" / "ui").rglob("*.py")
         )
     )
-    py_targets.extend(
-        sorted((PROJECT_ROOT / "bin" / "public_polling_relay").glob("*.py"))
-    )
-
     py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))
 
     if py_targets:

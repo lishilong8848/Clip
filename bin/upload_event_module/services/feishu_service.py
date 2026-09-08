@@ -149,6 +149,7 @@ def _build_client() -> Any:
         lark.Client.builder()
         .enable_set_token(True)
         .log_level(lark.LogLevel.ERROR)
+        .timeout(30.0)
         .build()
     )
 

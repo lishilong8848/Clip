@@ -29,7 +29,6 @@ POLLING_RELAY_MAX_PHOTO_BYTES = 8 * 1024 * 1024
 POLLING_RELAY_REMOTE_VERIFY_SECONDS = 5 * 60
 POLLING_RELAY_PROTOCOL_VERSION = 1
 POLLING_PUBLIC_SERVICE_NAME = "public_polling_work_order"
-POLLING_PUBLIC_ARTIFACT_MAX_BYTES = 20 * 1024 * 1024
 
 
 class PollingRelayError(RuntimeError):
@@ -247,6 +246,8 @@ def probe_polling_relay_health(
         "error": "",
     }
     try:
+        active_transport = transport or UrllibPollingRelayTransport()
+        timeout_budget = max(0.2, float(timeout))
         root = str(base_url or "").strip().rstrip("/")
         parsed = urllib.parse.urlsplit(root)
         if (
@@ -259,12 +260,12 @@ def probe_polling_relay_health(
             or parsed.path not in {"", "/"}
         ):
             raise PollingRelayConfigurationError("公网工单地址格式无效。")
-        response = (transport or UrllibPollingRelayTransport()).request(
+        response = active_transport.request(
             "GET",
             f"{root}/api/v1/health",
             headers={"Accept": "application/json"},
             body=b"",
-            timeout=max(0.2, float(timeout)),
+            timeout=timeout_budget,
             max_bytes=64 * 1024,
         )
         if not 200 <= int(response.status) < 300:
@@ -284,6 +285,27 @@ def probe_polling_relay_health(
             raise PollingRelayProtocolError("公网工单协议版本不兼容。")
         if payload.get("ready") is not True:
             raise PollingRelayProtocolError("公网工单服务尚未就绪。")
+        remaining_timeout = max(
+            0.2, timeout_budget - (time.monotonic() - started)
+        )
+        create_probe = active_transport.request(
+            "OPTIONS",
+            f"{root}/api/v1/internal/authority/lease",
+            headers={"Accept": "application/json"},
+            body=b"",
+            timeout=remaining_timeout,
+            max_bytes=64 * 1024,
+        )
+        allow = {
+            item.strip().upper()
+            for item in str(create_probe.headers.get("allow") or "").split(",")
+            if item.strip()
+        }
+        if not (
+            200 <= int(create_probe.status) < 300
+            or (int(create_probe.status) == 405 and "POST" in allow)
+        ):
+            raise PollingRelayProtocolError("公网工单内部中继接口不可用。")
         result["ready"] = True
     except Exception as exc:
         result["error"] = str(exc or "公网工单连接失败。")
@@ -1702,421 +1724,6 @@ class PollingWorkOrderRelayConnector:
         return {"enabled": True, "acked": acked, "groups": groups, "commands": commands}
 
 
-class PollingWorkOrderPublicClient:
-    """Small client for a public server that owns the work-order execution."""
-
-    def __init__(
-        self,
-        state_store: Any,
-        work_orders: Any,
-        *,
-        base_url: str,
-        allow_insecure_http: bool = False,
-        transport: PollingRelayTransport | None = None,
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        root = str(base_url or "").strip().rstrip("/")
-        parsed = urllib.parse.urlsplit(root)
-        allowed_schemes = {"https", "http"} if allow_insecure_http else {"https"}
-        if (
-            parsed.scheme not in allowed_schemes
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
-        ):
-            raise PollingRelayConfigurationError("公网工单地址格式无效。")
-        self.state_store = state_store
-        self.work_orders = work_orders
-        self.base_url = root
-        self.allow_insecure_http = bool(allow_insecure_http)
-        self.transport = transport or UrllibPollingRelayTransport()
-        self.clock = clock
-
-    @property
-    def enabled(self) -> bool:
-        return True
-
-    @staticmethod
-    def _retry_delay(attempts: int) -> float:
-        return float(min(300, max(2, 2 ** min(max(1, attempts), 8))))
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        payload: dict[str, Any] | None = None,
-        token: str = "",
-        idempotency_key: str = "",
-        max_bytes: int = POLLING_RELAY_MAX_JSON_BYTES,
-        timeout: float = 10.0,
-    ) -> RelayResponse:
-        headers = {"Accept": "application/json"}
-        body = b""
-        if method.upper() not in {"GET", "HEAD"}:
-            body = _json_bytes(payload or {})
-            headers["Content-Type"] = "application/json"
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key[:160]
-        response = self.transport.request(
-            method,
-            self.base_url + "/" + str(path or "").lstrip("/"),
-            headers=headers,
-            body=body,
-            timeout=max(0.2, float(timeout)),
-            max_bytes=max_bytes,
-        )
-        if not 200 <= int(response.status) < 300:
-            message = ""
-            with suppress(Exception):
-                error = _json_object(response.body).get("error")
-                message = (
-                    str(error.get("message") or error.get("code") or "")
-                    if isinstance(error, dict)
-                    else str(error or "")
-                )
-            raise PollingRelayHttpError(
-                int(response.status),
-                message or f"公网工单返回 HTTP {response.status}。",
-            )
-        return response
-
-    def _json_request(self, *args, **kwargs) -> dict[str, Any]:
-        payload = _json_object(self._request(*args, **kwargs).body)
-        data = payload.get("data")
-        return copy.deepcopy(data) if payload.get("ok") is True and isinstance(data, dict) else payload
-
-    def _public_link(self, value: Any) -> str:
-        text = str(value or "").strip()
-        parsed = urllib.parse.urlsplit(text)
-        allowed_schemes = {"https", "http"} if self.allow_insecure_http else {"https"}
-        if (
-            parsed.scheme not in allowed_schemes
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-            or any(ord(character) < 32 or ord(character) == 127 for character in text)
-        ):
-            raise PollingRelayProtocolError("公网工单返回了无效链接。")
-        return text
-
-    @staticmethod
-    def _create_payload(
-        group: dict,
-        client_order_id: str,
-        management_token_sha256: str,
-        links: dict[str, dict[str, str]],
-    ) -> dict[str, Any]:
-        return {
-            "protocol_version": POLLING_RELAY_PROTOCOL_VERSION,
-            "client_order_id": client_order_id,
-            "management_token_sha256": management_token_sha256,
-            "links": {
-                role: {
-                    "link_id": str(item.get("link_id") or ""),
-                    "secret_sha256": hashlib.sha256(
-                        str(item.get("secret") or "").encode("utf-8")
-                    ).hexdigest(),
-                    "assigned_name": str((group.get(role) or {}).get("name") or ""),
-                }
-                for role, item in links.items()
-            },
-            "work_type": str(group.get("work_type") or "polling"),
-            "title": str(group.get("title") or ""),
-            "scope": str(group.get("scope") or ""),
-            "sop_name": str(group.get("sop_name") or ""),
-            "operator": {"name": str((group.get("operator") or {}).get("name") or "")},
-            "reviewer": {"name": str((group.get("reviewer") or {}).get("name") or "")},
-            "runs": [
-                {
-                    key: copy.deepcopy(run.get(key))
-                    for key in ("run_index", "from_unit", "to_unit", "other_unit", "label")
-                    if run.get(key) not in (None, "")
-                }
-                for run in group.get("runs") or []
-                if isinstance(run, dict)
-            ],
-            "steps": [
-                {
-                    key: copy.deepcopy(step.get(key))
-                    for key in (
-                        "step_key",
-                        "global_index",
-                        "run_index",
-                        "run_count",
-                        "run_label",
-                        "step_index",
-                        "step_count",
-                        "content",
-                        "operator_required",
-                        "reviewer_required",
-                        "time_limit_seconds",
-                    )
-                }
-                for step in group.get("steps") or []
-                if isinstance(step, dict)
-            ],
-        }
-
-    def register_group(self, target_record_id: str, *, force: bool = False) -> dict[str, Any]:
-        group = self.work_orders.get_group(target_record_id)
-        relay = dict(group.get("relay") or {})
-        if str(relay.get("mode") or "") != "public_service":
-            return group
-        if (
-            not force
-            and str(relay.get("registration_state") or "") == "registered"
-            and relay.get("public_group_id")
-            and relay.get("management_token")
-        ):
-            return group
-        if not force and float(relay.get("next_retry_at") or 0) > self.clock():
-            return group
-        client_order_id = str(relay.get("client_order_id") or "").strip()
-        if not client_order_id:
-            client_order_id = f"wo_{secrets.token_urlsafe(24)}"
-        management_token = str(relay.get("management_token") or "").strip()
-        if not management_token:
-            management_token = secrets.token_urlsafe(32)
-        link_credentials = relay.get("link_credentials")
-        if not isinstance(link_credentials, dict) or any(
-            not isinstance(link_credentials.get(role), dict)
-            or not link_credentials[role].get("link_id")
-            or not link_credentials[role].get("secret")
-            for role in ("operator", "reviewer")
-        ):
-            link_credentials = {
-                role: {
-                    "link_id": f"lnk_{secrets.token_urlsafe(18)}",
-                    "secret": secrets.token_urlsafe(32),
-                }
-                for role in ("operator", "reviewer")
-            }
-        if (
-            client_order_id != str(relay.get("client_order_id") or "")
-            or management_token != str(relay.get("management_token") or "")
-            or link_credentials != relay.get("link_credentials")
-        ):
-            group = self.work_orders.update_relay(
-                target_record_id,
-                {
-                    "client_order_id": client_order_id,
-                    "management_token": management_token,
-                    "link_credentials": copy.deepcopy(link_credentials),
-                },
-            )
-            relay = dict(group.get("relay") or {})
-        attempts = int(relay.get("registration_attempts") or 0) + 1
-        try:
-            response = self._json_request(
-                "POST",
-                "/api/v1/work-orders",
-                payload=self._create_payload(
-                    group,
-                    client_order_id,
-                    hashlib.sha256(management_token.encode("utf-8")).hexdigest(),
-                    link_credentials,
-                ),
-                idempotency_key=f"create:{client_order_id}",
-            )
-            public_group_id = str(response.get("public_group_id") or "").strip()
-            operator_link = self._public_link(
-                f"{self.base_url}/polling-work-order#link="
-                f"{link_credentials['operator']['link_id']}.{link_credentials['operator']['secret']}"
-            )
-            reviewer_link = self._public_link(
-                f"{self.base_url}/polling-work-order#link="
-                f"{link_credentials['reviewer']['link_id']}.{link_credentials['reviewer']['secret']}"
-            )
-            if not re.fullmatch(r"[A-Za-z0-9_-]{8,200}", public_group_id):
-                raise PollingRelayProtocolError("公网工单ID无效。")
-            if not (24 <= len(management_token) <= 512):
-                raise PollingRelayProtocolError("公网工单管理令牌无效。")
-            return self.work_orders.update_relay(
-                target_record_id,
-                {
-                    "relay_url": self.base_url,
-                    "public_group_id": public_group_id,
-                    "management_token": management_token,
-                    "operator_link": operator_link,
-                    "reviewer_link": reviewer_link,
-                    "registration_state": "registered",
-                    "registration_attempts": attempts,
-                    "next_retry_at": 0,
-                    "last_error": "",
-                },
-            )
-        except Exception as exc:
-            return self.work_orders.update_relay(
-                target_record_id,
-                {
-                    "registration_state": "registration_pending",
-                    "registration_attempts": attempts,
-                    "next_retry_at": self.clock() + self._retry_delay(attempts),
-                    "last_error": str(exc),
-                },
-            )
-
-    def sync_group(self, target_record_id: str, *, force: bool = False) -> dict[str, Any]:
-        group = self.work_orders.get_group(target_record_id)
-        if str((group.get("relay") or {}).get("registration_state") or "") != "registered":
-            group = self.register_group(target_record_id, force=force)
-        relay = dict(group.get("relay") or {})
-        if str(relay.get("registration_state") or "") != "registered":
-            return group
-        if not force and float(relay.get("next_retry_at") or 0) > self.clock():
-            return group
-        public_id = urllib.parse.quote(str(relay.get("public_group_id") or ""), safe="")
-        token = str(relay.get("management_token") or "")
-        attempts = int(relay.get("sync_attempts") or 0) + 1
-        try:
-            response = self._json_request(
-                "GET", f"/api/v1/work-orders/{public_id}", token=token
-            )
-            remote_state = str(response.get("state") or "").strip().lower()
-            if remote_state not in {"active", "artifact_ready", "completed", "cancelled"}:
-                raise PollingRelayProtocolError("公网工单返回了未知状态。")
-            artifact = response.get("artifact") if isinstance(response.get("artifact"), dict) else {}
-            artifact_sha256 = str(artifact.get("sha256") or "").lower()
-            if remote_state in {"artifact_ready", "completed"} and not re.fullmatch(
-                r"[0-9a-f]{64}", artifact_sha256
-            ):
-                raise PollingRelayProtocolError("公网工单Excel缺少有效校验值。")
-            changes = {
-                "remote_state": remote_state,
-                "remote_version": int(response.get("version") or 0),
-                "artifact_name": str(artifact.get("name") or "轮巡操作流程.xlsx"),
-                "artifact_sha256": artifact_sha256,
-                "sync_attempts": attempts,
-                "next_retry_at": 0,
-                "last_error": "",
-            }
-            group = self.work_orders.update_relay(target_record_id, changes)
-            if remote_state in {"artifact_ready", "completed"}:
-                return self.work_orders.mark_public_artifact_ready(target_record_id)
-            if remote_state == "cancelled":
-                self.work_orders.cancel_group(target_record_id, reason="public_cancelled")
-                return self.work_orders.get_group(target_record_id)
-            return group
-        except Exception as exc:
-            if isinstance(exc, PollingRelayHttpError) and exc.status == 404:
-                return self.work_orders.cancel_and_get(
-                    target_record_id, reason="public_not_found"
-                )
-            return self.work_orders.update_relay(
-                target_record_id,
-                {
-                    "sync_attempts": attempts,
-                    "next_retry_at": self.clock() + self._retry_delay(attempts),
-                    "last_error": str(exc),
-                },
-            )
-
-    def download_artifact(self, target_record_id: str) -> dict[str, Any]:
-        group = self.sync_group(target_record_id, force=True)
-        relay = dict(group.get("relay") or {})
-        if str(relay.get("remote_state") or "") not in {"artifact_ready", "completed"}:
-            raise PollingRelayError("公网工单附件尚未生成。")
-        public_id = urllib.parse.quote(str(relay.get("public_group_id") or ""), safe="")
-        response = self._request(
-            "GET",
-            f"/api/v1/work-orders/{public_id}/artifact",
-            token=str(relay.get("management_token") or ""),
-            max_bytes=POLLING_PUBLIC_ARTIFACT_MAX_BYTES,
-            timeout=45.0,
-        )
-        return self.work_orders.save_public_artifact(
-            target_record_id,
-            content=response.body,
-            name=str(relay.get("artifact_name") or "轮巡操作流程.xlsx"),
-            expected_sha256=str(relay.get("artifact_sha256") or ""),
-        )
-
-    def cancel_group(self, target_record_id: str, *, reason: str) -> dict[str, Any]:
-        group = self.work_orders.get_group(target_record_id)
-        relay = dict(group.get("relay") or {})
-        public_group_id = str(relay.get("public_group_id") or "")
-        token = str(relay.get("management_token") or "")
-        if not public_group_id or not token:
-            return self.work_orders.update_relay(
-                target_record_id, {"registration_state": "cancelled", "last_error": ""}
-            )
-        attempts = int(relay.get("cancel_attempts") or 0) + 1
-        if float(relay.get("next_retry_at") or 0) > self.clock():
-            return group
-        try:
-            self._json_request(
-                "POST",
-                f"/api/v1/work-orders/{urllib.parse.quote(public_group_id, safe='')}/cancel",
-                token=token,
-                payload={"reason": str(reason or "local_cancelled")[:160]},
-                idempotency_key=f"cancel:{public_group_id}",
-            )
-        except PollingRelayHttpError as exc:
-            if exc.status != 404:
-                return self.work_orders.update_relay(
-                    target_record_id,
-                    {
-                        "registration_state": "cancel_pending",
-                        "cancel_attempts": attempts,
-                        "next_retry_at": self.clock() + self._retry_delay(attempts),
-                        "last_error": str(exc),
-                    },
-                )
-        except Exception as exc:
-            return self.work_orders.update_relay(
-                target_record_id,
-                {
-                    "registration_state": "cancel_pending",
-                    "cancel_attempts": attempts,
-                    "next_retry_at": self.clock() + self._retry_delay(attempts),
-                    "last_error": str(exc),
-                },
-            )
-        return self.work_orders.update_relay(
-            target_record_id,
-            {
-                "registration_state": "cancelled",
-                "operator_link": "",
-                "reviewer_link": "",
-                "cancel_attempts": attempts,
-                "next_retry_at": 0,
-                "last_error": "",
-            },
-        )
-
-    def run_once(self) -> dict[str, Any]:
-        synced = pending = cancelled = failed = 0
-        for item in self.state_store.list_documents("polling_work_order"):
-            group = item.get("payload") if isinstance(item, dict) else None
-            if not isinstance(group, dict) or str((group.get("relay") or {}).get("mode") or "") != "public_service":
-                continue
-            target_record_id = str(group.get("target_record_id") or "")
-            try:
-                if str(group.get("state") or "") in {"cancelled", "stopped"}:
-                    result = self.cancel_group(
-                        target_record_id,
-                        reason=str(group.get("cancel_reason") or "local_terminal"),
-                    )
-                    cancelled += int(str((result.get("relay") or {}).get("registration_state") or "") == "cancelled")
-                    continue
-                if str(group.get("state") or "") == "completed":
-                    continue
-                result = self.sync_group(target_record_id)
-                if str((result.get("relay") or {}).get("registration_state") or "") == "registered":
-                    synced += 1
-                else:
-                    pending += 1
-            except Exception:
-                failed += 1
-        return {"enabled": True, "synced": synced, "pending": pending, "cancelled": cancelled, "failed": failed}
-
-
 __all__ = [
     "POLLING_RELAY_COMMAND_NAMESPACE",
     "POLLING_RELAY_GROUP_NAMESPACE",
@@ -2128,7 +1735,6 @@ __all__ = [
     "PollingRelayLeaseError",
     "PollingRelayProtocolError",
     "PollingWorkOrderRelayConnector",
-    "PollingWorkOrderPublicClient",
     "RelayResponse",
     "UrllibPollingRelayTransport",
     "probe_polling_relay_health",

@@ -7831,10 +7831,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "_upload_started_monotonic",
                 "_last_upload_error",
                 "_pending_upload_hash",
-                "_upload_operation_id",
             ):
                 self.assertNotIn(field, loaded)
-            self.assertFalse(loaded["_has_unuploaded_changes"])
+            self.assertEqual(loaded["_upload_operation_id"], "qt_notice:old")
+            self.assertTrue(loaded["_has_unuploaded_changes"])
+            self.assertTrue(loaded["_remote_written_pending_verification"])
 
             loaded["_upload_in_progress"] = True
             loaded["_last_upload_error"] = "再次失败"
@@ -7843,7 +7844,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             persisted = state_store.list_qt_active_items()[0]["payload"]
             self.assertNotIn("_upload_in_progress", persisted)
             self.assertNotIn("_last_upload_error", persisted)
-            self.assertNotIn("_upload_operation_id", persisted)
+            self.assertEqual(persisted["_upload_operation_id"], "qt_notice:new")
+            self.assertTrue(persisted["_remote_written_pending_verification"])
 
     def test_active_cache_store_keeps_cross_month_ongoing_items(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -15636,7 +15638,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "manual": "1",
                         "manual_id": "manual:lite",
                         "record_id": "manual:lite",
-                        "title": "A楼测试检修",
+                        "title": "EA118_C01机房A楼测试故障检修",
                         "building": "A楼",
                         "building_codes": ["A"],
                         "specialty": "电气",
@@ -15665,7 +15667,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(job.get("request", {}).get("manual_id"), "manual:lite")
             prepared = service.prepare_action_job(job_id)
             self.assertEqual(prepared["work_type"], WORK_TYPE_REPAIR)
-            self.assertEqual(prepared["title"], "A楼测试检修")
+            self.assertEqual(
+                prepared["title"],
+                "EA118_C01机房A楼测试故障检修",
+            )
             self.assertIn("【设备检修】状态：开始", prepared["text"])
             self.assertIn("【备件更换情况】无", prepared["text"])
 
@@ -16596,8 +16601,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "display_fields": {
                             "名称": "C楼稍后生成目标的变更",
                             "变更状态": "开始",
-                            "变更开始时间": "2026-08-08 09:00",
-                            "变更结束时间": "2026-08-08 18:00",
+                            "变更开始时间": _test_datetime(8, "09:00"),
+                            "变更结束时间": _test_datetime(8, "18:00"),
                             "楼栋": "C楼",
                         },
                     }
@@ -17344,7 +17349,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("window.addEventListener('focus', checkLiteAuthStatus)", html)
         self.assertIn("document.addEventListener('visibilitychange'", html)
         self.assertIn("function scheduleLiteQtActiveRefresh()", html)
-        self.assertIn("payload?.qt_scope_signature", html)
+        self.assertIn("payload?.display_signature || payload?.qt_scope_signature", html)
         self.assertIn("<span>通告处理</span>", html)
         self.assertIn("<span>计划通告列表</span>", html)
         self.assertIn("<span>未结束通告</span>", html)
@@ -26510,7 +26515,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "repair",
                 "设备检修",
                 {
-                    "title": "EA118机房E楼测试检修",
+                    "title": "EA118_C01机房E楼测试故障检修",
                     "specialty": "暖通",
                     "fault_time": "2026-06-25T09:00",
                     "expected_time": "2026-06-25T18:30",
@@ -32402,19 +32407,22 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
         service._create_record_fields = fake_create_record_fields  # type: ignore[method-assign]
 
-        result = service.create_repair_management_record(
-            {
-                "故障维修原因": "测试原因",
-                "维修名称": "旧字段不可写",
-                "检修通告名称": "公式字段不可写",
-            }
-        )
+        with patch.object(service, "_save_source_scope_snapshots") as publish_source:
+            result = service.create_repair_management_record(
+                {
+                    "故障维修原因": "测试原因",
+                    "维修名称": "旧字段不可写",
+                    "检修通告名称": "公式字段不可写",
+                }
+            )
 
         self.assertEqual(captured["app_token"], REPAIR_SOURCE_APP_TOKEN)
         self.assertEqual(captured["table_id"], REPAIR_SOURCE_TABLE_ID)
         self.assertEqual(captured["fields"], {"故障维修原因": "测试原因"})
         self.assertEqual(result["record_id"], "rec_repair_created")
         self.assertEqual(result["field_count"], 1)
+        self.assertEqual(service._repair_records[0]["record_id"], "rec_repair_created")
+        publish_source.assert_called_once_with(["repair"])
 
     def test_repair_management_create_reuses_existing_remote_business_record(self):
         service = _TestMaintenancePortalService()
@@ -41462,6 +41470,107 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service._records[0]["display_fields"]["维护实施状态"],
             "未开始",
         )
+
+    def test_repair_notice_title_rule_and_default_spare_parts(self):
+        MaintenancePortalService._validate_repair_notice_title(
+            "EA118_C01机房C楼冷凝器传感器失效检修",
+            scope="C",
+        )
+        with self.assertRaisesRegex(PortalError, "故障现象无需输入括号"):
+            MaintenancePortalService._validate_repair_notice_title(
+                "C楼冷凝器传感器检修",
+                scope="C",
+            )
+        with self.assertRaisesRegex(PortalError, "EA118_C01机房C楼"):
+            MaintenancePortalService._validate_repair_notice_title(
+                "EA118_C01机房D楼冷凝器传感器失效检修",
+                scope="C",
+            )
+        for relaxed_scope in ("CAMPUS", "110", "ALL"):
+            MaintenancePortalService._validate_repair_notice_title(
+                "EA118_C01机房园区冷站传感器失效检修",
+                scope=relaxed_scope,
+            )
+        with self.assertRaisesRegex(PortalError, r"EA118_C01机房\+故障现象"):
+            MaintenancePortalService._validate_repair_notice_title(
+                "EA118_C01机房检修",
+                scope="ALL",
+            )
+        building_html = workbench_lite_module._form_fields("repair", {}, scope="C")
+        relaxed_html = workbench_lite_module._form_fields("repair", {}, scope="110")
+        self.assertIn("EA118_C01机房C楼+故障现象+检修", building_html)
+        self.assertIn("EA118_C01机房+故障现象+检修", relaxed_html)
+        self.assertNotIn("[故障现象]", building_html + relaxed_html)
+        self.assertNotIn("【故障现象】", building_html + relaxed_html)
+        self.assertRegex(
+            building_html,
+            r'<textarea name="spare_parts"[^>]*>无</textarea>',
+        )
+
+    def test_unlinked_transferred_event_is_selected_for_repair_backfill(self):
+        service = _TestMaintenancePortalService()
+        event = {
+            "record_id": "rec_event_missing_project",
+            "raw_fields": {"是否转检修": True},
+            "display_fields": {
+                "是否转检修": "True",
+                "最终状态": "事件闭环转检修中",
+                "告警描述": "C楼冷凝器传感器失效",
+                "机楼": "C楼",
+                "专业": "暖通",
+                "事件发生时间": "2026-09-08 10:20",
+            },
+        }
+        with (
+            patch.object(
+                service,
+                "_load_repair_management_project_records",
+                return_value=([], {}, []),
+            ),
+            patch.object(
+                service,
+                "_load_repair_management_event_records",
+                return_value=([], {}, [event]),
+            ),
+        ):
+            candidates = service.list_unlinked_transferred_events_for_repair()
+        self.assertEqual(
+            [item["event_record_id"] for item in candidates],
+            ["rec_event_missing_project"],
+        )
+        self.assertEqual(candidates[0]["scope"], "C")
+        self.assertEqual(candidates[0]["source_month"], "2026-09")
+
+    def test_unlinked_event_repair_backfill_is_queued_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            service = SimpleNamespace(
+                list_unlinked_transferred_events_for_repair=lambda **_kwargs: [
+                    {
+                        "event_record_id": "rec_event_backfill_once",
+                        "notice_data": {"title": "C楼传感器故障"},
+                        "remote_fields": {"是否转检修": True},
+                        "scope": "C",
+                        "source_month": "2026-09",
+                    }
+                ]
+            )
+            try:
+                with (
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(PortalRuntime, "service", service),
+                ):
+                    first = PortalRuntime._enqueue_unlinked_event_repair_project()
+                    second = PortalRuntime._enqueue_unlinked_event_repair_project()
+                self.assertGreater(first, 0)
+                self.assertEqual(second, 0)
+                queued = store.list_outbox_events(
+                    PortalRuntime.event_repair_queue_channel,
+                    status="pending",
+                )
+                self.assertEqual(len(queued), 1)
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
 
 
 if __name__ == "__main__":

@@ -1762,6 +1762,50 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_deleted_event_recreated_before_delete_ack_drops_old_target(self):
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【来源】BMS发现\n"
+            "【时间】2026-08-15 11:20\n"
+            "【概述】E楼冷机故障"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                first = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+                old_target = "rec-delete-ack-pending"
+                bound = {
+                    **first["item"]["payload"],
+                    "record_id": old_target,
+                    "target_record_id": old_target,
+                    "_is_placeholder_record": False,
+                }
+                self.assertTrue(store.upsert_qt_active_item(bound, section="event"))
+                self.assertTrue(
+                    store.delete_qt_active_item(
+                        active_item_id=first["active_item_id"],
+                        record_id=old_target,
+                    )
+                )
+
+                recreated = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+
+                payload = recreated["item"]["payload"]
+                self.assertNotEqual(recreated["record_id"], old_target)
+                self.assertTrue(str(recreated["record_id"]).startswith("local_"))
+                self.assertFalse(payload.get("target_record_id"))
+                identity = store.resolve_notice_identity(
+                    work_type="event",
+                    active_item_id=first["active_item_id"],
+                )
+                self.assertFalse((identity or {}).get("target_record_id"))
+            finally:
+                PortalRuntime.state_store = original_store
+
     def test_event_clipboard_projection_reuses_existing_target_record_by_event_identity(self):
         current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (

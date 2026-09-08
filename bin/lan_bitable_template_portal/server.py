@@ -224,7 +224,7 @@ class PortalRuntime:
             return any(
                 isinstance(item.get("payload"), dict)
                 and str(((item.get("payload") or {}).get("relay") or {}).get("mode") or "")
-                == "public_service"
+                in {"public_relay", "public_service"}
                 and str(((item.get("payload") or {}).get("relay") or {}).get("registration_state") or "")
                 != "cancelled"
                 for item in cls.state_store.list_documents("polling_work_order")
@@ -270,6 +270,9 @@ class PortalRuntime:
             return prepared
         previous = previous_prepared if isinstance(previous_prepared, dict) else {}
         previous_mode = str(previous.get("polling_work_order_mode") or "").strip()
+        if previous_mode == "public_service":
+            previous = {**previous, "polling_work_order_mode": "public_relay"}
+            previous_mode = "public_relay"
         if previous_mode in {"public_service", "public_relay", "local", "local_fallback"}:
             for key in (
                 "polling_work_order_mode",
@@ -289,7 +292,7 @@ class PortalRuntime:
         )
         prepared["polling_work_order_relay_url"] = str(health.get("url") or "")
         if health.get("ready") is True:
-            prepared["polling_work_order_mode"] = "public_service"
+            prepared["polling_work_order_mode"] = "public_relay"
             prepared.pop("polling_work_order_fallback_reason", None)
         else:
             prepared["polling_work_order_mode"] = "local_fallback"
@@ -319,7 +322,8 @@ class PortalRuntime:
                     address = ipaddress.ip_address(host)
                     allow_insecure = address.is_loopback or address.is_private
         from .polling_work_order_relay import (
-            PollingWorkOrderPublicClient,
+            PollingRelayConfig,
+            PollingWorkOrderRelayConnector,
         )
         signature = f"{relay_url}|{allow_insecure}"
         if (
@@ -327,12 +331,37 @@ class PortalRuntime:
             or cls._polling_relay_connector.state_store is not cls.state_store
             or cls._polling_relay_connector_signature != signature
         ):
-            cls._polling_relay_connector = PollingWorkOrderPublicClient(
+            cls._polling_relay_connector = PollingWorkOrderRelayConnector(
                 cls.state_store,
                 cls.polling_work_orders(),
-                base_url=relay_url,
-                allow_insecure_http=allow_insecure,
+                config=PollingRelayConfig(
+                    enabled=True,
+                    base_url=relay_url,
+                    allow_insecure_http=allow_insecure,
+                ),
+                finalize_callback=cls.finalize_polling_work_order_group,
             )
+            manager = cls.polling_work_orders()
+            for item in cls.state_store.list_documents("polling_work_order"):
+                group = item.get("payload") if isinstance(item, dict) else None
+                relay_state = group.get("relay") if isinstance(group, dict) else None
+                if not isinstance(relay_state, dict) or relay_state.get("mode") != "public_service":
+                    continue
+                target_record_id = str(group.get("target_record_id") or "").strip()
+                if not target_record_id:
+                    continue
+                manager.update_relay(
+                    target_record_id,
+                    {
+                        "mode": "public_relay",
+                        "registration_state": "registration_pending",
+                        "public_group_id": "",
+                        "operator_link": "",
+                        "reviewer_link": "",
+                        "next_retry_at": 0,
+                        "last_error": "",
+                    },
+                )
             cls._polling_relay_connector_signature = signature
         return cls._polling_relay_connector
 
@@ -1427,16 +1456,19 @@ class PortalRuntime:
         selected_mode = str(
             prepared.get("polling_work_order_mode") or ""
         ).strip()
-        if selected_mode not in {"public_service", "public_relay", "local", "local_fallback"}:
+        if selected_mode == "public_service":
+            selected_mode = "public_relay"
+            prepared["polling_work_order_mode"] = selected_mode
+        if selected_mode not in {"public_relay", "local", "local_fallback"}:
             selected_mode = (
-                "public_service"
+                "public_relay"
                 if cls.polling_work_order_public_relay_enabled()
                 else "local"
             )
             prepared["polling_work_order_mode"] = selected_mode
         relay = (
             cls.polling_work_order_relay()
-            if selected_mode == "public_service"
+            if selected_mode == "public_relay"
             else None
         )
         use_public_relay = bool(relay and relay.enabled)
@@ -1459,7 +1491,8 @@ class PortalRuntime:
             if use_public_relay:
                 relay.register_group(target_record_id, force=True)
                 group = cls.polling_work_orders().group_with_links(
-                    cls.polling_work_orders().get_group(target_record_id), ""
+                    cls.polling_work_orders().get_group(target_record_id),
+                    cls._polling_work_order_public_base_url(),
                 )
                 if group.get("operator_link") and group.get("reviewer_link"):
                     cls._send_polling_work_order_links(group)
@@ -1495,12 +1528,6 @@ class PortalRuntime:
                 "error": "工单附件正在上传，请稍后刷新。",
             }
         try:
-            relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
-            public_service = str(relay_state.get("mode") or "") == "public_service"
-            if public_service and str(group.get("state") or "") == "active":
-                group = cls.polling_work_order_relay().sync_group(
-                    target_record_id, force=True
-                )
             group_state = str(group.get("state") or "")
             if group_state not in {"upload_pending", "completed"}:
                 return {"ok": False, "state": str(group.get("state") or ""), "error": "工单步骤尚未全部完成。"}
@@ -1536,11 +1563,7 @@ class PortalRuntime:
                     target_record_id, reason="target_terminal"
                 )
                 return {"ok": False, "state": "cancelled", "error": f"{label}通告已结束，工单已停止。"}
-            workbook = (
-                cls.polling_work_order_relay().download_artifact(target_record_id)
-                if public_service
-                else manager.build_execution_workbook(target_record_id)
-            )
+            workbook = manager.build_execution_workbook(target_record_id)
             uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
             previous_generated_tokens = {
                 str(token or "").strip()
@@ -5779,6 +5802,70 @@ class PortalRuntime:
         return event_id
 
     @classmethod
+    def _enqueue_unlinked_event_repair_project(cls) -> int:
+        try:
+            candidates = cls.service.list_unlinked_transferred_events_for_repair(
+                limit=20
+            )
+        except Exception as exc:
+            log_warning(f"检查遗漏的事件转检修维修单失败: {exc}")
+            return 0
+        if not candidates:
+            return 0
+        blocked_ids: set[str] = set()
+        for status in ("pending", "leased"):
+            for item in cls.state_store.list_outbox_events(
+                cls.event_repair_queue_channel,
+                status=status,
+                limit=500,
+            ):
+                payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                event_record_id = str(payload.get("event_record_id") or "").strip()
+                if event_record_id:
+                    blocked_ids.add(event_record_id)
+        retry_cutoff = time.time() - 15 * 60
+        for item in cls.state_store.list_outbox_events(
+            cls.event_repair_queue_channel,
+            status="failed",
+            limit=500,
+        ):
+            if float(item.get("updated_at") or 0) < retry_cutoff:
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            event_record_id = str(payload.get("event_record_id") or "").strip()
+            if event_record_id:
+                blocked_ids.add(event_record_id)
+        candidate = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("event_record_id") or "").strip() not in blocked_ids
+            ),
+            None,
+        )
+        if not candidate:
+            return 0
+        event_id = cls.state_store.enqueue_outbox_event(
+            cls.event_repair_queue_channel,
+            {
+                key: candidate.get(key)
+                for key in (
+                    "event_record_id",
+                    "notice_data",
+                    "remote_fields",
+                    "scope",
+                    "source_month",
+                )
+            },
+        )
+        if event_id > 0:
+            logging.info(
+                "已自动补排遗漏的事件转检修维修单: "
+                f"event_record_id={candidate.get('event_record_id')}"
+            )
+        return event_id
+
+    @classmethod
     def _process_event_repair_queue_once(cls) -> dict[str, Any]:
         tasks = cls.state_store.lease_outbox_events(
             cls.event_repair_queue_channel,
@@ -5810,6 +5897,7 @@ class PortalRuntime:
             repair_record_id = str(result.get("record_id") or "").strip()
             if not repair_record_id:
                 raise PortalError("维修单创建未返回记录 ID。")
+            cls.clear_payload_cache()
             cls.state_store.mark_outbox_event(event_id, "done")
             cls.state_store.append_event_async(
                 "event_repair_project_result",
@@ -5872,8 +5960,16 @@ class PortalRuntime:
                 if cls.event_repair_worker_stop:
                     return
             result = cls._process_event_repair_queue_once()
+            if result.get("status") == "idle":
+                queued_id = cls._enqueue_unlinked_event_repair_project()
+                if queued_id > 0:
+                    cls.event_repair_queue_event.set()
+                    next_wait = 1.0
+                    continue
             if result.get("status") == "pending":
                 next_wait = max(1.0, float(result.get("retry_after") or 1.0))
+            elif result.get("status") == "idle":
+                next_wait = 30.0
             else:
                 next_wait = 1.0
             if result.get("processed") and result.get("status") != "pending":

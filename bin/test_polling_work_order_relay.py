@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import base64
 import hashlib
 import json
 import sys
@@ -23,7 +22,6 @@ from lan_bitable_template_portal.polling_work_order_relay import (  # noqa: E402
     PollingRelayConfig,
     PollingRelayConfigurationError,
     PollingRelayProtocolError,
-    PollingWorkOrderPublicClient,
     PollingWorkOrderRelayConnector,
     RelayResponse,
     probe_polling_relay_health,
@@ -162,38 +160,6 @@ class FakeRelayTransport:
             status,
             response_body,
             content_type=content_type,
-        )
-
-
-class TestClientRelayTransport:
-    def __init__(self, client) -> None:
-        self.client = client
-
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers,
-        body: bytes,
-        timeout: float,
-        max_bytes: int,
-    ) -> RelayResponse:
-        parsed = urllib.parse.urlsplit(url)
-        target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-        response = self.client.request(
-            method,
-            target,
-            headers=dict(headers),
-            content=body if method.upper() not in {"GET", "HEAD"} else None,
-        )
-        content = bytes(response.content)
-        if len(content) > max_bytes:
-            raise AssertionError("test relay response exceeded connector limit")
-        return RelayResponse(
-            response.status_code,
-            {str(key).lower(): str(value) for key, value in response.headers.items()},
-            content,
         )
 
 
@@ -351,103 +317,6 @@ def _config() -> PollingRelayConfig:
 
 
 class PollingWorkOrderRelayTests(unittest.TestCase):
-    def test_public_client_creates_independent_order_without_local_target_id(self) -> None:
-        captured: dict = {}
-
-        class CreateTransport:
-            def request(self, _method, _url, *, headers, body, **_kwargs) -> RelayResponse:
-                captured.update(json.loads(body.decode("utf-8")))
-                self.headers = headers
-                return RelayResponse(
-                    200,
-                    {"content-type": "application/json"},
-                    json.dumps(
-                        {
-                            "ok": True,
-                            "data": {
-                                "public_group_id": "public_group_001",
-                                "operator_link": "https://relay.example/operator",
-                                "reviewer_link": "https://relay.example/reviewer",
-                            },
-                        }
-                    ).encode("utf-8"),
-                )
-
-        group = {
-            "target_record_id": "recMustStayLocal",
-            "work_type": "polling",
-            "title": "测试轮巡",
-            "scope": "E",
-            "sop_name": "SOP-1",
-            "operator": {"name": "操作人"},
-            "reviewer": {"name": "审核人"},
-            "runs": [{"run_index": 1, "from_unit": "1#", "to_unit": "2#"}],
-            "steps": [{"step_key": "1:1", "content": "执行", "time_limit_seconds": 3}],
-            "relay": {"mode": "public_service", "registration_state": "registration_pending"},
-        }
-        manager = MagicMock()
-        manager.get_group.side_effect = lambda _target: copy.deepcopy(group)
-
-        def update_relay(_target, changes):
-            group["relay"] = {**group["relay"], **copy.deepcopy(changes)}
-            return copy.deepcopy(group)
-
-        manager.update_relay.side_effect = update_relay
-        client = PollingWorkOrderPublicClient(
-            MagicMock(), manager, base_url="https://relay.example", transport=CreateTransport()
-        )
-        result = client.register_group("recMustStayLocal", force=True)
-        self.assertNotIn("target_record_id", captured)
-        self.assertRegex(captured["management_token_sha256"], r"^[0-9a-f]{64}$")
-        self.assertNotIn("management_token", captured)
-        self.assertRegex(captured["links"]["operator"]["secret_sha256"], r"^[0-9a-f]{64}$")
-        self.assertNotIn("secret", captured["links"]["operator"])
-        self.assertEqual(result["relay"]["registration_state"], "registered")
-        self.assertEqual(result["relay"]["public_group_id"], "public_group_001")
-
-    def test_public_client_rejects_ready_artifact_without_sha256(self) -> None:
-        class StatusTransport:
-            def request(self, *_args, **_kwargs) -> RelayResponse:
-                return RelayResponse(
-                    200,
-                    {"content-type": "application/json"},
-                    json.dumps(
-                        {
-                            "ok": True,
-                            "data": {
-                                "state": "artifact_ready",
-                                "version": 2,
-                                "artifact": {"name": "result.xlsx"},
-                            },
-                        }
-                    ).encode("utf-8"),
-                )
-
-        group = {
-            "target_record_id": "recArtifact",
-            "state": "active",
-            "relay": {
-                "mode": "public_service",
-                "registration_state": "registered",
-                "public_group_id": "public_group_002",
-                "management_token": "management_token_1234567890abcdef",
-            },
-        }
-        manager = MagicMock()
-        manager.get_group.side_effect = lambda _target: copy.deepcopy(group)
-
-        def update_relay(_target, changes):
-            group["relay"] = {**group["relay"], **copy.deepcopy(changes)}
-            return copy.deepcopy(group)
-
-        manager.update_relay.side_effect = update_relay
-        client = PollingWorkOrderPublicClient(
-            MagicMock(), manager, base_url="https://relay.example", transport=StatusTransport()
-        )
-        result = client.sync_group("recArtifact", force=True)
-        manager.mark_public_artifact_ready.assert_not_called()
-        self.assertIn("校验值", result["relay"]["last_error"])
-
     def test_health_probe_requires_ready_matching_protocol(self) -> None:
         class HealthTransport:
             def __init__(self, payload: dict) -> None:
@@ -471,6 +340,17 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             ),
         )
         self.assertTrue(ready["ready"])
+        legacy_name = probe_polling_relay_health(
+            "https://relay.example",
+            transport=HealthTransport(
+                {
+                    "service": "public_polling_relay",
+                    "protocol_version": 1,
+                    "ready": True,
+                }
+            ),
+        )
+        self.assertFalse(legacy_name["ready"])
         incompatible = probe_polling_relay_health(
             "https://relay.example",
             transport=HealthTransport(
@@ -483,6 +363,29 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
         )
         self.assertFalse(incompatible["ready"])
         self.assertIn("版本不兼容", incompatible["error"])
+
+    def test_health_probe_rejects_missing_create_route(self) -> None:
+        class MissingCreateTransport:
+            def request(self, method, *_args, **_kwargs) -> RelayResponse:
+                if method == "OPTIONS":
+                    return RelayResponse(404, {}, b"{}")
+                return RelayResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps(
+                        {
+                            "service": "public_polling_work_order",
+                            "protocol_version": 1,
+                            "ready": True,
+                        }
+                    ).encode(),
+                )
+
+        result = probe_polling_relay_health(
+            "https://relay.example", transport=MissingCreateTransport()
+        )
+        self.assertFalse(result["ready"])
+        self.assertIn("内部中继接口", result["error"])
 
     def test_reconcile_does_not_migrate_legacy_local_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -584,6 +487,7 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             self.assertIn('"protocol_version": 1', payload_text)
             self.assertIn('"operator"', payload_text)
             self.assertIn('"reviewer"', payload_text)
+            self.assertIn('"photo_required": false', payload_text)
             self.assertNotIn("ou_secret", payload_text)
             group = manager.get_group(manager.target_record_id)
             self.assertEqual(group["relay"]["mode"], "public_relay")
@@ -851,119 +755,6 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             self.assertEqual(document["registration_state"], "cancelled")
             self.assertEqual(document["operator_link"], "")
             self.assertEqual(manager.get_group(manager.target_record_id)["relay"]["operator_link"], "")
-
-    def test_connector_contract_round_trip_with_public_relay_app(self) -> None:
-        from fastapi.testclient import TestClient
-        from public_polling_relay.app import RelaySettings, create_app
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            settings = RelaySettings(
-                db_path=root / "relay.sqlite3",
-                upload_root=root / "uploads",
-                secure_cookie=False,
-                authority_lease_seconds=45,
-                command_lease_seconds=30,
-            )
-            with TestClient(create_app(settings), base_url="http://testserver") as client:
-                store = LanPortalStateStore(root / "local.sqlite3")
-                manager = FakeWorkOrders(store)
-                config = PollingRelayConfig(
-                    enabled=True,
-                    base_url="http://testserver",
-                    connector_id="connector_integration_001",
-                    long_poll_seconds=1,
-                    request_timeout_seconds=6,
-                    allow_insecure_http=True,
-                )
-                connector = PollingWorkOrderRelayConnector(
-                    store,
-                    manager,
-                    config=config,
-                    transport=TestClientRelayTransport(client),
-                )
-                registration = connector.register_group(manager.target_record_id)
-                self.assertEqual(registration["registration_state"], "registered")
-                fragment = urllib.parse.parse_qs(
-                    urllib.parse.urlsplit(registration["operator_link"]).fragment
-                )
-                exchange = client.post(
-                    "/api/v1/link-sessions/exchange",
-                    json={
-                        "link_id": fragment["link_id"][0],
-                        "secret": fragment["secret"][0],
-                    },
-                )
-                self.assertEqual(exchange.status_code, 200, exchange.text)
-                exchange_data = exchange.json()["data"]
-                snapshot = exchange_data["snapshot"]
-                self.assertEqual(snapshot["title"], "二次泵轮巡")
-                self.assertEqual(snapshot["role"], "operator")
-                queued = client.post(
-                    "/api/v1/work-orders/commands",
-                    headers={
-                        "X-CSRF-Token": exchange_data["csrf_token"],
-                        "Idempotency-Key": "activate_command_0001",
-                    },
-                    json={"type": "activate", "expected_version": 1, "run_index": 1},
-                )
-                self.assertEqual(queued.status_code, 202, queued.text)
-                command_id = queued.json()["data"]["command_id"]
-                processed = connector.poll_commands_once()
-                self.assertEqual(processed["completed"], 1)
-                command = client.get(f"/api/v1/work-orders/commands/{command_id}")
-                self.assertEqual(command.status_code, 200, command.text)
-                self.assertEqual(command.json()["data"]["status"], "succeeded")
-                refreshed = client.get("/api/v1/work-orders/session?wait_seconds=0")
-                self.assertEqual(refreshed.status_code, 200, refreshed.text)
-                self.assertEqual(refreshed.json()["data"]["authority_version"], 2)
-
-                photo = base64.b64decode(
-                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-                )
-                digest = hashlib.sha256(photo).hexdigest()
-                initialized = client.post(
-                    "/api/v1/work-orders/uploads",
-                    headers={"X-CSRF-Token": exchange_data["csrf_token"]},
-                    json={
-                        "step_key": "1:1",
-                        "expected_version": 2,
-                        "file_name": "step.png",
-                        "content_type": "image/png",
-                        "size": len(photo),
-                        "sha256": digest,
-                    },
-                )
-                self.assertEqual(initialized.status_code, 201, initialized.text)
-                upload_id = initialized.json()["data"]["upload_id"]
-                uploaded = client.put(
-                    f"/api/v1/work-orders/uploads/{upload_id}/content",
-                    headers={
-                        "X-CSRF-Token": exchange_data["csrf_token"],
-                        "X-Content-SHA256": digest,
-                        "Content-Type": "image/png",
-                    },
-                    content=photo,
-                )
-                self.assertEqual(uploaded.status_code, 200, uploaded.text)
-                completed = client.post(
-                    f"/api/v1/work-orders/uploads/{upload_id}/complete",
-                    headers={"X-CSRF-Token": exchange_data["csrf_token"]},
-                )
-                self.assertEqual(completed.status_code, 202, completed.text)
-                photo_command_id = completed.json()["data"]["command_id"]
-                self.assertEqual(connector.poll_commands_once()["completed"], 1)
-                photo_ledger = store.get_document(
-                    POLLING_RELAY_COMMAND_NAMESPACE, photo_command_id
-                )
-                self.assertEqual(photo_ledger["ack_status"], "sent", photo_ledger)
-                photo_snapshot = client.get("/api/v1/work-orders/session?wait_seconds=0")
-                self.assertEqual(photo_snapshot.status_code, 200, photo_snapshot.text)
-                public_photos = photo_snapshot.json()["data"]["steps"][0]["photos"]
-                self.assertTrue(public_photos, photo_snapshot.json())
-                self.assertEqual(public_photos[0]["photo_id"], upload_id)
-                self.assertTrue(public_photos[0]["preview_url"].endswith(upload_id))
-
 
 if __name__ == "__main__":
     unittest.main()

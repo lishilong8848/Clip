@@ -1430,17 +1430,19 @@ def _input(
     input_type: str = "text",
     datalist: str = "",
     required: bool = False,
+    hint: str = "",
 ) -> str:
     label_class = " class=\"required\"" if required else ""
     required_attr = " required aria-required=\"true\"" if required else ""
+    hint_html = f'<small class="field-hint">{_e(hint)}</small>' if hint else ""
     if textarea:
         return (
-            f"<label{label_class}><span>{_e(label)}</span>"
+            f"<label{label_class}><span>{_e(label)}{hint_html}</span>"
             f"<textarea name=\"{_e(name)}\" rows=\"1\"{required_attr}>{_e(value)}</textarea></label>"
         )
     list_attr = f" list=\"{_e(datalist)}\"" if datalist else ""
     return (
-        f"<label{label_class}><span>{_e(label)}</span>"
+        f"<label{label_class}><span>{_e(label)}{hint_html}</span>"
         f"<input name=\"{_e(name)}\" type=\"{_e(input_type)}\" value=\"{_e(value)}\"{list_attr}{required_attr}></label>"
     )
 
@@ -1526,8 +1528,25 @@ def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
     def field(name: str, label: str, value: Any = "", **kwargs: Any) -> str:
         return _input(name, label, value, required=_is_required_upload_field(work_type, name), **kwargs)
 
+    normalized_scope = str(scope or "").strip().upper()
+    repair_title_hint = (
+        f"格式：EA118_C01机房{normalized_scope}楼+故障现象+检修；"
+        "“故障现象”为实际填写内容，无需输入括号。"
+        if normalized_scope in {"A", "B", "C", "D", "E", "H"}
+        else "格式：EA118_C01机房+故障现象+检修；"
+        "“故障现象”为实际填写内容，无需输入括号。"
+    )
     primary_fields: list[str] = [
-        field("title", "名称" if work_type not in {"repair", "polling"} else "标题", draft.get("title")),
+        field(
+            "title",
+            "名称" if work_type not in {"repair", "polling"} else "标题",
+            draft.get("title"),
+            hint=(
+                repair_title_hint
+                if work_type == "repair"
+                else ""
+            ),
+        ),
         _building_scope_field(draft, scope=scope),
         field("start_time", "开始时间" if work_type != "repair" else "期望完成时间", draft.get("start_time"), input_type="datetime-local"),
         field("end_time", "结束时间" if work_type != "repair" else "发现故障时间", draft.get("end_time"), input_type="datetime-local"),
@@ -1572,7 +1591,7 @@ def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
             field("discovery", "故障发现方式", draft.get("discovery")),
             field("symptom", "故障现象", draft.get("symptom")),
             field("solution", "解决方案（事件解决措施）", draft.get("solution"), textarea=True),
-            field("spare_parts", "备件更换情况", draft.get("spare_parts"), textarea=True),
+            field("spare_parts", "备件更换情况", draft.get("spare_parts") or "无", textarea=True),
         ])
     if work_type == "power":
         notice_fields.extend([
@@ -2976,8 +2995,10 @@ def render_workbench_lite(
     .form-section header strong {{ color:#0c244d; font-size:13px; }}
     .form-section header span {{ margin:0; color:#64748b; font-size:11px; line-height:1.25; text-align:right; }}
     label span {{ display:block; margin:0 0 4px; color:#51677f; font-size:11px; font-weight:900; }}
+    .field-hint {{ display:inline; margin-left:8px; color:#64748b; font-size:10px; font-weight:650; }}
     label.required > span::after {{ content:"必填"; display:inline-flex; margin-left:6px; border-radius:999px; padding:1px 6px; color:#b42318; background:#fff1f0; font-size:10px; font-weight:950; vertical-align:middle; }}
     input:required:invalid,textarea:required:invalid {{ border-color:#ffc7bf; background:#fffafa; }}
+    #lite-notice-form [name="title"].format-invalid {{ border-color:#ef4444; background:#fff1f2; box-shadow:0 0 0 3px rgba(239,68,68,.12); }}
     .form-grid > label {{ min-width:0; }}
     .building-scope-field {{ min-width:0; margin:0; border:1px solid #d5e3f4; border-radius:10px; padding:6px 8px; background:#fbfdff; }}
     .building-scope-field legend {{ padding:0 3px; color:#51677f; font-size:11px; font-weight:900; }}
@@ -3895,6 +3916,8 @@ def render_workbench_lite(
     }}
     let liteQtActiveStream = null;
     let liteQtActiveStreamKey = '';
+    let liteRepairStream = null;
+    let liteRepairStreamKey = '';
     let liteQtActiveScopeSignature = '';
     let liteQtActiveScopeSignatureKey = '';
     let liteQtActiveRefreshTimer = null;
@@ -3905,6 +3928,13 @@ def render_workbench_lite(
       }}
       liteQtActiveStream = null;
       liteQtActiveStreamKey = '';
+    }}
+    function closeLiteRepairStream() {{
+      if (liteRepairStream) {{
+        try {{ liteRepairStream.close(); }} catch {{}}
+      }}
+      liteRepairStream = null;
+      liteRepairStreamKey = '';
     }}
     function liteQtActiveIdentitySets(items) {{
       const sets = {{
@@ -3970,7 +4000,7 @@ def render_workbench_lite(
       }}, 120);
     }}
     function applyQtActiveIdentitySnapshot(payload) {{
-      const signature = String(payload?.qt_scope_signature || '').trim();
+      const signature = String(payload?.display_signature || payload?.qt_scope_signature || '').trim();
       if (signature) {{
         if (liteQtActiveScopeSignature && signature !== liteQtActiveScopeSignature) {{
           scheduleLiteQtActiveRefresh();
@@ -4054,10 +4084,44 @@ def render_workbench_lite(
         }}
       }});
     }}
+    function ensureLiteRepairStream() {{
+      const workType = document.querySelector('#lite-notice-form [name="work_type"]')?.value
+        || new URLSearchParams(location.search).get('work_type')
+        || '';
+      if (typeof EventSource === 'undefined' || document.hidden || workType !== 'repair') {{
+        closeLiteRepairStream();
+        return;
+      }}
+      const scope = getCurrentScope();
+      if (
+        liteRepairStream
+        && liteRepairStreamKey === scope
+        && liteRepairStream.readyState !== EventSource.CLOSED
+      ) return;
+      closeLiteRepairStream();
+      const streamUrl = new URL('/api/repair-management/stream', location.origin);
+      streamUrl.searchParams.set('scope', scope);
+      const stream = new EventSource(streamUrl.pathname + streamUrl.search);
+      liteRepairStream = stream;
+      liteRepairStreamKey = scope;
+      stream.addEventListener('repair_change', event => {{
+        if (stream !== liteRepairStream) return;
+        try {{
+          const payload = JSON.parse(String(event.data || '{{}}'));
+          if (Array.isArray(payload.changes) && payload.changes.length) {{
+            scheduleLiteQtActiveRefresh();
+          }}
+        }} catch {{}}
+      }});
+    }}
     document.addEventListener('visibilitychange', () => {{
-      if (document.hidden) closeLiteQtActiveStream();
+      if (document.hidden) {{
+        closeLiteQtActiveStream();
+        closeLiteRepairStream();
+      }}
       else {{
         ensureLiteQtActiveStream();
+        ensureLiteRepairStream();
         if (liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
       }}
     }});
@@ -4070,6 +4134,7 @@ def render_workbench_lite(
       requestAnimationFrame(() => {{
         hydrateLitePreview();
         ensureLiteQtActiveStream();
+        ensureLiteRepairStream();
       }});
     }}
     function applyLiteHtml(html, url, push, selectors) {{
@@ -5297,6 +5362,33 @@ def render_workbench_lite(
         .map(field => String(field.value || '').trim().toUpperCase())
         .filter((code, index, values) => ['110', 'A', 'B', 'C', 'D', 'E', 'H'].includes(code) && values.indexOf(code) === index);
     }}
+    function repairTitleIssue(form) {{
+      const workType = previewValue(form, 'work_type') || form?.dataset.workType || '';
+      if (workType !== 'repair' || String(form?.dataset.action || 'start') !== 'start') return '';
+      const title = previewValue(form, 'title');
+      if (!title) return '';
+      const scope = previewValue(form, 'scope').toUpperCase();
+      if (['A', 'B', 'C', 'D', 'E', 'H'].includes(scope)) {{
+        const prefix = `EA118_C01机房${{scope}}楼`;
+        if (!title.startsWith(prefix) || !title.endsWith('检修') || !title.slice(prefix.length, -2).trim()) {{
+          return `标题格式不正确：应为 ${{prefix}}+故障现象+检修；故障现象无需输入括号。`;
+        }}
+        return '';
+      }}
+      const prefix = 'EA118_C01机房';
+      return title.startsWith(prefix) && title.endsWith('检修') && title.slice(prefix.length, -2).trim()
+        ? ''
+        : '标题格式不正确：应为 EA118_C01机房+故障现象+检修；故障现象无需输入括号。';
+    }}
+    function syncRepairTitleValidity(form) {{
+      const field = form?.querySelector('[name="title"]');
+      if (!field) return '';
+      const issue = repairTitleIssue(form);
+      field.classList.toggle('format-invalid', Boolean(issue));
+      field.setAttribute('aria-invalid', issue ? 'true' : 'false');
+      field.title = issue;
+      return issue;
+    }}
     function buildingLabelFromCode(code) {{
       return code === '110' ? '110站' : `${{code}}楼`;
     }}
@@ -5453,6 +5545,7 @@ def render_workbench_lite(
       if (workType === 'polling') updatePollingSelectionSummary(targetForm);
       const sitePhotoCount = Number(previewValue(targetForm, 'site_photo_count') || 0);
       const buttons = targetForm.querySelectorAll('button[name="submit_action"]');
+      const titleIssue = syncRepairTitleValidity(targetForm);
       const bindingIssue = manualBindingIssue(targetForm);
       if (bindingIssue) {{
         buttons.forEach(button => button.disabled = true);
@@ -5463,6 +5556,11 @@ def render_workbench_lite(
       if (missing.length) {{
         buttons.forEach(button => button.disabled = true);
         setActionReason('缺少' + missing.join('、') + '，暂不能发送', 'blocked');
+        return;
+      }}
+      if (titleIssue) {{
+        buttons.forEach(button => button.disabled = true);
+        setActionReason(titleIssue, 'blocked');
         return;
       }}
       const durationIssue = noticeDurationIssue(targetForm);
@@ -8343,7 +8441,9 @@ def render_workbench_lite(
         message_sent: '个人消息已发送',
         qt_queued: '等待展示',
         upload_waiting: '等待上传多维',
+        remote_intent: '正在写入多维',
         uploading: '正在上传多维',
+        remote_written: '多维已写入，正在同步页面',
         undo_queued: '回退已排队',
         undoing_remote: '正在恢复多维记录',
         undoing_local: '正在恢复本地状态',
@@ -8364,7 +8464,7 @@ def render_workbench_lite(
       if (!jobId) return false;
       const startedAt = Date.now();
       let delay = 800;
-      while (Date.now() - startedAt < 90000) {{
+      while (Date.now() - startedAt < 600000) {{
         await sleep(delay);
         try {{
           const response = await fetch(`/api/jobs/${{encodeURIComponent(jobId)}}`, {{ credentials: 'same-origin' }});
@@ -8390,13 +8490,14 @@ def render_workbench_lite(
             setLiteStatus('发送失败：' + friendlyLiteMessage(message));
             return true;
           }}
-          setLiteStatus('发送中：' + jobPhaseText(phase));
+          const slow = Date.now() - startedAt >= 90000 ? '（处理时间较长，仍在自动查询）' : '';
+          setLiteStatus('发送中：' + jobPhaseText(phase) + slow);
         }} catch (error) {{
           setLiteStatus('正在读取任务状态...');
         }}
         delay = Math.min(2600, Math.round(delay * 1.25));
       }}
-      setLiteStatus('仍在处理，请稍后刷新本页查看结果');
+      setLiteStatus('处理超过10分钟，可刷新页面继续查看结果');
       return false;
     }}
     function schedulePostSubmitRefresh(label, jobId, payload) {{
@@ -8472,6 +8573,13 @@ def render_workbench_lite(
         const message = '缺少' + missing.join('、') + '，暂不能发送';
         showLiteError(message);
         setLiteStatus('提交失败：' + message);
+        updateActionAvailability(form);
+        return;
+      }}
+      const titleIssue = syncRepairTitleValidity(form);
+      if (titleIssue) {{
+        showLiteError(titleIssue);
+        setLiteStatus('提交失败：' + titleIssue);
         updateActionAvailability(form);
         return;
       }}
@@ -8551,6 +8659,7 @@ def render_workbench_lite(
     }});
     hydrateLitePreview();
     ensureLiteQtActiveStream();
+    ensureLiteRepairStream();
     if (new URLSearchParams(location.search).get('change_confirmation') && document.getElementById('lite-change-confirmation-open')) {{
       openChangeConfirmations().catch(() => null);
     }}

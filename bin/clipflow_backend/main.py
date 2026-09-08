@@ -5521,6 +5521,7 @@ class FastAPIPortalController:
                     source_month=str(payload.get("source_month") or ""),
                     scope=str(payload.get("scope") or "ALL"),
                 )
+                PortalRuntime.clear_payload_cache()
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -12220,6 +12221,10 @@ class FastAPIPortalController:
             data = {}
         if recreate_deleted_event:
             data = {"active_item_id": active_item_id}
+            PortalRuntime.state_store.mark_notice_identity_deleted(
+                work_type="event",
+                active_item_id=active_item_id,
+            )
         if (
             notice_type == "事件通告"
             and projected_action in {"update", "end"}
@@ -12681,7 +12686,9 @@ class FastAPIPortalController:
         relay.run_once()
         manager = PortalRuntime.polling_work_orders()
         for group in manager.open_groups():
-            projected = manager.group_with_links(group, "")
+            projected = manager.group_with_links(
+                group, PortalRuntime._polling_work_order_public_base_url()
+            )
             if str(projected.get("operator_link") or "") and str(
                 projected.get("reviewer_link") or ""
             ):

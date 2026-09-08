@@ -1223,7 +1223,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         relay_connector.assert_not_called()
         send_links.assert_called_once_with(group)
 
-    def test_ready_public_service_fixes_start_to_public_mode(self) -> None:
+    def test_ready_public_relay_fixes_start_to_public_mode(self) -> None:
         prepared = {
             "work_type": "polling",
             "action": "start",
@@ -1243,7 +1243,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             },
         ):
             resolved = PortalRuntime._resolve_polling_work_order_mode(dict(prepared))
-        self.assertEqual(resolved["polling_work_order_mode"], "public_service")
+        self.assertEqual(resolved["polling_work_order_mode"], "public_relay")
 
     def test_work_order_mode_is_not_rechecked_after_it_is_fixed(self) -> None:
         prepared = {
@@ -1278,6 +1278,19 @@ class PollingWorkOrderTests(unittest.TestCase):
                     "polling_work_order_public_relay_url": "http://192.168.224.122:18767",
                 }
             )
+            store.put_document(
+                "polling_work_order",
+                "recOldDirectClient",
+                {
+                    "target_record_id": "recOldDirectClient",
+                    "state": "active",
+                    "relay": {
+                        "mode": "public_service",
+                        "registration_state": "registration_pending",
+                        "public_group_id": "old-direct-id",
+                    },
+                },
+            )
             previous_store = PortalRuntime.state_store
             previous_connector = PortalRuntime._polling_relay_connector
             previous_signature = PortalRuntime._polling_relay_connector_signature
@@ -1290,8 +1303,17 @@ class PollingWorkOrderTests(unittest.TestCase):
                 )
                 relay = PortalRuntime.polling_work_order_relay()
                 self.assertTrue(relay.enabled)
-                self.assertEqual(relay.base_url, "http://192.168.224.122:18767")
-                self.assertTrue(relay.allow_insecure_http)
+                self.assertEqual(relay.config.base_url, "http://192.168.224.122:18767")
+                self.assertTrue(relay.config.allow_insecure_http)
+                migrated = store.get_document(
+                    "polling_work_order", "recOldDirectClient"
+                )
+                self.assertEqual(migrated["relay"]["mode"], "public_relay")
+                self.assertEqual(
+                    migrated["relay"]["registration_state"],
+                    "registration_pending",
+                )
+                self.assertFalse(migrated["relay"].get("public_group_id"))
             finally:
                 PortalRuntime.state_store = previous_store
                 PortalRuntime._polling_relay_connector = previous_connector
@@ -1312,7 +1334,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                 {
                     "target_record_id": "recPublicStillRunning",
                     "state": "active",
-                    "relay": {"mode": "public_service", "registration_state": "registered"},
+                    "relay": {"mode": "public_relay", "registration_state": "registered"},
                 },
             )
             previous_store = PortalRuntime.state_store
@@ -1350,7 +1372,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
-    def test_polling_start_can_create_public_service_order(self) -> None:
+    def test_polling_start_can_create_public_relay_order(self) -> None:
         manager = MagicMock()
         relay = MagicMock(enabled=True)
         group = {"target_record_id": "recPublicStart", "state": "active"}

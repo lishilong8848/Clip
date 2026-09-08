@@ -2472,16 +2472,34 @@ class MaintenancePortalService:
         if not normalized_record_id:
             return
         if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS:
-            for source_record in self._repair_records:
-                if str(source_record.get("record_id") or "").strip() != normalized_record_id:
-                    continue
-                for field_bucket in ("display_fields", "raw_fields"):
-                    source_fields = source_record.get(field_bucket)
-                    if not isinstance(source_fields, dict):
-                        source_fields = {}
-                        source_record[field_bucket] = source_fields
-                    source_fields.update(dict(fields or {}))
-                break
+            with self._refresh_lock:
+                for source_record in self._repair_records:
+                    if str(source_record.get("record_id") or "").strip() != normalized_record_id:
+                        continue
+                    for field_bucket in ("display_fields", "raw_fields"):
+                        source_fields = source_record.get(field_bucket)
+                        if not isinstance(source_fields, dict):
+                            source_fields = {}
+                            source_record[field_bucket] = source_fields
+                        source_fields.update(dict(fields or {}))
+                    break
+                else:
+                    now_ms = str(int(time.time() * 1000))
+                    self._repair_records.insert(
+                        0,
+                        {
+                            "record_id": normalized_record_id,
+                            "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                            "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                            "work_type": WORK_TYPE_REPAIR,
+                            "notice_type": NOTICE_TYPE_REPAIR,
+                            "display_fields": dict(fields or {}),
+                            "raw_fields": dict(fields or {}),
+                            "created_time": now_ms,
+                            "last_modified_time": now_ms,
+                        },
+                    )
+                self._repair_loaded_once = True
             with suppress(Exception):
                 self._state_store.patch_active_source_record_fields(
                     source_record_id=normalized_record_id,
@@ -16217,6 +16235,9 @@ class MaintenancePortalService:
                 record_id=record_id,
                 fields=prepared,
             )
+            with self._refresh_lock:
+                self._save_source_scope_snapshots(["repair"])
+                self._touch_state_cache_version()
         except Exception as exc:
             if stable_operation_id:
                 self._state_store.update_repair_management_operation(
@@ -20855,6 +20876,98 @@ class MaintenancePortalService:
             "last_failed": {},
         }
 
+    def list_unlinked_transferred_events_for_repair(
+        self,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return transferred, still-open repair projections missing a project."""
+        _project_metas, _project_meta_by_name, projects = (
+            self._load_repair_management_project_records()
+        )
+        linked_event_ids: set[str] = set()
+        for project in projects:
+            raw_fields = (
+                project.get("raw_fields")
+                if isinstance(project.get("raw_fields"), dict)
+                else {}
+            )
+            display_fields = (
+                project.get("display_fields")
+                if isinstance(project.get("display_fields"), dict)
+                else {}
+            )
+            linked_event_ids.update(
+                self._repair_management_record_ids(
+                    raw_fields.get("关联事件单")
+                    or display_fields.get("关联事件单")
+                )
+            )
+
+        _event_metas, _event_meta_by_name, events = (
+            self._load_repair_management_event_records()
+        )
+        candidates: list[dict[str, Any]] = []
+        for event in events:
+            event_id = str(event.get("record_id") or "").strip()
+            if not event_id or event_id in linked_event_ids:
+                continue
+            raw_fields = (
+                event.get("raw_fields")
+                if isinstance(event.get("raw_fields"), dict)
+                else {}
+            )
+            display_fields = (
+                event.get("display_fields")
+                if isinstance(event.get("display_fields"), dict)
+                else {}
+            )
+            if not self._truthy_flag(
+                raw_fields.get("是否转检修")
+                if raw_fields.get("是否转检修") not in (None, "", [], {})
+                else display_fields.get("是否转检修")
+            ):
+                continue
+            final_status = self._repair_management_plain_text(
+                display_fields.get("最终状态") or raw_fields.get("最终状态")
+            )
+            if "转检修中" not in final_status:
+                continue
+            item = self._repair_management_event_item(event)
+            building_codes = list(item.get("building_codes") or [])
+            occurrence_time = str(item.get("occurrence_time") or "").strip()
+            occurrence = self._parse_notice_datetime(occurrence_time)
+            candidates.append(
+                {
+                    "event_record_id": event_id,
+                    "notice_data": {
+                        "title": str(item.get("title") or item.get("alarm_desc") or ""),
+                        "building": str(item.get("building") or ""),
+                        "building_codes": building_codes,
+                        "specialty": str(item.get("specialty") or ""),
+                        "level": str(item.get("level") or ""),
+                        "event_source": str(item.get("source") or ""),
+                        "time_str": occurrence_time,
+                        "reason": str(item.get("fault_reason") or ""),
+                        "transfer_to_overhaul": True,
+                    },
+                    "remote_fields": dict(display_fields),
+                    "scope": (
+                        building_codes[0]
+                        if len(building_codes) == 1
+                        else "ALL"
+                    ),
+                    "source_month": (
+                        occurrence.strftime("%Y-%m")
+                        if occurrence is not None
+                        else ""
+                    ),
+                    "sort_time": occurrence.timestamp() if occurrence else 0.0,
+                }
+            )
+        candidates.sort(key=lambda item: float(item.get("sort_time") or 0), reverse=True)
+        return candidates[: max(1, min(int(limit or 20), 100))]
+
     def repair_management_event_prefill(
         self,
         *,
@@ -21356,6 +21469,39 @@ class MaintenancePortalService:
             return
         if (end_dt - start_dt).total_seconds() < 3600:
             raise PortalError(f"{start_label}和{end_label}之间不能少于1小时。")
+
+    @classmethod
+    def _validate_repair_notice_title(
+        cls,
+        title: Any,
+        *,
+        scope: Any = "",
+    ) -> None:
+        title_text = str(title or "").strip()
+        normalized_scope = cls._normalize_scope(scope)
+        if normalized_scope in {"A", "B", "C", "D", "E", "H"}:
+            prefix = f"EA118_C01机房{normalized_scope}楼"
+            if (
+                title_text.startswith(prefix)
+                and title_text.endswith("检修")
+                and title_text[len(prefix) : -2].strip()
+            ):
+                return
+            raise PortalError(
+                f"检修标题格式不正确：应为 {prefix}+故障现象+检修；"
+                "故障现象无需输入括号。"
+            )
+        prefix = "EA118_C01机房"
+        if (
+            title_text.startswith(prefix)
+            and title_text.endswith("检修")
+            and title_text[len(prefix) : -2].strip()
+        ):
+            return
+        raise PortalError(
+            "检修标题格式不正确：应为 EA118_C01机房+故障现象+检修；"
+            "故障现象无需输入括号。"
+        )
 
     @staticmethod
     def _has_site_photo_payload(payload: dict[str, Any] | None) -> bool:
@@ -42614,7 +42760,17 @@ class MaintenancePortalService:
         action = str(request_payload.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             raise PortalError("动作必须是 start/update/end。")
-        if is_workbench_command and str(request_payload.get("work_type") or "").strip() in {
+        request_work_type = str(request_payload.get("work_type") or "").strip()
+        if (
+            is_workbench_command
+            and request_work_type == WORK_TYPE_REPAIR
+            and action == "start"
+        ):
+            self._validate_repair_notice_title(
+                request_payload.get("title"),
+                scope=request_payload.get("scope"),
+            )
+        if is_workbench_command and request_work_type in {
             WORK_TYPE_MAINTENANCE,
             WORK_TYPE_CHANGE,
         } and str(request_payload.get("execution_party") or "").strip() not in {"厂维", "自维"}:
@@ -45037,6 +45193,8 @@ class MaintenancePortalService:
             if not fault_time and source_record is not None:
                 fault_time = self._repair_first_field(fields, "故障发生时间", "发现故障时间")
 
+        if action == "start" and not str(spare_parts or "").strip():
+            spare_parts = "无"
         building, building_codes = self._resolve_notice_submit_building(
             scope=scope,
             request_payload=request_payload,
