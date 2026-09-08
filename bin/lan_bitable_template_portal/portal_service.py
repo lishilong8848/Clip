@@ -5505,10 +5505,13 @@ class MaintenancePortalService:
 
     @classmethod
     def _repair_management_title(cls, record: dict[str, Any]) -> str:
-        fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+        raw_fields = record.get("raw_fields") if isinstance(record.get("raw_fields"), dict) else {}
+        display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+        fields = {**raw_fields, **display_fields}
+        generated_notice_title = cls._repair_generated_notice_title(fields)
         title_field_names = (
-            "维修名称",
             "检修通告名称",
+            "维修名称",
             "事件描述",
             "故障维修原因",
             "故障发生现象描述",
@@ -5519,8 +5522,19 @@ class MaintenancePortalService:
             value = cls._clean_source_text(
                 cls._repair_management_plain_text(fields.get(key))
             )
+            if key == "检修通告名称" and (
+                not value
+                or re.fullmatch(
+                    r"EA118[_-]?C01机房(?:110站|[ABCDEH]楼)?检修(?:通告)?",
+                    value,
+                    flags=re.I,
+                )
+            ):
+                if generated_notice_title:
+                    return generated_notice_title
+                continue
             if value:
-                return value[:80]
+                return value if key == "检修通告名称" else value[:80]
         fallback_title = cls._clean_source_text(record.get("title"))
         if fallback_title:
             return fallback_title[:80]
@@ -12124,7 +12138,52 @@ class MaintenancePortalService:
                 )
                 if option_name:
                     derived[legacy_name] = option_name
+        notice_title = cls._repair_generated_notice_title(derived)
+        if notice_title and "检修通告名称" in meta_by_name:
+            derived["检修通告名称"] = notice_title
         return derived
+
+    @classmethod
+    def _repair_generated_notice_title(cls, fields: dict[str, Any]) -> str:
+        if cls._repair_management_record_ids(
+            fields.get(REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME)
+            or fields.get(REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME)
+        ):
+            return ""
+        phenomenon = cls._clean_source_text(
+            cls._repair_management_plain_text(
+                fields.get("故障发生现象描述")
+            )
+        )
+        if not phenomenon:
+            return ""
+        phenomenon = re.sub(r"\s+", " ", phenomenon).strip()
+        phenomenon = re.sub(
+            r"^EA118[_-]?C01机房(?:110站|[ABCDEH]楼)?",
+            "",
+            phenomenon,
+            flags=re.I,
+        )
+        phenomenon = re.sub(
+            r"^(?:BMS(?:系统)?(?:报警|告警|报)?|(?:巡检|维护|监控|现场|值班|人员|检查|点检)发现)"
+            r"[\s:：,，、_-]*",
+            "",
+            phenomenon,
+            flags=re.I,
+        )
+        phenomenon = re.sub(r"检修$", "", phenomenon).strip(" \t\r\n-_—－[]【】")
+        if not phenomenon:
+            return ""
+        building_codes = cls._repair_building_codes_from_value(
+            fields.get("所属数据中心/楼栋-使用")
+            or fields.get("所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）")
+        )
+        building_suffix = (
+            f"{building_codes[0]}楼"
+            if len(building_codes) == 1 and building_codes[0] in "ABCDEH"
+            else ""
+        )
+        return f"EA118_C01机房{building_suffix}{phenomenon}检修"
 
     @staticmethod
     def _apply_repair_management_source_controlled_fields(
@@ -12732,6 +12791,10 @@ class MaintenancePortalService:
             "当前日期",
             dt.datetime.now().strftime("%Y/%m/%d"),
             overwrite=True,
+        )
+        result = self._apply_repair_management_form_derivatives(
+            result,
+            meta_by_name,
         )
         coerced, coerce_warnings = self._coerce_repair_management_fields(
             result,
@@ -22305,7 +22368,9 @@ class MaintenancePortalService:
             return ""
         return text
 
-    def _repair_notice_title(self, fields: dict[str, Any]) -> str:
+    @classmethod
+    def _repair_notice_title(cls, fields: dict[str, Any]) -> str:
+        generated_notice_title = cls._repair_generated_notice_title(fields)
         for field_name in (
             "检修通告名称",
             "维修名称",
@@ -22315,9 +22380,20 @@ class MaintenancePortalService:
             "故障维修原因",
             "故障发生现象描述",
         ):
-            value = self._clean_source_text(
-                self._repair_management_plain_text(fields.get(field_name))
+            value = cls._clean_source_text(
+                cls._repair_management_plain_text(fields.get(field_name))
             )
+            if field_name == "检修通告名称" and (
+                not value
+                or re.fullmatch(
+                    r"EA118[_-]?C01机房(?:110站|[ABCDEH]楼)?检修(?:通告)?",
+                    value,
+                    flags=re.I,
+                )
+            ):
+                if generated_notice_title:
+                    return generated_notice_title
+                continue
             if not value:
                 continue
             if re.fullmatch(
@@ -22330,7 +22406,9 @@ class MaintenancePortalService:
         return ""
 
     def _repair_title(self, record: dict[str, Any]) -> str:
-        fields = record.get("display_fields") or {}
+        raw_fields = record.get("raw_fields") if isinstance(record.get("raw_fields"), dict) else {}
+        display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+        fields = {**raw_fields, **display_fields}
         title = self._repair_notice_title(fields)
         if title:
             return title

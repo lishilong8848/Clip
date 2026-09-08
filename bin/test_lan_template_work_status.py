@@ -1259,6 +1259,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "E楼压缩机高压报警检修",
         )
 
+    def test_repair_generated_notice_title_replaces_legacy_formula_name(self):
+        fields = {
+            "检修通告名称": "EA118_C01机房检修",
+            "维修名称": "南通B楼—2026-08-31 21:34—BMS报B-244-LEAK-01漏水告警",
+            "所属数据中心/楼栋-使用": "南通B楼",
+            "故障发生现象描述": "BMS报B-244-LEAK-01漏水告警",
+        }
+
+        expected = "EA118_C01机房B楼B-244-LEAK-01漏水告警检修"
+        self.assertEqual(
+            MaintenancePortalService._repair_generated_notice_title(fields),
+            expected,
+        )
+        self.assertEqual(
+            MaintenancePortalService._repair_management_title(
+                {"display_fields": fields}
+            ),
+            expected,
+        )
+        self.assertEqual(
+            MaintenancePortalService._repair_notice_title(fields),
+            expected,
+        )
+        for prefix in ("巡检发现", "维护发现"):
+            self.assertEqual(
+                MaintenancePortalService._repair_generated_notice_title(
+                    {
+                        **fields,
+                        "检修通告名称": "",
+                        "故障发生现象描述": f"{prefix}B-244-LEAK-01漏水告警",
+                    }
+                ),
+                expected,
+            )
+
     def test_repair_project_patch_updates_workbench_source_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -32639,6 +32674,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service = _TestMaintenancePortalService()
         metas = [
             FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False),
+            FieldMeta("fld_notice_title", "检修通告名称", "Text", 1, False, {}, [], False),
             FieldMeta("fld_event", "关联事件单", "Text", 1, False, {}, [], False),
             FieldMeta("fld_source", "对应来源", "MultiSelect", 4, False, {}, ["BMS系统"], False),
             FieldMeta("fld_level", "对应事件等级", "SingleSelect", 3, False, {}, ["I3"], False),
@@ -32693,6 +32729,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         fields = payload["fields"]
         self.assertNotIn("维修名称", fields)
+        self.assertEqual(
+            fields["检修通告名称"],
+            "EA118_C01机房E楼E-217-CRAC-02压缩机高压报警: 告警检修",
+        )
         self.assertEqual(fields["关联事件单"], "rec_event_e")
         self.assertEqual(fields["对应来源"], ["BMS系统"])
         self.assertEqual(fields["对应事件等级"], "I3")
