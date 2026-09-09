@@ -3649,6 +3649,21 @@ class LanPortalStateStore:
                 conn.commit()
                 return int(cursor.rowcount or 0) > 0
 
+    def delete_notice_upload_attachment(self, upload_id: str, *, open_id: str) -> bool:
+        upload_id = self._text(upload_id)
+        open_id = self._text(open_id)
+        if not upload_id or not open_id:
+            return False
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    "DELETE FROM notice_upload_attachments WHERE upload_id = ? AND open_id = ?",
+                    (upload_id, open_id),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
     def mark_notice_upload_attachment_uploaded(
         self,
         upload_id: str,

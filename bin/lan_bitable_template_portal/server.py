@@ -98,6 +98,43 @@ CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 MAX_JSON_BODY_BYTES = 512 * 1024
 CHANGE_CONFIRMATION_REMINDER_SECONDS = 10 * 60
 CHANGE_CONFIRMATION_EMPTY_READS_BEFORE_RESET = 2
+WORKBENCH_NOTICE_DRAFT_NAMESPACE = "workbench_notice_draft"
+WORKBENCH_NOTICE_DRAFT_TTL_SECONDS = 30 * 24 * 60 * 60
+WORKBENCH_NOTICE_DRAFT_MAX_PER_USER = 100
+WORKBENCH_NOTICE_DRAFT_FIELDS = frozenset(
+    {
+        "notice_type",
+        "title",
+        "building",
+        "building_codes",
+        "specialty",
+        "maintenance_cycle",
+        "execution_party",
+        "level",
+        "start_time",
+        "end_time",
+        "location",
+        "content",
+        "reason",
+        "impact",
+        "progress",
+        "repair_device",
+        "repair_fault",
+        "fault_type",
+        "repair_mode",
+        "discovery",
+        "symptom",
+        "solution",
+        "spare_parts",
+        "cabinet",
+        "quantity",
+        "device",
+        "actual_action_time",
+        "source_record_id",
+        "related_event_record_id",
+        "repair_management_record_id",
+    }
+)
 def portal_frontend_dist_enabled() -> bool:
     return (FRONTEND_DIST_DIR / "index.html").is_file()
 
@@ -165,6 +202,7 @@ class PortalRuntime:
     _polling_relay_connector_signature = ""
     _polling_relay_health_lock = threading.RLock()
     _polling_relay_health_cache: dict[str, Any] = {}
+    _workbench_draft_lock = threading.RLock()
 
     @classmethod
     def polling_work_orders(cls) -> PollingWorkOrderService:
@@ -368,6 +406,157 @@ class PortalRuntime:
     @classmethod
     def local_notice_images(cls) -> LocalNoticeImageStore:
         return LocalNoticeImageStore(cls.state_store)
+
+    @staticmethod
+    def _workbench_draft_owner_key(open_id: str) -> str:
+        return hashlib.sha256(str(open_id or "").strip().encode("utf-8")).hexdigest()[:24]
+
+    @classmethod
+    def _workbench_draft_key(
+        cls, open_id: str, work_type: str, target_record_id: str
+    ) -> str:
+        owner_key = cls._workbench_draft_owner_key(open_id)
+        identity = f"{str(work_type or '').strip()}:{str(target_record_id or '').strip()}"
+        return f"{owner_key}:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:32]}"
+
+    @classmethod
+    def get_workbench_notice_draft(
+        cls, *, open_id: str, work_type: str, target_record_id: str
+    ) -> dict:
+        open_id = str(open_id or "").strip()
+        work_type = str(work_type or "").strip()
+        target_record_id = str(target_record_id or "").strip()
+        if not open_id or not work_type or not target_record_id:
+            raise PortalError("自动保存缺少通告身份。")
+        key = cls._workbench_draft_key(open_id, work_type, target_record_id)
+        with cls._workbench_draft_lock:
+            draft = cls.state_store.get_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key)
+            if not isinstance(draft, dict):
+                return {}
+            if float(draft.get("expires_at") or 0) <= time.time():
+                cls.state_store.delete_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key)
+                return {}
+            return copy.deepcopy(draft)
+
+    @classmethod
+    def save_workbench_notice_draft(
+        cls,
+        *,
+        open_id: str,
+        scope: str,
+        work_type: str,
+        target_record_id: str,
+        action: str,
+        fields: dict,
+        client_revision: int = 0,
+    ) -> dict:
+        open_id = str(open_id or "").strip()
+        scope = str(scope or "").strip().upper()
+        work_type = str(work_type or "").strip()
+        target_record_id = str(target_record_id or "").strip()
+        if str(action or "").strip() not in {"update", "end"}:
+            raise PortalError("首条通告不保存草稿。")
+        if not open_id or not work_type or not target_record_id:
+            raise PortalError("自动保存缺少通告身份。")
+        clean_fields: dict[str, Any] = {}
+        for name, value in dict(fields or {}).items():
+            if name not in WORKBENCH_NOTICE_DRAFT_FIELDS:
+                continue
+            if name == "building_codes":
+                raw_codes = value if isinstance(value, list) else str(value or "").split(",")
+                clean_fields[name] = list(
+                    dict.fromkeys(
+                        str(code or "").strip().upper()[:16]
+                        for code in raw_codes
+                        if str(code or "").strip()
+                    )
+                )[:16]
+            else:
+                clean_fields[name] = str(value or "")[:8000]
+        if len(json.dumps(clean_fields, ensure_ascii=False).encode("utf-8")) > 64 * 1024:
+            raise PortalError("自动保存内容过大。")
+        now = time.time()
+        key = cls._workbench_draft_key(open_id, work_type, target_record_id)
+        owner_prefix = cls._workbench_draft_owner_key(open_id) + ":"
+        with cls._workbench_draft_lock:
+            current = cls.state_store.get_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key) or {}
+            current_revision = int(current.get("client_revision") or 0)
+            if client_revision and client_revision <= current_revision:
+                return copy.deepcopy(current)
+            draft = {
+                "scope": scope,
+                "work_type": work_type,
+                "target_record_id": target_record_id,
+                "action": str(action or "update").strip(),
+                "fields": clean_fields,
+                "version": int(current.get("version") or 0) + 1,
+                "client_revision": max(int(client_revision or 0), current_revision),
+                "updated_at": now,
+                "expires_at": now + WORKBENCH_NOTICE_DRAFT_TTL_SECONDS,
+            }
+            cls.state_store.put_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key, draft)
+            documents = cls.state_store.list_documents(
+                WORKBENCH_NOTICE_DRAFT_NAMESPACE, key_prefix=owner_prefix
+            )
+            active = []
+            for document in documents:
+                item = document.get("payload") if isinstance(document, dict) else None
+                document_key = str(document.get("key") or "") if isinstance(document, dict) else ""
+                if not isinstance(item, dict) or float(item.get("expires_at") or 0) <= now:
+                    if document_key:
+                        cls.state_store.delete_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, document_key)
+                    continue
+                active.append((float(item.get("updated_at") or 0), document_key))
+            for _, old_key in sorted(active)[: max(0, len(active) - WORKBENCH_NOTICE_DRAFT_MAX_PER_USER)]:
+                cls.state_store.delete_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, old_key)
+            return copy.deepcopy(draft)
+
+    @classmethod
+    def delete_workbench_notice_draft(
+        cls,
+        *,
+        open_id: str,
+        work_type: str,
+        target_record_id: str,
+        expected_version: int = 0,
+    ) -> dict:
+        open_id = str(open_id or "").strip()
+        work_type = str(work_type or "").strip()
+        target_record_id = str(target_record_id or "").strip()
+        if not open_id or not work_type or not target_record_id:
+            return {"deleted": False, "newer": False}
+        key = cls._workbench_draft_key(open_id, work_type, target_record_id)
+        with cls._workbench_draft_lock:
+            current = cls.state_store.get_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key)
+            if not isinstance(current, dict):
+                return {"deleted": False, "newer": False}
+            if expected_version and int(current.get("version") or 0) != int(expected_version):
+                return {"deleted": False, "newer": True, "version": int(current.get("version") or 0)}
+            cls.state_store.delete_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key)
+            return {"deleted": True, "newer": False}
+
+    @classmethod
+    def delete_workbench_notice_drafts_for_target(cls, target_record_id: str) -> int:
+        target_record_id = str(target_record_id or "").strip()
+        if not target_record_id:
+            return 0
+        deleted = 0
+        try:
+            with cls._workbench_draft_lock:
+                for document in cls.state_store.list_documents(WORKBENCH_NOTICE_DRAFT_NAMESPACE):
+                    payload = document.get("payload") if isinstance(document, dict) else None
+                    key = str(document.get("key") or "") if isinstance(document, dict) else ""
+                    if (
+                        key
+                        and isinstance(payload, dict)
+                        and str(payload.get("target_record_id") or "").strip()
+                        == target_record_id
+                    ):
+                        cls.state_store.delete_document(WORKBENCH_NOTICE_DRAFT_NAMESPACE, key)
+                        deleted += 1
+        except Exception as exc:
+            log_warning(f"通告草稿清理失败: target_record_id={target_record_id}, error={exc}")
+        return deleted
 
     @classmethod
     def _local_notice_images_for_target(
@@ -12889,6 +13078,7 @@ class PortalRuntime:
                     target_record_id,
                     reason="target_deleted",
                 )
+            cls.delete_workbench_notice_drafts_for_target(target_record_id)
         except Exception as exc:
             message = (
                 "目标多维记录已删除，但本地显示清理失败；"
@@ -13500,6 +13690,7 @@ class PortalRuntime:
             )
         except Exception:
             identity_removed = False
+        cls.delete_workbench_notice_drafts_for_target(target_record_id)
         return {
             "ok": True,
             "message": "",
@@ -14529,6 +14720,16 @@ class PortalRuntime:
                     finalize_lock_key,
                     finalize_lock_owner,
                 )
+            if action == "update" and int(prepared.get("draft_version") or 0) > 0:
+                try:
+                    cls.delete_workbench_notice_draft(
+                        open_id=str(prepared.get("_auth_open_id") or ""),
+                        work_type=str(prepared.get("work_type") or ""),
+                        target_record_id=resolved_remote_record_id,
+                        expected_version=int(prepared.get("draft_version") or 0),
+                    )
+                except Exception as exc:
+                    log_warning(f"更新通告草稿清理失败: job_id={job_id}, error={exc}")
             cls._mark_notice_remote_operation(
                 remote_operation_id,
                 status="completed",
@@ -14569,6 +14770,9 @@ class PortalRuntime:
                     cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
                 except Exception:
                     pass
+                cls.delete_workbench_notice_drafts_for_target(
+                    resolved_remote_record_id
+                )
                 return
             try:
                 cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")

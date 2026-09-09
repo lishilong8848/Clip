@@ -215,10 +215,18 @@ class LocalNoticeImageStore:
             str(item.get("file_name") or path.name),
         )
 
-    def list(self, identity: str, *, kind: str = "", scope: str = "") -> list[dict]:
+    def list(
+        self,
+        identity: str,
+        *,
+        kind: str = "",
+        scope: str = "",
+        owner_open_id: str = "",
+    ) -> list[dict]:
         identity = str(identity or "").strip()
         kind = str(kind or "").strip()
         scope = str(scope or "").strip().upper()
+        owner_open_id = str(owner_open_id or "").strip()
         items = [
             document.get("payload")
             for document in self.state_store.list_documents(LOCAL_NOTICE_IMAGE_NAMESPACE)
@@ -229,6 +237,12 @@ class LocalNoticeImageStore:
                 not scope
                 or not str((document.get("payload") or {}).get("scope") or "").strip()
                 or str((document.get("payload") or {}).get("scope") or "").strip().upper() == scope
+            )
+            and (
+                not owner_open_id
+                or bool((document.get("payload") or {}).get("target_written"))
+                or str((document.get("payload") or {}).get("owner_open_id") or "")
+                == owner_open_id
             )
         ]
         items.sort(key=lambda item: float(item.get("created_at") or 0))

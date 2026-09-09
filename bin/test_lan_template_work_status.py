@@ -2297,6 +2297,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "owner_open_id": "uploader",
             "scope": "CAMPUS",
             "building_codes": ["A", "B"],
+            "target_written": True,
         }
 
         def session(scope, open_id):
@@ -2327,6 +2328,58 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 session("H", h_open_id), item, user={"open_id": h_open_id}
             )
         )
+        pending = {**item, "target_written": False}
+        self.assertFalse(
+            FastAPIPortalController._local_notice_image_access_allowed(
+                session("A", "a-user"), pending, user={"open_id": "a-user"}
+            )
+        )
+        self.assertTrue(
+            FastAPIPortalController._local_notice_image_access_allowed(
+                session("A", "uploader"), pending, user={"open_id": "uploader"}
+            )
+        )
+
+    def test_pending_notice_images_are_scoped_to_draft_owner(self):
+        from lan_bitable_template_portal.local_notice_images import LocalNoticeImageStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "images.db")
+            images = LocalNoticeImageStore(store)
+            images.root = Path(tmp) / "images"
+            first = images.save(
+                identity="maintenance:rec-one",
+                kind="site",
+                content=b"first-image",
+                file_name="first.png",
+                mime_type="image/png",
+                owner_open_id="ou_first",
+                scope="A",
+            )
+            images.save(
+                identity="maintenance:rec-one",
+                kind="site",
+                content=b"second-image",
+                file_name="second.png",
+                mime_type="image/png",
+                owner_open_id="ou_second",
+                scope="A",
+            )
+            self.assertEqual(
+                [item["file_name"] for item in images.list(
+                    "maintenance:rec-one", scope="A", owner_open_id="ou_first"
+                )],
+                ["first.png"],
+            )
+            images.mark_feishu_uploaded(
+                first["local_image_id"], file_token="file-one", target_written=True
+            )
+            self.assertEqual(
+                {item["file_name"] for item in images.list(
+                    "maintenance:rec-one", scope="A", owner_open_id="ou_second"
+                )},
+                {"first.png", "second.png"},
+            )
 
     def test_change_confirmation_today_screenshot_consumption_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3151,7 +3204,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         ali_handler = admin_html.split("async function handleAliConfirmationFile", 1)[1].split(
             "async function uploadAliConfirmationNow", 1
         )[0]
-        self.assertNotIn("setLiteFormDirty", ali_handler)
+        self.assertIn("setLiteFormDirty(true)", ali_handler)
+        self.assertIn("uploadSitePhotoFile(file, form, 'ali')", ali_handler)
         ali_items = _attachment_items(
             {
                 "target_record_id": "target change/preview",
@@ -17772,7 +17826,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('id="lite-notice-drawer-close"', default_html)
         self.assertIn("function openNoticeDrawer(title, trigger)", default_html)
         self.assertIn("function requestCloseNoticeDrawer()", default_html)
-        self.assertIn("let pendingDiscardPromise = null", default_html)
+        self.assertIn("function prepareLiteNavigation()", default_html)
+        self.assertIn("function saveLiteDraftNow(", default_html)
+        self.assertNotIn('id="lite-discard-confirm"', default_html)
         self.assertIn("lastNoticeDrawerTrigger = trigger", default_html)
         self.assertIn("if (body) body.scrollTop = 0", default_html)
         self.assertNotIn('class="notice-row active"', default_html)
@@ -17797,6 +17853,137 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             selected_html,
             r'class="notice-row active"[^>]+data-record-id="rec_maintenance"',
         )
+
+    def test_workbench_notice_drafts_are_owner_scoped_and_version_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "drafts.db")
+            try:
+                first = PortalRuntime.save_workbench_notice_draft(
+                    open_id="ou_user_a",
+                    scope="A",
+                    work_type="maintenance",
+                    target_record_id="rec_target",
+                    action="update",
+                    fields={"title": "草稿标题", "ignored": "drop"},
+                    client_revision=1,
+                )
+                self.assertEqual(first["fields"], {"title": "草稿标题"})
+                self.assertEqual(
+                    PortalRuntime.get_workbench_notice_draft(
+                        open_id="ou_user_a",
+                        work_type="maintenance",
+                        target_record_id="rec_target",
+                    )["fields"]["title"],
+                    "草稿标题",
+                )
+                self.assertEqual(
+                    PortalRuntime.get_workbench_notice_draft(
+                        open_id="ou_user_b",
+                        work_type="maintenance",
+                        target_record_id="rec_target",
+                    ),
+                    {},
+                )
+                with self.assertRaises(PortalError):
+                    PortalRuntime.save_workbench_notice_draft(
+                        open_id="ou_user_a",
+                        scope="A",
+                        work_type="maintenance",
+                        target_record_id="rec_start",
+                        action="start",
+                        fields={"title": "不应保存"},
+                    )
+                newer = PortalRuntime.save_workbench_notice_draft(
+                    open_id="ou_user_a",
+                    scope="A",
+                    work_type="maintenance",
+                    target_record_id="rec_target",
+                    action="end",
+                    fields={"title": "新修改"},
+                    client_revision=2,
+                )
+                kept = PortalRuntime.delete_workbench_notice_draft(
+                    open_id="ou_user_a",
+                    work_type="maintenance",
+                    target_record_id="rec_target",
+                    expected_version=first["version"],
+                )
+                self.assertTrue(kept["newer"])
+                deleted = PortalRuntime.delete_workbench_notice_draft(
+                    open_id="ou_user_a",
+                    work_type="maintenance",
+                    target_record_id="rec_target",
+                    expected_version=newer["version"],
+                )
+                self.assertTrue(deleted["deleted"])
+            finally:
+                PortalRuntime.state_store = old_store
+
+    def test_fastapi_workbench_notice_draft_round_trip(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        old_store = PortalRuntime.state_store
+        old_sessions = dict(PortalRuntime.auth_manager._sessions)
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "draft-api.db")
+            session_id = "workbench-draft-session"
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions[session_id] = {
+                    "session_id": session_id,
+                    "user": {"name": "草稿测试", "open_id": "ou_draft_user"},
+                    "role": "building",
+                    "allowed_scopes": ["A"],
+                    "expires_at": time.time() + 3600,
+                }
+            scopes_patch = patch.object(
+                PortalRuntime.auth_manager, "scopes_for_open_id", return_value=["A"]
+            )
+            role_patch = patch.object(
+                PortalRuntime.auth_manager, "role_for_open_id", return_value="building"
+            )
+            scopes_patch.start()
+            role_patch.start()
+            client = TestClient(controller._build_app())
+            headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+            try:
+                saved = client.put(
+                    "/api/workbench/draft",
+                    headers=headers,
+                    json={
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "target_record_id": "rec_draft_api",
+                        "action": "update",
+                        "client_revision": 1,
+                        "fields": {"progress": "待恢复内容"},
+                    },
+                )
+                self.assertEqual(saved.status_code, 200, saved.text)
+                version = saved.json()["data"]["draft"]["version"]
+                loaded = client.get(
+                    "/api/workbench/draft?scope=A&work_type=maintenance"
+                    "&target_record_id=rec_draft_api&action=update",
+                    headers=headers,
+                )
+                self.assertEqual(loaded.json()["data"]["draft"]["fields"]["progress"], "待恢复内容")
+                deleted = client.request(
+                    "DELETE",
+                    "/api/workbench/draft",
+                    headers=headers,
+                    json={
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "target_record_id": "rec_draft_api",
+                        "expected_version": version,
+                    },
+                )
+                self.assertTrue(deleted.json()["data"]["deleted"])
+            finally:
+                role_patch.stop()
+                scopes_patch.stop()
+                PortalRuntime.state_store = old_store
+                with PortalRuntime.auth_manager._lock:
+                    PortalRuntime.auth_manager._sessions = old_sessions
 
     def test_workbench_lite_pending_repair_can_prefill_from_incomplete_event_project(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite

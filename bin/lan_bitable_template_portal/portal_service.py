@@ -42763,6 +42763,7 @@ class MaintenancePortalService:
             "record_id",
             "repair_management_record_id",
             "operation_id",
+            "draft_version",
             "_auth_open_id",
             "_auth_user_name",
         ):

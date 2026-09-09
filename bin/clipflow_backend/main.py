@@ -6369,6 +6369,96 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/workbench/draft")
+        async def workbench_draft_get(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                work_type = str(request.query_params.get("work_type") or "").strip()
+                target_record_id = str(
+                    request.query_params.get("target_record_id") or ""
+                ).strip()
+                action = str(request.query_params.get("action") or "update").strip()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                if action == "start":
+                    return self._json_ok(request, session, {"exists": False})
+                draft = await asyncio.to_thread(
+                    PortalRuntime.get_workbench_notice_draft,
+                    open_id=str(user.get("open_id") or ""),
+                    work_type=work_type,
+                    target_record_id=target_record_id,
+                )
+                if draft and str(draft.get("scope") or "").upper() != scope.upper():
+                    raise PortalError("草稿不属于当前楼栋。")
+                return self._json_ok(
+                    request, session, {"exists": bool(draft), "draft": draft}
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.put("/api/workbench/draft")
+        async def workbench_draft_put(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = await self._read_json_request(request, max_bytes=80 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                work_type = str(payload.get("work_type") or "").strip()
+                target_record_id = str(payload.get("target_record_id") or "").strip()
+                action = str(payload.get("action") or "update").strip()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                open_id = str(user.get("open_id") or "")
+                if action == "start":
+                    result = await asyncio.to_thread(
+                        PortalRuntime.delete_workbench_notice_draft,
+                        open_id=open_id,
+                        work_type=work_type,
+                        target_record_id=target_record_id,
+                    )
+                    return self._json_ok(request, session, result)
+                draft = await asyncio.to_thread(
+                    PortalRuntime.save_workbench_notice_draft,
+                    open_id=open_id,
+                    scope=scope,
+                    work_type=work_type,
+                    target_record_id=target_record_id,
+                    action=action,
+                    fields=payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    client_revision=int(payload.get("client_revision") or 0),
+                )
+                return self._json_ok(request, session, {"saved": True, "draft": draft})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.delete("/api/workbench/draft")
+        async def workbench_draft_delete(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = await self._read_json_request(request, max_bytes=16 * 1024)
+                self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                result = await asyncio.to_thread(
+                    PortalRuntime.delete_workbench_notice_draft,
+                    open_id=str(user.get("open_id") or ""),
+                    work_type=str(payload.get("work_type") or "").strip(),
+                    target_record_id=str(payload.get("target_record_id") or "").strip(),
+                    expected_version=int(payload.get("expected_version") or 0),
+                )
+                return self._json_ok(request, session, result)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.post("/api/maintenance-actions")
         @app.post("/api/workbench-actions")
         async def workbench_actions(request: Request):
@@ -6637,6 +6727,22 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.delete("/api/notice-attachments/{upload_id}")
+        async def notice_attachment_delete(upload_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                deleted = await asyncio.to_thread(
+                    PortalRuntime.state_store.delete_notice_upload_attachment,
+                    upload_id,
+                    open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, {"deleted": bool(deleted)})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.post("/api/qt/local/notice-attachments")
         async def qt_local_notice_attachments(request: Request):
             deny = self._local_only_response(request)
@@ -6704,11 +6810,13 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, requested_scope
                 )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 items = await asyncio.to_thread(
                     PortalRuntime.local_notice_images().list,
                     str(request.query_params.get("identity") or ""),
                     kind=str(request.query_params.get("kind") or ""),
                     scope=scope,
+                    owner_open_id=str(user.get("open_id") or ""),
                 )
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
@@ -10933,6 +11041,11 @@ class FastAPIPortalController:
             return True
         user = user if isinstance(user, dict) else {}
         open_id = str(user.get("open_id") or "").strip()
+        if not bool(item.get("target_written")):
+            return bool(
+                open_id
+                and open_id == str(item.get("owner_open_id") or "").strip()
+            )
         if (
             str(item.get("kind") or "") == "ali"
             and open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")

@@ -1988,34 +1988,23 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               if (option) select.value = option.value;
               select.dispatchEvent(new Event('change', {{ bubbles: true }}));
               return document.body.classList.contains('has-dirty-lite-form')
-                && (document.querySelector('#lite-job-status')?.textContent || '').includes('未发送修改');
+                && (document.querySelector('#lite-job-status')?.textContent || '').includes('自动保存');
             }});
             if (!sourceSelectDirty) {{
               throw new Error('lite source link select did not mark form dirty');
             }}
-            await page.locator('#lite-notice-form textarea[name="progress"]').fill('未发送修改测试');
-            await page.waitForSelector('text=有未发送修改', {{ timeout: 10000 }});
+            await page.locator('#lite-notice-form textarea[name="progress"]').fill('自动保存恢复测试');
+            await page.waitForFunction(() => (document.querySelector('#lite-job-status')?.textContent || '').includes('关闭或切换时自动保存'), null, {{ timeout: 10000 }});
             await page.locator('#lite-notice-drawer-close').click();
-            await page.waitForSelector('#lite-discard-confirm:not([hidden])', {{ timeout: 10000 }});
-            const sawDirtyConfirm = await page.locator('#lite-discard-confirm').innerText();
-            if (!sawDirtyConfirm.includes('未发送修改')) throw new Error('lite dirty form warning did not appear before closing the drawer');
-            await page.locator('#lite-discard-cancel').click();
-            await page.waitForFunction(() => document.querySelector('#lite-discard-confirm')?.hidden === true, null, {{ timeout: 10000 }});
-            await page.waitForFunction(() => document.activeElement?.id === 'lite-notice-drawer-close', null, {{ timeout: 10000 }});
-            const dirtyCancelState = await page.evaluate(() => ({{
-              drawerOpen: document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open') || false,
-              focusedId: document.activeElement?.id || '',
-            }}));
-            if (!dirtyCancelState.drawerOpen || dirtyCancelState.focusedId !== 'lite-notice-drawer-close') {{
-              throw new Error(`lite dirty cancel did not restore drawer focus: ${{JSON.stringify(dirtyCancelState)}}`);
-            }}
-            await page.locator('#lite-notice-drawer-close').click();
-            await page.waitForSelector('#lite-discard-confirm:not([hidden])', {{ timeout: 10000 }});
-            await page.locator('#lite-discard-confirm-button').click();
             await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
             await page.waitForFunction(() => document.activeElement?.classList.contains('ongoing-row') || false, null, {{ timeout: 10000 }});
             const triggerFocusedAfterClose = await page.evaluate(() => document.activeElement?.classList.contains('ongoing-row') || false);
             if (!triggerFocusedAfterClose) throw new Error('lite notice drawer did not restore focus to its triggering row');
+            await page.locator('.ongoing-row').filter({{ hasText: 'A楼纯手填待关联维保通告' }}).first().click();
+            await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
+            await page.waitForFunction(() => document.querySelector('#lite-notice-form textarea[name="progress"]')?.value === '自动保存恢复测试', null, {{ timeout: 10000 }});
+            await page.locator('#lite-notice-drawer-close').click();
+            await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
             await page.locator('.notice-row').first().click();
             await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
             await page.evaluate(() => {{
@@ -2024,10 +2013,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }});
             await assertLayout(page, 'lite-workbench');
             await assertVnetSkin(page, 'lite-workbench');
+            const startAction = await page.locator('#lite-notice-form').getAttribute('data-action');
+            if (startAction !== 'start') throw new Error(`planned notice did not open as start action: ${{startAction}}`);
+            await page.locator('#lite-notice-form textarea[name="progress"]').fill('首条关闭丢弃测试');
+            await page.waitForFunction(() => (document.querySelector('#lite-job-status')?.textContent || '').includes('首条通告修改仅保留'), null, {{ timeout: 10000 }});
             await page.locator('#lite-notice-drawer-close').click();
             await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
             await page.locator('.notice-row').first().click();
             await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
+            const discardedStartValue = await page.locator('#lite-notice-form textarea[name="progress"]').inputValue();
+            if (discardedStartValue === '首条关闭丢弃测试') throw new Error('start notice edits were restored after closing');
             await page.waitForFunction(() => (document.querySelector('.notice-drawer-body')?.scrollTop || 0) === 0, null, {{ timeout: 10000 }});
             await page.locator('#lite-notice-drawer-close').click();
             await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});

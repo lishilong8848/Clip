@@ -3417,22 +3417,16 @@ def render_workbench_lite(
       </footer>
     </section>
   </div>
-  <div class="end-check-backdrop" id="lite-discard-confirm" hidden>
-    <section class="end-check-dialog lite-discard-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-discard-title">
-      <header class="end-check-head">
-        <span>未发送修改</span>
-        <strong id="lite-discard-title">切换会丢失当前修改</strong>
-      </header>
-      <footer class="end-check-actions">
-        <button class="btn ghost" type="button" id="lite-discard-cancel">继续编辑</button>
-        <button class="btn primary" type="button" id="lite-discard-confirm-button">放弃并切换</button>
-      </footer>
-    </section>
-  </div>
   <script>
     const initialScope = {_json_dumps(scope)};
     const liteIsAdmin = {_json_dumps(bool(is_admin_session))};
     let liteFormDirty = false;
+    let liteDraftRestoring = false;
+    let liteDraftContextKey = '';
+    let liteDraftRevision = 0;
+    let liteDraftSavedRevision = 0;
+    let liteDraftServerVersion = 0;
+    let liteDraftSavePromise = null;
     let litePollingSops = [];
     let litePollingSopMode = 'manage';
     let litePollingEditingSop = null;
@@ -3700,43 +3694,228 @@ def render_workbench_lite(
     }});
     window.addEventListener('focus', checkLiteAuthStatus);
     scheduleLiteAuthHeartbeat();
+    function liteDraftContext(form) {{
+      if (!form || String(form.dataset.action || 'start') === 'start') return null;
+      const targetRecordId = String(previewValue(form, 'target_record_id') || '').trim();
+      if (!targetRecordId || isMissingTargetRecordId(targetRecordId)) return null;
+      const scope = String(previewValue(form, 'scope') || getCurrentScope() || '').trim();
+      const workType = String(previewValue(form, 'work_type') || form.dataset.workType || '').trim();
+      if (!scope || !workType) return null;
+      return {{ scope, work_type: workType, target_record_id: targetRecordId, action: 'update' }};
+    }}
+    function liteDraftKey(context) {{
+      return context ? `${{context.scope}}:${{context.work_type}}:${{context.target_record_id}}` : '';
+    }}
+    function resetLiteDraftTracking(form) {{
+      const key = liteDraftKey(liteDraftContext(form));
+      if (key === liteDraftContextKey) return;
+      liteDraftContextKey = key;
+      liteDraftRevision = 0;
+      liteDraftSavedRevision = 0;
+      liteDraftServerVersion = 0;
+      liteFormDirty = false;
+      document.body.classList.remove('has-dirty-lite-form');
+    }}
+    function liteDraftFields(form) {{
+      const values = captureNoticeFormValues(form);
+      for (const name of ['source_record_id', 'related_event_record_id', 'repair_management_record_id']) {{
+        values[name] = String(previewValue(form, name) || '');
+      }}
+      const actualTime = form?.querySelector('[name="actual_action_time"]');
+      if (actualTime?.dataset.autoActualTime === '1') delete values.actual_action_time;
+      values.building_codes = selectedBuildingCodes(form);
+      return values;
+    }}
     function setLiteFormDirty(enabled) {{
+      if (liteDraftRestoring) return;
       liteFormDirty = Boolean(enabled);
       document.body.classList.toggle('has-dirty-lite-form', liteFormDirty);
-      if (liteFormDirty) setLiteStatus('有未发送修改');
+      if (!liteFormDirty) return;
+      const form = document.getElementById('lite-notice-form');
+      const context = liteDraftContext(form);
+      if (!context) {{
+        setLiteStatus('首条通告修改仅保留在当前页面');
+        return;
+      }}
+      resetLiteDraftTracking(form);
+      liteFormDirty = true;
+      document.body.classList.add('has-dirty-lite-form');
+      liteDraftRevision += 1;
+      setLiteStatus('修改将在关闭或切换时自动保存');
     }}
-    let pendingDiscardResolver = null;
-    let pendingDiscardPromise = null;
-    let discardReturnFocus = null;
-    function confirmDiscardLiteChanges() {{
-      if (!liteFormDirty) return Promise.resolve(true);
-      if (pendingDiscardPromise) return pendingDiscardPromise;
-      const modal = document.getElementById('lite-discard-confirm');
-      const confirmButton = document.getElementById('lite-discard-confirm-button');
-      if (!modal || !confirmButton) return Promise.resolve(false);
-      discardReturnFocus = document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-      modal.hidden = false;
-      confirmButton.focus();
-      pendingDiscardPromise = new Promise(resolve => {{
-        pendingDiscardResolver = resolve;
-      }});
-      return pendingDiscardPromise;
+    async function saveLiteDraftNow(form = document.getElementById('lite-notice-form')) {{
+      const context = liteDraftContext(form);
+      if (!context) return true;
+      resetLiteDraftTracking(form);
+      if (liteDraftSavePromise) {{
+        const previousOk = await liteDraftSavePromise;
+        if (!previousOk) return false;
+        if (liteDraftSavedRevision >= liteDraftRevision) return true;
+      }}
+      const key = liteDraftKey(context);
+      const revision = Math.max(1, liteDraftRevision);
+      const body = {{ ...context, fields: liteDraftFields(form), client_revision: revision }};
+      setLiteStatus('正在保存修改...');
+      const request = (async () => {{
+        try {{
+          const response = await fetch('/api/workbench/draft', {{
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify(body),
+          }});
+          const data = await response.json().catch(() => ({{}}));
+          if (handleLiteAuthRequired(response, data)) return false;
+          if (!response.ok || data.ok === false) throw new Error(data.error || '自动保存失败');
+          const draft = data?.data?.draft || {{}};
+          if (liteDraftContextKey !== key) return true;
+          liteDraftServerVersion = Number(draft.version || liteDraftServerVersion || 0);
+          liteDraftSavedRevision = Math.max(liteDraftSavedRevision, revision);
+          if (liteDraftSavedRevision >= liteDraftRevision) {{
+            liteFormDirty = false;
+            document.body.classList.remove('has-dirty-lite-form');
+            setLiteStatus(`已保存 ${{new Date().toLocaleTimeString('zh-CN', {{hour:'2-digit',minute:'2-digit'}})}}`);
+          }}
+          return true;
+        }} catch (error) {{
+          if (liteDraftContextKey === key) {{
+            liteFormDirty = true;
+            document.body.classList.add('has-dirty-lite-form');
+            setLiteStatus('自动保存失败：' + friendlyLiteMessage(error?.message || '请重试'));
+          }}
+          return false;
+        }}
+      }})();
+      liteDraftSavePromise = request;
+      const ok = await request;
+      if (liteDraftSavePromise === request) liteDraftSavePromise = null;
+      if (ok && liteDraftContextKey === key && liteDraftSavedRevision < liteDraftRevision) {{
+        return saveLiteDraftNow(form);
+      }}
+      return ok;
     }}
-    function resolveDiscardConfirm(approved) {{
-      const modal = document.getElementById('lite-discard-confirm');
-      if (modal) modal.hidden = true;
-      const resolver = pendingDiscardResolver;
-      const returnFocus = discardReturnFocus;
-      pendingDiscardResolver = null;
-      pendingDiscardPromise = null;
-      discardReturnFocus = null;
-      if (resolver) resolver(Boolean(approved));
-      if (!approved && returnFocus?.isConnected) {{
-        requestAnimationFrame(() => returnFocus.focus());
+    async function restoreLiteDraft(form = document.getElementById('lite-notice-form')) {{
+      resetLiteDraftTracking(form);
+      const context = liteDraftContext(form);
+      if (!context) return;
+      const key = liteDraftKey(context);
+      const initialRevision = liteDraftRevision;
+      try {{
+        const query = new URLSearchParams({{ ...context }});
+        const response = await fetch('/api/workbench/draft?' + query.toString(), {{ credentials:'same-origin' }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data) || !response.ok || data.ok === false) return;
+        if (liteDraftKey(liteDraftContext(form)) !== key || liteDraftRevision !== initialRevision) return;
+        const draft = data?.data?.draft;
+        if (!draft || !data?.data?.exists) return;
+        const fields = draft.fields && typeof draft.fields === 'object' ? draft.fields : {{}};
+        liteDraftRestoring = true;
+        try {{
+          for (const [name, value] of Object.entries(fields)) {{
+            if (name === 'building_codes') continue;
+            setFormValue(form, name, value == null ? '' : String(value));
+          }}
+          if (Array.isArray(fields.building_codes)) {{
+            const selected = new Set(fields.building_codes.map(value => String(value || '').toUpperCase()));
+            form.querySelectorAll('[name="building_codes"]').forEach(input => {{
+              input.checked = selected.has(String(input.value || '').toUpperCase());
+            }});
+            syncBuildingSelection(form);
+          }}
+          const actualTime = form.querySelector('[name="actual_action_time"]');
+          if (actualTime && Object.prototype.hasOwnProperty.call(fields, 'actual_action_time')) {{
+            actualTime.dataset.autoActualTime = '0';
+          }}
+          updateNoticePreview(form);
+          updateActionAvailability(form);
+        }} finally {{
+          liteDraftRestoring = false;
+        }}
+        liteDraftServerVersion = Number(draft.version || 0);
+        liteDraftRevision = Number(draft.client_revision || 0);
+        liteDraftSavedRevision = liteDraftRevision;
+        setLiteStatus(`已恢复自动保存的修改（${{new Date(Number(draft.updated_at || 0) * 1000).toLocaleTimeString('zh-CN', {{hour:'2-digit',minute:'2-digit'}})}}）`);
+      }} catch {{
+        setLiteStatus('自动保存的修改暂未恢复，可继续编辑');
       }}
     }}
+    function deletePendingNoticeImage(item, keepalive = false) {{
+      const localImageId = String(item?.local_image_id || '');
+      const uploadId = String(item?.upload_id || '');
+      const options = {{ method:'DELETE', credentials:'same-origin', keepalive:Boolean(keepalive) }};
+      if (localImageId) fetch(`/api/notice-images/${{encodeURIComponent(localImageId)}}`, options).catch(() => null);
+      if (uploadId) fetch(`/api/notice-attachments/${{encodeURIComponent(uploadId)}}`, options).catch(() => null);
+    }}
+    function discardStartNoticeImages(form) {{
+      if (!form || liteDraftContext(form)) return;
+      invalidateLocalNoticeImageLoad();
+      const pending = [...liteSitePhotos, ...(liteAliConfirmationImage ? [liteAliConfirmationImage] : [])];
+      for (const item of pending) {{
+        deletePendingNoticeImage(item, true);
+        if (String(item?.preview_url || '').startsWith('blob:')) URL.revokeObjectURL(item.preview_url);
+      }}
+      liteSitePhotos = [];
+      liteAliConfirmationImage = null;
+    }}
+    async function prepareLiteNavigation() {{
+      const form = document.getElementById('lite-notice-form');
+      if (!form) return true;
+      if (!liteDraftContext(form)) {{
+        discardStartNoticeImages(form);
+        setLiteFormDirty(false);
+        return true;
+      }}
+      if (!liteFormDirty) return true;
+      return saveLiteDraftNow(form);
+    }}
+    async function deleteSubmittedLiteDraft(payload) {{
+      if (!payload || !['update', 'end'].includes(String(payload.action || ''))) return {{}};
+      const targetRecordId = String(payload.target_record_id || '').trim();
+      if (!targetRecordId) return {{}};
+      if (payload.action === 'update' && Number(payload.draft_version || 0) <= 0) return {{}};
+      const response = await fetch('/api/workbench/draft', {{
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          scope: payload.scope,
+          work_type: payload.work_type,
+          target_record_id: targetRecordId,
+          expected_version: payload.action === 'end' ? 0 : Number(payload.draft_version || 0),
+        }}),
+      }});
+      const data = await response.json().catch(() => ({{}}));
+      const result = response.ok && data.ok !== false ? (data.data || {{}}) : {{}};
+      if (
+        result.deleted
+        && liteDraftKey(liteDraftContext(document.getElementById('lite-notice-form')))
+          === liteDraftKey({{scope:payload.scope,work_type:payload.work_type,target_record_id:targetRecordId}})
+        && Number(liteDraftServerVersion || 0) === Number(payload.draft_version || 0)
+      ) {{
+        liteDraftServerVersion = 0;
+        liteDraftRevision = 0;
+        liteDraftSavedRevision = 0;
+      }}
+      return result;
+    }}
+    function persistLiteDraftOnPageHide() {{
+      const form = document.getElementById('lite-notice-form');
+      const context = liteDraftContext(form);
+      if (!context) {{
+        discardStartNoticeImages(form);
+        return;
+      }}
+      if (!liteFormDirty) return;
+      liteDraftRevision += 1;
+      fetch('/api/workbench/draft', {{
+        method:'PUT',
+        credentials:'same-origin',
+        keepalive:true,
+        headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{...context, fields:liteDraftFields(form), client_revision:liteDraftRevision}}),
+      }}).catch(() => null);
+    }}
+    window.addEventListener('pagehide', persistLiteDraftOnPageHide);
     function setPanelLoading(enabled) {{
       const panel = document.getElementById('detail-panel');
       if (panel) panel.classList.toggle('loading', Boolean(enabled));
@@ -3806,9 +3985,7 @@ def render_workbench_lite(
     async function requestCloseNoticeDrawer() {{
       const overlay = noticeDrawerOverlay();
       if (!overlay || !overlay.classList.contains('open')) return true;
-      const hadUnsavedChanges = liteFormDirty;
-      if (!(await confirmDiscardLiteChanges())) return false;
-      if (hadUnsavedChanges) overlay.dataset.detailNeedsReload = '1';
+      if (!(await prepareLiteNavigation())) return false;
       setLiteFormDirty(false);
       closeNoticeDrawer();
       return true;
@@ -4435,6 +4612,7 @@ def render_workbench_lite(
         if (!response.ok || data.ok === false) {{
           throw new Error(data.error || (data.data && data.data.error) || '删除失败');
         }}
+        await deleteSubmittedLiteDraft({{ ...payload, action:'end' }}).catch(() => ({{}}));
         const row = findOngoingRowByDraft(payload);
         if (row) removeOngoingRow(row);
         const result = data.data || {{}};
@@ -5057,8 +5235,15 @@ def render_workbench_lite(
           staged: false,
           remote_uploaded: false,
         }};
+        if (liteDraftContext(form)) {{
+          if (status) status.textContent = '正在本机暂存截图...';
+          const uploaded = await uploadSitePhotoFile(file, form, 'ali');
+          if (!uploaded?.upload_id) throw new Error('阿里确认截图本机暂存失败');
+          liteAliConfirmationImage = {{ ...liteAliConfirmationImage, ...uploaded }};
+        }}
         showAliConfirmationResult(form, '');
         updateAliConfirmationUi(form);
+        setLiteFormDirty(true);
       }} catch (error) {{
         const message = error && error.message ? error.message : '阿里确认截图上传失败';
         if (status) status.textContent = message;
@@ -5158,8 +5343,7 @@ def render_workbench_lite(
       const buttonLocalImageId = String(button?.getAttribute('data-local-image-id') || '').trim();
       const existing = Number(panel.dataset.existingCount || 0) > 0;
       if (liteAliConfirmationImage && !fileToken) {{
-        const localImageId = String(liteAliConfirmationImage.local_image_id || '');
-        if (localImageId) await fetch(`/api/notice-images/${{encodeURIComponent(localImageId)}}`, {{ method:'DELETE', credentials:'same-origin' }}).catch(() => null);
+        deletePendingNoticeImage(liteAliConfirmationImage);
         if (String(liteAliConfirmationImage.preview_url || '').startsWith('blob:')) {{
           URL.revokeObjectURL(liteAliConfirmationImage.preview_url);
         }}
@@ -6609,6 +6793,8 @@ def render_workbench_lite(
       resetActualActionTime(form);
       updateNoticePreview(form);
       syncNoticeDrawerState();
+      resetLiteDraftTracking(form);
+      restoreLiteDraft(form).catch(() => null);
     }}
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
@@ -6741,6 +6927,8 @@ def render_workbench_lite(
         ? '该事项已在进行中，可发送更新、结束或删除'
         : '已选择计划通告，可继续编辑后发送');
       openNoticeDrawer(title, link);
+      resetLiteDraftTracking(form);
+      restoreLiteDraft(form).catch(() => null);
       return true;
     }}
     function applyOngoingRowToDetail(link) {{
@@ -6814,6 +7002,8 @@ def render_workbench_lite(
         : '已选择未结束通告，可发送更新或结束'
       );
       openNoticeDrawer(title, link);
+      resetLiteDraftTracking(form);
+      restoreLiteDraft(form).catch(() => null);
       return true;
     }}
     async function navigateLite(url, options = {{}}) {{
@@ -7386,8 +7576,7 @@ def render_workbench_lite(
         if (Number.isInteger(index) && index >= 0) {{
           const removed = liteSitePhotos[index];
           if (String(removed?.preview_url || '').startsWith('blob:')) URL.revokeObjectURL(removed.preview_url);
-          const localImageId = String(removed?.local_image_id || '');
-          if (localImageId) fetch(`/api/notice-images/${{encodeURIComponent(localImageId)}}`, {{ method:'DELETE', credentials:'same-origin' }}).catch(() => null);
+          deletePendingNoticeImage(removed);
           liteSitePhotos.splice(index, 1);
           setLiteFormDirty(true);
           updateSitePhotoUi(form);
@@ -7454,18 +7643,6 @@ def render_workbench_lite(
         await confirmRepairEventCandidate();
         return;
       }}
-      const discardCancel = target.closest('#lite-discard-cancel');
-      if (discardCancel) {{
-        event.preventDefault();
-        resolveDiscardConfirm(false);
-        return;
-      }}
-      const discardConfirm = target.closest('#lite-discard-confirm-button');
-      if (discardConfirm) {{
-        event.preventDefault();
-        resolveDiscardConfirm(true);
-        return;
-      }}
       const manualBindingButton = target.closest('[data-manual-binding-mode]');
       if (manualBindingButton) {{
         event.preventDefault();
@@ -7529,7 +7706,7 @@ def render_workbench_lite(
         event.preventDefault();
         if (navLink.matches('.manual-menu a')) clearManualImageIdentityForLink(navLink);
         if (navLink.getAttribute('data-direct-navigation') === '1') {{
-          if (!(await confirmDiscardLiteChanges())) return;
+          if (!(await prepareLiteNavigation())) return;
           setLiteFormDirty(false);
           window.location.assign(navLink.href);
           return;
@@ -7542,7 +7719,7 @@ def render_workbench_lite(
           setLiteStatus(navLink.getAttribute('data-disabled-reason') || '该事项不可操作');
           return;
         }}
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         closePickers();
         navLink.classList.add('is-loading');
@@ -7600,7 +7777,7 @@ def render_workbench_lite(
       }}
       const pageRefreshButton = target.closest('#lite-refresh-page');
       if (pageRefreshButton) {{
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         setButtonBusy(pageRefreshButton, true);
         setPickerOpen('refresh-picker', 'refresh-open', false);
@@ -7611,7 +7788,7 @@ def render_workbench_lite(
       }}
       const maintenanceButton = target.closest('#lite-refresh-maintenance');
       if (maintenanceButton) {{
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         setButtonBusy(maintenanceButton, true);
         setPickerOpen('refresh-picker', 'refresh-open', false);
@@ -7622,7 +7799,7 @@ def render_workbench_lite(
       }}
       const repairButton = target.closest('#lite-refresh-repair');
       if (repairButton) {{
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         setButtonBusy(repairButton, true);
         setPickerOpen('refresh-picker', 'refresh-open', false);
@@ -7633,7 +7810,7 @@ def render_workbench_lite(
       }}
       const changeButton = target.closest('#lite-refresh-change');
       if (changeButton) {{
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         setButtonBusy(changeButton, true);
         setPickerOpen('refresh-picker', 'refresh-open', false);
@@ -7717,7 +7894,7 @@ def render_workbench_lite(
     }}, true);
     document.addEventListener('change', async (event) => {{
       if (event.target && event.target.id === 'lite-month-select') {{
-        if (!(await confirmDiscardLiteChanges())) {{
+        if (!(await prepareLiteNavigation())) {{
           event.target.value = new URLSearchParams(location.search).get('month') || '{_e(selected_month)}';
           return;
         }}
@@ -7747,7 +7924,7 @@ def render_workbench_lite(
         return;
       }}
       if (event.target && event.target.id === 'lite-scope-select') {{
-        if (!(await confirmDiscardLiteChanges())) {{
+        if (!(await prepareLiteNavigation())) {{
           event.target.value = currentUrlScope();
           return;
         }}
@@ -7858,7 +8035,8 @@ def render_workbench_lite(
         if (!hadOpenDialog) requestCloseNoticeDrawer().catch(() => null);
       }}
     }});
-    window.addEventListener('popstate', () => {{
+    window.addEventListener('popstate', async () => {{
+      if (!(await prepareLiteNavigation())) return;
       navigateLite(location.href, {{
         push: false,
         label: '正在恢复页面...',
@@ -7945,6 +8123,7 @@ def render_workbench_lite(
         }}
       }}
       const commandPatch = compactCommandPatch(patch);
+      const draftContext = liteDraftContext(form);
       return {{
         command_format: 'notice_command',
         action,
@@ -7958,6 +8137,7 @@ def render_workbench_lite(
         record_id: submitRecordId,
         actual_action_time: patch.actual_action_time || '',
         operation_id: patch.operation_id,
+        draft_version: draftContext ? Number(liteDraftServerVersion || 0) : 0,
         patch: commandPatch
       }};
     }}
@@ -8337,9 +8517,10 @@ def render_workbench_lite(
       form.dataset.targetEnded = '';
       delete form.dataset.submitOperationId;
       const wasDirty = liteFormDirty;
+      const preserveCurrentInput = wasDirty || liteDraftServerVersion > 0;
       const actualTime = previewValue(form, 'actual_action_time');
       setOngoingSubmitButtons(form);
-      if (wasDirty && actualTime) {{
+      if (preserveCurrentInput && actualTime) {{
         setFormValue(form, 'actual_action_time', actualTime);
         const actualField = form.querySelector('[name="actual_action_time"]');
         if (actualField) actualField.dataset.autoActualTime = '0';
@@ -8474,6 +8655,7 @@ def render_workbench_lite(
           const job = data.data || {{}};
           const phase = String(job.phase || '');
           if (phase === 'success') {{
+            await deleteSubmittedLiteDraft(payload).catch(() => ({{}}));
             applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
             setLiteStatus(successfulNoticeActionText(
               payload?.action,
@@ -8519,7 +8701,7 @@ def render_workbench_lite(
       const pasteForm = event.target.closest('.paste-drawer form,.paste-box form');
       if (pasteForm) {{
         event.preventDefault();
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         const submitter = event.submitter;
         if (submitter) submitter.disabled = true;
@@ -8543,7 +8725,7 @@ def render_workbench_lite(
       const filterForm = event.target.closest('.toolbar form');
       if (filterForm) {{
         event.preventDefault();
-        if (!(await confirmDiscardLiteChanges())) return;
+        if (!(await prepareLiteNavigation())) return;
         setLiteFormDirty(false);
         const url = filterForm.action + '?' + new URLSearchParams(new FormData(filterForm)).toString();
         try {{ await navigateLite(url, {{ label: '正在筛选...', workspaceSwitch: true }}); }}
@@ -8592,6 +8774,10 @@ def render_workbench_lite(
       }}
       let payload = null;
       try {{
+        if (liteDraftContext(form) && liteFormDirty && !(await saveLiteDraftNow(form))) {{
+          showLiteError('自动保存失败，已保留当前页面，请重试后再发送。');
+          return;
+        }}
         // Capture the exact visible values before yielding; a background patch may
         // replace the drawer while the browser processes the next frame.
         payload = formPayload(form, submitter, submitAction);
