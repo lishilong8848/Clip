@@ -546,7 +546,7 @@ import {
   Users,
 } from "lucide-vue-next";
 import { ApiError, requestJson, type Dict } from "../api/client";
-import { navigate } from "../navigation";
+import { navigate, navigateBack } from "../navigation";
 import { refreshSignatureDirectory } from "../mopSignatureApi";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
@@ -1445,8 +1445,7 @@ function openAdmin(): void {
 function leavePage(): void {
   requestDiscardChanges("离开会放弃当前未保存修改。", () => {
     clearStatusPoll(true);
-    if (viewMode.value === "landing") navigate("/");
-    else navigate("/drill-management");
+    navigateBack(viewMode.value === "landing" ? "/" : "/drill-management");
   });
 }
 

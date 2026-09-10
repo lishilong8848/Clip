@@ -10118,7 +10118,7 @@ class FastAPIPortalController:
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
             f"<title>{html.escape(title)}</title></head><body>"
             f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p>"
-            "<p><a href=\"/\">返回工作台</a></p></body></html>"
+            "<p><a href=\"/\" onclick=\"if(history.length>1){event.preventDefault();history.back()}\">返回</a></p></body></html>"
         ).encode("utf-8")
         return Response(
             content=body,

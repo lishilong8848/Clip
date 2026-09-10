@@ -149,7 +149,7 @@ import {
   X,
 } from "lucide-vue-next";
 import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
-import { navigate } from "../navigation";
+import { navigate, navigateBack } from "../navigation";
 import { REPAIR_STATUS_INVALIDATED_EVENT } from "../repairStatusState";
 import type { LooseDict } from "../types";
 import MessageBanner from "./MessageBanner.vue";
@@ -221,7 +221,7 @@ function formatTime(value: unknown): string {
 function backToRepairManagement(): void {
   const url = new URL("/repair-management", window.location.origin);
   url.searchParams.set("scope", props.scope || "ALL");
-  navigate(url);
+  navigateBack(`${url.pathname}${url.search}`);
 }
 
 function openRecord(record: LooseDict): void {

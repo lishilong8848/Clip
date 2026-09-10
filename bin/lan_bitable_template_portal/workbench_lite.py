@@ -3226,7 +3226,7 @@ def render_workbench_lite(
     </div>
     <nav class="top-actions">
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
-      <a class="top-link" href="/" aria-label="返回">返回</a>
+      <a class="top-link" id="lite-back-link" href="/" aria-label="返回">返回</a>
       <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
       {change_confirmation_button}
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
@@ -7507,6 +7507,14 @@ def render_workbench_lite(
     document.addEventListener('click', async (event) => {{
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      const backLink = target.closest('#lite-back-link');
+      if (backLink) {{
+        event.preventDefault();
+        if (!(await prepareLiteNavigation())) return;
+        if (history.length > 1) history.back();
+        else location.assign(backLink.href);
+        return;
+      }}
       const nativePickerInput = target.matches('input[type="date"],input[type="time"],input[type="month"],input[type="datetime-local"]') ? target : null;
       if (nativePickerInput && !nativePickerInput.disabled && !nativePickerInput.readOnly) {{
         try {{ nativePickerInput.showPicker?.(); }} catch {{ /* Keep native focus/typing fallback. */ }}

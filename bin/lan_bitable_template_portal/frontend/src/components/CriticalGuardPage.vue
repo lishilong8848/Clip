@@ -692,7 +692,7 @@ import {
   ZoomIn,
 } from "lucide-vue-next";
 import { requestJson, type Dict } from "../api/client";
-import { navigate } from "../navigation";
+import { navigate, navigateBack } from "../navigation";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import CriticalGuardSignatureDrawer from "./CriticalGuardSignatureDrawer.vue";
 import VnetBackButton from "./VnetBackButton.vue";
@@ -2009,7 +2009,7 @@ function requestReload(): void {
 }
 
 function requestPageExit(): void {
-  requestSwitch(() => navigate(backTarget.value));
+  requestSwitch(() => navigateBack(backTarget.value));
 }
 
 watch(

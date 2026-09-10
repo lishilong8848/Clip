@@ -2,7 +2,7 @@
   <section class="water-page">
     <header class="water-page__header">
       <div class="header-left">
-        <VnetBackButton @click="navigate('/')" />
+        <VnetBackButton to="/" />
         <div>
           <span>容量管理</span>
           <h1>{{ buildingLabel }}水耗管理</h1>
@@ -549,7 +549,6 @@ import {
   X,
 } from "lucide-vue-next";
 import { requestBinaryJson, requestJson } from "../api/client";
-import { navigate } from "../navigation";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";

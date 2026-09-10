@@ -594,7 +594,7 @@ import {
   X,
 } from "lucide-vue-next";
 import { ApiError, refreshRemoteSourceAndWait, requestJson } from "../api/client";
-import { navigate, navigateHard } from "../navigation";
+import { navigate, navigateBack, navigateHard } from "../navigation";
 import { invalidateRepairStatus } from "../repairStatusState";
 import {
   REPAIR_REQUIRED_FIELD_GROUPS,
@@ -1657,7 +1657,7 @@ function requestBack(): void {
     dirtyFieldNames.clear();
     hasUnsavedChanges.value = false;
     followupHasUnsavedChanges.value = false;
-    navigate("/");
+    navigateBack("/");
   });
 }
 

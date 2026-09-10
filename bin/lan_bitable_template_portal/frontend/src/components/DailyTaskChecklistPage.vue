@@ -11,7 +11,7 @@
   <section v-else class="daily-page">
     <header class="daily-header">
       <div class="daily-header__left">
-        <VnetBackButton @click="navigate('/')" />
+        <VnetBackButton to="/" />
         <div>
           <span>每日任务清单</span>
           <h1>{{ scopeLabel }}今日工作</h1>
@@ -326,7 +326,6 @@ import {
   Wrench,
 } from "lucide-vue-next";
 import { requestJson } from "../api/client";
-import { navigate } from "../navigation";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
 import RepairPeoplePicker from "./RepairPeoplePicker.vue";

@@ -11,7 +11,7 @@
 </template>
 
 <script setup lang="ts">
-import { navigate, navigateHard } from "../navigation";
+import { navigateBack } from "../navigation";
 
 const props = defineProps<{
   to?: string;
@@ -27,11 +27,7 @@ const emit = defineEmits<{
 function handleClick(): void {
   if (props.disabled) return;
   if (props.to) {
-    if (props.hard) {
-      navigateHard(props.to);
-    } else {
-      navigate(props.to);
-    }
+    navigateBack(props.to, props.hard);
     return;
   }
   emit("click");

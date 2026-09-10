@@ -55,3 +55,11 @@ export function navigateHard(target: string | URL): void {
 export function replaceRoute(target: string | URL): void {
   navigate(target, { replace: true });
 }
+
+export function navigateBack(fallback = "/", hardFallback = false): void {
+  if (window.history.length > 1) {
+    window.history.back();
+    return;
+  }
+  navigate(fallback, { replace: !hardFallback, hard: hardFallback });
+}
