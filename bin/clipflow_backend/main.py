@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, quote, urlencode
 import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.middleware.gzip import GZipMiddleware
 
 from clipflow_backend.preflight import (
     build_backend_preflight_report as _build_backend_preflight_report,
@@ -728,6 +729,8 @@ class FastAPIPortalController:
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="ClipFlow LAN Backend")
+        from lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
+        install_cabinet_power_routes(app, self, PortalRuntime)
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
@@ -778,6 +781,10 @@ class FastAPIPortalController:
                     cache_miss=bool(getattr(request.state, "cache_miss", False)),
                     rate_limited=rate_limited,
                 )
+
+        # Keep compression outside the request-timing middleware so cancelled
+        # streaming responses do not surface as false application errors.
+        app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
         @app.get("/")
         async def root(request: Request):
@@ -1162,6 +1169,8 @@ class FastAPIPortalController:
 
         @app.get("/water-management")
         @app.get("/water-management/")
+        @app.get("/cabinet-power")
+        @app.get("/cabinet-power/")
         async def water_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
@@ -1255,6 +1264,9 @@ class FastAPIPortalController:
 
         @app.get("/api/health")
         async def health(request: Request) -> dict:
+            if request.query_params.get("probe") == "1":
+                # Connectivity probes never wait for SQLite, Feishu, or runtime snapshots.
+                return JSONResponse({"ok": True, "service": "clipflow_backend", "instance_id": BACKEND_INSTANCE_ID}, headers={"Cache-Control": "no-store"})
             cached = self._read_cache_get(("health",), ttl=1.5, stale_ttl=5.0)
             if cached is not None:
                 request.state.cache_hit = True
@@ -7075,6 +7087,7 @@ class FastAPIPortalController:
                         (delete_result or {}).get("remote_deleted")
                     )
                 if not delete_ok:
+                    status_code = 409 if bool((delete_result or {}).get("conflict")) else 500
                     return JSONResponse(
                         {
                             "ok": False,
@@ -7085,7 +7098,7 @@ class FastAPIPortalController:
                                 else {}
                             ),
                         },
-                        status_code=500,
+                        status_code=status_code,
                     )
                 cleanup_payload = dict(payload)
                 for identity_field in ("source_record_id", "work_type"):
@@ -12793,10 +12806,16 @@ class FastAPIPortalController:
             log_warning(f"每日汇总主管目录预热失败，将使用兜底名单: {exc}")
 
     def _run_scheduled_polling_relay(self) -> None:
-        if not PortalRuntime.polling_work_order_public_relay_should_run():
+        if _mock_external_enabled():
             return
-        relay = PortalRuntime.polling_work_order_relay()
-        relay.run_once()
+        relay_error = None
+        if PortalRuntime.polling_work_order_public_relay_should_run():
+            try:
+                relay = PortalRuntime.polling_work_order_relay()
+                relay.run_once()
+            except Exception as exc:
+                # Public outages must not starve pending LAN/fallback role links.
+                relay_error = exc
         manager = PortalRuntime.polling_work_orders()
         for group in manager.open_groups():
             projected = manager.group_with_links(
@@ -12805,7 +12824,12 @@ class FastAPIPortalController:
             if str(projected.get("operator_link") or "") and str(
                 projected.get("reviewer_link") or ""
             ):
-                PortalRuntime._send_polling_work_order_links(projected)
+                try:
+                    PortalRuntime._send_polling_work_order_links(projected)
+                except Exception as exc:
+                    log_warning(f"工单角色链接待重试：group_id={projected.get('target_record_id')}, error={exc}")
+        if relay_error is not None:
+            raise relay_error  # preserve the worker's existing offline backoff
 
     def _start_polling_relay_worker(self) -> None:
         if self._polling_relay_thread and self._polling_relay_thread.is_alive():
@@ -12817,11 +12841,8 @@ class FastAPIPortalController:
             delay = 2.0
             while not stop_event.is_set():
                 try:
-                    if PortalRuntime.polling_work_order_public_relay_should_run():
-                        self._run_scheduled_polling_relay()
-                        delay = 2.0
-                    else:
-                        delay = 5.0
+                    self._run_scheduled_polling_relay()
+                    delay = 2.0
                 except Exception as exc:
                     log_warning(f"轮巡公网工单同步失败，将自动重试: {exc}")
                     delay = min(30.0, delay * 2.0)

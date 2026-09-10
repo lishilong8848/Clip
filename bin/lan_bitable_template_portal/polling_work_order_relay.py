@@ -68,6 +68,18 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, result))
 
 
+def public_link_with_configured_port(value: Any, relay_url: str) -> str:
+    text=str(value or '').strip()
+    if not text or not relay_url: return text
+    if any(ord(c)<32 or ord(c)==127 for c in text): raise PollingRelayProtocolError('公网中继返回了无效能力链接。')
+    parsed=urllib.parse.urlsplit(text); configured=urllib.parse.urlsplit(relay_url)
+    try: port=configured.port
+    except ValueError as exc: raise PollingRelayConfigurationError('公网工单地址端口无效') from exc
+    if port and configured.scheme in ('http','https') and parsed.scheme in ('http','https') and parsed.hostname==configured.hostname and not (configured.username or configured.password or parsed.username or parsed.password):
+        return urllib.parse.urlunsplit((configured.scheme,configured.netloc,parsed.path,parsed.query,parsed.fragment))
+    return text
+
+
 @dataclass(frozen=True)
 class PollingRelayConfig:
     enabled: bool
@@ -306,6 +318,31 @@ def probe_polling_relay_health(
             or (int(create_probe.status) == 405 and "POST" in allow)
         ):
             raise PollingRelayProtocolError("公网工单内部中继接口不可用。")
+        remaining_timeout = max(
+            0.2, timeout_budget - (time.monotonic() - started)
+        )
+        access_probe = active_transport.request(
+            "POST",
+            f"{root}/api/v1/internal/authority/lease",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Idempotency-Key": "health-access-probe",
+            },
+            body=b"{}",
+            timeout=remaining_timeout,
+            max_bytes=64 * 1024,
+        )
+        if not 200 <= int(access_probe.status) < 300:
+            access_payload = _json_object(access_probe.body)
+            access_code = str(access_payload.get("error_code") or "")
+            if int(access_probe.status) != 422 or access_code != "validation_error":
+                access_error = access_payload.get("error")
+                if isinstance(access_error, dict):
+                    access_error = access_error.get("message") or access_error.get("code")
+                raise PollingRelayProtocolError(
+                    str(access_error or "公网工单内部接口拒绝当前程序访问。")
+                )
         result["ready"] = True
     except Exception as exc:
         result["error"] = str(exc or "公网工单连接失败。")
@@ -672,8 +709,8 @@ class PollingWorkOrderRelayConnector:
             "relay_url": self.config.base_url,
             "public_group_id": str(document.get("public_group_id") or ""),
             "registration_state": str(document.get("registration_state") or ""),
-            "operator_link": str(document.get("operator_link") or ""),
-            "reviewer_link": str(document.get("reviewer_link") or ""),
+            "operator_link": public_link_with_configured_port(document.get("operator_link"),self.config.base_url),
+            "reviewer_link": public_link_with_configured_port(document.get("reviewer_link"),self.config.base_url),
             "link_ids": copy.deepcopy(document.get("link_ids") or {}),
             "last_error": str(document.get("last_error") or ""),
             "projection_revision": int(
@@ -748,6 +785,7 @@ class PollingWorkOrderRelayConnector:
         entry = str(entry_url or "").strip() or (
             f"{self.config.base_url}/polling-work-order"
         )
+        entry=public_link_with_configured_port(entry,self.config.base_url)
         parsed = urllib.parse.urlsplit(entry)
         entry = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
@@ -907,10 +945,10 @@ class PollingWorkOrderRelayConnector:
             if not reviewer_link:
                 reviewer_link = self._capability_link(entry_url, credentials["reviewer"])
             operator_link = self._public_link(
-                operator_link, allow_http=self.config.allow_insecure_http
+                public_link_with_configured_port(operator_link,self.config.base_url), allow_http=self.config.allow_insecure_http
             )
             reviewer_link = self._public_link(
-                reviewer_link, allow_http=self.config.allow_insecure_http
+                public_link_with_configured_port(reviewer_link,self.config.base_url), allow_http=self.config.allow_insecure_http
             )
             return self._put_group_document(
                 target_record_id,
@@ -959,8 +997,8 @@ class PollingWorkOrderRelayConnector:
     def public_links(self, target_record_id: str) -> dict[str, str]:
         document = self._group_document(target_record_id)
         return {
-            "operator_link": str(document.get("operator_link") or ""),
-            "reviewer_link": str(document.get("reviewer_link") or ""),
+            "operator_link": public_link_with_configured_port(document.get("operator_link"),self.config.base_url),
+            "reviewer_link": public_link_with_configured_port(document.get("reviewer_link"),self.config.base_url),
         }
 
     def _stage_projection(self, target_record_id: str) -> dict[str, Any]:

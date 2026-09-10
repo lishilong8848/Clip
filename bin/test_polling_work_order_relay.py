@@ -25,6 +25,7 @@ from lan_bitable_template_portal.polling_work_order_relay import (  # noqa: E402
     PollingWorkOrderRelayConnector,
     RelayResponse,
     probe_polling_relay_health,
+    public_link_with_configured_port,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
@@ -387,6 +388,62 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertIn("内部中继接口", result["error"])
 
+    def test_health_probe_rejects_internal_source_ip_filter(self) -> None:
+        class SourceFilteredTransport:
+            def request(self, method, url, **_kwargs) -> RelayResponse:
+                if method == "GET":
+                    return RelayResponse(
+                        200,
+                        {"content-type": "application/json"},
+                        json.dumps({
+                            "service": "public_polling_work_order",
+                            "protocol_version": 1,
+                            "ready": True,
+                        }).encode(),
+                    )
+                if method == "OPTIONS":
+                    return RelayResponse(405, {"allow": "POST"}, b'{}')
+                return RelayResponse(
+                    403,
+                    {"content-type": "application/json"},
+                    json.dumps({
+                        "ok": False,
+                        "error": "当前来源 IP 无权调用内部工单接口。",
+                        "error_code": "internal_source_forbidden",
+                    }, ensure_ascii=False).encode(),
+                )
+
+        result = probe_polling_relay_health(
+            "https://relay.example",
+            transport=SourceFilteredTransport(),
+        )
+        self.assertFalse(result["ready"])
+        self.assertIn("来源 IP", result["error"])
+
+    def test_health_probe_accepts_latest_internal_validation_response(self) -> None:
+        class LatestTransport:
+            def request(self, method, url, **_kwargs) -> RelayResponse:
+                if method == "GET":
+                    payload = {
+                        "service": "public_polling_work_order",
+                        "protocol_version": 1,
+                        "ready": True,
+                    }
+                    return RelayResponse(200, {"content-type": "application/json"}, json.dumps(payload).encode())
+                if method == "OPTIONS":
+                    return RelayResponse(405, {"allow": "POST"}, b'{}')
+                return RelayResponse(
+                    422,
+                    {"content-type": "application/json"},
+                    b'{"ok":false,"error":"instance_id: Field required","error_code":"validation_error"}',
+                )
+
+        result = probe_polling_relay_health(
+            "https://relay.example",
+            transport=LatestTransport(),
+        )
+        self.assertTrue(result["ready"])
+
     def test_reconcile_does_not_migrate_legacy_local_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
@@ -529,6 +586,34 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
                 lease_calls[-1]["headers"]["Idempotency-Key"],
                 lease_calls[-2]["headers"]["Idempotency-Key"],
             )
+
+    def test_public_links_keep_configured_port_for_new_and_existing_groups(self) -> None:
+        from lan_bitable_template_portal.polling_work_orders import PollingWorkOrderService
+        base = 'https://public.example:8787'
+        tail = '/polling-work-order?view=work#link_id=fixture&secret=fixture'
+        for original in ('https://public.example', 'https://public.example:443', base):
+            self.assertEqual(public_link_with_configured_port(original+tail, base), base+tail)
+        self.assertEqual(public_link_with_configured_port('https://other.example'+tail, base), 'https://other.example'+tail)
+        self.assertEqual(public_link_with_configured_port('https://[::1]'+tail, 'https://[::1]:8787'), 'https://[::1]:8787'+tail)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / 'state.sqlite3')
+            manager = FakeWorkOrders(store); clock = FakeClock()
+            config = PollingRelayConfig(enabled=True, base_url=base)
+            connector = PollingWorkOrderRelayConnector(store, manager, config=config, transport=FakeRelayTransport(config, clock), clock=clock)
+            registered = connector.register_group(manager.target_record_id)
+            for key in ('operator_link','reviewer_link'):
+                self.assertEqual(urllib.parse.urlsplit(registered[key]).netloc,'public.example:8787')
+            group = manager.get_group(manager.target_record_id)
+            for key in ('operator_link','reviewer_link'):
+                group['relay'][key] = group['relay'][key].replace(':8787','')
+            before = copy.deepcopy(group)
+            formatted = PollingWorkOrderService.group_with_links(None, group, '')
+            self.assertEqual(group, before)
+            for key in ('operator_link','reviewer_link'):
+                self.assertEqual(formatted[key], registered[key])
+                self.assertEqual(formatted['relay'][key], registered[key])
+            group['relay']['registration_state']='pending'
+            self.assertEqual(PollingWorkOrderService.group_with_links(None,group,'')['operator_link'],'')
 
     def test_missing_remote_group_is_registered_again_before_projection_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

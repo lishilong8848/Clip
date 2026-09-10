@@ -1524,7 +1524,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           for (const marker of forbidden) {{
             if (bodyText.includes(marker)) throw new Error(`legacy marker visible: ${{marker}}`);
           }}
-          const expectedModuleOrder = ['事件管理', '维护管理', '变更管理', '检修管理', '风险管理', '容量管理', '其他工具', '演练管理'];
+          const expectedModuleOrder = ['事件管理', '维护管理', '变更管理', '检修管理', '风险管理', '容量管理', '其他工具', '演练管理', '机柜上下电'];
           const moduleOrder = await page.locator('.module-card .module-card__main strong').allTextContents();
           if (JSON.stringify(moduleOrder) !== JSON.stringify(expectedModuleOrder)) {{
             throw new Error(`home module order mismatch: ${{JSON.stringify(moduleOrder)}}`);
@@ -1547,10 +1547,32 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }};
           }});
           const desktopDashboard = await inspectDashboard();
-          if (desktopDashboard.columns !== 4 || desktopDashboard.heights.length !== 1 || desktopDashboard.lastBottom > 768 || desktopDashboard.headerHeight > 100 || desktopDashboard.overflowX || desktopDashboard.bodyMargin !== '0px' || desktopDashboard.disabledFocusable || desktopDashboard.duplicatePrimaryActions) {{
+          if (desktopDashboard.columns !== 4 || desktopDashboard.heights.length !== 1 || desktopDashboard.lastBottom > 768 + desktopDashboard.heights[0] + 20 || desktopDashboard.headerHeight > 100 || desktopDashboard.overflowX || desktopDashboard.bodyMargin !== '0px' || desktopDashboard.disabledFocusable || desktopDashboard.duplicatePrimaryActions) {{
             throw new Error(`desktop home dashboard mismatch: ${{JSON.stringify(desktopDashboard)}}`);
           }}
           await page.emulateMedia({{ reducedMotion: 'reduce' }});
+          await page.locator('.module-cabinet_power .module-card__main').click();
+          await page.waitForSelector('.building-card');
+          if (await page.locator('.building-card').count() !== 5) throw new Error('cabinet building entries missing');
+          await page.locator('.building-card').first().click();
+          await page.waitForSelector('.cabinet-page .metrics');
+          await page.getByRole('button', {{ name: '机柜平面图', exact: true }}).click();
+          await page.getByRole('button', {{ name: '302包间', exact: false }}).click();
+          await page.waitForSelector('.map-cell.rack');
+          await page.locator('.map-cell.rack').filter({{ hasText: /^B03$/ }}).click();
+          await page.waitForSelector('.timeline-item');
+          if (!(await page.locator('.timeline-item').innerText()).includes('上正式电')) throw new Error('cabinet history is not scoped to room/rack');
+          await page.getByRole('button', {{ name: '切换为测试电', exact: true }}).click();
+          await page.waitForSelector('.editor-layer form');
+          const actualInput = page.locator('.editor-layer input[type="datetime-local"]').first();
+          if (await actualInput.inputValue() !== '' || !(await actualInput.evaluate(node => node.required))) throw new Error('state switch must require manual operation data');
+          if (await page.locator('.editor-layer form').evaluate(form => form.checkValidity())) throw new Error('empty state-switch form must not submit');
+          await page.getByRole('button', {{ name: '关闭编辑', exact: true }}).click();
+          await page.getByRole('button', {{ name: '关闭历史', exact: true }}).click();
+          require('fs').mkdirSync('output/playwright', {{ recursive: true }});
+          await page.screenshot({{ path: 'output/playwright/cabinet-desktop.png', fullPage: true }});
+          await page.goto(cfg.url, {{ waitUntil: 'domcontentloaded' }});
+          await page.waitForSelector('.module-card');
           const visibleBroadcastDuplicates = await page.locator('.broadcast-item[aria-hidden="true"]').evaluateAll(nodes =>
             nodes.filter(node => getComputedStyle(node).display !== 'none').length,
           );
@@ -1920,6 +1942,43 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             ) {{
               throw new Error(`lite workbench accessibility markers missing: ${{JSON.stringify(liteA11yProbe)}}`);
             }}
+            const pollingTerminalProbe = await page.evaluate(async () => {{
+              const source = Array.from(document.scripts).map(node => node.textContent || '').join('\\n');
+              const start = source.indexOf("let latestSubmittedJobId = '';");
+              const end = source.indexOf('function schedulePostSubmitRefresh', start);
+              if (start < 0 || end < 0) throw new Error('notice polling implementation missing');
+              const run = new Function('env',
+                'const {{Date,sleep,fetch,setLiteStatus,handleLiteAuthRequired,deleteSubmittedLiteDraft,applyJobPatch,successfulNoticeActionText,showLiteError,friendlyLiteMessage,jobPhaseText}}=env;'
+                + source.slice(start, end)
+                + ';latestSubmittedJobId=env.latest;return pollSubmittedJob("job", "", {{action:"start"}});');
+              const results = [];
+              for (const scenario of [{{phase:'success', latest:'job'}}, {{phase:'failed', latest:'job'}}, {{phase:'success', latest:'newer-job'}}]) {{
+                let clock = 0, reads = 0;
+                const statuses = [];
+                const result = await run({{
+                  latest: scenario.latest,
+                  Date: {{now: () => clock}},
+                  sleep: async () => {{clock += 100000;}},
+                  fetch: async () => {{reads += 1; return {{ok:true,status:200,json:async()=>({{ok:true,data:{{phase:scenario.phase,error:'明确失败'}}}})}};}},
+                  setLiteStatus: text => statuses.push(text),
+                  handleLiteAuthRequired: () => false,
+                  deleteSubmittedLiteDraft: async () => {{}},
+                  applyJobPatch: () => {{throw new Error('render failed');}},
+                  successfulNoticeActionText: () => '发送成功',
+                  showLiteError: () => {{}},
+                  friendlyLiteMessage: text => text,
+                  jobPhaseText: text => text,
+                }});
+                results.push({{result,reads,statuses}});
+              }}
+              return results;
+            }});
+            if (pollingTerminalProbe.some(item => !item.result || item.reads !== 1)
+                || !pollingTerminalProbe[0].statuses[0]?.includes('已发送成功')
+                || !pollingTerminalProbe[1].statuses[0]?.includes('明确失败')
+                || pollingTerminalProbe[2].statuses.length) {{
+              throw new Error('notice terminal rendering/parallel status regression: ' + JSON.stringify(pollingTerminalProbe));
+            }}
             const liteSubmitScriptProbe = await page.evaluate(() => {{
               const scriptText = Array.from(document.scripts).map(node => node.textContent || '').join('\\n');
               return {{
@@ -2183,6 +2242,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
             }}
             const pageTitle = await page.title().catch(() => '');
+            await assertConnectionGuard();
             await browser.close();
             console.log(JSON.stringify({{
               ok: true,
@@ -2216,6 +2276,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!draftPanelText.includes('通告类型') || !draftPanelText.includes('调整')) {{
             throw new Error(`manual adjust draft not visible: ${{draftPanelText}}`);
           }}
+          await page.locator('#lite-polling-sop-open').click();
+          const sopType = page.getByLabel('SOP 类型');
+          await sopType.selectOption('cooling');
+          await page.getByText('使用 {{{{from}}}} 的位置会在创建工单时替换为所选制冷单元。', {{ exact: false }}).waitFor();
+          const insertCoolingUnit = page.getByRole('button', {{ name: '插入制冷单元' }}).first();
+          await insertCoolingUnit.click();
+          if (!(await page.locator('.polling-step-edit textarea').first().inputValue()).includes('{{{{from}}}}')) throw new Error('adjust cooling unit placeholder was not inserted');
+          await page.locator('#lite-polling-sop-close').click();
           await page.getByRole('button', {{ name: '解析粘贴' }}).click();
           await page.waitForSelector('text=解析到待发起通告', {{ timeout: 10000 }});
           const pastePanel = page.locator('.paste-panel');
@@ -2380,6 +2448,44 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
           }}
           const pageTitle = await page.title().catch(() => '');
+          await assertConnectionGuard();
+          async function assertConnectionGuard() {{
+          // Separate page: expected failed health probes must not pollute app diagnostics.
+          const guardPage = await context.newPage();
+          let guardHealthy = true;
+          let guardInstance = 'smoke-instance-1';
+          await guardPage.route('**/api/health?probe=1', route => route.fulfill({{
+            status: guardHealthy ? 200 : 503,
+            contentType: 'application/json',
+            body: JSON.stringify({{ ok: guardHealthy, service: 'clipflow_backend', instance_id: guardInstance }}),
+          }}));
+          await guardPage.goto(cfg.url, {{ waitUntil: 'networkidle' }});
+          await guardPage.waitForFunction(() => Boolean(window.ClipFlowConnectionGuard));
+          if (await guardPage.locator('#clipflow-connection-guard').count()) throw new Error('healthy page incorrectly hidden');
+          // A business API failure does not mean the local backend is offline.
+          await guardPage.evaluate(async () => {{
+            window.dispatchEvent(new Event('clipflow-api-offline'));
+            await window.ClipFlowConnectionGuard.check();
+          }});
+          if (await guardPage.locator('#clipflow-connection-guard').count()) throw new Error('Feishu error incorrectly hid business page');
+          guardHealthy = false;
+          await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
+          await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
+          await guardPage.getByRole('heading', {{ name: '页面连接已中断' }}).waitFor();
+          if (await guardPage.locator('#app').isVisible()) throw new Error('disconnected business page still visible');
+          guardHealthy = true;
+          await guardPage.getByRole('button', {{ name: '重新检测连接' }}).click();
+          await guardPage.getByText('连接已恢复，请点击“刷新页面”重新加载。', {{ exact: true }}).waitFor();
+          if (await guardPage.locator('#app').isVisible()) throw new Error('stale business page restored without refresh');
+          await guardPage.getByRole('button', {{ name: '刷新页面', exact: true }}).click();
+          await guardPage.waitForLoadState('networkidle');
+          if (!(await guardPage.locator('#app').isVisible())) throw new Error('refresh did not restore healthy page');
+          guardInstance = 'smoke-instance-2';
+          await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
+          await guardPage.getByText('当前程序已重启，原页面状态可能已失效，请刷新后继续。', {{ exact: true }}).waitFor();
+          await guardPage.screenshot({{ path: 'output/playwright/connection-lost-desktop.png', fullPage: true }});
+          await guardPage.close();
+          }}
           await browser.close();
           console.log(JSON.stringify({{
             ok: true,
@@ -2468,6 +2574,20 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
 
         controller = FastAPIPortalController(host="127.0.0.1", port=port)
         app = controller._build_app()
+        from lan_bitable_template_portal.cabinet_power import from_feishu, to_fields
+        from lan_bitable_template_portal.cabinet_power_excel import parse_template, digest
+        cabinet_source = BIN_DIR / "lan_bitable_template_portal/templates/cabinet_power/A.xlsm"
+        cabinet_config = parse_template(cabinet_source.read_bytes(), "A")
+        cabinet_config.update(issues=[], history_ready=True, path=str(cabinet_source))
+        for rack in cabinet_config["inventory"]:
+            rack["rack_type"] = rack["rack_type"] or "服务器机柜"
+        controller._cabinet_power.write("config:A", cabinet_config)
+        cabinet_op = from_feishu({"record_id": "recCabinetSmoke", "fields": to_fields({
+            "scope": "A", "room": "302", "rack": "B03", "system_name": "EA118-A3-2",
+            "action": "上正式电", "actual": "2026-08-01 09:00:00", "expected": "",
+            "rack_type": "网络机柜", "power": 16000, "result": "成功",
+        })})
+        controller._cabinet_power.write("snapshot:A", {"operations": [cabinet_op], "version": digest(cabinet_op), "updated_at": "2026-08-01 09:00:00", "error": ""})
 
         @app.middleware("http")
         async def _frontend_smoke_login(request, call_next):

@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import quote
 
 from upload_event_module.utils import get_data_file_path
+from .polling_work_order_relay import public_link_with_configured_port
 
 from .portal_service import (
     BUILDING_OPEN_ID_MAP,
@@ -55,7 +56,13 @@ POLLING_STEP_PHOTO_MIME_TYPES = frozenset(
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
 POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v3.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
-WORK_ORDER_TYPES = frozenset({"polling", "maintenance"})
+WORK_ORDER_TYPES = frozenset({"polling", "maintenance", "adjust"})
+ADJUST_COOLING_MODES = {
+    "1#": "停机状态",
+    "2#": "板换模式",
+    "3#": "预冷模式",
+    "4#": "制冷模式",
+}
 
 
 class PollingWorkOrderTokenError(PortalError):
@@ -94,7 +101,7 @@ def _polling_unit_group(unit: str) -> tuple[str, ...]:
 def _work_order_type(value: Any) -> str:
     normalized = str(value or "polling").strip().lower()
     if normalized not in WORK_ORDER_TYPES:
-        raise PortalError("工单类型必须是 maintenance 或 polling。")
+        raise PortalError("工单类型必须是 maintenance、polling 或 adjust。")
     return normalized
 
 
@@ -104,9 +111,20 @@ def _stored_work_order_type(payload: dict | None) -> str:
 
 
 def _run_label(work_type: str, run: dict) -> str:
+    if work_type == "adjust":
+        return str(run.get("label") or "设备调整作业")
     if work_type == "maintenance":
         return "维保作业"
     return f"{run.get('from_unit') or ''}→{run.get('to_unit') or ''}"
+
+
+def _adjust_cooling_sop_tokens(steps: list[dict]) -> set[str]:
+    content = "\n".join(str(step.get("content") or "") for step in steps)
+    return {
+        token
+        for token in ("{{from}}", "{{to}}", "{{other}}")
+        if token in content
+    }
 
 
 class PollingWorkOrderService:
@@ -511,23 +529,44 @@ class PollingWorkOrderService:
             sop.get("scope") or ""
         ).strip().upper() != request_scope:
             raise PortalError("所选 SOP 不属于当前楼栋，请重新选择。")
-        if work_type == "maintenance" and any(
-            re.search(
-                r"\{\{(?:from|to|other)\}\}",
-                str(step.get("content") or ""),
-            )
-            for step in sop.get("steps") or []
-            if isinstance(step, dict)
-        ):
-            raise PortalError(
-                "所选 SOP 包含轮巡设备指向占位符，不能用于维保工单。"
-            )
+        sop_steps = [step for step in sop.get("steps") or [] if isinstance(step, dict)]
+        adjust_tokens = _adjust_cooling_sop_tokens(sop_steps)
+        has_adjust_cooling_step = work_type == "adjust" and adjust_tokens == {"{{from}}"}
+        has_any_placeholder = bool(adjust_tokens)
+        has_unsupported_placeholder = has_any_placeholder and not has_adjust_cooling_step
+        if work_type in {"maintenance", "adjust"} and has_unsupported_placeholder:
+            if work_type == "maintenance":
+                raise PortalError("所选 SOP 包含轮巡设备指向占位符，不能用于维保工单。")
+            raise PortalError("制冷单元模式切换 SOP 只允许使用 {{from}} 表示本次选择的制冷单元。")
         expected_version = int(request_payload.get("polling_sop_version") or 0)
         if expected_version != int(sop.get("version") or 0):
             raise PortalConflictError("所选 SOP 已修改，请重新选择。")
         if not sop.get("steps") or not sop.get("attachments"):
             raise PortalError("所选 SOP 缺少步骤或附件，不能用于发送开始。")
-        normalized_runs: list[dict] = [{"run_index": 1, "label": "维保作业"}]
+        normalized_runs: list[dict] = [{"run_index": 1, "label": _run_label(work_type, {})}]
+        if has_adjust_cooling_step:
+            runs = request_payload.get("polling_runs")
+            runs = runs if isinstance(runs, list) else []
+            run_count = int(request_payload.get("polling_run_count") or 0)
+            run = runs[0] if len(runs) == 1 and isinstance(runs[0], dict) else {}
+            from_mode = str(run.get("from_unit") or "").strip()
+            to_mode = str(run.get("to_unit") or "").strip()
+            cooling_unit = str(run.get("other_unit") or "").strip()
+            if run_count != 1 or len(runs) != 1 or cooling_unit not in POLLING_UNITS:
+                raise PortalError("请选择本次需要调整的 1#–6# 制冷单元。")
+            if from_mode not in ADJUST_COOLING_MODES or to_mode not in ADJUST_COOLING_MODES:
+                raise PortalError("请选择制冷单元当前运行模式和切换后运行模式。")
+            if from_mode == to_mode:
+                raise PortalError("制冷单元当前运行模式和切换后运行模式不能相同。")
+            from_label = ADJUST_COOLING_MODES[from_mode]
+            to_label = ADJUST_COOLING_MODES[to_mode]
+            normalized_runs = [{
+                "run_index": 1,
+                "label": f"{cooling_unit}制冷单元由{from_label}指向{to_label}",
+                "from_unit": from_mode,
+                "to_unit": to_mode,
+                "other_unit": cooling_unit,
+            }]
         if work_type == "polling":
             runs = request_payload.get("polling_runs")
             runs = runs if isinstance(runs, list) else []
@@ -610,6 +649,13 @@ class PollingWorkOrderService:
                     "staged_path": str(target),
                 }
             )
+        prepared_steps = copy.deepcopy(sop.get("steps") or [])
+        if has_adjust_cooling_step:
+            unit_text = f"{normalized_runs[0]['other_unit']}制冷单元"
+            for step in prepared_steps:
+                step["content"] = str(step.get("content") or "").replace(
+                    "{{from}}", unit_text
+                )
         return {
             "polling_work_order_required": True,
             "polling_work_order_spec": {
@@ -618,7 +664,7 @@ class PollingWorkOrderService:
                 "sop_version": int(sop.get("version") or 0),
                 "sop_name": str(sop.get("name") or ""),
                 "scope": request_scope,
-                "steps": copy.deepcopy(sop.get("steps") or []),
+                "steps": prepared_steps,
                 "attachments": snapshot_attachments,
                 "runs": normalized_runs,
                 "operator": operator,
@@ -786,7 +832,7 @@ class PollingWorkOrderService:
                 "group_id": target_record_id,
                 "target_record_id": target_record_id,
                 "work_type": work_type,
-                "notice_type": "维保通告" if work_type == "maintenance" else "设备轮巡",
+                "notice_type": {"maintenance": "维保通告", "adjust": "设备调整", "polling": "设备轮巡"}[work_type],
                 "title": str(title or target_record_id),
                 "sop_id": str(spec.get("sop_id") or ""),
                 "sop_version": int(spec.get("sop_version") or 0),
@@ -849,8 +895,8 @@ class PollingWorkOrderService:
         result["relay"] = relay
         if str(relay.get("mode") or "") in {"public_service", "public_relay"}:
             if str(relay.get("registration_state") or "") == "registered":
-                result["operator_link"] = str(relay.get("operator_link") or "")
-                result["reviewer_link"] = str(relay.get("reviewer_link") or "")
+                for key in ('operator_link','reviewer_link'):
+                    result[key]=relay[key]=public_link_with_configured_port(relay.get(key),str(relay.get('relay_url') or ''))
             else:
                 result["operator_link"] = ""
                 result["reviewer_link"] = ""
@@ -969,7 +1015,7 @@ class PollingWorkOrderService:
         )
         sop_name = _safe_file_name(
             group.get("sop_name")
-            or ("维保SOP" if work_type == "maintenance" else "轮巡SOP")
+            or ({"maintenance": "维保SOP", "adjust": "设备调整SOP"}.get(work_type, "轮巡SOP"))
         )
         sop_name = sop_name[: max(1, 155 - len(prefix) - len(tail))]
         return f"{prefix}{sop_name}{tail}.xlsx"
@@ -1632,7 +1678,7 @@ class PollingWorkOrderService:
                 except ValueError:
                     sheet["E3"] = _excel_text(completion_text)
                 sheet["B7"] = _excel_text(
-                    f"{group.get('sop_name') or (('维保' if work_type == 'maintenance' else '轮巡') + '操作流程')} · {run_label}"
+                    f"{group.get('sop_name') or (({'maintenance': '维保', 'adjust': '设备调整'}.get(work_type, '轮巡')) + '操作流程')} · {run_label}"
                 )
 
                 source_styles = [

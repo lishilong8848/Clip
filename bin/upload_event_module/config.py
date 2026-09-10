@@ -1162,6 +1162,10 @@ POWER_NOTICE_FIELDS = {
 }
 
 ADJUST_NOTICE_FIELDS = {
+    "work_order_required": "是否涉及重要操作",
+    "work_order_operator": "操作人",
+    "work_order_reviewer": "现场复核人",
+    "work_order_attachments": "工单附件",
     "specialty": "专业",
     "building": "楼栋",
     "status": "调整状态",

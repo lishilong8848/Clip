@@ -281,6 +281,7 @@ const emit = defineEmits<{
   water: [scope: string];
   "critical-guard": [];
   drill: [];
+  "cabinet-power": [];
   daily: [scope: string];
   "request-permission": [];
   "dashboard-visible": [visible: boolean];
@@ -597,6 +598,10 @@ function selectEntry(key: EntryKey): void {
   }
   if (key === "drill") {
     emit("drill");
+    return;
+  }
+  if (key === "cabinet_power") {
+    emit("cabinet-power");
     return;
   }
   activeMode.value = key;

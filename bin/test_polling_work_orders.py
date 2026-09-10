@@ -302,11 +302,11 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("countLabel.hidden=maintenance", html)
         self.assertIn("directionTitle.hidden=maintenance", html)
         self.assertIn("if(pollingSopWorkType()==='polling')for", html)
-        self.assertIn("['maintenance', 'polling'].includes(patch.work_type)", html)
-        self.assertIn("可在维保页查看和修改，但不能用于维保工单", html)
+        self.assertIn("['maintenance', 'polling', 'adjust'].includes(patch.work_type)", html)
+        self.assertIn("不可用于维保或设备调整工单", html)
         self.assertIn("function pollingSopHasDevicePlaceholders", html)
         self.assertIn("button.disabled=blocked", html)
-        self.assertIn("含设备指向，维保不可选", html)
+        self.assertIn("含设备指向，通用工单不可选", html)
         button_pattern = re.compile(
             r'<h2 class="inbox-title"><span>通告处理</span>'
             r'(<button class="btn ghost" id="lite-polling-sop-open".*?</button>)'
@@ -940,7 +940,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("与本次完成记录不一致", message)
 
-    def test_exempt_polling_start_clears_stale_work_order_fields(self) -> None:
+    def test_exempt_polling_start_creates_directly_without_stale_target_lookup(self) -> None:
         prepared = {
             "action": "start",
             "work_type": "polling",
@@ -950,12 +950,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             "polling_work_order_exempt": True,
             "text": "【设备轮巡】状态：开始\n【标题】非工单轮巡",
         }
-        patches = []
         manager = MagicMock()
-
-        def update_fields(_record_id, _notice_type, fields):
-            patches.append(fields)
-            return True, "ok"
 
         with patch.object(
             portal_server,
@@ -965,27 +960,21 @@ class PollingWorkOrderTests(unittest.TestCase):
             PortalRuntime,
             "_existing_target_for_prepared_start",
             return_value="recTarget1",
-        ), patch.object(
+        ) as existing_target, patch.object(
             PortalRuntime,
             "_upload_change_confirmation_images",
             return_value=(True, "", [], []),
         ), patch.object(
             portal_server,
-            "update_bitable_record_fields",
-            side_effect=update_fields,
-        ), patch.object(
+            "create_bitable_record_by_payload",
+            return_value=(True, "recNewTarget"),
+        ) as create_record, patch.object(
             portal_server,
             "query_record_by_id",
-            return_value=(
-                True,
-                {
-                    "fields": {
-                        "是否涉及重要操作": False,
-                        "操作人": "",
-                        "现场复核人": "",
-                    }
-                },
-            ),
+            return_value=(True, {"fields": {}}),
+        ) as query_record, patch.object(
+            portal_server,
+            "update_bitable_record_fields",
         ), patch.object(
             PortalRuntime,
             "_create_backend_undo_checkpoint",
@@ -1003,14 +992,11 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual(record_id, "recTarget1")
-        self.assertIn(
-            {"是否涉及重要操作": False, "操作人": "", "现场复核人": ""},
-            patches,
-        )
-        manager.cancel_group.assert_called_once_with(
-            "recTarget1", reason="work_order_exempt"
-        )
+        self.assertEqual(record_id, "recNewTarget")
+        existing_target.assert_not_called()
+        query_record.assert_not_called()
+        create_record.assert_called_once()
+        manager.cancel_group.assert_not_called()
 
     def test_polling_start_writes_work_order_fields_but_not_h_confirmation(self) -> None:
         fields = PollingNoticeHandler().build_create_fields(
@@ -1090,6 +1076,24 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(send.call_count, 4)
         self.assertGreater(notifications["operator"]["next_retry_at"], time.time())
 
+    def test_sending_existing_public_work_order_keeps_settings_port(self) -> None:
+        group = {
+            'target_record_id':'recPortTest','title':'Port test','sop_name':'SOP','runs':[{}],
+            'operator':{'open_id':'ou_fixture_operator'},'reviewer':{'open_id':'ou_fixture_reviewer'},
+            'relay':{'mode':'public_relay','registration_state':'registered',
+                     'relay_url':'https://public.example:8787',
+                     'operator_link':'https://public.example/work#link_id=op&secret=fixture',
+                     'reviewer_link':'https://public.example/work#link_id=re&secret=fixture'},
+        }
+        manager=MagicMock()
+        manager.get_group.return_value=group
+        manager.group_with_links.side_effect=lambda value,base:PollingWorkOrderService.group_with_links(None,value,base)
+        with patch.object(PortalRuntime,'polling_work_orders',return_value=manager), patch.object(PortalRuntime,'polling_work_order_relay',return_value=MagicMock(enabled=True)), patch.object(portal_server,'_send_text_to_open_ids_guarded',return_value=(True,'ok',[])) as send:
+            PortalRuntime._send_polling_work_order_links(group)
+        self.assertEqual(send.call_count,2)
+        self.assertIn('https://public.example:8787/work#link_id=op&secret=fixture',send.call_args_list[0].args[0])
+        self.assertIn('https://public.example:8787/work#link_id=re&secret=fixture',send.call_args_list[1].args[0])
+
     def test_concurrent_automatic_link_send_only_notifies_each_role_once(self) -> None:
         manager = MagicMock()
         state = {
@@ -1132,7 +1136,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(send_mock.call_count, 2)
         self.assertEqual(manager.update_notifications.call_count, 1)
 
-    def test_polling_start_creates_lan_group_and_sends_lan_links(self) -> None:
+    def test_polling_start_persists_lan_group_without_waiting_for_messages(self) -> None:
         manager = MagicMock()
         group = {"target_record_id": "recLanStart", "state": "active"}
         manager.create_group.return_value = group
@@ -1171,7 +1175,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         )
         self.assertNotIn("public_relay", manager.create_group.call_args.kwargs)
         relay_connector.assert_not_called()
-        send_links.assert_called_once_with(group)
+        send_links.assert_not_called()
 
     def test_unavailable_public_relay_fixes_start_to_local_fallback(self) -> None:
         prepared = {
@@ -1221,7 +1225,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
         self.assertNotIn("public_relay", manager.create_group.call_args.kwargs)
         relay_connector.assert_not_called()
-        send_links.assert_called_once_with(group)
+        send_links.assert_not_called()
 
     def test_ready_public_relay_fixes_start_to_public_mode(self) -> None:
         prepared = {
@@ -1406,11 +1410,11 @@ class PollingWorkOrderTests(unittest.TestCase):
             result = PortalRuntime._create_polling_work_order_group(
                 prepared, "recPublicStart"
             )
-        self.assertEqual(result, projected)
+        self.assertEqual(result, group)
         self.assertEqual(manager.create_group.call_args.kwargs["public_base_url"], "")
         self.assertTrue(manager.create_group.call_args.kwargs["public_relay"])
-        relay.register_group.assert_called_once_with("recPublicStart", force=True)
-        send_links.assert_called_once_with(projected)
+        relay.register_group.assert_not_called()
+        send_links.assert_not_called()
 
     def test_existing_public_group_keeps_its_creation_mode_when_setting_is_off(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

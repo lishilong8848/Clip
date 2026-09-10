@@ -5,7 +5,9 @@ import os
 import tempfile
 import threading
 import time
+import uuid
 from typing import Any, Callable
+from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
 from ..config import SPECIALTY_FIRE, config
 from ..logger import log_error, log_info, log_warning
@@ -143,13 +145,13 @@ def _is_token_error(response) -> bool:
     return response.code in [99991663, 99991664, 99991665, 99991677] or "token" in msg
 
 
-def _build_client() -> Any:
+def _build_client(*, timeout: float = 30.0) -> Any:
     _ensure_lark_sdk_loaded()
     return (
         lark.Client.builder()
         .enable_set_token(True)
         .log_level(lark.LogLevel.ERROR)
-        .timeout(30.0)
+        .timeout(timeout)
         .build()
     )
 
@@ -203,9 +205,37 @@ def _with_rejected_bitable_write_retry(request_fn: Callable[[str], object]):
 
 
 def _execute_bitable_write(request_fn: Callable[[str], object], notice_type: str):
-    if str(notice_type or "").strip() == "事件通告":
+    try:
+        # Retry only explicit server rejections, for every notice type. A
+        # transport timeout after POST is uncertain, not permission to POST again.
         return _with_rejected_bitable_write_retry(request_fn)
-    return _with_token_retry(request_fn)
+    except (RequestsTimeout, RequestsConnectionError) as exc:
+        raise RuntimeError("飞书写入请求超时或连接中断，远端结果暂不能确认。请刷新核验该条通告，不要重复新增；重试会先核验上次结果。") from exc
+
+
+def _notice_create_client_token(payload: NoticePayload, notice_type: str, table_id: str) -> str:
+    operation_id = str(payload.operation_id or "").strip()
+    if not operation_id:
+        return ""
+    seed = hashlib.sha256(
+        f"clipflow-notice:{config.app_token}:{table_id}:{notice_type}:{operation_id}".encode()
+    ).digest()
+    raw = bytearray(seed[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(raw)))
+
+
+def _query_with_transport_retry(request_fn: Callable[[str], object]):
+    """One bounded retry is safe for a record GET, never shared with writes."""
+    for attempt in range(2):
+        try:
+            return _with_bitable_data_ready_retry(request_fn)
+        except (RequestsTimeout, RequestsConnectionError) as exc:
+            if attempt:
+                raise RuntimeError("查询飞书记录超时，有限重试仍未成功。请稍后刷新核验，当前页面与程序连接正常时不需要重新新增通告。") from exc
+            log_warning("飞书记录读取暂时超时，重试一次只读查询。")
+            time.sleep(0.3)
 
 
 def _get_bitable_fields(notice_type: str) -> list:
@@ -298,7 +328,18 @@ def _filter_missing_optional_fields(notice_type: str, fields: dict) -> dict:
     ]
     if not optional_present:
         return fields
-    actual_fields = _get_bitable_fields(notice_type)
+    notice_key = str(notice_type or "").strip()
+    if notice_key == "事件通告":
+        actual_fields = _get_bitable_fields(notice_type)
+    else:
+        # Ordinary notice writes use the submitted fields directly.  A live
+        # schema lookup here added a full network round trip to every first
+        # write after startup; an explicit Feishu field error still triggers
+        # the existing diagnostic lookup in _parse_field_error.
+        with _field_cache_lock:
+            actual_fields = list(_field_cache.get(notice_key) or [])
+        if not actual_fields:
+            return fields
     if not actual_fields:
         return fields
     actual_field_set = set(actual_fields)
@@ -747,13 +788,16 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
         log_info(f"Creating record({notice_type}) with fields: {fields}")
 
     client = _build_client()
-    request = (
+    request_builder = (
         CreateAppTableRecordRequest.builder()
         .app_token(config.app_token)
         .table_id(table_id)
         .request_body(AppTableRecord.builder().fields(fields).build())
-        .build()
     )
+    client_token = _notice_create_client_token(payload, notice_type, table_id)
+    if client_token:
+        request_builder.client_token(client_token)
+    request = request_builder.build()
 
     def do_create(token: str):
         option = lark.RequestOption.builder().user_access_token(token).build()
@@ -897,7 +941,7 @@ def query_record_by_id(record_id, notice_type):
     if err:
         return False, err
 
-    client = _build_client()
+    client = _build_client(timeout=12.0)
     request = (
         GetAppTableRecordRequest.builder()
         .app_token(config.app_token)
@@ -910,7 +954,7 @@ def query_record_by_id(record_id, notice_type):
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.get(request, option)
 
-    response = _with_bitable_data_ready_retry(do_query)
+    response = _query_with_transport_retry(do_query)
 
     if not response.success():
         error_msg = f"查询记录失败: {response.code} - {response.msg}"

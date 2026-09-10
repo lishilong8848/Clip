@@ -18,6 +18,7 @@ import time
 import uuid
 import weakref
 from contextlib import suppress
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from .portal_service import (
     NOTICE_TYPE_CHANGE,
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_POLLING,
+    NOTICE_TYPE_ADJUST,
     PortalConflictError,
     PortalError,
     PortalExternalError,
@@ -44,6 +46,7 @@ from .portal_service import (
     WORK_TYPE_EVENT,
     WORK_TYPE_MAINTENANCE,
     WORK_TYPE_POLLING,
+    WORK_TYPE_ADJUST,
     WORK_TYPE_REPAIR,
     engineer_mop_fill_kwargs_from_payload,
     engineer_mop_upload_signed_kwargs_from_payload,
@@ -65,6 +68,7 @@ from upload_event_module.config import (
     EVENT_NOTICE_FIELDS,
     MAINTENANCE_NOTICE_FIELDS,
     POLLING_NOTICE_FIELDS,
+    ADJUST_NOTICE_FIELDS,
     SPECIALTY_FIRE,
     DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_ENABLED,
     DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL,
@@ -303,7 +307,7 @@ class PortalRuntime:
             str(prepared.get("action") or "").strip().lower() != "start"
             or not prepared.get("polling_work_order_required")
             or str(prepared.get("work_type") or "")
-            not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}
+            not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
         ):
             return prepared
         previous = previous_prepared if isinstance(previous_prepared, dict) else {}
@@ -636,7 +640,7 @@ class PortalRuntime:
     payload_cache_inflight: dict[tuple, threading.Event] = {}
     payload_cache_inflight_started: dict[tuple, float] = {}
     payload_cache_generation = 0
-    payload_cache_ttl_s = 5
+    payload_cache_ttl_s = 30
     payload_cache_max_entries = 64
     payload_cache_max_payload_bytes = 1024 * 1024
     orphan_reconcile_lock = threading.RLock()
@@ -1637,7 +1641,7 @@ class PortalRuntime:
     ) -> dict:
         if (
             str(prepared.get("work_type") or "")
-            not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}
+            not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
             or str(prepared.get("action") or "").lower() != "start"
             or not prepared.get("polling_work_order_required")
         ):
@@ -1677,16 +1681,9 @@ class PortalRuntime:
             **create_kwargs,
         )
         if group:
-            if use_public_relay:
-                relay.register_group(target_record_id, force=True)
-                group = cls.polling_work_orders().group_with_links(
-                    cls.polling_work_orders().get_group(target_record_id),
-                    cls._polling_work_order_public_base_url(),
-                )
-                if group.get("operator_link") and group.get("reviewer_link"):
-                    cls._send_polling_work_order_links(group)
-            else:
-                cls._send_polling_work_order_links(group)
+            # Registration and role notifications are durable pending state in the
+            # group. The existing relay worker retries them outside the notice
+            # projection lock; a slow network must not hold up the whole notice.
             prepared["polling_work_order_group_id"] = target_record_id
         return group
 
@@ -1752,6 +1749,10 @@ class PortalRuntime:
                     target_record_id, reason="target_terminal"
                 )
                 return {"ok": False, "state": "cancelled", "error": f"{label}通告已结束，工单已停止。"}
+            if work_type == WORK_TYPE_MAINTENANCE:
+                cls.service.ensure_maintenance_work_order_schema()
+            elif work_type == WORK_TYPE_ADJUST:
+                cls.service.ensure_adjust_work_order_schema()
             workbook = manager.build_execution_workbook(target_record_id)
             uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
             previous_generated_tokens = {
@@ -6373,7 +6374,7 @@ class PortalRuntime:
             cls.enqueue_action_job(job_id)
 
     @classmethod
-    def _dequeue_runtime_job(cls, queue_name: str) -> str:
+    def _dequeue_runtime_job(cls, queue_name: str, *, exclude_job_ids: tuple[str, ...] = ()) -> str:
         queue_name = str(queue_name or "").strip()
         if queue_name == "message":
             with cls.message_queue_lock:
@@ -6416,6 +6417,7 @@ class PortalRuntime:
                     queue_name,
                     limit=1,
                     lease_seconds=30,
+                    **({"exclude_job_ids": exclude_job_ids} if exclude_job_ids else {}),
                 )
             except Exception:
                 leased = []
@@ -6450,6 +6452,26 @@ class PortalRuntime:
             except Exception:
                 pass
             return False
+        if queue_name == "qt_action" and phase in {"remote_intent", "uploading"}:
+            try:
+                operation = cls._get_notice_remote_operation(
+                    str(job.get("remote_operation_id") or f"notice_action:{job_id}")
+                ) or {}
+            except Exception:
+                operation = {}
+            if (
+                str(operation.get("status") or "") == "failed"
+                and not cls._remote_operation_outcome_uncertain(operation)
+            ):
+                error = str(operation.get("error") or "多维写入已失败。")
+                cls.service.mark_job(job_id, phase="failed", error=error)
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        queue_name, job_id, "failed", error=error
+                    )
+                except Exception:
+                    pass
+                return False
         if phase in {"success", "failed"}:
             try:
                 cls.state_store.mark_runtime_queue_item(
@@ -6574,10 +6596,17 @@ class PortalRuntime:
             queued_job_id = str((item or {}).get("job_id") or "").strip()
             if not queued_job_id:
                 continue
+            job = cls.service.get_job(queued_job_id) or {}
+            # Queue position is presentation metadata, not the execution phase.
+            # In particular, never overwrite remote_written/failed on retries.
+            phase_patch = (
+                {"phase": "qt_queued", "qt_phase": "queued"}
+                if str(job.get("phase") or "") in {"accepted", "queued", "qt_queued"}
+                else {}
+            )
             cls.service.mark_job(
                 queued_job_id,
-                phase="qt_queued",
-                qt_phase="queued",
+                **phase_patch,
                 qt_queue_position=index,
                 qt_queue_size=total,
                 queue_position=index,
@@ -6588,25 +6617,59 @@ class PortalRuntime:
             )
 
     @classmethod
+    def _action_job_identity_keys(cls, job: dict) -> set[str]:
+        request = dict(job.get("request") or {})
+        prepared = dict(job.get("prepared") or {})
+        work_type = str(prepared.get("work_type") or request.get("work_type") or "")
+        if work_type == WORK_TYPE_EVENT or str(prepared.get("notice_type") or request.get("notice_type") or "") == "事件通告":
+            # Event actions retain their existing single serial lane.
+            return {"event:serial"}
+        keys = {str(job.get("target_key") or "")}
+        for payload in (request, prepared, job):
+            for field in ("source_record_id", "active_item_id", "target_record_id", "remote_record_id"):
+                value = str(payload.get(field) or "").strip()
+                if value:
+                    kind = "target_record_id" if field == "remote_record_id" else field
+                    keys.add(f"{work_type}:{kind}:{value}")
+        return keys - {""} or {str(job.get("job_id") or "")}
+
+    @classmethod
     def _action_worker_loop(cls) -> None:
-        while True:
-            cls.action_queue_event.wait(timeout=1)
-            if cls.action_worker_stop:
-                return
-            job_id = cls._dequeue_runtime_job("qt_action")
-            if not job_id:
-                continue
-            try:
-                cls.state_store.mark_runtime_queue_item("qt_action", job_id, "processing")
-            except Exception:
-                pass
-            cls.service.mark_job(
-                job_id,
-                queue_position=0,
-                qt_queue_position=0,
-                upload_queue_position=0,
-            )
-            cls._process_maintenance_action_job(job_id)
+        # Bounded concurrency prevents a slow unrelated notice blocking all
+        # uploads without flooding Feishu or the desktop with unbounded threads.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="NoticeUpload") as pool:
+            running = {}
+            while not cls.action_worker_stop:
+                for job_id, future in list(running.items()):
+                    if future.done():
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            logging.exception("通告任务执行异常: job_id=%s", job_id)
+                            cls.service.mark_job(job_id, phase="failed", error=str(exc))
+                            cls.state_store.mark_runtime_queue_item("qt_action", job_id, "failed", error=str(exc))
+                        del running[job_id]
+                cls.action_queue_event.wait(timeout=0.25)
+                cls.action_queue_event.clear()
+                if cls.action_worker_stop or len(running) >= 4:
+                    continue
+                job_id = cls._dequeue_runtime_job("qt_action", exclude_job_ids=tuple(running))
+                if not job_id:
+                    continue
+                job = cls.service.get_job(job_id) or {}
+                keys = cls._action_job_identity_keys(job)
+                if any(keys & cls._action_job_identity_keys(cls.service.get_job(other) or {}) for other in running):
+                    cls.state_store.requeue_runtime_queue_item(
+                        "qt_action", job_id, available_at=time.time() + 0.5,
+                        error="等待同一通告上一条操作完成",
+                    )
+                    continue
+                cls.service.mark_job(
+                    job_id,
+                    queue_position=0, qt_queue_position=0, upload_queue_position=0,
+                    **({"qt_phase": "preparing"} if str(job.get("phase") or "") in {"accepted", "queued", "qt_queued"} and "event:serial" not in keys else {}),
+                )
+                running[job_id] = pool.submit(cls._process_maintenance_action_job, job_id)
 
     @classmethod
     def ensure_upload_wait_worker(cls) -> None:
@@ -6859,6 +6922,7 @@ class PortalRuntime:
             polling_reviewer_name=(
                 str(prepared.get("polling_reviewer_name") or "").strip() or None
             ),
+            operation_id=str(prepared.get("operation_id") or prepared.get("job_id") or "").strip() or None,
         )
 
     @staticmethod
@@ -7177,6 +7241,8 @@ class PortalRuntime:
     @staticmethod
     def _work_order_field_config(payload: dict) -> dict[str, str]:
         work_type = str((payload or {}).get("work_type") or "polling").strip()
+        if work_type == WORK_TYPE_ADJUST:
+            return ADJUST_NOTICE_FIELDS
         return (
             MAINTENANCE_NOTICE_FIELDS
             if work_type == WORK_TYPE_MAINTENANCE
@@ -7185,6 +7251,8 @@ class PortalRuntime:
 
     @staticmethod
     def _work_order_notice_type(payload: dict) -> str:
+        if str((payload or {}).get("work_type") or "").strip() == WORK_TYPE_ADJUST:
+            return NOTICE_TYPE_ADJUST
         return (
             NOTICE_TYPE_MAINTENANCE
             if str((payload or {}).get("work_type") or "polling").strip()
@@ -7194,6 +7262,8 @@ class PortalRuntime:
 
     @staticmethod
     def _work_order_label(payload: dict) -> str:
+        if str((payload or {}).get("work_type") or "").strip() == WORK_TYPE_ADJUST:
+            return "设备调整"
         return (
             "维保"
             if str((payload or {}).get("work_type") or "polling").strip()
@@ -10211,22 +10281,18 @@ class PortalRuntime:
         work_order_notice = notice_type in {
             NOTICE_TYPE_MAINTENANCE,
             NOTICE_TYPE_POLLING,
+            NOTICE_TYPE_ADJUST,
         }
         work_order_fields = cls._work_order_field_config(prepared)
         work_order_label = cls._work_order_label(prepared)
-        if (
-            action == "start"
-            and notice_type == NOTICE_TYPE_MAINTENANCE
-            and prepared.get("polling_work_order_required")
-        ):
-            try:
-                cls.service.ensure_maintenance_work_order_schema()
-            except Exception as exc:
-                return False, str(exc), ""
         if action == "start":
-            existing_target = cls._existing_target_for_prepared_start(
-                prepared,
-                notice_type,
+            # Event upload keeps its strict remote identity verification.  Other
+            # notice starts are idempotent through Feishu client_token and can
+            # create immediately without a preliminary record lookup.
+            existing_target = (
+                cls._existing_target_for_prepared_start(prepared, notice_type)
+                if notice_type == "事件通告"
+                else ""
             )
             if existing_target:
                 if cls._has_extra_images_payload(prepared):
@@ -10566,47 +10632,18 @@ class PortalRuntime:
                 prepared["ali_confirmation_expected_tokens"] = list(ali_tokens)
                 for upload_id in ali_upload_ids:
                     cls.state_store.mark_notice_upload_attachment_used(upload_id)
-                ok_created, created_result = query_record_by_id(record_id, notice_type)
-                if ok_created and isinstance(created_result, dict):
-                    prepared["record_version"] = str(
-                        created_result.get("record_version") or ""
-                    ).strip()
-                    prepared["remote_last_modified_time"] = str(
-                        created_result.get("last_modified_time") or ""
-                    ).strip()
-                if (
-                    work_order_notice
-                    and prepared.get("polling_work_order_required")
-                ):
-                    work_order_verified = bool(
-                        ok_created
-                        and cls._polling_work_order_remote_fields_match(
-                            cls._change_confirmation_fields(created_result),
-                            prepared,
-                        )
-                    )
-                    for attempt in range(2):
-                        if work_order_verified:
-                            break
-                        ok_work_order, work_order_record = query_record_by_id(
-                            record_id, notice_type
-                        )
-                        work_order_verified = bool(
-                            ok_work_order
-                            and cls._polling_work_order_remote_fields_match(
-                                cls._change_confirmation_fields(work_order_record),
-                                prepared,
-                            )
-                        )
-                        if not work_order_verified and attempt < 1:
-                            time.sleep(0.2 * (attempt + 1))
-                    if not work_order_verified:
-                        return (
-                            False,
-                            f"{work_order_label}工单记录已创建，但人员字段尚未确认写入。",
-                            record_id,
-                        )
-                if ali_tokens:
+                if notice_type == "事件通告":
+                    ok_created, created_result = query_record_by_id(record_id, notice_type)
+                    if ok_created and isinstance(created_result, dict):
+                        prepared["record_version"] = str(
+                            created_result.get("record_version") or ""
+                        ).strip()
+                        prepared["remote_last_modified_time"] = str(
+                            created_result.get("last_modified_time") or ""
+                        ).strip()
+                else:
+                    cls._rebase_remote_record_version(prepared, "")
+                if ali_tokens and notice_type == "事件通告":
                     verified, _verified_record = (
                         cls._verify_change_confirmation_remote_fields(
                             record_id,
@@ -10615,6 +10652,8 @@ class PortalRuntime:
                         )
                     )
                     prepared["ali_confirmation_remote_pending"] = not verified
+                elif ali_tokens:
+                    prepared["ali_confirmation_remote_pending"] = True
                 cls._mark_local_notice_images_target_written(prepared)
             return bool(ok), str(result or ""), record_id
 
@@ -11436,9 +11475,9 @@ class PortalRuntime:
             )
         if (
             str(prepared.get("work_type") or "").strip()
-            in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}
+            in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
             or str(prepared.get("notice_type") or "").strip()
-            in {NOTICE_TYPE_MAINTENANCE, NOTICE_TYPE_POLLING}
+            in {NOTICE_TYPE_MAINTENANCE, NOTICE_TYPE_POLLING, NOTICE_TYPE_ADJUST}
         ):
             cls.polling_work_orders().cancel_group(
                 target_record_id,
@@ -11658,6 +11697,7 @@ class PortalRuntime:
         if action_type == "end" and notice_type in {
             NOTICE_TYPE_MAINTENANCE,
             NOTICE_TYPE_POLLING,
+            NOTICE_TYPE_ADJUST,
         }:
             end_fields = (
                 prequery_result.get("fields")
@@ -13073,7 +13113,7 @@ class PortalRuntime:
                     target_record_id,
                     reason="target_deleted",
                 )
-            if work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}:
+            if work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
                 cls.polling_work_orders().cancel_group(
                     target_record_id,
                     reason="target_deleted",
@@ -13276,6 +13316,7 @@ class PortalRuntime:
         if lock_error:
             return {
                 "ok": False,
+                "conflict": True,
                 "message": lock_error,
                 "record_id": target_record_id,
                 "active_item_id": active_item_id,
@@ -14027,7 +14068,10 @@ class PortalRuntime:
                                 "reconciled": True,
                             },
                         )
-                    elif reconcile_blocked:
+                    elif reconcile_blocked or (
+                        current_job.get("restart_recovered")
+                        and str(prepared.get("work_type") or "") != WORK_TYPE_EVENT
+                    ):
                         ok = False
                         remote_record_id = str(
                             operation_target_id
@@ -14037,7 +14081,7 @@ class PortalRuntime:
                         ).strip()
                         result_message = (
                             reconcile_message
-                            or "远端写入结果暂时无法确认，已停止重复提交。"
+                            or "程序重启后未能确认上次写入结果，已停止自动发送；请核对目标记录。"
                         )
                         cls._mark_notice_remote_operation(
                             remote_operation_id,
@@ -14474,6 +14518,8 @@ class PortalRuntime:
                         )
                         or 0
                     ) + 1
+                    if retry_count >= 3 and str(prepared.get("work_type") or "") != WORK_TYPE_EVENT:
+                        raise RuntimeError(projection_warning) from exc
                     cls.service.mark_job(
                         job_id,
                         phase="remote_written",
@@ -14794,6 +14840,16 @@ class PortalRuntime:
                     or 0
                 ) + 1
                 warning = f"远端已成功，本地状态收敛失败，稍后重试：{exc}"
+                current = cls.service.get_job(job_id) or {}
+                if retry_count >= 3 and str((current.get("request") or {}).get("work_type") or "") != WORK_TYPE_EVENT:
+                    error = f"多维已写入，但页面同步连续失败，已停止自动重试，请勿重新发送。原因：{exc}"
+                    cls.service.mark_job(
+                        job_id, phase="failed", remote_written=True,
+                        projection_pending=True, projection_retry_count=retry_count,
+                        error=error,
+                    )
+                    cls.state_store.mark_runtime_queue_item("qt_action", job_id, "failed", error=error)
+                    return
                 cls.service.mark_job(
                     job_id,
                     phase="remote_written",

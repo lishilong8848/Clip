@@ -864,13 +864,13 @@ def _change_confirmation_uploader(
 
 def _polling_work_order_selector(work_type: str) -> str:
     work = _work_type(work_type)
-    if work not in {"maintenance", "polling"}:
+    if work not in {"maintenance", "polling", "adjust"}:
         return ""
-    title = "维保工单" if work == "maintenance" else "轮巡工单"
+    title = {"maintenance": "维保工单", "adjust": "设备调整工单", "polling": "轮巡工单"}[work]
     exempt = (
         "本次维保不使用工单"
         if work == "maintenance"
-        else "非制冷单元/二次泵轮巡"
+        else "本次调整不使用工单" if work == "adjust" else "非制冷单元/二次泵轮巡"
     )
     return f"""
       <section class="form-section polling-work-order-select" data-polling-work-order-select>
@@ -885,11 +885,29 @@ def _polling_work_order_selector(work_type: str) -> str:
 
 def _polling_work_order_status(source: dict[str, Any], work_type: str) -> str:
     work = _work_type(work_type)
-    if work not in {"maintenance", "polling"}:
+    if work not in {"maintenance", "polling", "adjust"}:
         return ""
     group_id = str(source.get("polling_work_order_group_id") or "").strip()
     if not group_id:
         return ""
+    # Link delivery now runs asynchronously. Read the local group projection so
+    # reopening a notice does not keep showing the initial registration state.
+    try:
+        from .server import PortalRuntime
+        manager = PortalRuntime.polling_work_orders()
+        group = manager.group_with_links(manager.get_group(group_id), PortalRuntime._polling_work_order_public_base_url())
+        relay = group.get("relay") or {}
+        notifications = group.get("notifications") or {}
+        pending = not all((notifications.get(role) or {}).get("sent") for role in ("operator", "reviewer"))
+        source = {**source,
+            "polling_work_order_state": group.get("state", "active"),
+            "polling_work_order_mode": relay.get("mode", "local"),
+            "polling_work_order_operator_link": group.get("operator_link", ""),
+            "polling_work_order_reviewer_link": group.get("reviewer_link", ""),
+            "polling_work_order_last_error": relay.get("last_error") or group.get("last_error") or ("工单已创建，角色链接正在后台发送；失败将自动重试。" if pending else ""),
+        }
+    except Exception:
+        pass  # retain the existing local notice projection if its group is unavailable
     state = str(source.get("polling_work_order_state") or "active").strip()
     mode = str(source.get("polling_work_order_mode") or "local").strip()
     mode_label = {
@@ -2697,7 +2715,7 @@ def render_workbench_lite(
     polling_sop_button = (
         '<button class="btn ghost" id="lite-polling-sop-open" type="button" '
         'aria-haspopup="dialog" aria-controls="lite-polling-sop-modal">SOP步骤填写</button>'
-        if view_work in {"maintenance", "polling"}
+        if view_work in {"maintenance", "polling", "adjust"}
         else ""
     )
     scope_options = scope_options or []
@@ -2747,6 +2765,7 @@ def render_workbench_lite(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="/assets/connection-guard.js" defer></script>
   <title>南通基地-运维灯塔工作台</title>
   <style>
     * {{ box-sizing: border-box; }}
@@ -3124,6 +3143,8 @@ def render_workbench_lite(
     .polling-step-time {{ margin-left:auto; display:flex; align-items:center; gap:6px; color:#53677f; font-size:11px; font-weight:850; }}
     .polling-step-time span {{ margin:0; white-space:nowrap; }}
     .polling-step-time input {{ width:92px; min-height:30px; padding:4px 7px; }}
+    .polling-cooling-mode {{ display:grid; grid-template-columns:repeat(3,minmax(160px,1fr)); gap:8px; margin:7px 0; padding:9px; border:1px solid #cfe0ff; border-radius:12px; background:#f2f7ff; }}
+    .polling-cooling-mode label {{ display:grid; gap:5px; }}
     .polling-step-flags,.polling-sop-inline {{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; }}
     .polling-step-flags label {{ display:inline-flex; align-items:center; gap:5px; }}
     .polling-step-flags input {{ width:16px; min-height:16px; }}
@@ -3437,9 +3458,12 @@ def render_workbench_lite(
     let litePollingSopDeleteTarget = null;
     let litePollingSopDeleteReturnFocus = null;
     const litePollingUnits = ['1#','2#','3#','4#','5#','6#'];
+    const liteAdjustCoolingModes = Object.freeze([['1#','停机状态'],['2#','板换模式'],['3#','预冷模式'],['4#','制冷模式']]);
     const litePollingSopScopes = new Set(['110','A','B','C','D','E','H']);
     function pollingSopScope() {{ const scope=String(getCurrentScope()||'').toUpperCase();return litePollingSopScopes.has(scope)?scope:''; }}
-    function pollingSopWorkType() {{ return currentViewWorkType()==='maintenance'?'maintenance':'polling'; }}
+    function pollingSopWorkType() {{ return ['maintenance','adjust'].includes(currentViewWorkType())?currentViewWorkType():'polling'; }}
+    function pollingSopLabel() {{ return ({{maintenance:'维保',adjust:'设备调整',polling:'轮巡'}})[pollingSopWorkType()]; }}
+    function pollingSopRunLabel() {{ return pollingSopLabel()+'作业'; }}
     async function pollingApi(url, options = {{}}) {{
       const response = await fetch(url, {{ credentials:'same-origin', ...options }});
       const data = await response.json().catch(() => ({{}}));
@@ -3483,26 +3507,33 @@ def render_workbench_lite(
       return litePollingPeople;
     }}
     function pollingNewDraft() {{ return {{sop_id:'',work_type:pollingSopWorkType(),scope:pollingSopScope(),name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true,photo_required:true,time_limit_seconds:0}}],attachments:[]}}; }}
+    function pollingSopPlaceholderTokens(sop) {{const content=(sop?.steps||[]).map(step=>String(step.content||'')).join('\\n');return new Set(['{{{{other}}}}','{{{{from}}}}','{{{{to}}}}'].filter(token=>content.includes(token)))}}
+    function pollingSopIsAdjustCooling(sop) {{const tokens=pollingSopPlaceholderTokens(sop);return tokens.size===1&&tokens.has('{{{{from}}}}')}}
+    function pollingAdjustSopType(sop) {{return sop?._ui_adjust_sop_type||(pollingSopIsAdjustCooling(sop)?'cooling':'normal')}}
+    function pollingAdjustModeLabel(code) {{return liteAdjustCoolingModes.find(item=>item[0]===String(code))?.[1]||''}}
     function pollingMergeSopAttachmentResult(draft,remote) {{
       const merged={{...(remote||{{}})}};
       merged.name=draft?.name??merged.name??'';
       merged.steps=draft?.steps??merged.steps??[];
+      merged._ui_adjust_sop_type=draft?._ui_adjust_sop_type||'';
       return merged;
     }}
     function pollingStepEditor(step,index) {{
       const node=document.createElement('article');node.className='polling-step-edit';
       const head=document.createElement('header'),title=document.createElement('strong'),limitLabel=document.createElement('label'),limitText=document.createElement('span'),limit=document.createElement('input'),remove=document.createElement('button');title.textContent=`步骤 ${{index+1}}`;limitLabel.className='polling-step-time';limitText.textContent='时间限制（秒）';limit.type='number';limit.min='0';limit.max='86400';limit.step='1';limit.value=String(Math.max(0,Number(step.time_limit_seconds||0)));limit.oninput=()=>step.time_limit_seconds=Math.max(0,Math.trunc(Number(limit.value||0)));limitLabel.append(limitText,limit);remove.type='button';remove.className='btn danger-ghost';remove.textContent='删除';remove.onclick=()=>{{litePollingEditingSop.steps.splice(index,1);renderPollingSopEditor()}};head.append(title,limitLabel,remove);
-      const textarea=document.createElement('textarea');textarea.value=String(step.content||'');textarea.placeholder=pollingSopWorkType()==='maintenance'?'输入维保操作内容':'输入操作内容，可插入起点/终点';textarea.oninput=()=>step.content=textarea.value;
+      const textarea=document.createElement('textarea');textarea.value=String(step.content||'');textarea.placeholder=pollingSopWorkType()!=='polling'?'输入通用操作内容':'输入操作内容，可插入起点/终点';textarea.oninput=()=>step.content=textarea.value;
       const tools=document.createElement('div');tools.className='polling-sop-inline';
       if(pollingSopWorkType()==='polling')for(const [label,token] of [['插入起点','{{{{from}}}}'],['插入终点','{{{{to}}}}'],['插入其他点','{{{{other}}}}']]){{const button=document.createElement('button');button.type='button';button.className='btn ghost';button.textContent=label;button.onclick=()=>{{const start=textarea.selectionStart??textarea.value.length,end=textarea.selectionEnd??start;textarea.value=textarea.value.slice(0,start)+token+textarea.value.slice(end);step.content=textarea.value;textarea.focus();textarea.setSelectionRange(start+token.length,start+token.length)}};tools.append(button)}}
+      if(pollingSopWorkType()==='adjust'&&pollingAdjustSopType(litePollingEditingSop)==='cooling'){{const button=document.createElement('button'),token='{{{{from}}}}';button.type='button';button.className='btn ghost';button.textContent='插入制冷单元';button.onclick=()=>{{const start=textarea.selectionStart??textarea.value.length,end=textarea.selectionEnd??start;textarea.value=textarea.value.slice(0,start)+token+textarea.value.slice(end);step.content=textarea.value;textarea.focus();textarea.setSelectionRange(start+token.length,start+token.length)}};tools.append(button)}}
       const flags=document.createElement('div');flags.className='polling-step-flags';
       for(const [key,label] of [['operator_required','操作人是否需要'],['reviewer_required','现场审核人是否需要'],['photo_required','是否需要拍照']]){{const labelNode=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.checked=key==='photo_required'?step[key]!==false:Boolean(step[key]);input.onchange=()=>step[key]=input.checked;labelNode.append(input,document.createTextNode(label));flags.append(labelNode)}}
       node.append(head,textarea,tools,flags);return node;
     }}
     function pollingSopHasDevicePlaceholders(sop) {{return (sop?.steps||[]).some(step=>['{{{{from}}}}','{{{{to}}}}','{{{{other}}}}'].some(token=>String(step.content||'').includes(token)))}}
+    function pollingSopHasUnsupportedDevicePlaceholders(sop) {{const work=pollingSopWorkType(),tokens=pollingSopPlaceholderTokens(sop);if(work==='polling'||!tokens.size)return false;return work!=='adjust'||!pollingSopIsAdjustCooling(sop)}}
     function renderPollingSopList() {{
       const list=document.getElementById('lite-polling-sop-list');if(!list)return;const items=litePollingSops;
-      const nodes=items.map(item=>{{const button=document.createElement('button'),blocked=litePollingSopMode==='select'&&pollingSopWorkType()==='maintenance'&&pollingSopHasDevicePlaceholders(item);button.type='button';button.disabled=blocked;button.title=blocked?'步骤包含设备指向占位符，维保不能选择':'';button.className='polling-sop-row '+((litePollingSopMode==='select'?litePollingSelectedSop?.sop_id:litePollingEditingSop?.sop_id)===item.sop_id?'active':'');const strong=document.createElement('strong'),small=document.createElement('small');strong.textContent=item.name;small.textContent=`${{item.steps?.length||0}} 步 · ${{item.attachments?.length||0}} 附件${{blocked?' · 含设备指向，维保不可选':item.ready?'':' · 缺少步骤或附件，暂不可确认'}}`;button.append(strong,small);button.onclick=()=>{{setPollingSopFeedback('');if(litePollingSopMode==='select'){{litePollingSelectedSop=item;renderPollingSopList();renderPollingSelectionEditor()}}else{{litePollingPendingSopFiles=[];litePollingEditingSop=structuredClone(item);renderPollingSopList();renderPollingSopEditor()}}}};return button}});
+      const nodes=items.map(item=>{{const button=document.createElement('button'),blocked=litePollingSopMode==='select'&&pollingSopHasUnsupportedDevicePlaceholders(item);button.type='button';button.disabled=blocked;button.title=blocked?'步骤包含当前工单不支持的设备指向占位符':'';button.className='polling-sop-row '+((litePollingSopMode==='select'?litePollingSelectedSop?.sop_id:litePollingEditingSop?.sop_id)===item.sop_id?'active':'');const strong=document.createElement('strong'),small=document.createElement('small');strong.textContent=item.name;small.textContent=`${{item.steps?.length||0}} 步 · ${{item.attachments?.length||0}} 附件${{blocked?' · 含设备指向，通用工单不可选':item.ready?'':' · 缺少步骤或附件，暂不可确认'}}`;button.append(strong,small);button.onclick=()=>{{setPollingSopFeedback('');if(litePollingSopMode==='select'){{litePollingSelectedSop=item;renderPollingSopList();renderPollingSelectionEditor()}}else{{litePollingPendingSopFiles=[];litePollingEditingSop=structuredClone(item);renderPollingSopList();renderPollingSopEditor()}}}};return button}});
       if(!nodes.length){{const empty=document.createElement('div');empty.className='empty compact';empty.textContent='当前楼栋还没有 SOP';nodes.push(empty)}}list.replaceChildren(...nodes);
     }}
     function pollingAttachmentRows(sop) {{
@@ -3514,12 +3545,13 @@ def render_workbench_lite(
     function renderPollingSopEditor() {{
       const editor=document.getElementById('lite-polling-sop-editor');if(!editor)return;const sop=litePollingEditingSop||pollingNewDraft();litePollingEditingSop=sop;editor.replaceChildren();
       const label=document.createElement('label'),span=document.createElement('span'),name=document.createElement('input');span.textContent='SOP 名称';name.value=sop.name||'';name.oninput=()=>sop.name=name.value;label.append(span,name);
+      let typeLabel=null,typeHint=null;if(pollingSopWorkType()==='adjust'){{const typeText=document.createElement('span'),type=document.createElement('select');typeLabel=document.createElement('label');typeHint=document.createElement('div');typeText.textContent='SOP 类型';for(const [value,text] of [['normal','普通设备调整 SOP'],['cooling','制冷单元模式切换 SOP']]){{const option=document.createElement('option');option.value=value;option.textContent=text;type.append(option)}}type.value=pollingAdjustSopType(sop);sop._ui_adjust_sop_type=type.value;type.onchange=()=>{{sop._ui_adjust_sop_type=type.value;renderPollingSopEditor()}};typeLabel.append(typeText,type);typeHint.className='job-status';typeHint.textContent=type.value==='cooling'?'步骤保持原填写方式；使用 {{{{from}}}} 的位置会在创建工单时替换为所选制冷单元。':'普通设备调整 SOP 不使用设备占位符。'}}
       const steps=document.createElement('div');steps.className='polling-sop-steps';steps.replaceChildren(...(sop.steps||[]).map(pollingStepEditor));
       const add=document.createElement('button');add.type='button';add.className='btn ghost';add.textContent='添加步骤';add.onclick=()=>{{sop.steps.push({{step_id:'',content:'',operator_required:true,reviewer_required:true,photo_required:true,time_limit_seconds:0}});renderPollingSopEditor()}};
-      const save=document.createElement('button');save.type='button';save.className='btn primary';save.textContent='保存 SOP';save.onclick=async()=>{{let saved=null;const creating=!sop.sop_id,originalText=save.textContent;setButtonBusy(save,true);save.textContent='保存中…';setPollingSopFeedback('正在保存 SOP…');try{{if(!(sop.attachments?.length||litePollingPendingSopFiles.length))throw new Error('SOP 必须至少包含一个附件');const body={{sop_id:sop.sop_id||'',work_type:pollingSopWorkType(),scope:pollingSopScope(),name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},url=sop.sop_id?`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`:'/api/polling-sops';saved=await pollingApi(url,{{method:sop.sop_id?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});for(const file of litePollingPendingSopFiles){{const form=new FormData();form.append('file',file);form.append('expected_version',String(saved.version||0));saved=await pollingApi(`/api/polling-sops/${{encodeURIComponent(saved.sop_id)}}/attachments`,{{method:'POST',body:form}})}}litePollingPendingSopFiles=[];litePollingEditingSop=saved;await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setPollingSopFeedback(`已保存：${{saved.name}}`);setLiteStatus('SOP 已保存')}}catch(error){{if(creating&&saved?.sop_id)await pollingApi(`/api/polling-sops/${{encodeURIComponent(saved.sop_id)}}?expected_version=${{saved.version}}`,{{method:'DELETE'}}).catch(()=>null);setPollingSopFeedback(`保存失败：${{error.message}}`,true);showLiteError(error.message)}}finally{{if(save.isConnected){{setButtonBusy(save,false);save.textContent=originalText}}}}}};
+      const save=document.createElement('button');save.type='button';save.className='btn primary';save.textContent='保存 SOP';save.onclick=async()=>{{let saved=null;const creating=!sop.sop_id,originalText=save.textContent;setButtonBusy(save,true);save.textContent='保存中…';setPollingSopFeedback('正在保存 SOP…');try{{if(pollingSopWorkType()==='adjust'){{const tokens=pollingSopPlaceholderTokens(sop),cooling=pollingAdjustSopType(sop)==='cooling';if(cooling&&!pollingSopIsAdjustCooling(sop))throw new Error('制冷单元模式切换 SOP 必须且只能使用 {{{{from}}}} 占位符');if(!cooling&&tokens.size)throw new Error('普通设备调整 SOP 不能使用设备占位符')}}if(!(sop.attachments?.length||litePollingPendingSopFiles.length))throw new Error('SOP 必须至少包含一个附件');const body={{sop_id:sop.sop_id||'',work_type:pollingSopWorkType(),scope:pollingSopScope(),name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},url=sop.sop_id?`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`:'/api/polling-sops';saved=await pollingApi(url,{{method:sop.sop_id?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});for(const file of litePollingPendingSopFiles){{const form=new FormData();form.append('file',file);form.append('expected_version',String(saved.version||0));saved=await pollingApi(`/api/polling-sops/${{encodeURIComponent(saved.sop_id)}}/attachments`,{{method:'POST',body:form}})}}litePollingPendingSopFiles=[];litePollingEditingSop=saved;await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setPollingSopFeedback(`已保存：${{saved.name}}`);setLiteStatus('SOP 已保存')}}catch(error){{if(creating&&saved?.sop_id)await pollingApi(`/api/polling-sops/${{encodeURIComponent(saved.sop_id)}}?expected_version=${{saved.version}}`,{{method:'DELETE'}}).catch(()=>null);setPollingSopFeedback(`保存失败：${{error.message}}`,true);showLiteError(error.message)}}finally{{if(save.isConnected){{setButtonBusy(save,false);save.textContent=originalText}}}}}};
       const actions=document.createElement('div');actions.className='polling-sop-inline';actions.append(add,save);
       if(sop.sop_id){{const del=document.createElement('button');del.type='button';del.className='btn danger';del.textContent='删除 SOP';del.onclick=()=>openPollingSopDeleteConfirm(sop,del);actions.append(del)}}
-      editor.append(label,steps,actions);
+      editor.append(label);if(typeLabel)editor.append(typeLabel,typeHint);editor.append(steps,actions);
       const attachmentTitle=document.createElement('strong');attachmentTitle.textContent='本地附件（必填）';const files=pollingAttachmentRows(sop),pendingFiles=pollingPendingAttachmentRows(),input=document.createElement('input'),drop=document.createElement('div'),addFiles=chosen=>handlePollingSopAttachmentFiles(chosen,sop).catch(error=>showLiteError(error.message));input.type='file';input.multiple=true;input.hidden=true;input.onchange=()=>addFiles(input.files);drop.className='polling-sop-drop';drop.tabIndex=0;drop.textContent='点击选择或将附件拖到这里';drop.onclick=()=>input.click();drop.onkeydown=event=>{{if(event.key==='Enter'||event.key===' '){{event.preventDefault();input.click()}}}};drop.ondragover=event=>{{event.preventDefault();drop.classList.add('dragover')}};drop.ondragleave=()=>drop.classList.remove('dragover');drop.ondrop=event=>{{event.preventDefault();drop.classList.remove('dragover');addFiles(event.dataTransfer?.files)}};editor.append(attachmentTitle,files,pendingFiles,input,drop);
     }}
     function pollingUnitGroup(unit) {{return litePollingUnits.slice(Number.parseInt(unit,10)<=3?0:3,Number.parseInt(unit,10)<=3?3:6)}}
@@ -3545,25 +3577,28 @@ def render_workbench_lite(
     }}
     function renderPollingSelectionEditor() {{
       const editor=document.getElementById('lite-polling-sop-editor');if(!editor)return;editor.replaceChildren();const sop=litePollingSelectedSop;if(!sop){{const empty=document.createElement('div');empty.className='empty';empty.textContent='请先选择一个 SOP';editor.append(empty);return}}
-      const maintenance=pollingSopWorkType()==='maintenance',compatible=!maintenance||!pollingSopHasDevicePlaceholders(sop);const availability=document.createElement('div');availability.className='job-status';availability.textContent=!compatible?'该 SOP 含轮巡设备指向，可在维保页查看和修改，但不能用于维保工单。':sop.ready?(maintenance?'SOP 已就绪，请选择人员。':'SOP 已就绪，请配置设备指向和人员。'):(maintenance?'该 SOP 缺少步骤或附件，补充完整前不能确认。':'该 SOP 缺少步骤或附件，可先配置设备指向，但补充完整前不能确认。');
+      const work=pollingSopWorkType(),maintenance=work!=='polling',hasCoolingStep=work==='adjust'&&pollingSopIsAdjustCooling(sop),compatible=!pollingSopHasUnsupportedDevicePlaceholders(sop);const availability=document.createElement('div');availability.className='job-status';availability.textContent=!compatible?'该 SOP 含当前工单不支持的设备指向占位符，不可用于维保或设备调整工单。':sop.ready?(hasCoolingStep?'SOP 已就绪，请选择制冷单元、当前模式、切换后模式和人员。':maintenance?'SOP 已就绪，请选择人员。':'SOP 已就绪，请配置设备指向和人员。'):(maintenance?'该 SOP 缺少步骤或附件，补充完整前不能确认。':'该 SOP 缺少步骤或附件，可先配置设备指向，但补充完整前不能确认。');
       if(!sop.ready||!compatible){{const manage=document.createElement('button');manage.type='button';manage.className='btn ghost';manage.textContent=compatible?'去补充 SOP':'去修改 SOP';manage.onclick=()=>{{litePollingSopMode='manage';litePollingPendingSopFiles=[];litePollingEditingSop=structuredClone(sop);document.getElementById('lite-polling-sop-title').textContent='SOP步骤填写';document.getElementById('lite-polling-sop-new').hidden=false;renderPollingSopList();renderPollingSopEditor()}};availability.append(document.createTextNode(' '),manage)}}
-      const preview=document.createElement('div');preview.className='polling-sop-steps';for(const step of sop.steps||[]){{const row=document.createElement('div');row.className='polling-step-edit';row.textContent=`${{step.order}}. ${{step.content}}`;preview.append(row)}}
-      const detectedRuns=maintenance?[]:pollingRunsFromContent(previewValue(document.getElementById('lite-notice-form'),'content')),hasSavedSelection=litePollingSelection?.sop_id===sop.sop_id&&litePollingSelection?.work_type===pollingSopWorkType(),initial=hasSavedSelection?litePollingSelection:(detectedRuns.length?{{run_count:detectedRuns.length,runs:detectedRuns}}:{{run_count:1,runs:maintenance?[{{label:'维保作业'}}]:[{{from_unit:'1#',to_unit:'2#'}}]}});const countLabel=document.createElement('label'),countText=document.createElement('span'),count=document.createElement('select');countText.textContent='需要轮巡几次';for(let i=1;i<=2;i++){{const option=document.createElement('option');option.value=String(i);option.textContent=`${{i}} 次`;count.append(option)}}count.value=String(Math.min(2,Number(initial.run_count||1)));countLabel.append(countText,count);countLabel.hidden=maintenance;
-      const directionTitle=document.createElement('strong');directionTitle.textContent='设备指向（1#–3# / 4#–6# 组内选择）'+(!hasSavedSelection&&detectedRuns.length?` · 已从内容识别 ${{detectedRuns.map(run=>`${{run.from_unit}}→${{run.to_unit}}`).join('、')}}`:'');directionTitle.hidden=maintenance;const runs=document.createElement('div');runs.className='polling-sop-steps';runs.hidden=maintenance;const runValues=maintenance?[{{label:'维保作业'}}]:Array.from({{length:Number(count.value)}},(_,i)=>({{from_unit:initial.runs?.[i]?.from_unit||'1#',to_unit:initial.runs?.[i]?.to_unit||'2#'}}));if(!maintenance)pollingRunRows(runs,Number(count.value),runValues);count.onchange=()=>{{const value=Number(count.value);while(runValues.length<value)runValues.push({{from_unit:'1#',to_unit:'2#'}});runValues.length=value;pollingRunRows(runs,value,runValues)}};
+      const preview=document.createElement('div'),previewRows=[];preview.className='polling-sop-steps';for(const step of sop.steps||[]){{const row=document.createElement('div');row.className='polling-step-edit';previewRows.push([row,step]);preview.append(row)}}
+      const detectedRuns=maintenance?[]:pollingRunsFromContent(previewValue(document.getElementById('lite-notice-form'),'content')),hasSavedSelection=litePollingSelection?.sop_id===sop.sop_id&&litePollingSelection?.work_type===pollingSopWorkType(),initial=hasSavedSelection?litePollingSelection:(detectedRuns.length?{{run_count:detectedRuns.length,runs:detectedRuns}}:{{run_count:1,runs:maintenance?[{{label:pollingSopRunLabel()}}]:[{{from_unit:'1#',to_unit:'2#'}}]}});const countLabel=document.createElement('label'),countText=document.createElement('span'),count=document.createElement('select');countText.textContent='需要轮巡几次';for(let i=1;i<=2;i++){{const option=document.createElement('option');option.value=String(i);option.textContent=`${{i}} 次`;count.append(option)}}count.value=String(Math.min(2,Number(initial.run_count||1)));countLabel.append(countText,count);countLabel.hidden=maintenance;
+      const directionTitle=document.createElement('strong');directionTitle.textContent='设备指向（1#–3# / 4#–6# 组内选择）'+(!hasSavedSelection&&detectedRuns.length?` · 已从内容识别 ${{detectedRuns.map(run=>`${{run.from_unit}}→${{run.to_unit}}`).join('、')}}`:'');directionTitle.hidden=maintenance;const runs=document.createElement('div');runs.className='polling-sop-steps';runs.hidden=maintenance;const runValues=maintenance?[hasCoolingStep?{{from_unit:String(initial.runs?.[0]?.from_unit||''),to_unit:String(initial.runs?.[0]?.to_unit||''),other_unit:String(initial.runs?.[0]?.other_unit||'')}}:{{label:pollingSopRunLabel()}}]:Array.from({{length:Number(count.value)}},(_,i)=>({{from_unit:initial.runs?.[i]?.from_unit||'1#',to_unit:initial.runs?.[i]?.to_unit||'2#'}}));if(!maintenance)pollingRunRows(runs,Number(count.value),runValues);count.onchange=()=>{{const value=Number(count.value);while(runValues.length<value)runValues.push({{from_unit:'1#',to_unit:'2#'}});runValues.length=value;pollingRunRows(runs,value,runValues)}};
+      let apply=null;const coolingFields=document.createElement('div'),coolingUnitLabel=document.createElement('label'),coolingUnitText=document.createElement('span'),coolingUnit=document.createElement('select'),fromModeLabel=document.createElement('label'),fromModeText=document.createElement('span'),fromMode=document.createElement('select'),toModeLabel=document.createElement('label'),toModeText=document.createElement('span'),toMode=document.createElement('select'),coolingIssue=document.createElement('small');coolingFields.className='polling-cooling-mode';coolingUnitText.textContent='制冷单元';fromModeText.textContent='当前运行模式';toModeText.textContent='切换后运行模式';for(const [select,prompt] of [[coolingUnit,'请选择制冷单元'],[fromMode,'请选择当前模式'],[toMode,'请选择切换后模式']]){{select.required=true;const option=document.createElement('option');option.value='';option.textContent=prompt;select.append(option)}}for(const unit of litePollingUnits){{const option=document.createElement('option');option.value=unit;option.textContent=`${{unit}}制冷单元`;coolingUnit.append(option)}}for(const [code,label] of liteAdjustCoolingModes){{for(const select of [fromMode,toMode]){{const option=document.createElement('option');option.value=code;option.textContent=label;select.append(option)}}}}coolingUnit.value=litePollingUnits.includes(runValues[0]?.other_unit)?runValues[0].other_unit:'';fromMode.value=pollingAdjustModeLabel(runValues[0]?.from_unit)?runValues[0].from_unit:'';toMode.value=pollingAdjustModeLabel(runValues[0]?.to_unit)?runValues[0].to_unit:'';coolingUnit.setAttribute('aria-label','调整制冷单元');fromMode.setAttribute('aria-label','制冷单元当前运行模式');toMode.setAttribute('aria-label','制冷单元切换后运行模式');const syncCoolingSelection=()=>{{runValues[0].other_unit=coolingUnit.value;runValues[0].from_unit=fromMode.value;runValues[0].to_unit=toMode.value;const same=Boolean(fromMode.value&&fromMode.value===toMode.value);coolingIssue.textContent=same?'当前运行模式和切换后运行模式不能相同':'';coolingIssue.hidden=!same;renderCoolingPreview();if(apply)apply.disabled=!sop.ready||!compatible||!coolingUnit.value||!fromMode.value||!toMode.value||same}};coolingUnit.onchange=fromMode.onchange=toMode.onchange=syncCoolingSelection;coolingUnitLabel.append(coolingUnitText,coolingUnit);fromModeLabel.append(fromModeText,fromMode);toModeLabel.append(toModeText,toMode);coolingFields.append(coolingUnitLabel,fromModeLabel,toModeLabel,coolingIssue);coolingFields.hidden=!hasCoolingStep;
+      function renderCoolingPreview() {{for(const [row,step] of previewRows){{const content=String(step.content||''),unit=runValues[0]?.other_unit;row.textContent=`${{step.order}}. ${{hasCoolingStep?content.replace('{{{{from}}}}',unit?`${{unit}}制冷单元`:'待选择制冷单元'):content}}`}}}}
+      renderCoolingPreview();
       const peopleGrid=document.createElement('div');peopleGrid.className='polling-people-grid';const operatorLabel=document.createElement('div'),reviewerLabel=document.createElement('div'),operatorText=document.createElement('span'),reviewerText=document.createElement('span'),operator=document.createElement('input'),reviewer=document.createElement('input'),operatorResults=document.createElement('div'),reviewerResults=document.createElement('div'),currentShift=pollingCurrentShift();operatorLabel.className=reviewerLabel.className='polling-person-picker';operatorText.textContent=`操作人（当前${{currentShift}}班）`;reviewerText.textContent='现场审核人';operator.type=reviewer.type='search';operator.autocomplete=reviewer.autocomplete='off';operator.placeholder='搜索姓名、工号、岗位或楼栋';reviewer.placeholder='搜索姓名、工号、岗位或楼栋';operator.setAttribute('aria-label','搜索并选择操作人');reviewer.setAttribute('aria-label','搜索并选择现场审核人');operatorResults.className=reviewerResults.className='polling-person-results';operatorResults.hidden=reviewerResults.hidden=true;pollingBindPersonSearch(operator,operatorResults,()=>[reviewer.dataset.recordId,'h_duty_account']);pollingBindPersonSearch(reviewer,reviewerResults,()=>[operator.dataset.recordId]);
       const building=pollingCurrentBuildingLabel(),inBuilding=litePollingPeople.filter(person=>String(person.building||'').includes(building));const defaultOperator=inBuilding.find(person=>String(person.shift||'').includes(currentShift)&&/(值班长|楼长|H楼值班主管|110站站长)/.test(String(person.position||'')));const defaultReviewer=inBuilding.find(person=>String(person.record_id||'')!==String(defaultOperator?.record_id||'')&&String(person.position||'').includes('暖通工程师'));pollingChoosePerson(operator,initial.operator_record_id||defaultOperator?.record_id);pollingChoosePerson(reviewer,initial.reviewer_record_id||defaultReviewer?.record_id);
       const hQuick=document.createElement('button');hQuick.type='button';hQuick.className='btn ghost';hQuick.textContent='快捷选择H楼值班账号';hQuick.onclick=()=>{{pollingChoosePerson(reviewer,'h_duty_account');reviewerResults.hidden=true}};operatorLabel.append(operatorText,operator,operatorResults);reviewerLabel.append(reviewerText,reviewer,hQuick,reviewerResults);peopleGrid.append(operatorLabel,reviewerLabel);
-      const apply=document.createElement('button');apply.type='button';apply.className='btn primary';apply.textContent='确认选择';apply.onclick=()=>{{pollingSyncPersonInput(operator);pollingSyncPersonInput(reviewer);const operatorId=String(operator.dataset.recordId||''),reviewerId=String(reviewer.dataset.recordId||'');if(!operatorId||!reviewerId){{showLiteError('请选择操作人和现场审核人');return}}if(operatorId===reviewerId){{showLiteError('操作人和现场审核人不能是同一人');return}}if(!maintenance){{const pairs=new Set(),usedUnits=new Set();for(const run of runValues){{if(run.from_unit===run.to_unit){{showLiteError('起点和终点不能相同');return}}if(!pollingUnitGroup(run.from_unit).includes(run.to_unit)){{showLiteError('起点和终点不能跨越 1#–3# 与 4#–6# 分组');return}}if(usedUnits.has(run.from_unit)||usedUnits.has(run.to_unit)){{showLiteError('后续工单不能再选择前面已使用的设备编号');return}}const key=`${{run.from_unit}}>${{run.to_unit}}`;if(pairs.has(key)){{showLiteError('轮巡组合不能重复');return}}pairs.add(key);usedUnits.add(run.from_unit);usedUnits.add(run.to_unit)}}}}litePollingSelection={{identity:sitePhotoSignature(document.getElementById('lite-notice-form')),work_type:pollingSopWorkType(),sop_id:sop.sop_id,sop_version:sop.version,sop_name:sop.name,run_count:maintenance?1:Number(count.value),runs:runValues.map(item=>({{...item}})),operator_record_id:operatorId,reviewer_record_id:reviewerId,operator_name:litePollingPeople.find(person=>person.record_id===operatorId)?.name||'',reviewer_name:litePollingPeople.find(person=>person.record_id===reviewerId)?.name||''}};updatePollingSelectionSummary(document.getElementById('lite-notice-form'));closePollingSopModal();setLiteFormDirty(true);updateActionAvailability(document.getElementById('lite-notice-form'))}};
-      apply.disabled=!sop.ready||!compatible;apply.title=!compatible?'该 SOP 含轮巡设备指向，不能用于维保工单':sop.ready?'确认当前选择':'请先补充 SOP 步骤和附件';editor.append(availability,preview,countLabel,directionTitle,runs,peopleGrid,apply);
+      apply=document.createElement('button');apply.type='button';apply.className='btn primary';apply.textContent='确认选择';apply.onclick=()=>{{pollingSyncPersonInput(operator);pollingSyncPersonInput(reviewer);const operatorId=String(operator.dataset.recordId||''),reviewerId=String(reviewer.dataset.recordId||'');if(hasCoolingStep&&(!litePollingUnits.includes(runValues[0]?.other_unit)||!pollingAdjustModeLabel(runValues[0]?.from_unit)||!pollingAdjustModeLabel(runValues[0]?.to_unit))){{showLiteError('请选择制冷单元、当前运行模式和切换后运行模式');return}}if(hasCoolingStep&&runValues[0].from_unit===runValues[0].to_unit){{showLiteError('当前运行模式和切换后运行模式不能相同');return}}if(!operatorId||!reviewerId){{showLiteError('请选择操作人和现场审核人');return}}if(operatorId===reviewerId){{showLiteError('操作人和现场审核人不能是同一人');return}}if(!maintenance){{const pairs=new Set(),usedUnits=new Set();for(const run of runValues){{if(run.from_unit===run.to_unit){{showLiteError('起点和终点不能相同');return}}if(!pollingUnitGroup(run.from_unit).includes(run.to_unit)){{showLiteError('起点和终点不能跨越 1#–3# 与 4#–6# 分组');return}}if(usedUnits.has(run.from_unit)||usedUnits.has(run.to_unit)){{showLiteError('后续工单不能再选择前面已使用的设备编号');return}}const key=`${{run.from_unit}}>${{run.to_unit}}`;if(pairs.has(key)){{showLiteError('轮巡组合不能重复');return}}pairs.add(key);usedUnits.add(run.from_unit);usedUnits.add(run.to_unit)}}}}litePollingSelection={{identity:sitePhotoSignature(document.getElementById('lite-notice-form')),work_type:pollingSopWorkType(),sop_id:sop.sop_id,sop_version:sop.version,sop_name:sop.name,run_count:maintenance?1:Number(count.value),runs:runValues.map(item=>({{...item}})),operator_record_id:operatorId,reviewer_record_id:reviewerId,operator_name:litePollingPeople.find(person=>person.record_id===operatorId)?.name||'',reviewer_name:litePollingPeople.find(person=>person.record_id===reviewerId)?.name||''}};updatePollingSelectionSummary(document.getElementById('lite-notice-form'));closePollingSopModal();setLiteFormDirty(true);updateActionAvailability(document.getElementById('lite-notice-form'))}};
+      if(hasCoolingStep)syncCoolingSelection();apply.disabled=!sop.ready||!compatible||(hasCoolingStep&&(!coolingUnit.value||!fromMode.value||!toMode.value||fromMode.value===toMode.value));apply.title=!compatible?'该 SOP 含当前工单不支持的设备指向':!sop.ready?'请先补充 SOP 步骤和附件':hasCoolingStep&&apply.disabled?'请完成制冷单元模式切换配置':'确认当前选择';editor.append(availability,coolingFields,preview,countLabel,directionTitle,runs,peopleGrid,apply);
     }}
     function pollingWorkOrderExempt(form) {{return Boolean(form?.querySelector('[name="polling_work_order_exempt"]:checked'));}}
-    function updatePollingSelectionSummary(form) {{const section=form?.querySelector('[data-polling-work-order-select]');if(!section)return;const start=String(form.dataset.action||'start')==='start',maintenance=pollingSopWorkType()==='maintenance',exempt=pollingWorkOrderExempt(form),valid=litePollingSelection&&litePollingSelection.work_type===pollingSopWorkType()&&litePollingSelection.identity===sitePhotoSignature(form),select=document.getElementById('lite-polling-select-open'),summary=document.getElementById('lite-polling-selection-summary'),toggle=form?.querySelector('.polling-work-order-exempt');section.hidden=!start;if(toggle)toggle.classList.toggle('active',exempt);if(select){{select.disabled=exempt;select.title=exempt?`当前${{maintenance?'维保':'轮巡'}}不启用工单流程`:''}}if(summary){{const detail=maintenance?'维保作业':litePollingSelection?.runs?.map(run=>`${{run.from_unit}}→${{run.to_unit}}`).join('、');summary.textContent=exempt?'已忽略工单流程':valid?`${{litePollingSelection.sop_name}} · ${{detail}} · ${{litePollingSelection.operator_name}}/${{litePollingSelection.reviewer_name}}`:'未选择 SOP'}}}}
+    function updatePollingSelectionSummary(form) {{const section=form?.querySelector('[data-polling-work-order-select]');if(!section)return;const start=String(form.dataset.action||'start')==='start',work=pollingSopWorkType(),maintenance=work!=='polling',exempt=pollingWorkOrderExempt(form),valid=litePollingSelection&&litePollingSelection.work_type===work&&litePollingSelection.identity===sitePhotoSignature(form),select=document.getElementById('lite-polling-select-open'),summary=document.getElementById('lite-polling-selection-summary'),toggle=form?.querySelector('.polling-work-order-exempt');section.hidden=!start;if(toggle)toggle.classList.toggle('active',exempt);if(select){{select.disabled=exempt;select.title=exempt?`当前${{pollingSopLabel()}}不启用工单流程`:''}}if(summary){{const run=litePollingSelection?.runs?.[0],coolingUnit=work==='adjust'&&litePollingUnits.includes(run?.other_unit)?`${{run.other_unit}}制冷单元由${{pollingAdjustModeLabel(run.from_unit)}}指向${{pollingAdjustModeLabel(run.to_unit)}}`:'';const detail=coolingUnit|| (maintenance?pollingSopRunLabel():litePollingSelection?.runs?.map(run=>`${{run.from_unit}}→${{run.to_unit}}`).join('、'));summary.textContent=exempt?'已忽略工单流程':valid?`${{litePollingSelection.sop_name}} · ${{detail}} · ${{litePollingSelection.operator_name}}/${{litePollingSelection.reviewer_name}}`:'未选择 SOP'}}}}
     async function openPollingSopModal(mode='manage') {{
       litePollingSopMode=mode;const modal=pollingSopModal();if(!modal)return;
       if(!pollingSopScope()){{showLiteError('请先切换到具体楼栋，再填写或选择 SOP 步骤');return}}
       setPollingSopFeedback('');
       const list=document.getElementById('lite-polling-sop-list'),editor=document.getElementById('lite-polling-sop-editor');modal.hidden=true;
-      document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':`${{pollingSopWorkType()==='maintenance'?'维保':'轮巡'}} SOP步骤填写`;document.getElementById('lite-polling-sop-new').hidden=mode==='select';
+      document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':`${{pollingSopLabel()}} SOP步骤填写`;document.getElementById('lite-polling-sop-new').hidden=mode==='select';
       try{{
         await loadPollingSops();litePollingEditingSop=litePollingEditingSop&&litePollingEditingSop.scope===pollingSopScope()?litePollingEditingSop:pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id)||null):litePollingSelectedSop;renderPollingSopList();
         if(mode==='manage'){{renderPollingSopEditor();modal.hidden=false;return}}
@@ -3601,6 +3636,9 @@ def render_workbench_lite(
     function friendlyLiteMessage(message) {{
       const raw = String(message || '').trim();
       if (!raw) return '操作失败';
+      if (/HTTPSConnectionPool|Read timed out|read timeout/i.test(raw)) {{
+        return '飞书接口等待超时，通告结果暂不能确认。请刷新核验本条通告，不要重新新增或反复发送。';
+      }}
       if (raw.includes('目标多维记录不存在') || raw.includes('RecordIdNotFound') || (raw.includes('record_id') && raw.includes('不存在'))) {{
         return '没有找到对应的目标多维记录。请先点击“查找目标记录”重新绑定，再更新或结束。';
       }}
@@ -4248,6 +4286,7 @@ def render_workbench_lite(
       }});
       stream.addEventListener('error', event => {{
         if (stream !== liteQtActiveStream) return;
+        window.dispatchEvent(new Event('clipflow-api-offline'));
         const raw = typeof event.data === 'string' ? event.data : '';
         if (!raw) return;
         try {{
@@ -4518,7 +4557,7 @@ def render_workbench_lite(
           compact[key] = value.map(item => {{
             if (item && typeof item === 'object') {{
               const safe = {{}};
-              for (const field of ['upload_id', 'file_token', 'token', 'local_image_id', 'file_name', 'url', 'mime_type', 'content_type', 'size', 'from_unit', 'to_unit']) {{
+              for (const field of ['upload_id', 'file_token', 'token', 'local_image_id', 'file_name', 'url', 'mime_type', 'content_type', 'size', 'from_unit', 'to_unit', 'other_unit']) {{
                 if (item[field] != null && item[field] !== '') safe[field] = String(item[field]).slice(0, 500);
               }}
               return safe;
@@ -4633,6 +4672,7 @@ def render_workbench_lite(
       }} catch (error) {{
         const message = error && error.message ? error.message : '删除失败';
         showLiteError(message);
+        setLiteStatus('删除未完成：' + friendlyLiteMessage(message));
       }} finally {{
         button.removeAttribute('data-confirmed');
         button.textContent = originalText;
@@ -5637,11 +5677,11 @@ def render_workbench_lite(
         .map(([, label]) => label);
       if (!selectedBuildingCodes(form).length) missing.unshift('楼栋/范围');
       if (
-        ['maintenance', 'polling'].includes(workType)
+        ['maintenance', 'polling', 'adjust'].includes(workType)
         && String(form?.dataset.action || 'start') === 'start'
         && !pollingWorkOrderExempt(form)
         && !(litePollingSelection && litePollingSelection.work_type === workType && litePollingSelection.identity === sitePhotoSignature(form))
-      ) missing.push(`${{workType === 'maintenance' ? '维保' : '轮巡'}} SOP/人员`);
+      ) missing.push(`${{pollingSopLabel()}} SOP/人员`);
       return missing;
     }}
     function manualBindingIssue(form) {{
@@ -8111,7 +8151,7 @@ def render_workbench_lite(
       ) {{
         patch.ali_confirmation_images = aliConfirmationImages;
       }}
-      if (['maintenance', 'polling'].includes(patch.work_type) && action === 'start') {{
+      if (['maintenance', 'polling', 'adjust'].includes(patch.work_type) && action === 'start') {{
         patch.polling_work_order_exempt = pollingWorkOrderExempt(form);
         if (!patch.polling_work_order_exempt && litePollingSelection && litePollingSelection.work_type === patch.work_type && litePollingSelection.identity === sitePhotoSignature(form)) {{
           patch.polling_sop_id = litePollingSelection.sop_id;
@@ -8620,7 +8660,7 @@ def render_workbench_lite(
         queued: '排队中',
         sending_message: '正在发送个人消息',
         message_sent: '个人消息已发送',
-        qt_queued: '等待展示',
+        qt_queued: '等待执行',
         upload_waiting: '等待上传多维',
         remote_intent: '正在写入多维',
         uploading: '正在上传多维',
@@ -8641,23 +8681,38 @@ def render_workbench_lite(
       if (action === 'update') return '更新成功，通告仍在进行中';
       return '发送成功，通告已进入进行中';
     }}
+    let latestSubmittedJobId = '';
     async function pollSubmittedJob(jobId, label, payload) {{
       if (!jobId) return false;
       const startedAt = Date.now();
       let delay = 800;
+      let readFailures = 0;
+      const updateStatus = text => {{ if (latestSubmittedJobId === jobId) setLiteStatus(text); }};
       while (Date.now() - startedAt < 600000) {{
         await sleep(delay);
+        const controller = new AbortController();
+        const readTimeout = setTimeout(() => controller.abort(), 15000);
         try {{
-          const response = await fetch(`/api/jobs/${{encodeURIComponent(jobId)}}`, {{ credentials: 'same-origin' }});
+          const response = await fetch(`/api/jobs/${{encodeURIComponent(jobId)}}`, {{ credentials: 'same-origin', signal: controller.signal }});
           const data = await response.json().catch(() => ({{}}));
           if (handleLiteAuthRequired(response, data)) return true;
+          if (response.status === 404) {{
+            updateStatus('任务记录不存在，请刷新并核对通告结果，勿重复发送。');
+            return false;
+          }}
           if (!response.ok || data.ok === false) throw new Error(data.error || '读取任务状态失败');
+          readFailures = 0;
           const job = data.data || {{}};
           const phase = String(job.phase || '');
           if (phase === 'success') {{
             await deleteSubmittedLiteDraft(payload).catch(() => ({{}}));
-            applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
-            setLiteStatus(successfulNoticeActionText(
+            try {{
+              applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
+            }} catch (error) {{
+              updateStatus('通告已发送成功，但页面展示更新失败，请刷新查看，勿重复发送。');
+              return true;
+            }}
+            updateStatus(successfulNoticeActionText(
               payload?.action,
               Boolean(job.frontend_patch?.terminal_projection_skipped),
               Boolean(job.frontend_patch?.source_fallback_active),
@@ -8667,23 +8722,32 @@ def render_workbench_lite(
           }}
           if (phase === 'failed') {{
             const message = job.error || job.upload_message || job.message_error || '发送失败';
-            applyJobPatch(job.frontend_patch, payload, false, message);
-            showLiteError(message);
-            setLiteStatus('发送失败：' + friendlyLiteMessage(message));
+            try {{ applyJobPatch(job.frontend_patch, payload, false, message); }} catch (error) {{}}
+            if (latestSubmittedJobId === jobId) showLiteError(message);
+            updateStatus((job.remote_written ? '多维已写入，后续处理失败：' : '发送失败：') + friendlyLiteMessage(message));
             return true;
           }}
-          const slow = Date.now() - startedAt >= 90000 ? '（处理时间较长，仍在自动查询）' : '';
-          setLiteStatus('发送中：' + jobPhaseText(phase) + slow);
+          const slow = Date.now() - startedAt >= 90000 ? '（处理时间较长，后台仍在执行，请勿重复提交）' : '';
+          const stage = job.qt_phase === 'preparing' && ['accepted', 'queued', 'qt_queued'].includes(phase)
+            ? '正在准备通告' : phase === 'qt_queued' && job.depends_on_phase
+              ? '等待同一通告上一条操作完成' : jobPhaseText(phase);
+          updateStatus('发送中：' + stage + (job.projection_pending && job.message_warning ? '（' + job.message_warning + '）' : slow));
         }} catch (error) {{
-          setLiteStatus('正在读取任务状态...');
+          readFailures += 1;
+          updateStatus(readFailures >= 3
+            ? '任务状态连续读取失败，结果暂未确认，请检查连接后刷新，勿重复发送。'
+            : '任务状态读取失败，正在重新连接...');
+        }} finally {{
+          clearTimeout(readTimeout);
         }}
         delay = Math.min(2600, Math.round(delay * 1.25));
       }}
-      setLiteStatus('处理超过10分钟，可刷新页面继续查看结果');
+      updateStatus('等待结果已超过10分钟，当前结果尚未确认，请刷新核对，勿重复发送。');
       return false;
     }}
     function schedulePostSubmitRefresh(label, jobId, payload) {{
       if (jobId) {{
+        latestSubmittedJobId = jobId;
         pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload).catch(() => {{
           setLiteStatus('仍在处理，请稍后刷新本页');
         }});
@@ -8796,7 +8860,7 @@ def render_workbench_lite(
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '提交失败');
         const jobId = (data && data.job_id) || (data && data.data && data.data.job_id) || '';
-        setLiteStatus(`后端已受理，正在排队发送和上传。任务号 ${{jobId}}`);
+        setLiteStatus(`后端已受理，正在处理。任务号 ${{jobId}}`);
         schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload);
       }} catch (error) {{
         delete form.dataset.submitOperationId;
@@ -8859,12 +8923,12 @@ _POLLING_WORK_ORDER_STYLE = r"""*{box-sizing:border-box}html{background:#eef4ff}
 
 def render_polling_work_order_page() -> str:
     return r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单总览</title><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
+<html lang="zh-CN"><head><script src="/assets/connection-guard.js" defer></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单总览</title><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
 <body><main class="shell"><section class="head"><span id="role">轮巡工单总览</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status" role="status" aria-live="polite">正在读取工单状态...</div><button id="retry" class="action" type="button" hidden>重试上传工单附件</button><div class="toolbar"><button id="cancel-selection" class="secondary danger" type="button" hidden>取消当前选择</button></div><section id="overview" class="work-orders" aria-label="轮巡工单列表"></section><p class="links">选择一个未完成工单后，将进入独立步骤页面。</p></main>
 <script>
 const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false,loading=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type};const stepsUrl=run=>`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`;
 function workOrderCard(order){const button=document.createElement('button'),strong=document.createElement('strong'),label=document.createElement('small'),progress=document.createElement('span');button.type='button';button.className=`work-order ${order.state}`;button.disabled=!order.selectable||busy;strong.textContent=`工单 ${order.run_index}`;label.textContent=order.label;progress.textContent=`已完成 ${order.completed_steps}/${order.step_count} 步 · ${order.state==='completed'?'已完成':order.state==='active'?'已选择，进入步骤':order.state==='available'?'可选择':'另一工单执行中'}`;button.append(strong,label,progress);button.onclick=()=>openWorkOrder(order);return button}
-function render(data){current=data;const typeLabel=data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;q('overview').replaceChildren(...(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?'步骤已全部完成，正在上传工单表格...':data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
+function render(data){current=data;const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;q('overview').replaceChildren(...(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?'步骤已全部完成，正在上传工单表格...':data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
 async function openWorkOrder(order){if(!current||busy||!order.selectable)return;busy=true;let message='',refresh=false;render(current);status(`正在进入工单 ${order.run_index}...`);try{const r=await fetch('/api/polling-work-orders/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(order.run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false){refresh=r.status===409;throw new Error(body.error||'工单进入失败')}location.assign(stepsUrl(body.data.current_run_index||order.run_index));return}catch(error){message=error.message||'工单进入失败'}finally{busy=false;if(refresh)await load();else if(current)render(current);if(message)status(message,'error')}}
 async function cancelSelection(){if(!current||busy||!current.can_release_selection)return;busy=true;let message='',tone='';render(current);status('正在取消当前选择...');try{const r=await fetch('/api/polling-work-orders/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(current.current_run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'取消选择失败');current=body.data;message='已取消，未完成工单可以重新选择';tone='success'}catch(error){message=error.message||'取消选择失败';tone='error'}finally{busy=false;if(current)render(current);status(message,tone)}}
 async function load(){if(busy||loading)return;loading=true;try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(busy)return;if(!r.ok||body.ok===false){const error=new Error(body.error||'工单读取失败');error.terminal=[403,404].includes(r.status);throw error}render(body.data)}catch(error){status(error.message||'工单读取失败','error');if(error.terminal)clearInterval(timer)}finally{loading=false}}
@@ -8875,12 +8939,12 @@ q('retry').onclick=retryUpload;q('cancel-selection').onclick=cancelSelection;if(
 
 def render_polling_work_order_steps_page() -> str:
     return r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单步骤</title><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
+<html lang="zh-CN"><head><script src="/assets/connection-guard.js" defer></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单步骤</title><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
 <body><main class="shell"><section class="head"><span id="role">轮巡工单步骤</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status" role="status" aria-live="polite">正在读取工单状态...</div><div class="toolbar"><button id="back" class="back" type="button">← 返回工单总览</button></div><section id="steps" class="steps" aria-label="当前工单步骤"></section><p class="links">页面会自动刷新；浏览器返回不会取消当前选择。</p></main>
 <script>
 const params=new URLSearchParams(location.search),token=params.get('token')||'',runIndex=Number.parseInt(params.get('run_index')||'',10),overviewUrl=`/polling-work-order?token=${encodeURIComponent(token)}`;let current=null,timer=0,clock=0,busy=false,loading=false,navigating=false,receivedAt=Date.now();const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type};const remaining=step=>Math.max(0,Math.ceil(Number(step.remaining_seconds||0)-(Date.now()-receivedAt)/1000));const goOverview=()=>{if(!navigating){navigating=true;location.replace(overviewUrl)}};const goSelected=run=>{if(!navigating){navigating=true;location.replace(`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`)}};
 function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`第 ${Number(step.step_index||0)} 步`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';head.append(title,badge);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;checks.append(mark)}const photoRequired=step.photo_required!==false,photoCount=(step.photos||[]).length,hasPhoto=photoCount>0,photoMark=document.createElement('em');photoMark.className=hasPhoto||!photoRequired?'done':'waiting';photoMark.textContent=hasPhoto?`操作照片 ${photoCount} 张`:photoRequired?'操作照片待拍':'无需拍照';checks.append(photoMark);const wait=remaining(step);if(step.position==='current'&&wait>0){const mark=document.createElement('em');mark.className='waiting';mark.dataset.countdown='1';mark.textContent=`倒计时 ${wait} 秒`;checks.append(mark)}article.append(head,run,content,checks);if(hasPhoto){const gallery=document.createElement('div');gallery.className='photos';for(const photo of step.photos){const link=document.createElement('a'),image=document.createElement('img');link.href=photo.preview_url;link.target='_blank';link.rel='noopener';image.className='photo-thumb';image.src=photo.preview_url;image.alt=photo.name||'操作照片';image.loading='eager';image.decoding='async';image.onerror=()=>status('操作照片已保存，但缩略图加载失败，请刷新页面重试','error');link.append(image);gallery.append(link)}article.append(gallery)}if(photoRequired&&step.position==='current'&&current&&!step.operator_confirmed&&!step.reviewer_confirmed){const upload=document.createElement('label'),input=document.createElement('input');upload.className='photo-upload';upload.textContent=hasPhoto?'继续添加照片':'拍照/上传操作照片';input.type='file';input.accept='image/*';input.setAttribute('capture','environment');input.disabled=busy;input.onchange=()=>uploadStepPhoto(step,input.files&&input.files[0]);upload.append(input);article.append(upload)}if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.dataset.confirmAction='1';button.textContent=busy?'处理中...':done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0;button.onclick=()=>confirmStep(step.step_key);article.append(button);if(current.role==='reviewer'&&current.can_rollback_previous){const rollback=document.createElement('button');rollback.type='button';rollback.className='secondary danger rollback';rollback.textContent='回退上一步';rollback.disabled=busy;rollback.onclick=()=>rollbackPrevious(step.step_key);article.append(rollback)}}return article}
-function render(data){current=data;const selected=Number(data.current_run_index||0);if(!selected){goOverview();return}if(selected!==runIndex){goSelected(selected);return}const typeLabel=data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单步骤`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;const order=(data.work_orders||[]).find(item=>Number(item.run_index)===runIndex);q('summary').textContent=`${data.sop_name||''} · 工单 ${runIndex} · ${order?.label||''}`;q('back').textContent=data.can_release_selection?'← 退出当前工单并重新选择':'← 返回工单总览';q('steps').replaceChildren(...(data.steps||[]).filter(step=>Number(step.run_index)===runIndex).map(card));status(data.last_error||`工单 ${runIndex} · ${order?.label||''}`,data.last_error?'error':'')}
+function render(data){current=data;const selected=Number(data.current_run_index||0);if(!selected){goOverview();return}if(selected!==runIndex){goSelected(selected);return}const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单步骤`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;const order=(data.work_orders||[]).find(item=>Number(item.run_index)===runIndex);q('summary').textContent=`${data.sop_name||''} · 工单 ${runIndex} · ${order?.label||''}`;q('back').textContent=data.can_release_selection?'← 退出当前工单并重新选择':'← 返回工单总览';q('steps').replaceChildren(...(data.steps||[]).filter(step=>Number(step.run_index)===runIndex).map(card));status(data.last_error||`工单 ${runIndex} · ${order?.label||''}`,data.last_error?'error':'')}
 function refreshCountdown(){if(!current||busy)return;const step=(current.steps||[]).find(item=>item.position==='current'&&Number(item.run_index)===runIndex);if(!step)return;const wait=remaining(step),mark=document.querySelector('[data-countdown]'),button=document.querySelector('[data-confirm-action]');if(mark){if(wait>0)mark.textContent=`倒计时 ${wait} 秒`;else mark.remove()}if(!button)return;const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed,photoRequired=step.photo_required!==false,hasPhoto=(step.photos||[]).length>0;button.textContent=done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0}
 async function leaveWorkOrder(){if(!current||busy)return;if(!current.can_release_selection){goOverview();return}busy=true;let message='';render(current);status('正在退出当前工单...');try{const r=await fetch('/api/polling-work-orders/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:runIndex,expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'退出工单失败');goOverview()}catch(error){message=error.message||'退出工单失败'}finally{busy=false;if(message){if(current)render(current);status(message,'error')}}}
 async function load(){if(busy||loading||navigating)return;loading=true;try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(busy)return;if(!r.ok||body.ok===false){const error=new Error(body.error||'工单读取失败');error.terminal=[403,404].includes(r.status);throw error}const next=body.data,sameView=current&&Number(current.version)===Number(next.version)&&Number(current.current_run_index)===Number(next.current_run_index)&&Number(current.current_index)===Number(next.current_index);current=next;receivedAt=Date.now();if(sameView)refreshCountdown();else render(current)}catch(error){status(error.message||'工单读取失败','error');if(error.terminal){clearInterval(timer);clearInterval(clock)}}finally{loading=false}}

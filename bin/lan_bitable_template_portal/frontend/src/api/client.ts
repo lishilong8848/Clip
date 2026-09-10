@@ -130,6 +130,7 @@ export async function requestJson(
     }
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
+    window.dispatchEvent(new Event('clipflow-api-offline'));
     throw new ApiError(message, { offline: true });
   } finally {
     requestSignal.cleanup();
@@ -320,6 +321,7 @@ export async function requestBinaryJson(
     }
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
+    window.dispatchEvent(new Event('clipflow-api-offline'));
     throw new ApiError(message, { offline: true });
   } finally {
     requestSignal.cleanup();

@@ -36,6 +36,7 @@ class NoticePayload:
     polling_work_order_required: Optional[bool] = None
     polling_operator_name: Optional[str] = None
     polling_reviewer_name: Optional[str] = None
+    operation_id: Optional[str] = None
 
 
 class BaseNoticeHandler:

@@ -2997,6 +2997,53 @@ class MaintenancePortalService:
                 "field_count": len(by_name),
             }
 
+    def ensure_adjust_work_order_schema(self) -> dict[str, Any]:
+        from upload_event_module.config import ADJUST_NOTICE_FIELDS
+        app_token = str(config.app_token or "").strip()
+        table_id = str(config.table_id_tiaozheng or "").strip()
+        if not app_token or not table_id:
+            raise PortalError("设备调整目标表未配置，不能启用工单。")
+        key = (app_token, table_id)
+        expected = {ADJUST_NOTICE_FIELDS[k]: t for k, t in (
+            ("work_order_required", 7), ("work_order_operator", 1),
+            ("work_order_reviewer", 1), ("work_order_attachments", 17),
+        )}
+        with self._maintenance_work_order_schema_lock:
+            if getattr(self, "_adjust_work_order_schema_key", None) == key:
+                return {"ok": True, "cached": True, "created_fields": []}
+
+            def read_fields():
+                return {str(f.get("field_name") or ""): f for f in self._load_raw_table_fields(
+                    app_token=app_token, table_id=table_id, http_client=self._write_http_client,
+                )}
+
+            fields = read_fields()
+            for name, kind in expected.items():
+                if name in fields and int(fields[name].get("type") or 0) != kind:
+                    raise PortalError(f"设备调整目标表“{name}”类型错误，应为 {kind}。")
+            created = []
+            for name, kind in expected.items():
+                if name in fields:
+                    continue
+                # An uncertain create is reconciled by readback, never blindly retried.
+                result = self._request_payload(
+                    "POST", f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
+                    context="设备调整工单字段创建", headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    json_payload={"field_name": name, "type": kind}, http_client=self._write_http_client,
+                )
+                if int(result.get("code") or 0):
+                    fields = read_fields()
+                    if name not in fields or int(fields[name].get("type") or 0) != kind:
+                        raise PortalError(f"设备调整目标表“{name}”字段创建尚未确认，请稍后重试。")
+                created.append(name)
+            if created:
+                fields = read_fields()
+                for name, kind in expected.items():
+                    if name not in fields or int(fields[name].get("type") or 0) != kind:
+                        raise PortalError(f"设备调整工单字段回读未通过：{name}。")
+            self._adjust_work_order_schema_key = key
+            return {"ok": True, "created_fields": created}
+
     def _find_deletion_audit_record_id(self, audit_id: str) -> str:
         normalized_audit_id = str(audit_id or "").strip()
         if not normalized_audit_id:
@@ -42371,7 +42418,11 @@ class MaintenancePortalService:
                 job["restart_recovered"] = True
                 job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
                 self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
-            elif phase in {"accepted", "queued"} and not float(job.get("message_started_at") or 0):
+            elif (
+                phase in {"accepted", "queued"}
+                and not float(job.get("message_started_at") or 0)
+                and str((job.get("request") or {}).get("work_type") or "") == WORK_TYPE_EVENT
+            ):
                 job["phase"] = "accepted"
                 job["error"] = ""
                 job["error_category"] = ""
@@ -42982,8 +43033,17 @@ class MaintenancePortalService:
                     if phase not in blocking_phase_order:
                         continue
                     rank = int(blocking_phase_order.get(phase) or 0)
-                    epoch = self._job_epoch(existing) or 0.0
-                    if rank > blocking_rank or (rank == blocking_rank and epoch >= blocking_epoch):
+                    # Chain to the latest submission, not the furthest-running
+                    # phase; otherwise the second and third updates can race.
+                    is_event = request_work_type == WORK_TYPE_EVENT
+                    epoch = (
+                        self._job_epoch(existing) if is_event else
+                        float(existing.get("accepted_at") or 0) or self._job_epoch(existing)
+                    )
+                    if (
+                        (is_event and (rank > blocking_rank or (rank == blocking_rank and epoch >= blocking_epoch)))
+                        or (not is_event and epoch >= blocking_epoch)
+                    ):
                         blocking_job_id = str(existing.get("job_id") or "").strip()
                         blocking_phase = phase
                         blocking_rank = rank
@@ -43303,6 +43363,10 @@ class MaintenancePortalService:
         job = self._jobs.get(job_id)
         if not isinstance(job, dict) or str(job.get("phase") or "") != "failed":
             return
+        if job.get("remote_written") and str((job.get("request") or {}).get("work_type") or "") != WORK_TYPE_EVENT:
+            # Preserve the confirmed target and prepared data for local-only
+            # recovery; dropping them could turn a retry into another upload.
+            return
         retryable = bool(job.get("error_retryable"))
         compacted = {
             "job_id": str(job.get("job_id") or job_id),
@@ -43404,6 +43468,17 @@ class MaintenancePortalService:
                 patch.setdefault("error_retryable", classified["error_retryable"])
             if phase and phase != prior_phase:
                 now_ts = time.time()
+                stage_started = float(job.get("phase_started_at") or job.get("accepted_at") or now_ts)
+                durations = dict(job.get("phase_durations_ms") or {})
+                if prior_phase:
+                    durations[prior_phase] = round(float(durations.get(prior_phase) or 0) + max(0, now_ts - stage_started) * 1000, 1)
+                patch["phase_durations_ms"] = durations
+                patch["phase_started_at"] = now_ts
+                if phase in {"success", "failed"}:
+                    request = job.get("request") or {}
+                    elapsed = max(0, now_ts - float(job.get("accepted_at") or now_ts))
+                    if elapsed >= 10:
+                        logging.warning(f"通告处理耗时: job_id={job_id}, work_type={request.get('work_type', '')}, action={request.get('action', '')}, elapsed_s={elapsed:.1f}, stages_ms={durations}")
                 if phase == "accepted" and not job.get("accepted_at"):
                     patch["accepted_at"] = now_ts
                 elif phase == "sending_message":
@@ -43537,14 +43612,18 @@ class MaintenancePortalService:
             )
         else:
             prepared = self.prepare_maintenance_action(request_payload, job_id=job_id)
-        if work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING}:
+        if (
+            work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
+            and str(request_payload.get("action") or "").lower() == "start"
+            and self._truthy_flag(request_payload.get("_web_action_request"))
+        ):
             from .polling_work_orders import PollingWorkOrderService
 
             prepared.update(
                 PollingWorkOrderService(self._state_store).prepare_start(
                     request_payload,
                     job_id=job_id,
-                    people=self._load_signature_people(),
+                    people=([] if self._truthy_flag(request_payload.get("polling_work_order_exempt")) else self._load_signature_people()),
                 )
             )
         return self._synchronize_prepared_notice_text(prepared)

@@ -14265,6 +14265,7 @@ class LanPortalStateStore:
         *,
         limit: int = 1,
         lease_seconds: float = 30.0,
+        exclude_job_ids: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         queue_name = self._text(queue_name)
         if not queue_name:
@@ -14272,12 +14273,17 @@ class LanPortalStateStore:
         limit = max(1, min(int(limit or 1), 50))
         now = time.time()
         lease_until = now + max(1.0, float(lease_seconds or 30.0))
+        excluded = tuple(str(value) for value in exclude_job_ids)
+        exclusion = (
+            " AND job_id NOT IN (" + ",".join("?" for _ in excluded) + ")"
+            if excluded else ""
+        )
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT queue_name, job_id, status, available_at, lease_until,
                            attempts, last_error, payload_json, created_at, updated_at
                     FROM runtime_task_queue
@@ -14286,10 +14292,11 @@ class LanPortalStateStore:
                         (status = 'queued' AND available_at <= ?)
                         OR (status = 'processing' AND lease_until > 0 AND lease_until <= ?)
                       )
+                      {exclusion}
                     ORDER BY available_at ASC, updated_at ASC
                     LIMIT ?
                     """,
-                    (queue_name, now, now, limit),
+                    (queue_name, now, now, *excluded, limit),
                 ).fetchall()
                 keys = [str(row["job_id"] or "") for row in rows if str(row["job_id"] or "")]
                 for job_id in keys:

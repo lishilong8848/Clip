@@ -207,8 +207,17 @@ def check_requests_usage() -> tuple[bool, list[str]]:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        if "import requests" in text or "requests." in text:
-            offenders.append(normalized)
+        # Inspect code, not comments/test strings. Catching SDK exception types
+        # is allowed; importing requests/Session (including aliases) is not.
+        for node in ast.walk(ast.parse(text.lstrip("\ufeff"))):
+            forbidden = isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "requests" for alias in node.names)
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "requests":
+                forbidden = not (node.module == "requests.exceptions" and all(alias.name in {"Timeout", "ReadTimeout", "ConnectionError"} for alias in node.names))
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "requests":
+                forbidden = True
+            if forbidden:
+                offenders.append(normalized)
+                break
     return not offenders, offenders
 
 

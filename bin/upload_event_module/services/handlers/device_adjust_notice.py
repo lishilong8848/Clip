@@ -73,6 +73,13 @@ class AdjustNoticeHandler(BaseNoticeHandler):
                 {"file_token": token} for token in payload.file_tokens
             ]
 
+        if payload.polling_work_order_required:
+            fields.update({
+                ADJUST_NOTICE_FIELDS["work_order_required"]: True,
+                ADJUST_NOTICE_FIELDS["work_order_operator"]: str(payload.polling_operator_name or "").strip(),
+                ADJUST_NOTICE_FIELDS["work_order_reviewer"]: str(payload.polling_reviewer_name or "").strip(),
+            })
+
         return fields
 
     def build_update_fields(self, payload: NoticePayload) -> dict:

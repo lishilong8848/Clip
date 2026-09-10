@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "drill" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "drill" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -128,9 +128,15 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     tags: ["演练计划", "评估改进"],
     primaryAction: { key: "drill", label: "进入演练管理", primary: true },
   },
+  {
+    key: "cabinet_power", tone: "blue", icon: "capacity", badge: "机柜台账",
+    title: "机柜上下电", tags: ["五楼平面图", "操作历史", "表格导出"],
+    primaryAction: { key: "cabinet_power", label: "进入机柜上下电", primary: true },
+  },
 ];
 
 export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, ScopeHomeEntryConfig> = {
+  cabinet_power: { kicker: "机柜台账", title: "选择楼栋", description: "上下电记录与机柜平面图", actionLabel: "进入机柜上下电" },
   event: {
     kicker: "事件管理",
     title: "选择楼栋进入事件管理",

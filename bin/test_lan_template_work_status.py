@@ -6554,7 +6554,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
-    def test_backend_source_start_reuses_existing_target_record(self):
+    def test_backend_source_start_creates_directly_without_existing_target_query(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -6600,7 +6600,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ) as query_record, patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "rec-maint-duplicate"),
+                    return_value=(True, "rec-maint-new"),
                 ) as create_record:
                     ok, message, record_id = PortalRuntime._execute_backend_prepared_upload(
                         prepared
@@ -6609,12 +6609,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = old_store
 
         self.assertTrue(ok)
-        self.assertEqual(message, "rec-maint-existing")
-        self.assertEqual(record_id, "rec-maint-existing")
-        query_record.assert_called_once_with("rec-maint-existing", "维保通告")
-        create_record.assert_not_called()
+        self.assertEqual(message, "rec-maint-new")
+        self.assertEqual(record_id, "rec-maint-new")
+        query_record.assert_not_called()
+        create_record.assert_called_once()
 
-    def test_backend_manual_start_reuses_existing_active_target_by_semantic_key(self):
+    def test_backend_manual_start_creates_directly_without_semantic_target_query(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -6681,7 +6681,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ) as query_record, patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "rec-manual-duplicate"),
+                    return_value=(True, "rec-manual-new"),
                 ) as create_record:
                     ok, message, record_id = PortalRuntime._execute_backend_prepared_upload(
                         prepared
@@ -6690,10 +6690,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = old_store
 
         self.assertTrue(ok)
-        self.assertEqual(message, "rec-manual-existing")
-        self.assertEqual(record_id, "rec-manual-existing")
-        query_record.assert_called_once_with("rec-manual-existing", "维保通告")
-        create_record.assert_not_called()
+        self.assertEqual(message, "rec-manual-new")
+        self.assertEqual(record_id, "rec-manual-new")
+        query_record.assert_not_called()
+        create_record.assert_called_once()
 
     def test_backend_active_projection_preserves_existing_site_photo_count(self):
         old_store = PortalRuntime.state_store
@@ -7802,6 +7802,49 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = old_store
                 PortalRuntime.service = old_service
                 PortalRuntime.action_queue_event = old_event
+
+    def test_portal_qt_action_skips_nonretryable_failed_remote_intent(self):
+        class _FakeService:
+            def __init__(self):
+                self.job = {
+                    "phase": "remote_intent",
+                    "remote_operation_id": "notice_action:job-invalid-token",
+                }
+
+            def get_job(self, _job_id):
+                return dict(self.job)
+
+            def mark_job(self, _job_id, **patch):
+                self.job.update(patch)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            service = _FakeService()
+            old_store = PortalRuntime.state_store
+            old_service = PortalRuntime.service
+            try:
+                PortalRuntime.state_store = store
+                PortalRuntime.service = service
+                store.upsert_runtime_queue_item("qt_action", "job-invalid-token")
+                with patch.object(
+                    PortalRuntime,
+                    "_get_notice_remote_operation",
+                    return_value={
+                        "status": "failed",
+                        "error": "1254037 Invalid client token",
+                    },
+                ):
+                    processable = PortalRuntime._runtime_queue_job_processable(
+                        "qt_action", "job-invalid-token"
+                    )
+                self.assertFalse(processable)
+                self.assertEqual(service.job["phase"], "failed")
+                self.assertEqual(
+                    store.runtime_queue_counts()["qt_action"]["failed"], 1
+                )
+            finally:
+                PortalRuntime.state_store = old_store
+                PortalRuntime.service = old_service
 
     def test_lan_portal_state_store_checkpoints_database(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11421,7 +11464,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(memory["location"], "A-245配电室")
             self.assertEqual(memory["maintenance_cycle"], "月度")
 
-    def test_action_jobs_persist_in_sqlite_and_restart_recovers_pre_send_job(self):
+    def test_action_jobs_restart_stops_unsent_non_event_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             service = self._new_temp_service(root)
@@ -11439,9 +11482,154 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             restarted = self._new_temp_service(root)
             restored = restarted.get_job(job_id)
-            self.assertEqual(restored["phase"], "accepted")
-            self.assertTrue(restored["restart_recovered"])
-            self.assertEqual(restarted.recoverable_action_job_ids(), [job_id])
+            self.assertEqual(restored["phase"], "failed")
+            self.assertFalse(restored["restart_recovered"])
+            self.assertEqual(restarted.recoverable_action_job_ids(), [])
+
+    def test_slow_notice_terminal_status_survives_timing_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            for phase in ("success", "failed"):
+                job_id, _ = service.create_action_job({
+                    "action": "update", "work_type": "adjust", "scope": "A",
+                    "target_record_id": "target-" + phase, "operation_id": phase,
+                })
+                service.mark_job(job_id, accepted_at=time.time() - 120, phase="remote_written")
+                service.mark_job(job_id, phase=phase, error="test failure" if phase == "failed" else "")
+                self.assertEqual(service.get_job(job_id)["phase"], phase)
+                self.assertEqual(service._state_store.get_document("notice_action_job", job_id)["phase"], phase)
+
+    def test_event_restart_recovery_and_serial_lane_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            job = service._base_job({
+                "action": "start", "work_type": "event", "scope": "A",
+                "notice_type": "事件通告",
+                "record_id": "event-source", "operation_id": "event-restart",
+            })
+            job_id = job["job_id"]
+            service._state_store.put_document("notice_action_job", job_id, job)
+            restarted = self._new_temp_service(Path(tmp))
+            self.assertEqual(restarted.get_job(job_id)["phase"], "accepted")
+            self.assertIn(job_id, restarted.recoverable_action_job_ids())
+            first = {"request": {"work_type": "event", "target_record_id": "event-1"}}
+            second = {"request": {"work_type": "event", "target_record_id": "event-2"}}
+            self.assertEqual(PortalRuntime._action_job_identity_keys(first), PortalRuntime._action_job_identity_keys(second))
+
+    def test_notice_queue_positions_preserve_failure_and_projection_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            for phase in ("remote_written", "remote_intent", "failed", "success"):
+                job_id, _ = service.create_action_job({
+                    "action": "update", "work_type": "maintenance", "scope": "A",
+                    "target_record_id": phase, "operation_id": phase,
+                })
+                service.mark_job(job_id, phase=phase)
+                service._state_store.upsert_runtime_queue_item("qt_action", job_id)
+                with patch.object(PortalRuntime, "service", service), patch.object(PortalRuntime, "state_store", service._state_store):
+                    PortalRuntime._update_queue_positions_locked()
+                self.assertEqual(service.get_job(job_id)["phase"], phase)
+
+    def test_three_notice_updates_depend_on_latest_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            payload = {"action": "update", "scope": "A", "work_type": "adjust", "target_record_id": "one-target"}
+            first, _ = service.create_action_job({**payload, "operation_id": "first"})
+            service.mark_job(first, phase="uploading", accepted_at=100)
+            second, _ = service.create_action_job({**payload, "operation_id": "second"})
+            service.mark_job(second, accepted_at=200)
+            third, _ = service.create_action_job({**payload, "operation_id": "third", "action": "end"})
+            self.assertEqual(service.get_job(second)["depends_on_job_id"], first)
+            self.assertEqual(service.get_job(third)["depends_on_job_id"], second)
+
+    def test_notice_dispatcher_runs_different_targets_concurrently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            jobs = []
+            for index, target in enumerate(("one", "one", "two")):
+                job_id, _ = service.create_action_job({
+                    "action": "update", "scope": "A", "work_type": "adjust",
+                    "target_record_id": target, "operation_id": str(index),
+                })
+                store.upsert_runtime_queue_item("qt_action", job_id)
+                jobs.append(job_id)
+            first_started, second_started, other_started, release = (threading.Event() for _ in range(4))
+            calls = []
+
+            def execute(job_id):
+                calls.append(job_id)
+                if job_id == jobs[0]:
+                    first_started.set()
+                    release.wait(8)
+                elif job_id == jobs[1]:
+                    second_started.set()
+                else:
+                    other_started.set()
+                service.mark_job(job_id, phase="success")
+                store.mark_runtime_queue_item("qt_action", job_id, "done")
+
+            with (
+                patch.object(PortalRuntime, "service", service),
+                patch.object(PortalRuntime, "state_store", store),
+                patch.object(PortalRuntime, "action_queue_event", threading.Event()),
+                patch.object(PortalRuntime, "action_worker_stop", False),
+                patch.object(PortalRuntime, "_process_maintenance_action_job", side_effect=execute),
+            ):
+                worker = threading.Thread(target=PortalRuntime._action_worker_loop)
+                worker.start()
+                try:
+                    self.assertTrue(first_started.wait(5))
+                    self.assertTrue(other_started.wait(5), "unrelated target must not wait")
+                    self.assertFalse(second_started.is_set(), "same target must remain serialized")
+                    release.set()
+                    self.assertTrue(second_started.wait(5))
+                finally:
+                    release.set()
+                    PortalRuntime.action_worker_stop = True
+                    PortalRuntime.action_queue_event.set()
+                    worker.join(8)
+                self.assertFalse(worker.is_alive())
+                self.assertCountEqual(calls, jobs)
+
+    def test_running_notice_not_released_again_after_lease_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.upsert_runtime_queue_item("qt_action", "running")
+            store.lease_runtime_queue_items("qt_action")
+            store.upsert_runtime_queue_item("qt_action", "next")
+            with patch("lan_bitable_template_portal.state_store.time.time", return_value=time.time() + 60):
+                leased = store.lease_runtime_queue_items("qt_action", exclude_job_ids=("running",))
+            self.assertEqual([row["job_id"] for row in leased], ["next"])
+
+    def test_repeated_projection_failure_stops_with_remote_written_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            job_id, _ = service.create_action_job({
+                "action": "update", "work_type": "adjust", "scope": "A",
+                "target_record_id": "existing-target", "operation_id": "projection-limit",
+            })
+            service.mark_job(job_id, remote_written=True, remote_record_id="existing-target", prepared={"work_type": "adjust"})
+            store = service._state_store
+            store.upsert_runtime_queue_item("qt_action", job_id)
+            with (
+                patch.object(PortalRuntime, "service", service),
+                patch.object(PortalRuntime, "state_store", store),
+                patch.object(PortalRuntime, "_get_notice_remote_operation", return_value={"status": "remote_written"}),
+                patch.object(PortalRuntime, "_begin_notice_remote_operation", side_effect=RuntimeError("local unavailable")),
+                patch.object(PortalRuntime, "_execute_backend_prepared_upload") as upload,
+            ):
+                for _ in range(3):
+                    PortalRuntime._process_maintenance_action_job(job_id)
+            final = service.get_job(job_id)
+            self.assertEqual(final["phase"], "failed")
+            self.assertTrue(final["remote_written"])
+            self.assertIn("勿重新发送", final["error"])
+            restarted = self._new_temp_service(Path(tmp))
+            self.assertEqual(restarted.get_job(job_id)["phase"], "failed")
+            self.assertTrue(restarted.get_job(job_id)["remote_written"])
+            self.assertNotIn(job_id, restarted.recoverable_action_job_ids())
+            upload.assert_not_called()
 
     def test_source_refresh_publishes_successes_and_retains_failed_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -24888,6 +25076,50 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.service = original_service
             PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
+
+    def test_fastapi_ongoing_delete_busy_returns_conflict(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        session = {
+            "user": {"name": "测试用户", "open_id": "ou_delete_busy"},
+            "role": "admin",
+            "allowed_scopes": ["ALL"],
+            "expires_at": time.time() + 3600,
+        }
+        with (
+            patch.object(controller, "_current_session", return_value=session),
+            patch.object(PortalRuntime.service, "validate_ongoing_delete_item"),
+            patch.object(
+                PortalRuntime,
+                "execute_local_delete_active_item",
+                return_value={
+                    "ok": False,
+                    "conflict": True,
+                    "message": "该通告正在处理，请稍后再试。当前动作：projection_retry",
+                    "remote_deleted": False,
+                },
+            ),
+        ):
+            response = TestClient(controller._build_app()).post(
+                "/api/ongoing-items/delete",
+                json={
+                    "scope": "A",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "active_item_id": "active-busy",
+                },
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("正在处理", response.json()["error"])
+
+    def test_fastapi_large_text_responses_use_gzip(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        response = client.get(
+            "/assets/connection-guard.js",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("content-encoding"), "gzip")
 
     def test_fastapi_ongoing_delete_keeps_success_when_local_cleanup_fails(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
