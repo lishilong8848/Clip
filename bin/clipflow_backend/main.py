@@ -9303,11 +9303,27 @@ class FastAPIPortalController:
 
     def _initialize_portal_handler_state(self) -> None:
         started_at = time.perf_counter()
-        PortalRuntime.service = MaintenancePortalService(
-            app_token=self.app_token,
-            table_id=self.table_id,
-            enable_repair_snapshots=True,
-        )
+        with PortalRuntime.action_queue_lock:
+            with PortalRuntime.message_queue_lock:
+                previous_service = PortalRuntime.service
+                has_running_jobs = bool(
+                    PortalRuntime.action_running_job_ids
+                    or PortalRuntime.message_running_job_ids
+                    or PortalRuntime.message_scope_inflight
+                )
+                if has_running_jobs:
+                    if (
+                        str(getattr(previous_service, "app_token", "") or "") != str(self.app_token or "")
+                        or str(getattr(previous_service, "table_id", "") or "") != str(self.table_id or "")
+                    ):
+                        raise RuntimeError("后台仍有通告任务执行中，不能切换飞书应用或数据表。")
+                    PortalRuntime.service = previous_service
+                else:
+                    PortalRuntime.service = MaintenancePortalService(
+                        app_token=self.app_token,
+                        table_id=self.table_id,
+                        enable_repair_snapshots=True,
+                    )
         PortalRuntime.service._polling_sop_cloud = (
             PortalRuntime._polling_sop_cloud
             if external_real_write_guard().get("real_write_allowed")

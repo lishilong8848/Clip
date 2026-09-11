@@ -110,6 +110,26 @@ class PerformanceGuardTests(unittest.TestCase):
             client.close()
         self.assertEqual(maximum, 2)
 
+    def test_http_transport_error_does_not_close_shared_client(self):
+        calls = 0
+
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ConnectError("temporary", request=request)
+            return httpx.Response(200, json={"code": 0}, request=request)
+
+        client = FeishuHttpClient(transport=httpx.MockTransport(handler), retries=0)
+        try:
+            with patch.object(client, "close", wraps=client.close) as close:
+                with self.assertRaisesRegex(Exception, "temporary"):
+                    client.request_json("GET", "https://open.feishu.cn/first")
+                close.assert_not_called()
+                self.assertEqual(client.request_json("GET", "https://open.feishu.cn/second")["code"], 0)
+        finally:
+            client.close()
+
     def test_patch_zip_rejects_parent_paths_and_meta_has_file_hashes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

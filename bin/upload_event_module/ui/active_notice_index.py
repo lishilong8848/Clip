@@ -52,7 +52,7 @@ class ActiveNoticeIndex:
         self._built = False
 
     def invalidate(self):
-        self._built = False
+        self.clear()
 
     def rebuild(self, iter_items):
         by_record_id = {}

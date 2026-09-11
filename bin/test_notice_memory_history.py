@@ -289,7 +289,7 @@ class NoticeMemoryHistoryTests(unittest.TestCase):
         self.assertEqual(source["memory_name"], "A楼冷机检修")
         self.assertEqual(source["source_status"], "已结束")
 
-    def test_history_source_items_ignore_candidate_work_type_filter(self):
+    def test_history_source_items_respect_candidate_work_type_filter(self):
         month_label = self.service._current_month_label()
         self.service.source_records = [
             _source_record(
@@ -322,7 +322,7 @@ class NoticeMemoryHistoryTests(unittest.TestCase):
 
         titles = {item["memory_name"] for item in payload["source_items"]}
         self.assertIn("A楼维保", titles)
-        self.assertIn("A楼变更", titles)
+        self.assertNotIn("A楼变更", titles)
 
     def test_lookup_change_target_candidates_by_name_and_time(self):
         self.service.target_records[WORK_TYPE_CHANGE] = [

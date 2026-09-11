@@ -2268,6 +2268,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._capture_generation = 0
 
+        self._session_generation = 0
+
         self._extra_screenshot_encodes = 0
 
         self.screenshot_encoded.connect(self._on_screenshot_encoded)
@@ -3344,6 +3346,14 @@ class ScreenshotConfirmDialog(QDialog):
 
 
     def set_data(self, data_dict, action_type="upload", is_mandatory=False):
+
+        self._session_generation += 1
+
+        self._capture_generation += 1
+
+        self._extra_screenshot_encodes = 0
+
+        self._ocr_cancelled = False
 
         # The dialog may prefill and normalize several selections.  Work on a
         # copy so opening the dialog and closing it with X is a neutral action.
@@ -6849,7 +6859,7 @@ class ScreenshotConfirmDialog(QDialog):
 
     def _on_extra_screenshot_captured(self, pil_image):
 
-        generation = self._capture_generation
+        generation = self._session_generation
 
         self._extra_screenshot_encodes += 1
 
@@ -8524,11 +8534,15 @@ class ScreenshotConfirmDialog(QDialog):
 
     def _on_extra_screenshot_encoded(self, generation, image_bytes):
 
+        if generation != self._session_generation:
+
+            return
+
         self._extra_screenshot_encodes = max(0, self._extra_screenshot_encodes - 1)
 
         self._refresh_submit_state()
 
-        if generation != self._capture_generation or self._ocr_cancelled:
+        if self._ocr_cancelled:
 
             return
 
@@ -8758,6 +8772,12 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._ocr_cancelled = True
 
+        self._session_generation += 1
+
+        self._capture_generation += 1
+
+        self._extra_screenshot_encodes = 0
+
         self._reset_recover_selection()
 
         self.hide()
@@ -8783,6 +8803,12 @@ class ScreenshotConfirmDialog(QDialog):
         self._suppress_ocr_cancel_on_hide = False
 
         self._ocr_cancelled = True
+
+        self._session_generation += 1
+
+        self._capture_generation += 1
+
+        self._extra_screenshot_encodes = 0
 
         self._reset_recover_selection()
 

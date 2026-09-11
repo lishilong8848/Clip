@@ -95,15 +95,6 @@ class FeishuHttpClient:
             if client is not None:
                 client.close()
 
-    def _reset_after_transport_error(self) -> None:
-        """Discard a connection pool after a network/TLS failure."""
-        try:
-            self.close()
-        except Exception:
-            # Preserve the original transport exception; the next attempt will
-            # still build a fresh client because close clears ``_client`` first.
-            pass
-
     def __del__(self) -> None:
         try:
             self.close()
@@ -157,8 +148,6 @@ class FeishuHttpClient:
                 ) from exc
             except Exception as exc:
                 last_error = str(exc)
-                if not isinstance(exc, FeishuHTTPError):
-                    self._reset_after_transport_error()
                 if attempt < retry_count:
                     time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
                     continue
@@ -231,8 +220,6 @@ class FeishuHttpClient:
                 ) from exc
             except Exception as exc:
                 last_error = str(exc)
-                if not isinstance(exc, FeishuHTTPError):
-                    self._reset_after_transport_error()
                 if attempt < retry_count:
                     time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
                     continue
@@ -281,8 +268,6 @@ class FeishuHttpClient:
                 ) from exc
             except Exception as exc:
                 last_error = str(exc)
-                if not isinstance(exc, FeishuHTTPError):
-                    self._reset_after_transport_error()
                 if attempt < retry_count:
                     time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
                     continue

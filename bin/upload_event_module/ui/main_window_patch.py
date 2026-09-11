@@ -197,6 +197,8 @@ class PatchUpdateMixin:
     def _remote_update_check_worker(self, manual: bool = False):
         if getattr(self, "_closing", False):
             return
+        from ..services.remote_patch_updater import RemotePatchUpdater
+
         status_text = "远程更新: 已是最新"
         ui_manifest = None
         non_ui_manifest = None
@@ -208,10 +210,10 @@ class PatchUpdateMixin:
             if not manifest:
                 status_text = "远程更新: 清单为空"
             else:
-                local_meta = type(self._remote_patch_updater).load_local_build_meta(
+                local_meta = RemotePatchUpdater.load_local_build_meta(
                     self._get_app_root_dir()
                 )
-                if not type(self._remote_patch_updater).is_local_version_known(local_meta):
+                if not RemotePatchUpdater.is_local_version_known(local_meta):
                     status_text = "远程更新: 本地版本未标记(跳过)"
                 elif not self._remote_patch_updater.has_newer_patch(local_meta, manifest):
                     status_text = "远程更新: 已是最新"
@@ -810,8 +812,10 @@ class PatchUpdateMixin:
                 self.patch_btn.hide()
 
     def _discard_satisfied_remote_manifests(self):
+        from ..services.remote_patch_updater import RemotePatchUpdater
+
         try:
-            local_meta = type(self._remote_patch_updater).load_local_build_meta(
+            local_meta = RemotePatchUpdater.load_local_build_meta(
                 self._get_app_root_dir()
             )
         except Exception:

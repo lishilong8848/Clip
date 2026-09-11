@@ -322,7 +322,12 @@ class PollingSopCloudStore:
         if existing:
             record = self._request("PUT", f"records/{existing['_cloud_record_id']}", body).get("record") or {}
         else:
-            record = self._request("POST", "records", body).get("record") or {}
+            client_token = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, "clipflow:polling-sop:" + str(sop.get("sop_id") or ""))
+            )
+            record = self._request(
+                "POST", "records", body, params={"client_token": client_token}
+            ).get("record") or {}
         result = copy.deepcopy(sop)
         result["_cloud_record_id"] = str(record.get("record_id") or (existing or {}).get("_cloud_record_id") or "")
         self.invalidate()
@@ -482,6 +487,14 @@ class PollingWorkOrderService:
             if self._legacy_cloud_sync_done:
                 return cloud_items, []
             known_ids = {str(item.get("sop_id") or "") for item in cloud_items}
+            known_names = {
+                (
+                    str(item.get("scope") or "").strip().upper(),
+                    _stored_work_order_type(item),
+                    str(item.get("name") or "").strip().casefold(),
+                )
+                for item in cloud_items
+            }
             pending: list[dict] = []
             changed = False
             documents = self.state_store.list_documents(POLLING_SOP_NAMESPACE)
@@ -498,6 +511,13 @@ class PollingWorkOrderService:
                         raise PortalError("本地旧 SOP 标识或楼栋无效。")
                     if not name or len(name) > 160:
                         raise PortalError("本地旧 SOP 名称无效。")
+                    name_key = (scope, work_type, name.casefold())
+                    if name_key in known_names:
+                        print(
+                            "[ClipFlow] 本地旧 SOP 与云端同名，保留云端版本: "
+                            f"sop_id={sop_id}, name={name}"
+                        )
+                        continue
                     local.update(
                         scope=scope,
                         work_type=work_type,
@@ -514,6 +534,16 @@ class PollingWorkOrderService:
                         attachment_id = str(attachment.get("attachment_id") or "")
                         if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", attachment_id):
                             raise PortalError("本地旧 SOP 附件标识无效。")
+                        file_token = str(attachment.get("file_token") or "").strip()
+                        if file_token:
+                            if not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", file_token):
+                                raise PortalError("本地旧 SOP 飞书附件标识无效。")
+                            size = int(attachment.get("size") or 0)
+                            total_size += size
+                            if size < 0 or size > POLLING_SOP_MAX_FILE_BYTES or total_size > POLLING_SOP_MAX_TOTAL_BYTES:
+                                raise PortalError("本地旧 SOP 附件大小超限。")
+                            attachment["name"] = _safe_file_name(attachment.get("name"))
+                            continue
                         path = Path(str(attachment.get("path") or "")).resolve()
                         directory = self._sop_directory(sop_id)
                         if not path.is_file() or not path.is_relative_to(directory):
@@ -527,13 +557,13 @@ class PollingWorkOrderService:
                         if expected_hash and digest_value != expected_hash:
                             raise PortalError(f"本地旧 SOP 附件校验失败：{path.name}")
                         attachment.update(size=size, sha256=digest_value, name=_safe_file_name(attachment.get("name")))
-                        if not str(attachment.get("file_token") or "").strip():
-                            attachment["file_token"] = self.cloud.upload_attachment(path, attachment["name"])
-                            local["attachments"] = attachments
-                            self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, local)
+                        attachment["file_token"] = self.cloud.upload_attachment(path, attachment["name"])
+                        local["attachments"] = attachments
+                        self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, local)
                     local["attachments"] = attachments
                     self.cloud.save_sop(local, expected_version=0, allow_create=True)
                     known_ids.add(sop_id)
+                    known_names.add(name_key)
                     changed = True
                 except PortalConflictError:
                     existing = self.cloud.get_sop(sop_id, force=True)

@@ -1121,13 +1121,13 @@ class MainWindowUiMixin:
         except Exception:
             return True
 
-    def _shutdown_qt_backend_command_executor(self) -> None:
+    def _shutdown_qt_backend_command_executor(self, *, wait: bool = False) -> None:
         executor = getattr(self, "_qt_backend_command_executor", None)
         if executor is None:
             return
         self._qt_backend_command_executor = None
         try:
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=wait, cancel_futures=True)
         except Exception as exc:
             log_warning(f"Qt后端命令线程池停止失败: {exc}")
 
@@ -1140,12 +1140,6 @@ class MainWindowUiMixin:
         if getattr(self, "_runtime_shutdown_done", False):
             return
         self._runtime_shutdown_done = True
-        try:
-            store = getattr(self, "cache_store", None)
-            if store:
-                store.replace_payload(self._collect_active_cache())
-        except Exception:
-            pass
         self._closing = True
         try:
             for timer_name in (
@@ -1178,7 +1172,13 @@ class MainWindowUiMixin:
         self._shutdown_clipboard_ipc(wait_ms=1500)
         if hasattr(self, "hot_reload_manager") and self.hot_reload_manager:
             self.hot_reload_manager.stop()
-        self._shutdown_qt_backend_command_executor()
+        self._shutdown_qt_backend_command_executor(wait=True)
+        try:
+            store = getattr(self, "cache_store", None)
+            if store:
+                store.replace_payload(self._collect_active_cache())
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         try:

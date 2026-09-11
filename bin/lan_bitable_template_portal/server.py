@@ -631,6 +631,8 @@ class PortalRuntime:
     action_queue_event = threading.Event()
     action_worker_thread: threading.Thread | None = None
     action_worker_stop = False
+    action_worker_generation = 0
+    action_running_job_ids: set[str] = set()
     action_upload_timeout_s = 30 * 60
     upload_wait_thread: threading.Thread | None = None
     upload_wait_lock = threading.RLock()
@@ -640,6 +642,8 @@ class PortalRuntime:
     message_queue_event = threading.Event()
     message_worker_threads: list[threading.Thread] = []
     message_worker_stop = False
+    message_worker_generation = 0
+    message_running_job_ids: set[str] = set()
     message_worker_count = 5
     message_batch_wait_seconds = 1.2
     message_batch_max_jobs = 20
@@ -6226,11 +6230,13 @@ class PortalRuntime:
             if len(cls.message_worker_threads) >= cls.message_worker_count:
                 return
             cls.message_worker_stop = False
-            missing = cls.message_worker_count - len(cls.message_worker_threads)
+            if not cls.message_worker_threads:
+                cls.message_worker_generation += 1
+            generation = cls.message_worker_generation
             for worker_index in range(len(cls.message_worker_threads), cls.message_worker_count):
                 worker = threading.Thread(
                     target=cls._message_worker_loop,
-                    args=(worker_index,),
+                    args=(worker_index, generation),
                     name=f"LANPersonalMessageQueue-{worker_index + 1}",
                     daemon=True,
                 )
@@ -6241,7 +6247,7 @@ class PortalRuntime:
     def stop_message_workers(cls) -> None:
         with cls.message_queue_lock:
             cls.message_worker_stop = True
-            cls.message_scope_inflight.clear()
+            cls.message_worker_generation += 1
             cls.message_queue_event.set()
             workers = list(cls.message_worker_threads)
         for worker in workers:
@@ -6299,16 +6305,29 @@ class PortalRuntime:
             )
 
     @classmethod
-    def _message_worker_loop(cls, worker_index: int = 0) -> None:
+    def _message_worker_loop(
+        cls, worker_index: int = 0, generation: int | None = None
+    ) -> None:
+        generation = cls.message_worker_generation if generation is None else generation
         while True:
             signaled = cls.message_queue_event.wait(timeout=1)
-            if cls.message_worker_stop:
+            if cls.message_worker_stop or generation != cls.message_worker_generation:
                 return
             if not signaled and worker_index:
                 continue
             job_id = cls._dequeue_runtime_job("message")
             if not job_id:
                 continue
+            with cls.message_queue_lock:
+                if cls.message_worker_stop or generation != cls.message_worker_generation:
+                    cls.state_store.requeue_runtime_queue_item(
+                        "message", job_id, available_at=time.time()
+                    )
+                    scope = cls._message_job_scope(job_id)
+                    if scope:
+                        cls.message_scope_inflight.discard(scope)
+                    return
+                cls.message_running_job_ids.add(job_id)
             try:
                 cls.state_store.mark_runtime_queue_item("message", job_id, "processing")
             except Exception:
@@ -6379,10 +6398,10 @@ class PortalRuntime:
     @classmethod
     def _release_message_scope(cls, job_id: str) -> None:
         scope = cls._message_job_scope(job_id)
-        if not scope:
-            return
         with cls.message_queue_lock:
-            cls.message_scope_inflight.discard(scope)
+            cls.message_running_job_ids.discard(job_id)
+            if scope:
+                cls.message_scope_inflight.discard(scope)
             cls.message_queue_event.set()
 
     @classmethod
@@ -6418,6 +6437,7 @@ class PortalRuntime:
                             "message",
                             limit=1,
                             lease_seconds=30,
+                            exclude_job_ids=tuple(cls.message_running_job_ids),
                         )
                     except Exception:
                         leased = []
@@ -6579,9 +6599,12 @@ class PortalRuntime:
             if cls.action_worker_thread and cls.action_worker_thread.is_alive():
                 return
             cls.action_worker_stop = False
+            cls.action_worker_generation += 1
+            generation = cls.action_worker_generation
             cls.action_queue_event.clear()
             cls.action_worker_thread = threading.Thread(
                 target=cls._action_worker_loop,
+                args=(generation,),
                 name="LANMaintenanceActionQueue",
                 daemon=True,
             )
@@ -6591,6 +6614,7 @@ class PortalRuntime:
     def stop_action_worker(cls) -> None:
         with cls.action_queue_lock:
             cls.action_worker_stop = True
+            cls.action_worker_generation += 1
             cls._update_queue_positions_locked()
             cls.action_queue_event.set()
             worker = cls.action_worker_thread
@@ -6599,6 +6623,9 @@ class PortalRuntime:
                 worker.join(timeout=2)
             except Exception:
                 pass
+        with cls.action_queue_lock:
+            if cls.action_worker_thread is worker:
+                cls.action_worker_thread = None
 
     @classmethod
     def enqueue_action_job(cls, job_id: str) -> None:
@@ -6630,7 +6657,8 @@ class PortalRuntime:
             queued_job_id = str((item or {}).get("job_id") or "").strip()
             if not queued_job_id:
                 continue
-            job = cls.service.get_job(queued_job_id) or {}
+            get_job = getattr(cls.service, "get_job", None)
+            job = get_job(queued_job_id) or {} if callable(get_job) else {}
             # Queue position is presentation metadata, not the execution phase.
             # In particular, never overwrite remote_written/failed on retries.
             phase_patch = (
@@ -6668,46 +6696,105 @@ class PortalRuntime:
         return keys - {""} or {str(job.get("job_id") or "")}
 
     @classmethod
-    def _action_worker_loop(cls) -> None:
+    def _action_future_done(cls, job_id: str, future, service, state_store) -> None:
+        try:
+            future.result()
+        except Exception as exc:
+            logging.exception("通告任务执行异常: job_id=%s", job_id)
+            try:
+                service.mark_job(job_id, phase="failed", error=str(exc))
+            except Exception:
+                pass
+            try:
+                state_store.mark_runtime_queue_item(
+                    "qt_action", job_id, "failed", error=str(exc)
+                )
+            except Exception:
+                pass
+        finally:
+            with cls.action_queue_lock:
+                cls.action_running_job_ids.discard(job_id)
+            cls.action_queue_event.set()
+
+    @classmethod
+    def _action_worker_loop(cls, generation: int | None = None) -> None:
         # Bounded concurrency prevents a slow unrelated notice blocking all
         # uploads without flooding Feishu or the desktop with unbounded threads.
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="NoticeUpload") as pool:
+        generation = cls.action_worker_generation if generation is None else generation
+        pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="NoticeUpload")
+        try:
             running = {}
-            while not cls.action_worker_stop:
+            while generation == cls.action_worker_generation and not cls.action_worker_stop:
                 for job_id, future in list(running.items()):
                     if future.done():
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            logging.exception("通告任务执行异常: job_id=%s", job_id)
-                            cls.service.mark_job(job_id, phase="failed", error=str(exc))
-                            cls.state_store.mark_runtime_queue_item("qt_action", job_id, "failed", error=str(exc))
                         del running[job_id]
                 cls.action_queue_event.wait(timeout=1.0)
                 cls.action_queue_event.clear()
-                if cls.action_worker_stop or len(running) >= 4:
+                if (
+                    generation != cls.action_worker_generation
+                    or cls.action_worker_stop
+                ):
                     continue
-                job_id = cls._dequeue_runtime_job("qt_action", exclude_job_ids=tuple(running))
+                with cls.action_queue_lock:
+                    if len(cls.action_running_job_ids) >= 4:
+                        continue
+                    excluded = tuple(set(running) | cls.action_running_job_ids)
+                job_id = cls._dequeue_runtime_job("qt_action", exclude_job_ids=excluded)
                 if not job_id:
                     continue
-                job = cls.service.get_job(job_id) or {}
-                keys = cls._action_job_identity_keys(job)
-                if any(keys & cls._action_job_identity_keys(cls.service.get_job(other) or {}) for other in running):
-                    cls.state_store.requeue_runtime_queue_item(
-                        "qt_action", job_id, available_at=time.time() + 0.5,
-                        error="等待同一通告上一条操作完成",
+                with cls.action_queue_lock:
+                    if generation != cls.action_worker_generation or cls.action_worker_stop:
+                        cls.state_store.requeue_runtime_queue_item(
+                            "qt_action", job_id, available_at=time.time()
+                        )
+                        continue
+                    cls.action_running_job_ids.add(job_id)
+                service = cls.service
+                state_store = cls.state_store
+                try:
+                    job = service.get_job(job_id) or {}
+                    keys = cls._action_job_identity_keys(job)
+                    with cls.action_queue_lock:
+                        other_running = cls.action_running_job_ids - {job_id}
+                    if any(
+                        keys & cls._action_job_identity_keys(service.get_job(other) or {})
+                        for other in other_running
+                    ):
+                        state_store.requeue_runtime_queue_item(
+                            "qt_action", job_id, available_at=time.time() + 0.5,
+                            error="等待同一通告上一条操作完成",
+                        )
+                        with cls.action_queue_lock:
+                            cls.action_running_job_ids.discard(job_id)
+                        continue
+                    service.mark_job(
+                        job_id,
+                        queue_position=0, qt_queue_position=0, upload_queue_position=0,
+                        **({"qt_phase": "preparing"} if str(job.get("phase") or "") in {"accepted", "queued", "qt_queued"} and "event:serial" not in keys else {}),
                     )
+                    future = pool.submit(cls._process_maintenance_action_job, job_id)
+                except Exception as exc:
+                    with cls.action_queue_lock:
+                        cls.action_running_job_ids.discard(job_id)
+                    try:
+                        state_store.requeue_runtime_queue_item(
+                            "qt_action", job_id, available_at=time.time() + 1.0,
+                            error=str(exc),
+                        )
+                    except Exception:
+                        pass
+                    logging.exception("通告任务准备失败，已重新排队: job_id=%s", job_id)
                     continue
-                cls.service.mark_job(
-                    job_id,
-                    queue_position=0, qt_queue_position=0, upload_queue_position=0,
-                    **({"qt_phase": "preparing"} if str(job.get("phase") or "") in {"accepted", "queued", "qt_queued"} and "event:serial" not in keys else {}),
+                future.add_done_callback(
+                    lambda completed, current_job_id=job_id, current_service=service, current_store=state_store: cls._action_future_done(
+                        current_job_id, completed, current_service, current_store
+                    )
                 )
-                future = pool.submit(cls._process_maintenance_action_job, job_id)
-                future.add_done_callback(lambda _future: cls.action_queue_event.set())
                 running[job_id] = future
                 if len(running) < 4:
                     cls.action_queue_event.set()
+        finally:
+            pool.shutdown(wait=True, cancel_futures=False)
 
     @classmethod
     def ensure_upload_wait_worker(cls) -> None:

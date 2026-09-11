@@ -298,6 +298,7 @@ async function changeTab(key: string): Promise<void> { tab.value = key; if (key 
 function showRoomRecords(room: string): void { query.room = room; tab.value = 'records'; void loadRecords(1); }
 const mapSearch = ref(''), currentRoom = ref(''), layout = ref<Dict>({}), layoutLoading = ref(false), viewport = ref<HTMLElement>(), zoom = ref(1);
 const layoutCache = new Map<string,Dict>();
+watch(() => overview.value.version, (version, previous) => { if (previous && version !== previous) layoutCache.clear(); });
 const filteredRooms = computed(() => (overview.value.rooms || []).filter((r: Dict) => !mapSearch.value || (r.id + ' ' + r.name).includes(mapSearch.value) || (overview.value.racks || []).some((rack: Dict) => rack.room === r.id && rack.rack.includes(mapSearch.value.toUpperCase()))));
 async function selectRoom(id: string): Promise<void> {
   if (!id) return; currentRoom.value = id; const cacheKey = `${overview.value.version || ''}:${id}`, cached = layoutCache.get(cacheKey); if (cached) { layout.value = cached; await nextTick(); fitMap(); return; }

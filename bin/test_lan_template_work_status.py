@@ -3961,7 +3961,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(payload["code"], 99991663)
 
-    def test_feishu_http_client_rebuilds_pool_after_transport_timeout(self):
+    def test_feishu_http_client_retries_transport_timeout_without_closing_pool(self):
         calls = []
 
         def handler(request):
@@ -3970,16 +3970,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 raise httpx.ConnectTimeout("TLS handshake timeout", request=request)
             return httpx.Response(200, json={"code": 0}, request=request)
 
-        class _TrackingClient(FeishuHttpClient):
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                self.reset_count = 0
-
-            def _reset_after_transport_error(self):
-                self.reset_count += 1
-                super()._reset_after_transport_error()
-
-        client = _TrackingClient(
+        client = FeishuHttpClient(
             transport=httpx.MockTransport(handler),
             retries=1,
         )
@@ -3990,7 +3981,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(payload["code"], 0)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(client.reset_count, 1)
 
     def test_portal_service_request_uses_unified_http_client_by_default(self):
         service = MaintenancePortalService()
@@ -11634,6 +11624,47 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 leased = store.lease_runtime_queue_items("qt_action", exclude_job_ids=("running",))
             self.assertEqual([row["job_id"] for row in leased], ["next"])
 
+    def test_notice_dispatcher_serializes_target_across_worker_generations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            payload = {
+                "action": "update", "scope": "A", "work_type": "adjust",
+                "target_record_id": "shared-target",
+            }
+            old_job, _ = service.create_action_job({**payload, "operation_id": "old"})
+            service.mark_job(old_job, phase="uploading")
+            new_job, _ = service.create_action_job({**payload, "operation_id": "new"})
+            service._state_store.upsert_runtime_queue_item("qt_action", new_job)
+            started = threading.Event()
+
+            def execute(job_id):
+                started.set()
+                service.mark_job(job_id, phase="success")
+                service._state_store.mark_runtime_queue_item("qt_action", job_id, "done")
+
+            with (
+                patch.object(PortalRuntime, "service", service),
+                patch.object(PortalRuntime, "state_store", service._state_store),
+                patch.object(PortalRuntime, "action_queue_event", threading.Event()),
+                patch.object(PortalRuntime, "action_worker_stop", False),
+                patch.object(PortalRuntime, "action_running_job_ids", {old_job}),
+                patch.object(PortalRuntime, "_process_maintenance_action_job", side_effect=execute),
+            ):
+                worker = threading.Thread(target=PortalRuntime._action_worker_loop)
+                worker.start()
+                try:
+                    PortalRuntime.action_queue_event.set()
+                    self.assertFalse(started.wait(0.4))
+                    service.mark_job(old_job, phase="success")
+                    PortalRuntime.action_running_job_ids.discard(old_job)
+                    PortalRuntime.action_queue_event.set()
+                    self.assertTrue(started.wait(3))
+                finally:
+                    PortalRuntime.action_worker_stop = True
+                    PortalRuntime.action_queue_event.set()
+                    worker.join(5)
+                self.assertFalse(worker.is_alive())
+
     def test_repeated_projection_failure_stops_with_remote_written_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -17749,7 +17780,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("function ongoingDisplayTitle(draft)", html)
         self.assertIn("const title = ongoingDisplayTitle(draft);", html)
         self.assertIn("setOngoingRowStatus(row, '进行中', 'working');", html)
-        self.assertIn("setLiteStatus(successfulNoticeActionText(", html)
+        self.assertIn("updateStatus(successfulNoticeActionText(", html)
         self.assertNotIn("setMetaChip(meta, status, 'ready');", html)
         self.assertNotIn("setMetaChip(meta, String(message).slice", html)
         self.assertNotIn("setMetaChip(meta, String(message || patch.message", html)
@@ -22018,6 +22049,30 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             dialog.deleteLater()
             app.processEvents()
 
+    def test_qt_screenshot_dialog_ignores_previous_session_encoding(self):
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        dialog = ScreenshotConfirmDialog(theme="dark")
+        try:
+            payload = {
+                "notice_type": "设备轮巡",
+                "text": "【设备轮巡】状态：开始\n【名称】延迟截图测试",
+                "buildings": ["A楼"],
+            }
+            dialog.set_data(payload, action_type="upload")
+            previous_generation = dialog._session_generation
+            dialog.cancel_upload()
+            dialog.set_data(payload, action_type="upload")
+            dialog._on_extra_screenshot_encoded(previous_generation, b"stale-image")
+            self.assertEqual(dialog.extra_images, [])
+            dialog._on_extra_screenshot_encoded(dialog._session_generation, b"current-image")
+            self.assertEqual(len(dialog.extra_images), 1)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            app.processEvents()
+
     def test_qt_screenshot_cancel_rebases_rolled_back_record_version(self):
         class _Item:
             def __init__(self, payload):
@@ -22229,7 +22284,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "job_id": "job-accepted",
                 "phase": "accepted",
                 "message_started_at": 0.0,
-                "request": {"action": "start", "record_id": "m1"},
+                "request": {
+                    "action": "start",
+                    "record_id": "m1",
+                    "work_type": WORK_TYPE_EVENT,
+                },
             }
             uploading = {
                 "job_id": "job-uploading",

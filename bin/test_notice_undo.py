@@ -237,44 +237,49 @@ class NoticeUndoTests(unittest.TestCase):
     def test_checkpoint_enriches_scope_and_reason_from_qt_active_item(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = self._service(tmpdir)
-            service._state_store.upsert_qt_active_item(
-                {
-                    "active_item_id": "aid-reason",
-                    "record_id": "rec-reason",
-                    "work_type": WORK_TYPE_MAINTENANCE,
-                    "notice_type": NOTICE_TYPE_MAINTENANCE,
-                    "title": "EA118机房C楼冷却塔清洗",
-                    "reason": "5#冷却塔脏堵",
-                    "building": "C楼",
-                    "building_codes": ["C"],
-                    "text": (
-                        "【维保通告】状态：开始\n\n"
-                        "【名称】EA118机房C楼冷却塔清洗\n\n"
-                        "【原因】5#冷却塔脏堵"
-                    ),
-                },
-                section="other",
-                origin="portal",
-            )
+            try:
+                service._state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "aid-reason",
+                        "record_id": "rec-reason",
+                        "work_type": WORK_TYPE_MAINTENANCE,
+                        "notice_type": NOTICE_TYPE_MAINTENANCE,
+                        "title": "EA118机房C楼冷却塔清洗",
+                        "reason": "5#冷却塔脏堵",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "text": (
+                            "【维保通告】状态：开始\n\n"
+                            "【名称】EA118机房C楼冷却塔清洗\n\n"
+                            "【原因】5#冷却塔脏堵"
+                        ),
+                    },
+                    section="other",
+                    origin="portal",
+                )
 
-            undo_id = service.create_notice_undo_checkpoint(
-                "delete",
-                {
-                    "active_item_id": "aid-reason",
-                    "target_record_id": "rec-reason",
-                    "work_type": WORK_TYPE_MAINTENANCE,
-                    "notice_type": NOTICE_TYPE_MAINTENANCE,
-                },
-                remote_fields={"名称": "EA118机房C楼冷却塔清洗"},
-                scope="C",
-            )
-            undo = service._state_store.get_notice_undo_action(undo_id)
-            available = service.list_available_notice_undos(scope="C")
+                undo_id = service.create_notice_undo_checkpoint(
+                    "delete",
+                    {
+                        "active_item_id": "aid-reason",
+                        "target_record_id": "rec-reason",
+                        "work_type": WORK_TYPE_MAINTENANCE,
+                        "notice_type": NOTICE_TYPE_MAINTENANCE,
+                    },
+                    remote_fields={"名称": "EA118机房C楼冷却塔清洗"},
+                    scope="C",
+                )
+                undo = service._state_store.get_notice_undo_action(undo_id)
+                available = service.list_available_notice_undos(scope="C")
 
-            self.assertEqual(undo["building_codes"], ["C"])
-            self.assertEqual(undo["reason"], "5#冷却塔脏堵")
-            self.assertEqual(len(available), 1)
-            self.assertTrue(service.create_notice_undo_job(undo_id, scope="C"))
+                self.assertEqual(undo["building_codes"], ["C"])
+                self.assertEqual(undo["reason"], "5#冷却塔脏堵")
+                self.assertEqual(len(available), 1)
+                self.assertTrue(service.create_notice_undo_job(undo_id, scope="C"))
+            finally:
+                service._state_store.shutdown_write_worker(timeout=1.0)
+                del service
+                gc.collect()
 
     def test_multibuilding_undo_is_visible_to_each_related_building(self):
         with tempfile.TemporaryDirectory() as tmpdir:

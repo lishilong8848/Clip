@@ -127,6 +127,30 @@ class PollingWorkOrderTests(unittest.TestCase):
             service.list_sops("A", "maintenance")
             self.assertEqual((len(cloud.uploaded), len(cloud.saved)), (1, 1))
 
+    def test_legacy_local_sop_does_not_duplicate_cloud_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            cloud_sop = {
+                "sop_id": "cloud_sop_12345",
+                "scope": "A",
+                "work_type": "maintenance",
+                "name": "同名SOP",
+                "version": 1,
+                "steps": [],
+                "attachments": [],
+            }
+            cloud = _FakePollingSopCloud([cloud_sop])
+            store.put_document("polling_sop", "local_sop_12345", {
+                **cloud_sop,
+                "sop_id": "local_sop_12345",
+                "version": 2,
+            })
+            service = PollingWorkOrderService(store, cloud)
+
+            listed = service.list_sops("A", "maintenance")
+            self.assertEqual([item["sop_id"] for item in listed], ["cloud_sop_12345"])
+            self.assertEqual(cloud.saved, [])
+
     def test_cloud_attachment_rejects_untrusted_download_url(self) -> None:
         cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
         cloud.client = MagicMock()
@@ -136,6 +160,26 @@ class PollingWorkOrderTests(unittest.TestCase):
                 "_cloud_download_url": "https://example.invalid/private",
             })
         cloud.client.request_bytes.assert_not_called()
+
+    def test_cloud_sop_create_uses_stable_client_token(self) -> None:
+        cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+        cloud.get_sop = MagicMock(return_value=None)
+        cloud._request = MagicMock(return_value={"record": {"record_id": "recCloudSop"}})
+        cloud.invalidate = MagicMock()
+        sop = {
+            "sop_id": "stable_sop_1234",
+            "scope": "A",
+            "work_type": "polling",
+            "name": "幂等SOP",
+            "steps": [],
+            "attachments": [],
+            "version": 1,
+        }
+        cloud.save_sop(sop, expected_version=0, allow_create=True)
+        first_token = cloud._request.call_args.kwargs["params"]["client_token"]
+        cloud.save_sop(sop, expected_version=0, allow_create=True)
+        second_token = cloud._request.call_args.kwargs["params"]["client_token"]
+        self.assertEqual(first_token, second_token)
 
     def test_sop_cloud_is_authoritative_and_attachment_is_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
