@@ -45,6 +45,8 @@ class ClipboardTool(
     lan_maintenance_action_received = pyqtSignal(dict)
     lan_maintenance_ongoing_query_received = pyqtSignal(dict)
     lan_ongoing_delete_received = pyqtSignal(dict)
+    ui_signal_wakeup = pyqtSignal()
+    ui_mutation_wakeup = pyqtSignal()
 
     def __init__(self):
         startup_started_at = time.perf_counter()
@@ -65,8 +67,6 @@ class ClipboardTool(
         self.resize(500, 550)
 
         log_info("================ 应用程序启动 ================")
-        self._install_qt_message_handler()
-
         # 检查并刷新飞书 Token (初始化时，如有必要)
         threading.Thread(
             target=check_token_status,
@@ -154,30 +154,28 @@ class ClipboardTool(
         self.connection_registry = ConnectionRegistry()
         self._ui_signal_queue = queue.Queue(maxsize=500)
         self._ui_signal_max_per_tick = 3
-        self._ui_signal_timer = QTimer(self)
         self.connection_registry.connect(
-            "ui_signal_timer",
-            self._ui_signal_timer,
-            "timeout",
+            "ui_signal_wakeup",
+            self,
+            "ui_signal_wakeup",
             self._drain_ui_signal_queue,
+            Qt.ConnectionType.QueuedConnection,
         )
-        self._ui_signal_timer.start(100)
         self._ui_priority_mutation_queue = queue.Queue(maxsize=100)
         self._ui_mutation_queue = queue.Queue(maxsize=500)
-        self._ui_mutation_max_per_tick = 1
-        self._ui_mutation_budget_ms = 40.0
+        self._ui_mutation_max_per_tick = 8
+        self._ui_mutation_budget_ms = 8.0
         self._ui_slow_threshold_ms = 120.0
         self._ui_slow_log_interval_s = 10.0
         self._ui_slow_last_log_ts = 0.0
         self._ui_slow_count = 0
-        self._ui_mutation_timer = QTimer(self)
         self.connection_registry.connect(
-            "ui_mutation_timer",
-            self._ui_mutation_timer,
-            "timeout",
+            "ui_mutation_wakeup",
+            self,
+            "ui_mutation_wakeup",
             self._drain_ui_mutations,
+            Qt.ConnectionType.QueuedConnection,
         )
-        self._ui_mutation_timer.start(80)
         self.detail_dialog = None
         self.add_dialog = None
         self.clipboard_preview_dialog = None
@@ -341,17 +339,13 @@ class ClipboardTool(
             Qt.ConnectionType.QueuedConnection,
         )
 
-        QTimer.singleShot(100, self._restore_cache_after_first_paint)
-        QTimer.singleShot(300, self._init_clipboard_ipc)
-        QTimer.singleShot(500, self._init_deferred_dialogs)
-        QTimer.singleShot(1000, self._ensure_remote_patch_updater)
-        QTimer.singleShot(1500, self._init_hot_reload)
-        QTimer.singleShot(0, self._refresh_lan_ongoing_snapshot_now)
+        QTimer.singleShot(150, self._restore_cache_after_first_paint)
+        QTimer.singleShot(400, self._init_clipboard_ipc)
+        QTimer.singleShot(1500, self._ensure_remote_patch_updater)
+        QTimer.singleShot(2500, self._init_hot_reload)
+        QTimer.singleShot(800, self._request_lan_ongoing_snapshot_refresh)
         QTimer.singleShot(0, self._restore_update_overlay_state)
         QTimer.singleShot(600, self._close_restart_overlay_window)
-        # 强制刷新和提升窗口，确保完全渲染
-        QTimer.singleShot(0, self.repaint)
-        QTimer.singleShot(0, self.raise_)
         log_info(
             f"Startup[qt]: constructor_ms={(time.perf_counter() - startup_started_at) * 1000:.1f}"
         )
@@ -361,15 +355,33 @@ class ClipboardTool(
             return
         self._startup_cache_restored = True
         started_at = time.perf_counter()
-        self._cache_id_repair_result = self._validate_cache_record_ids_on_startup()
-        self._restore_active_cache()
-        self._finalize_active_cache_restore_startup()
-        if self._cache_id_repair_result.get("changed"):
-            self.save_active_cache()
-        self._log_runtime_health_snapshot("startup")
-        log_info(
-            f"Startup[qt]: active_cache_ms={(time.perf_counter() - started_at) * 1000:.1f}"
-        )
+
+        def load_cache():
+            repair = self._validate_cache_record_ids_on_startup()
+            return repair, self.cache_store.load_payload(), self.cache_store.get_locked_level_map()
+
+        def loaded(future):
+            try:
+                repair, payload, locked_levels = future.result()
+            except Exception as exc:
+                log_info(f"Startup[qt]: active_cache_load_failed={exc}")
+                repair, payload, locked_levels = {"changed": False}, {}, {}
+
+            def apply_cache():
+                if self._closing:
+                    return
+                self._cache_id_repair_result = repair
+                self._active_cache_locked_level_map = locked_levels
+                self._restore_active_cache(payload)
+                self._finalize_active_cache_restore_startup()
+                self._log_runtime_health_snapshot("startup")
+                log_info(
+                    f"Startup[qt]: active_cache_ms={(time.perf_counter() - started_at) * 1000:.1f}"
+                )
+
+            self._enqueue_ui_mutation("startup_cache_restore", apply_cache)
+
+        self._qt_backend_command_executor.submit(load_cache).add_done_callback(loaded)
 
     def _init_deferred_dialogs(self):
         if self._closing or self.detail_dialog is not None:

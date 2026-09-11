@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import shutil
+import stat
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -132,8 +133,20 @@ class RemotePatchUpdater:
             shutil.rmtree(extract_root, ignore_errors=True)
         extract_root.mkdir(parents=True, exist_ok=True)
 
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_root)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                for info in zf.infolist():
+                    rel = Path(info.filename.replace("\\", "/"))
+                    target = (extract_root / rel).resolve()
+                    mode = (info.external_attr >> 16) & 0xFFFF
+                    if rel.is_absolute() or ".." in rel.parts or not target.is_relative_to(extract_root.resolve()):
+                        raise RuntimeError("patch zip contains an unsafe path")
+                    if stat.S_ISLNK(mode):
+                        raise RuntimeError("patch zip contains an unsupported symbolic link")
+                    zf.extract(info, extract_root)
+        except Exception:
+            shutil.rmtree(extract_root, ignore_errors=True)
+            raise
 
         candidates = [
             p

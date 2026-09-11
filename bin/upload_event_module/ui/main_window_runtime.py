@@ -7,11 +7,11 @@ import time
 import re
 import uuid
 from PyQt6.QtWidgets import QMessageBox
-from PyQt6.QtCore import Qt, QTimer, QUrl, QThread, qInstallMessageHandler
+from PyQt6.QtCore import Qt, QTimer, QUrl, QThread
 from PyQt6.QtGui import QDesktopServices
 
 from ..config import config
-from ..logger import log_info, log_error, log_warning, write_crash_trace_message
+from ..logger import log_info, log_error, log_warning
 from ..utils import BASE_DIR
 from ..hot_reload.manager import HotReloadManager
 from ..services.system_alert_webhook import send_system_alert
@@ -20,7 +20,6 @@ from ..core.speech import speech_manager
 from ..time_parser import parse_time_range
 from lan_bitable_template_portal.identity_utils import canonical_target_record_id
 
-_QT_MESSAGE_HANDLER_INSTALLED = False
 DEFAULT_DISPLAY_VERSION = "V1.0.20260210"
 LAN_ONGOING_SNAPSHOT_REFRESH_MS = 5000
 LAN_ONGOING_SNAPSHOT_STALE_SECONDS = 3.0
@@ -62,7 +61,7 @@ class MainWindowRuntimeMixin:
         try:
             from lan_bitable_template_portal.state_store import LanPortalStateStore
 
-            settings = LanPortalStateStore().get_settings() or {}
+            settings = LanPortalStateStore(busy_timeout_ms=75).get_settings() or {}
             wait_seconds = max(
                 1.0,
                 min(
@@ -173,7 +172,7 @@ class MainWindowRuntimeMixin:
         try:
             from lan_bitable_template_portal.state_store import LanPortalStateStore
 
-            details = LanPortalStateStore().runtime_queue_details() or {}
+            details = LanPortalStateStore(busy_timeout_ms=75).runtime_queue_details() or {}
             qt_action = details.get("qt_action") if isinstance(details, dict) else {}
             queued = int((qt_action or {}).get("queued") or 0)
             processing = int((qt_action or {}).get("processing") or 0)
@@ -240,7 +239,7 @@ class MainWindowRuntimeMixin:
         try:
             from lan_bitable_template_portal.state_store import LanPortalStateStore
 
-            settings = LanPortalStateStore().get_settings() or {}
+            settings = LanPortalStateStore(busy_timeout_ms=75).get_settings() or {}
             low_performance = (
                 str(settings.get("lan_low_performance_mode") or "").strip()
                 in {"1", "true", "是", "开启"}
@@ -1292,18 +1291,32 @@ class MainWindowRuntimeMixin:
         with lock:
             self._lan_ongoing_snapshot_all = copied
             self._lan_ongoing_snapshot_at = time.time()
-        try:
-            store = getattr(self, "_lan_portal_state_store", None)
-            if store is None:
-                from lan_bitable_template_portal.state_store import (
-                    LanPortalStateStore,
-                )
 
-                store = LanPortalStateStore()
-                self._lan_portal_state_store = store
-            store.replace_ongoing_items(copied)
-        except Exception as exc:
-            log_warning(f"SQLite 进行中状态写入失败: {exc}")
+        def persist():
+            try:
+                store = getattr(self, "_lan_portal_state_store", None)
+                if store is None:
+                    from lan_bitable_template_portal.state_store import (
+                        LanPortalStateStore,
+                    )
+
+                    store = LanPortalStateStore(busy_timeout_ms=75)
+                    self._lan_portal_state_store = store
+                store.replace_ongoing_items(copied)
+            except Exception as exc:
+                log_warning(f"SQLite 进行中状态写入失败: {exc}")
+
+        executor = getattr(self, "_qt_backend_command_executor", None)
+        if executor is not None:
+            try:
+                executor.submit(persist)
+            except RuntimeError:
+                pass
+        else:
+            try:
+                persist()
+            except Exception as exc:
+                log_warning(f"SQLite 进行中状态写入失败: {exc}")
         return copied
 
     def _refresh_lan_ongoing_snapshot_now(self) -> list[dict]:
@@ -2507,83 +2520,64 @@ class MainWindowRuntimeMixin:
             self.lan_template_portal_url = self._build_lan_template_portal_url_from_config()
             self.refresh_lan_template_portal_link()
             return
-        try:
-            current_host = str(getattr(controller, "host", "") or "").strip()
-            current_port = int(getattr(controller, "preferred_port", 0) or 0)
-            if current_host != host or current_port != port:
-                previous_url = controller.get_url()
+        current_host = str(getattr(controller, "host", "") or "").strip()
+        current_port = int(getattr(controller, "preferred_port", 0) or 0)
+        if current_host == host and current_port == port:
+            self.lan_template_portal_url = controller.get_url()
+            self.refresh_lan_template_portal_link()
+            return
+        if getattr(self, "_lan_portal_restart_in_progress", False):
+            self._lan_portal_restart_pending = True
+            return
+        self._lan_portal_restart_in_progress = True
+        previous_url = controller.get_url()
+
+        def restart():
+            try:
                 controller.stop()
-                controller.host = host
-                controller.preferred_port = port
+                controller.host, controller.preferred_port = host, port
+                return controller.start(), ""
+            except Exception as exc:
+                controller.host, controller.preferred_port = current_host, current_port
                 try:
-                    self.lan_template_portal_url = controller.start()
-                    if hasattr(controller, "set_notice_callback"):
-                        controller.set_notice_callback(self.enqueue_lan_template_notice)
-                    if hasattr(controller, "set_ongoing_callback"):
-                        controller.set_ongoing_callback(
-                            self.get_lan_maintenance_ongoing_notices
-                        )
-                    if hasattr(controller, "set_ongoing_delete_callback"):
-                        controller.set_ongoing_delete_callback(
-                            self.delete_lan_ongoing_notice
-                        )
-                    if hasattr(controller, "set_maintenance_action_callback"):
-                        controller.set_maintenance_action_callback(
-                            self.enqueue_lan_maintenance_action
-                        )
-                    if hasattr(controller, "set_shell_event_callback") and hasattr(
-                        self, "handle_qt_shell_event"
-                    ):
-                        controller.set_shell_event_callback(
-                            self.handle_qt_shell_event
-                        )
+                    return controller.start(), str(exc)
                 except Exception:
-                    controller.host = current_host
-                    controller.preferred_port = current_port
-                    try:
-                        self.lan_template_portal_url = controller.start()
-                        if hasattr(controller, "set_notice_callback"):
-                            controller.set_notice_callback(
-                                self.enqueue_lan_template_notice
-                            )
-                        if hasattr(controller, "set_ongoing_callback"):
-                            controller.set_ongoing_callback(
-                                self.get_lan_maintenance_ongoing_notices
-                            )
-                        if hasattr(controller, "set_ongoing_delete_callback"):
-                            controller.set_ongoing_delete_callback(
-                                self.delete_lan_ongoing_notice
-                            )
-                        if hasattr(controller, "set_maintenance_action_callback"):
-                            controller.set_maintenance_action_callback(
-                                self.enqueue_lan_maintenance_action
-                            )
-                        if hasattr(controller, "set_shell_event_callback") and hasattr(
-                            self, "handle_qt_shell_event"
-                        ):
-                            controller.set_shell_event_callback(
-                                self.handle_qt_shell_event
-                            )
-                    except Exception:
-                        self.lan_template_portal_url = previous_url
-                    raise
-                log_info(
-                    "局域网模板页面服务已按设置重启: "
-                    f"{self.lan_template_portal_url}"
-                )
-                if hasattr(self, "refresh_clipboard_backend_url"):
-                    self.refresh_clipboard_backend_url()
-            else:
-                self.lan_template_portal_url = controller.get_url()
-            self.refresh_lan_template_portal_link()
-        except Exception as exc:
-            self.lan_template_portal_url = self._build_lan_template_portal_url_from_config()
-            self.refresh_lan_template_portal_link()
-            log_error(f"局域网模板页面服务重启失败: {exc}")
-            self._show_info_message(
-                "局域网页面重启失败",
-                f"请确认该 IP 属于本机网卡，或重启程序后再试。\n{exc}",
-            )
+                    return previous_url, str(exc)
+
+        def restarted(future):
+            url, restart_error = future.result()
+
+            def apply_result():
+                self._lan_portal_restart_in_progress = False
+                self.lan_template_portal_url = url
+                self._bind_lan_template_portal_callbacks(controller)
+                self.refresh_lan_template_portal_link()
+                if restart_error:
+                    log_error(f"局域网模板页面服务重启失败: {restart_error}")
+                    self._show_info_message("局域网页面重启失败", f"请确认该 IP 属于本机网卡，或重启程序后再试。\n{restart_error}")
+                else:
+                    log_info(f"局域网模板页面服务已按设置重启: {url}")
+                    if hasattr(self, "refresh_clipboard_backend_url"):
+                        self.refresh_clipboard_backend_url()
+                if getattr(self, "_lan_portal_restart_pending", False):
+                    self._lan_portal_restart_pending = False
+                    QTimer.singleShot(0, self.refresh_lan_template_portal_setting)
+
+            self._enqueue_ui_mutation("portal_restart", apply_result)
+
+        self._qt_backend_command_executor.submit(restart).add_done_callback(restarted)
+
+    def _bind_lan_template_portal_callbacks(self, controller):
+        callbacks = (
+            ("set_notice_callback", self.enqueue_lan_template_notice),
+            ("set_ongoing_callback", self.get_lan_maintenance_ongoing_notices),
+            ("set_ongoing_delete_callback", self.delete_lan_ongoing_notice),
+            ("set_maintenance_action_callback", self.enqueue_lan_maintenance_action),
+            ("set_shell_event_callback", getattr(self, "handle_qt_shell_event", None)),
+        )
+        for name, callback in callbacks:
+            if callback is not None and hasattr(controller, name):
+                getattr(controller, name)(callback)
 
     def refresh_table_links(self):
         if not hasattr(self, "table_link_buttons"):
@@ -2596,31 +2590,6 @@ class MainWindowRuntimeMixin:
             else:
                 btn.setToolTip("未配置")
 
-    def _install_qt_message_handler(self):
-        global _QT_MESSAGE_HANDLER_INSTALLED
-        if _QT_MESSAGE_HANDLER_INSTALLED:
-            return
-
-        def _qt_message_handler(msg_type, context, message):
-            try:
-                msg = f"QtMsg[{msg_type}] {message}"
-                if any(
-                    key in message
-                    for key in ("QThreadStorage", "QObject", "QWidget", "QPainter")
-                ):
-                    log_warning(msg)
-                else:
-                    log_info(msg)
-                write_crash_trace_message(msg)
-            except Exception:
-                pass
-
-        try:
-            qInstallMessageHandler(_qt_message_handler)
-            _QT_MESSAGE_HANDLER_INSTALLED = True
-        except Exception as exc:
-            log_warning(f"Qt消息处理器安装失败: {exc}")
-
     def _enqueue_ui_mutation(self, tag: str, fn):
         if self._closing:
             return False
@@ -2631,6 +2600,7 @@ class MainWindowRuntimeMixin:
             target_queue = getattr(self, "_ui_priority_mutation_queue", target_queue)
         try:
             target_queue.put_nowait((tag, fn, time.time()))
+            self._wake_ui_mutations()
             return True
         except queue.Full:
             self._ui_mutation_drop_count = (
@@ -2640,6 +2610,7 @@ class MainWindowRuntimeMixin:
                 return False
             try:
                 target_queue.put((tag, fn, time.time()), timeout=0.05)
+                self._wake_ui_mutations()
                 return True
             except Exception:
                 if tag in priority_tags:
@@ -2651,9 +2622,15 @@ class MainWindowRuntimeMixin:
     def _drain_ui_mutations(self):
         if self._closing or self._ui_update_in_progress:
             return
-        max_count = max(1, int(self._ui_mutation_max_per_tick or 1))
+        backlog = self._ui_mutation_queue.qsize() + getattr(
+            self, "_ui_priority_mutation_queue", self._ui_mutation_queue
+        ).qsize()
+        max_count = min(
+            max(1, int(self._ui_mutation_max_per_tick or 1)),
+            max(1, backlog),
+        )
         tick_started = time.perf_counter()
-        tick_budget_ms = max(10.0, float(getattr(self, "_ui_mutation_budget_ms", 40.0) or 40.0))
+        tick_budget_ms = max(4.0, float(getattr(self, "_ui_mutation_budget_ms", 8.0) or 8.0))
         self._ui_update_in_progress = True
         try:
             for _ in range(max_count):
@@ -2688,6 +2665,18 @@ class MainWindowRuntimeMixin:
                         pass
         finally:
             self._ui_update_in_progress = False
+        if not self._ui_priority_mutation_queue.empty() or not self._ui_mutation_queue.empty():
+            self._wake_ui_mutations()
+
+    def _wake_ui_mutations(self):
+        signal = getattr(self, "ui_mutation_wakeup", None)
+        if signal is not None and callable(getattr(signal, "emit", None)):
+            signal.emit()
+
+    def _wake_ui_signals(self):
+        signal = getattr(self, "ui_signal_wakeup", None)
+        if signal is not None and callable(getattr(signal, "emit", None)):
+            signal.emit()
 
     def _post_request_finished(
         self, name, success, msg, record_id, operation_id=""
@@ -2695,6 +2684,7 @@ class MainWindowRuntimeMixin:
         item = (name, bool(success), msg, record_id, str(operation_id or ""))
         try:
             self._ui_signal_queue.put_nowait(item)
+            self._wake_ui_signals()
             return
         except queue.Full:
             self._ui_signal_drop_count = (
@@ -2708,6 +2698,7 @@ class MainWindowRuntimeMixin:
                 pass
             try:
                 self._ui_signal_queue.put(item, timeout=0.25)
+                self._wake_ui_signals()
                 return
             except queue.Full:
                 pass
@@ -2758,3 +2749,5 @@ class MainWindowRuntimeMixin:
                     self._record_slow_ui_operation(f"ui_signal:{name}", elapsed_ms)
             except Exception:
                 pass
+        if not self._ui_signal_queue.empty():
+            self._wake_ui_signals()

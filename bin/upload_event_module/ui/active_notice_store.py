@@ -30,8 +30,11 @@ class ActiveNoticeStore:
     def rebuild(self):
         self.index.rebuild(self._iter_items_factory())
 
+    def invalidate(self):
+        self.index.invalidate()
+
     def entries(self):
-        return self.index.entries(self._iter_items_factory, force=True)
+        return self.index.entries(self._iter_items_factory)
 
     def count(self) -> int:
         return self.index.count(self._iter_items_factory)

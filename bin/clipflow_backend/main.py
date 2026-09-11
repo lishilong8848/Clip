@@ -183,6 +183,7 @@ from lan_bitable_template_portal.portal_service import (
     ZHIHANG_CHANGE_TABLE_ID,
     engineer_mop_fill_kwargs_from_payload,
     engineer_mop_upload_signed_kwargs_from_payload,
+    external_real_write_guard,
 )
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
@@ -9307,6 +9308,11 @@ class FastAPIPortalController:
             table_id=self.table_id,
             enable_repair_snapshots=True,
         )
+        PortalRuntime.service._polling_sop_cloud = (
+            PortalRuntime._polling_sop_cloud
+            if external_real_write_guard().get("real_write_allowed")
+            else None
+        )
         service_ms = (time.perf_counter() - started_at) * 1000.0
         stage_started_at = time.perf_counter()
         try:
@@ -9318,7 +9324,10 @@ class FastAPIPortalController:
             PortalRuntime.service.resume_repair_link_tasks_async()
         except Exception:
             pass
+        previous_auth_manager = PortalRuntime.auth_manager
         PortalRuntime.auth_manager = PortalAuthManager()
+        with suppress(Exception):
+            previous_auth_manager.shutdown()
         PortalRuntime.state_store = PortalRuntime.service._state_store
         PortalRuntime.apply_runtime_settings()
         self._state_store = PortalRuntime.state_store
@@ -12598,7 +12607,7 @@ class FastAPIPortalController:
         outbox_removed = PortalRuntime.state_store.cleanup_outbox_events(
             done_retention_seconds=24 * 3600,
             failed_retention_seconds=7 * 24 * 3600,
-            max_delete=5000,
+            max_delete=20_000,
         )
         append_events_removed = PortalRuntime.state_store.cleanup_append_events(
             retention_seconds=3 * 24 * 3600,
@@ -13729,6 +13738,10 @@ class FastAPIPortalController:
         PortalRuntime.stop_message_workers()
         PortalRuntime.stop_action_worker()
         PortalRuntime.stop_upload_wait_worker()
+        with suppress(Exception):
+            PortalRuntime.auth_manager.shutdown()
+        with suppress(Exception):
+            PortalRuntime._polling_sop_cloud.close()
         PortalRuntime.notice_callback = None
         PortalRuntime.ongoing_callback = None
         PortalRuntime.ongoing_delete_callback = None
@@ -13885,6 +13898,7 @@ class FastAPIPortalController:
         PortalRuntime.state_store.enqueue_outbox_event(
             "qt_action",
             {
+                "idempotency_key": f"qt_action:{job_id}:upload_result" if job_id else "",
                 "kind": "active_upsert",
                 "payload": {
                     "item": projected_item,

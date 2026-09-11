@@ -51,6 +51,9 @@ class ActiveNoticeIndex:
         self._entries = []
         self._built = False
 
+    def invalidate(self):
+        self._built = False
+
     def rebuild(self, iter_items):
         by_record_id = {}
         by_record_id_candidates = {}
@@ -138,12 +141,12 @@ class ActiveNoticeIndex:
         return list(self._entries)
 
     def count(self, iter_items_factory) -> int:
-        return len(self.entries(iter_items_factory, force=True))
+        return len(self.entries(iter_items_factory))
 
     def data_snapshot(self, iter_items_factory) -> list[dict]:
         return [
             dict(data)
-            for _, _, data in self.entries(iter_items_factory, force=True)
+            for _, _, data in self.entries(iter_items_factory)
         ]
 
     def groups_by_match_key(self, iter_items_factory, match_keys=None):
@@ -155,7 +158,7 @@ class ActiveNoticeIndex:
         if match_keys is not None and not limited_keys:
             return {}
         groups = {}
-        for list_widget, item, data in self.entries(iter_items_factory, force=True):
+        for list_widget, item, data in self.entries(iter_items_factory):
             if not self._entry_is_valid((list_widget, item)):
                 continue
             match_key = str(data.get("match_key") or "").strip()

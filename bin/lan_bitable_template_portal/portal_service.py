@@ -43646,7 +43646,10 @@ class MaintenancePortalService:
             from .polling_work_orders import PollingWorkOrderService
 
             prepared.update(
-                PollingWorkOrderService(self._state_store).prepare_start(
+                PollingWorkOrderService(
+                    self._state_store,
+                    getattr(self, "_polling_sop_cloud", None),
+                ).prepare_start(
                     request_payload,
                     job_id=job_id,
                     people=([] if self._truthy_flag(request_payload.get("polling_work_order_exempt")) else self._load_signature_people()),

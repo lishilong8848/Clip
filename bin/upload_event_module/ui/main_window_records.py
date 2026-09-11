@@ -119,6 +119,18 @@ class MainWindowRecordsMixin:
             self._recover_stale_upload_states
         )
         self.upload_state_watchdog_timer.start(15 * 1000)
+        self._ui_heartbeat_expected = time.monotonic() + 0.5
+        self.ui_heartbeat_timer = QTimer(self)
+        self.ui_heartbeat_timer.timeout.connect(self._measure_ui_event_loop_lag)
+        self.ui_heartbeat_timer.start(500)
+
+    def _measure_ui_event_loop_lag(self):
+        now = time.monotonic()
+        expected = float(getattr(self, "_ui_heartbeat_expected", now) or now)
+        lag_ms = max(0.0, (now - expected) * 1000.0)
+        self._ui_heartbeat_expected = now + 0.5
+        if lag_ms >= 120.0:
+            self._record_slow_ui_operation("event_loop_lag", lag_ms)
 
     def _collect_live_runtime_record_ids(self) -> set[str]:
         record_ids = set()
@@ -544,6 +556,12 @@ class MainWindowRecordsMixin:
         model = getattr(self, attr, None)
         if not isinstance(model, ActiveNoticeModel):
             model = ActiveNoticeModel(self if isinstance(self, QObject) else None)
+            invalidate = lambda *_args: self._active_notice_store().invalidate()
+            model.dataChanged.connect(invalidate)
+            model.rowsInserted.connect(invalidate)
+            model.rowsRemoved.connect(invalidate)
+            model.rowsMoved.connect(invalidate)
+            model.modelReset.connect(invalidate)
             setattr(self, attr, model)
         return model
 

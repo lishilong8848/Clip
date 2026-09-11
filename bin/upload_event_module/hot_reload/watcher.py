@@ -114,11 +114,20 @@ class HotReloadWatcher:
             return
         if self._observer and self._observer.is_alive():
             return
+        patch_roots = [
+            path
+            for path in (self.root / "bin").glob("*_patch_only*")
+            if path.is_dir()
+        ]
+        if not patch_roots:
+            log_info("HotReload: no patch-only directory to watch")
+            return
         self._observer = Observer()
-        self._observer.schedule(self._handler, str(self.root), recursive=True)
+        for path in patch_roots:
+            self._observer.schedule(self._handler, str(path), recursive=True)
         self._observer.daemon = True
         self._observer.start()
-        log_info(f"HotReload: watcher started at {self.root}")
+        log_info(f"HotReload: watcher started for {len(patch_roots)} patch directories")
 
     def stop(self) -> None:
         if not WATCHDOG_AVAILABLE:

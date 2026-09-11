@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import shutil
@@ -1265,7 +1266,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
         const cfg = {json.dumps(payload, ensure_ascii=False)};
 
         (async () => {{
-          const browser = await chromium.launch({{ headless: true }});
+          const browser = await chromium.launch({{
+            headless: true,
+            args: ['--enable-precise-memory-info', '--js-flags=--expose-gc'],
+          }});
           const errors = [];
           const failedResponses = [];
 
@@ -1552,22 +1556,43 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await page.emulateMedia({{ reducedMotion: 'reduce' }});
           await page.locator('.module-cabinet_power .module-card__main').click();
-          await page.waitForSelector('.building-card');
-          if (await page.locator('.building-card').count() !== 5) throw new Error('cabinet building entries missing');
-          await page.locator('.building-card').first().click();
+          await page.waitForSelector('button.building');
+          if (await page.locator('button.building').count() !== 5) throw new Error('cabinet building entries missing');
+          await page.locator('button.building').first().click();
           await page.waitForSelector('.cabinet-page .metrics');
-          await page.getByRole('button', {{ name: '机柜平面图', exact: true }}).click();
-          await page.getByRole('button', {{ name: '302包间', exact: false }}).click();
-          await page.waitForSelector('.map-cell.rack');
-          await page.locator('.map-cell.rack').filter({{ hasText: /^B03$/ }}).click();
-          await page.waitForSelector('.timeline-item');
-          if (!(await page.locator('.timeline-item').innerText()).includes('上正式电')) throw new Error('cabinet history is not scoped to room/rack');
-          await page.getByRole('button', {{ name: '切换为测试电', exact: true }}).click();
+          await page.getByRole('button', {{ name: '原始平面图', exact: true }}).click();
+          await page.getByRole('button', {{ name: /302[ ]*包间/ }}).click();
+          await page.waitForSelector('button.map-cell');
+          await page.locator('button.map-cell').filter({{ hasText: /^B03$/ }}).click();
+          await page.waitForSelector('.timeline li');
+          if (!(await page.locator('.timeline li').innerText()).includes('上正式电')) throw new Error('cabinet history is not scoped to room/rack');
+          await page.locator('.history-record').first().getByRole('button', {{ name: '编辑', exact: true }}).click();
           await page.waitForSelector('.editor-layer form');
-          const actualInput = page.locator('.editor-layer input[type="datetime-local"]').first();
+          if (await page.locator('.editor-layer .group-editor').count() !== 1) throw new Error('blank cabinet history groups were rendered');
+          await page.getByRole('button', {{ name: '添加一组', exact: true }}).click();
+          if (await page.locator('.editor-layer .group-editor').count() !== 2) throw new Error('new cabinet operation group was not rendered');
+          for (let index = 0; index < 10; index += 1) await page.getByRole('button', {{ name: '添加一组', exact: true }}).click();
+          const cabinetEditorLayout = await page.evaluate(() => {{
+            const modal = document.querySelector('.editor-layer .modal');
+            const body = document.querySelector('.editor-layer .editor-body');
+            const rect = modal?.getBoundingClientRect();
+            return {{
+              modalInsideViewport: Boolean(rect && rect.top >= 0 && rect.bottom <= window.innerHeight + 1),
+              bodyScrollable: Boolean(body && body.scrollHeight > body.clientHeight && ['auto', 'scroll'].includes(getComputedStyle(body).overflowY)),
+            }};
+          }});
+          if (!cabinetEditorLayout.modalInsideViewport || !cabinetEditorLayout.bodyScrollable) throw new Error(`cabinet editor overflow handling failed: ${{JSON.stringify(cabinetEditorLayout)}}`);
+          await page.getByRole('button', {{ name: '关闭编辑', exact: true }}).click();
+          await page.getByRole('button', {{ name: '放弃修改', exact: true }}).click();
+          const stateAction = page.locator('.state-actions button:not(:disabled)').first();
+          if (await stateAction.count() !== 1) throw new Error('cabinet state action is unavailable');
+          await stateAction.click();
+          await page.waitForSelector('.editor-layer form');
+          const actualInput = page.locator('.editor-layer input[type="datetime-local"]').nth(1);
           if (await actualInput.inputValue() !== '' || !(await actualInput.evaluate(node => node.required))) throw new Error('state switch must require manual operation data');
           if (await page.locator('.editor-layer form').evaluate(form => form.checkValidity())) throw new Error('empty state-switch form must not submit');
           await page.getByRole('button', {{ name: '关闭编辑', exact: true }}).click();
+          await page.getByRole('button', {{ name: '放弃修改', exact: true }}).click();
           await page.getByRole('button', {{ name: '关闭历史', exact: true }}).click();
           require('fs').mkdirSync('output/playwright', {{ recursive: true }});
           await page.screenshot({{ path: 'output/playwright/cabinet-desktop.png', fullPage: true }});
@@ -2236,8 +2261,29 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
             }}
             await page.getByRole('link', {{ name: /^返回$/ }}).click();
-            await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
-            await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-home-after-return');
+            await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
+            if (!page.url().includes('entry=maintenance')) {{
+              throw new Error(`lite workbench return lost module entry: ${{page.url()}}`);
+            }}
+            const heapBeforeSoak = await page.evaluate(() => {{
+              if (typeof globalThis.gc === 'function') globalThis.gc();
+              return performance.memory?.usedJSHeapSize || 0;
+            }});
+            for (let cycle = 0; cycle < 100; cycle += 1) {{
+              await page.getByRole('button', {{ name: /^返回$/ }}).click();
+              await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
+              await page.locator('.module-maintenance .module-card__main').click();
+              await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
+            }}
+            const heapAfterSoak = await page.evaluate(() => {{
+              if (typeof globalThis.gc === 'function') globalThis.gc();
+              return performance.memory?.usedJSHeapSize || 0;
+            }});
+            const heapGrowth = heapAfterSoak - heapBeforeSoak;
+            if (heapBeforeSoak && heapGrowth > 12 * 1024 * 1024 && heapGrowth > heapBeforeSoak * 0.35) {{
+              throw new Error(`100-cycle navigation heap growth too high: before=${{heapBeforeSoak}} after=${{heapAfterSoak}}`);
+            }}
+            await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-scope-after-return');
             if (errors.length || failedResponses.length) {{
               throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
             }}
@@ -2248,7 +2294,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               ok: true,
               title: pageTitle,
               mode: 'workbench-lite',
-              markers: ['飞书扫码登录', ...required, 'A楼轻量工作台', '计划通告列表', '未结束通告', 'VNET蓝白皮肤', 'worker提交不卡顿'],
+              markers: ['飞书扫码登录', ...required, 'A楼轻量工作台', '计划通告列表', '未结束通告', 'VNET蓝白皮肤', 'worker提交不卡顿', '100次导航堆稳定'],
+              heapGrowthBytes: heapGrowth,
             }}));
             return;
           }}
@@ -2311,11 +2358,12 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertLayout(page, 'workbench');
           await assertVnetSkin(page, 'workbench');
           await page.getByRole('button', {{ name: /^返回$/ }}).click();
-          await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
-          await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-return-from-workbench');
-          await assertVnetSkin(page, 'home-after-return-from-workbench');
-          await page.locator('.module-maintenance .module-card__main').click();
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
+          if (!page.url().includes('entry=maintenance')) {{
+            throw new Error(`workbench return lost module entry: ${{page.url()}}`);
+          }}
+          await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'scope-after-return-from-workbench');
+          await assertVnetSkin(page, 'scope-after-return-from-workbench');
           const returnScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await returnScopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
           await page.waitForSelector('text=计划通告列表', {{ timeout: 10000 }});
@@ -2575,19 +2623,54 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
         controller = FastAPIPortalController(host="127.0.0.1", port=port)
         app = controller._build_app()
         from lan_bitable_template_portal.cabinet_power import from_feishu, to_fields
-        from lan_bitable_template_portal.cabinet_power_excel import parse_template, digest
-        cabinet_source = BIN_DIR / "lan_bitable_template_portal/templates/cabinet_power/A.xlsm"
-        cabinet_config = parse_template(cabinet_source.read_bytes(), "A")
-        cabinet_config.update(issues=[], history_ready=True, path=str(cabinet_source))
-        for rack in cabinet_config["inventory"]:
-            rack["rack_type"] = rack["rack_type"] or "服务器机柜"
-        controller._cabinet_power.write("config:A", cabinet_config)
-        cabinet_op = from_feishu({"record_id": "recCabinetSmoke", "fields": to_fields({
+        from lan_bitable_template_portal.cabinet_power_excel import parse_template, Workbook
+        cabinet_record = {"record_id": "recCabinetSmoke", "fields": to_fields({
             "scope": "A", "room": "302", "rack": "B03", "system_name": "EA118-A3-2",
             "action": "上正式电", "actual": "2026-08-01 09:00:00", "expected": "",
             "rack_type": "网络机柜", "power": 16000, "result": "成功",
-        })})
-        controller._cabinet_power.write("snapshot:A", {"operations": [cabinet_op], "version": digest(cabinet_op), "updated_at": "2026-08-01 09:00:00", "error": ""})
+            "groups": [
+                {"id": "smoke_event_1", "action": "上正式电", "actual": "2026-08-01 09:00:00", "expected": "", "result": "成功"},
+                *[
+                    {"id": f"smoke_blank_{index}", "action": "", "actual": "", "expected": "", "result": "成功"}
+                    for index in range(1, 8)
+                ],
+            ],
+        })}
+        cabinet_op = from_feishu(cabinet_record)
+        for cabinet_scope in "ABCDE":
+            cabinet_source = BIN_DIR / f"lan_bitable_template_portal/templates/cabinet_power/{cabinet_scope}.xlsm"
+            content = cabinet_source.read_bytes()
+            model = parse_template(content, cabinet_scope)
+            book = Workbook(content)
+            cabinet_config = {
+                "scope": cabinet_scope,
+                "rooms": [{key: value for key, value in room.items() if key != "layout"} for room in model["rooms"]],
+                "inventory": model["inventory"],
+                "issues": [],
+                "history_ready": True,
+                "path": str(cabinet_source),
+                "template_data": {
+                    "hash": model["template_hash"],
+                    "formats": model["formats"],
+                    "summary_cells": {
+                        name: {ref: book.value(cell) for ref, cell in book.cells(name).items()}
+                        for name in book.sheets if "汇总" in name
+                    },
+                },
+                "map_values": {
+                    name: {ref: book.value(cell) for ref, cell in book.cells(name).items() if book.value(cell) not in (None, "")}
+                    for name in book.sheets if "平面图" in name
+                },
+            }
+            records = [cabinet_record] if cabinet_scope == "A" else []
+            baseline = [event["id"] for event in cabinet_op.get("events") or []] if cabinet_scope == "A" else []
+            controller._cabinet_power.local.replace(cabinet_scope, cabinet_config, records, baseline)
+        with gzip.open(
+            BIN_DIR / "lan_bitable_template_portal/templates/cabinet_power/A.layouts.json.gz",
+            "rt",
+            encoding="utf-8",
+        ) as layout_stream:
+            controller._cabinet_power._layouts["A"] = json.load(layout_stream)
 
         @app.middleware("http")
         async def _frontend_smoke_login(request, call_next):

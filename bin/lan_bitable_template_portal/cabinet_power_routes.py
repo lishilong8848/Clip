@@ -27,7 +27,7 @@ def install_cabinet_power_routes(app,controller,runtime):
                         current=status.get(scope_code,{"scope":scope_code,"status":"idle","error":""})
                         if current["status"]=="succeeded":
                             try:
-                                item={k:v for k,v in service.overview(scope_code).items() if k in ("scope","counts","updated_at","record_count","inventory_only","source")}
+                                item={k:v for k,v in service.overview(scope_code,False).items() if k in ("scope","counts","updated_at","record_count","inventory_only","source")}
                                 item["bootstrap_status"]="succeeded"; item["bootstrap_error"]=""
                                 items.append(item); continue
                             except Exception as exc:
@@ -63,7 +63,8 @@ def install_cabinet_power_routes(app,controller,runtime):
                 else: data=await asyncio.to_thread(service.write_status,scope,oid,owner,admin,details=query.get('details')=='1')
             elif path=="export-history": data=await asyncio.to_thread(service.export_history,scope)
             elif resource is not None: data=resource
-            elif path in ("overview","rooms"): data=await asyncio.to_thread(service.overview,scope)
+            elif path in ("overview","rooms"): data=await asyncio.to_thread(service.overview,scope,query.get("summary")!="1")
+            elif path=="racks": data=await asyncio.to_thread(service.racks,scope)
             elif path.startswith("rooms/") and path.endswith("/layout"): data=await asyncio.to_thread(service.layout,scope,path.split("/")[1])
             elif path=="operations" and request.method=="GET": data=await asyncio.to_thread(service.operations,scope,query)
             elif (path=="operations" and request.method=="POST") or (path.startswith("operations/") and request.method=="PATCH"):
@@ -79,7 +80,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         except Exception as exc: return controller._portal_error_response(exc,default_status=400)
 
     for path,methods in {
-        "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"rooms/{room_id}/layout":["GET"],
+        "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],
         "operations":["GET","POST"],"operations/{record_id}":["PATCH"],"refresh":["POST"],
         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],

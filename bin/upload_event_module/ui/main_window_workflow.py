@@ -923,7 +923,7 @@ class MainWindowWorkflowMixin:
         try:
             from lan_bitable_template_portal.state_store import LanPortalStateStore
 
-            store = LanPortalStateStore()
+            store = LanPortalStateStore(busy_timeout_ms=75)
             self._lan_portal_state_store = store
             return store
         except Exception:

@@ -7,7 +7,7 @@
         <button :disabled="loading || busy || bootstrapActive" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
         <template v-if="scope">
           <a v-if="overview.table_url" :href="overview.table_url" target="_blank" rel="noopener"><ExternalLink :size="16" />多维表</a>
-          <button :disabled="!overview.rooms || busy || saving" @click="['D','E'].includes(scope) ? changeTab('records') : openEditor()"><Plus :size="16" />{{ ['D','E'].includes(scope) ? '登记机柜操作' : '新增记录' }}</button>
+          <button :disabled="!overview.rooms || racksLoading || busy || saving" @click="['D','E'].includes(scope) ? changeTab('records') : openEditor()"><Plus :size="16" />{{ ['D','E'].includes(scope) ? '登记机柜操作' : '新增记录' }}</button>
           <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />按原模板生成</button>
       <button @click="showExports"><History :size="16" />导出历史</button>
         </template>
@@ -134,8 +134,8 @@
               <label v-if="!editingId">工作表<select :value="form.source" @change="requestSheetChange"><option v-for="format in overview.sheet_formats || []" :key="format.sheet">{{ format.sheet }}</option></select></label>
             </div>
             <div class="section-title"><h3>{{ form.source || '操作明细' }}</h3><button type="button" @click="form.groups.push(newGroup())"><Plus :size="16" />添加一组</button></div>
-            <div v-for="(group, i) in form.groups" :key="i" class="group-editor" :class="{ 'current-operation': ['D','E'].includes(scope) && i === 0, 'history-operation': ['D','E'].includes(scope) && i > 0 }">
-              <b>{{ groupLabel(i, editorFormat) }}</b><label>操作类型<select v-if="!group.action || actionOptions.includes(group.action)" v-model="group.action"><option value="">未填写</option><option v-for="action in actionOptions" :key="action">{{ action }}</option></select><textarea v-else v-model="group.action" rows="2" /></label><label>期望完成时间<input v-if="singleDate(group.expected)" v-model="group.expected" type="datetime-local" step="1" /><textarea v-else v-model="group.expected" rows="2" /></label><label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" /><textarea v-else v-model="group.actual" rows="2" /></label><label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label><button type="button" title="移除此组" aria-label="移除此组" @click="form.groups.splice(i, 1)"><Trash2 :size="16" /></button>
+            <div v-for="(group, i) in editableGroups" :key="group.id || i" class="group-editor" :class="{ 'current-operation': ['D','E'].includes(scope) && i === 0, 'history-operation': ['D','E'].includes(scope) && i > 0 }">
+              <b>{{ groupLabel(i, editorFormat) }}</b><label>操作类型<select v-if="!group.action || actionOptions.includes(group.action)" v-model="group.action"><option value="">未填写</option><option v-for="action in actionOptions" :key="action">{{ action }}</option></select><textarea v-else v-model="group.action" rows="2" /></label><label>期望完成时间<input v-if="singleDate(group.expected)" v-model="group.expected" type="datetime-local" step="1" /><textarea v-else v-model="group.expected" rows="2" /></label><label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label><label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label><button type="button" title="移除此组" aria-label="移除此组" @click="removeGroup(group)"><Trash2 :size="16" /></button>
             </div>
             <label v-if="form.original_scope && form.original_scope !== (form.scope || scope)" class="checkbox"><input v-model="form.confirm_scope_move" type="checkbox" required />将原 {{ form.original_scope }} 楼记录调整到 {{ form.scope }} 楼</label>
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
@@ -169,7 +169,7 @@ import ConfirmDialog from './ConfirmDialog.vue';
 import VnetBackButton from './VnetBackButton.vue';
 const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string }>();
 const api = '/api/cabinet-power';
-const read = (path: string, params: Dict = {}, timeoutMs = 90000) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs });
+const read = (path: string, params: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs, signal });
 const write = (path: string, data: Dict, method = 'POST') => requestJson(api + '/' + path, { method, body: JSON.stringify({ ...data, scope: data.scope || props.scope }), timeoutMs: 90000 });
 const overview = ref<Dict>({}), buildings = ref<Dict[]>([]), loading = ref(false), error = ref(''), message = ref(''), bootstrap = ref<Dict>({});
 const bootstrapActive = computed(() => ['starting','pending','running'].includes(String(bootstrap.value.status || '')));
@@ -186,6 +186,7 @@ const bootstrapMessage = computed(() => {
 const bootstrapStatusLabel = (status: string) => ({ succeeded:'完成', running:'拉取中', pending:'等待', failed:'失败', idle:'等待' }[status] || '等待');
 const tab = ref('overview'), tabs = computed(() => [{ key: 'overview', label: '包间汇总' }, { key: 'layout', label: '原始平面图' }, { key: 'records', label: '机柜台账' }, { key: 'racks', label: '机柜状态' }, ...(props.scope === 'B' ? [{ key: 'carrier', label: '运营商机房' }] : [])]);
 const rackState = ref(''), rackRoom = ref(''), rackSearch = ref(''), rackPage = ref(1);
+const racksLoading = ref(false);
 const rackRooms = computed(() => (overview.value.rooms || []).filter((r: Dict) => tab.value !== 'carrier' || r.carrier));
 const stateRacks = computed(() => (overview.value.racks || []).filter((r: Dict) => (!rackState.value || r.state === rackState.value || rackState.value === 'powered' && ['formal','test'].includes(r.state)) && (!rackRoom.value || r.room === rackRoom.value) && r.rack.includes(rackSearch.value.toUpperCase()) && rackRooms.value.some((room: Dict) => room.id === r.room)));
 const paginationPages = (current: number,total: number) => [...new Set([1,total,...Array.from({length:5},(_,i)=>current+i-2)])].filter(p=>p>=1 && p<=total).sort((a,b)=>a-b);
@@ -203,18 +204,21 @@ const stateColors: Dict = { formal: '#ff0000', test: '#ffc000', off: '#00b050', 
 const actionOptions = ['上正式电', '上测试电', '测试电转正式电', '正式电转测试电', '下正式电', '下测试电'];
 const singleDate = (value: string) => !value || /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(value);
 let disposed = false, pollTimer: number | undefined, bootstrapTimer: number | undefined, recordSequence = 0, mapSequence = 0, historySequence = 0, initialDataLoaded = false, loadedReadyCount = -1;
+let recordAbort: AbortController | undefined, mapAbort: AbortController | undefined, historyAbort: AbortController | undefined;
+const scheduleVisible = (callback: () => void, delay: number) => window.setTimeout(() => document.hidden ? scheduleVisible(callback, Math.max(delay, 2000)) : callback(), delay);
+const cancelled = (exc: any) => String(exc?.message || '').includes('已取消');
 function fail(exc: any): void { error.value = exc?.message || '读取失败，请重试'; }
 async function applyBootstrap(data: Dict): Promise<void> {
   bootstrap.value = data;
   if (error.value.includes('初始化状态暂未读取到')) error.value = '';
   if (props.scope && bootstrapTargetReady.value && !initialDataLoaded) { await load(); initialDataLoaded = Boolean(overview.value.rooms); }
   if (!props.scope && Number(data.ready || 0) !== loadedReadyCount) { await load(); loadedReadyCount = Number(data.ready || 0); initialDataLoaded = loadedReadyCount > 0; }
-  if (bootstrapActive.value && !disposed) bootstrapTimer = window.setTimeout(pollBootstrap,1000);
+  if (bootstrapActive.value && !disposed) bootstrapTimer = scheduleVisible(pollBootstrap,1000);
 }
 async function pollBootstrap(): Promise<void> {
   if (disposed) return;
   try { await applyBootstrap(await read('bootstrap',{},15000)); }
-  catch { error.value = '初始化状态暂未读取到，后台仍在继续拉取…'; if (!disposed) bootstrapTimer = window.setTimeout(pollBootstrap,4000); }
+  catch { error.value = '初始化状态暂未读取到，后台仍在继续拉取…'; if (!disposed) bootstrapTimer = scheduleVisible(pollBootstrap,4000); }
 }
 async function startBootstrap(retryFailed = false): Promise<void> {
   if (bootstrapActive.value) return;
@@ -230,13 +234,14 @@ async function startBootstrap(retryFailed = false): Promise<void> {
     }
     bootstrap.value = { ...bootstrap.value, status:'running' };
     error.value = '初始化请求暂未返回，后台仍在继续拉取…';
-    if (!disposed) bootstrapTimer = window.setTimeout(pollBootstrap,2000);
+    if (!disposed) bootstrapTimer = scheduleVisible(pollBootstrap,2000);
   }
 }
 async function load(): Promise<void> {
   loading.value = true;
-  try { if (props.scope) { overview.value = await read('overview'); if (!query.sheet) query.sheet = overview.value.sheet_formats?.[0]?.sheet || ''; } else buildings.value = (await read('buildings')).buildings; error.value = ''; }
+  try { if (props.scope) { overview.value = await read('overview',{summary:'1'}); if (!query.sheet) query.sheet = overview.value.sheet_formats?.[0]?.sheet || ''; racksLoading.value = true; const racks = await read('racks'); if (racks.version === overview.value.version) overview.value.racks = racks.items || []; } else buildings.value = (await read('buildings')).buildings; error.value = ''; }
   catch (exc) { fail(exc); } finally { loading.value = false; }
+  racksLoading.value = false;
 }
 const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false);
 const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false);
@@ -250,7 +255,7 @@ async function pollJob(): Promise<void> {
   if (disposed) return;
   try {
     job.value = await read('jobs/' + job.value.job_id);
-    if (['pending', 'running'].includes(job.value.status)) { pollTimer = window.setTimeout(pollJob, 1800); return; }
+    if (['pending', 'running'].includes(job.value.status)) { pollTimer = scheduleVisible(pollJob,1800); return; }
     localStorage.removeItem(storageKey);
     if (job.value.status === 'succeeded') {
       if (job.value.kind === 'export') exported.value = job.value.result;
@@ -258,7 +263,7 @@ async function pollJob(): Promise<void> {
       if (tab.value === 'records') await loadRecords(records.value.page || 1);
       if (tab.value === 'layout') await selectRoom(currentRoom.value);
     }
-  } catch (exc) { fail(exc); if (!disposed) pollTimer = window.setTimeout(pollJob, 4000); }
+  } catch (exc) { fail(exc); if (!disposed) pollTimer = scheduleVisible(pollJob,4000); }
 }
 async function refresh(): Promise<void> { if (!initialDataLoaded || bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
 const query = reactive({ q: '', room: '', direction: '', from: '', to: '', sheet: '' }), onlyIssues = ref(false), records = ref<Dict>({}), recordsLoading = ref(false);
@@ -285,17 +290,19 @@ function groupLabel(index: number, format?: Dict): string {
   return '转换记录';
 }
 async function loadRecords(page = 1): Promise<void> {
-  const seq = ++recordSequence; recordsLoading.value = true;
-  try { const data = await read('operations', { ...query, issues: String(onlyIssues.value), page, page_size: 50 }); if (seq === recordSequence) records.value = data; } catch (exc) { fail(exc); } finally { if (seq === recordSequence) recordsLoading.value = false; }
+  recordAbort?.abort(); recordAbort = new AbortController(); const seq = ++recordSequence; recordsLoading.value = true;
+  try { const data = await read('operations', { ...query, issues: String(onlyIssues.value), page, page_size: 50 },90000,recordAbort.signal); if (seq === recordSequence) records.value = data; } catch (exc) { if (!cancelled(exc)) fail(exc); } finally { if (seq === recordSequence) recordsLoading.value = false; }
 }
 function resetFilters(): void { Object.assign(query, { q: '', room: '', direction: '', from: '', to: '' }); onlyIssues.value = false; void loadRecords(1); }
 async function changeTab(key: string): Promise<void> { tab.value = key; if (key === 'carrier') { rackRoom.value = ''; rackState.value = ''; rackSearch.value = ''; } if (key === 'records') await loadRecords(1); if (key === 'layout') await selectRoom(currentRoom.value || overview.value.rooms[0]?.id); }
 function showRoomRecords(room: string): void { query.room = room; tab.value = 'records'; void loadRecords(1); }
 const mapSearch = ref(''), currentRoom = ref(''), layout = ref<Dict>({}), layoutLoading = ref(false), viewport = ref<HTMLElement>(), zoom = ref(1);
+const layoutCache = new Map<string,Dict>();
 const filteredRooms = computed(() => (overview.value.rooms || []).filter((r: Dict) => !mapSearch.value || (r.id + ' ' + r.name).includes(mapSearch.value) || (overview.value.racks || []).some((rack: Dict) => rack.room === r.id && rack.rack.includes(mapSearch.value.toUpperCase()))));
 async function selectRoom(id: string): Promise<void> {
-  if (!id) return; currentRoom.value = id; layoutLoading.value = true; const seq = ++mapSequence;
-  try { const data = await read('rooms/' + id + '/layout'); if (seq !== mapSequence) return; layout.value = data; layoutLoading.value = false; await nextTick(); fitMap(); } catch (exc) { fail(exc); } finally { if (seq === mapSequence) layoutLoading.value = false; }
+  if (!id) return; currentRoom.value = id; const cacheKey = `${overview.value.version || ''}:${id}`, cached = layoutCache.get(cacheKey); if (cached) { layout.value = cached; await nextTick(); fitMap(); return; }
+  mapAbort?.abort(); mapAbort = new AbortController(); layoutLoading.value = true; const seq = ++mapSequence;
+  try { const data = await read('rooms/' + id + '/layout',{},90000,mapAbort.signal); if (seq !== mapSequence) return; layoutCache.set(cacheKey,data); layout.value = data; layoutLoading.value = false; await nextTick(); fitMap(); } catch (exc) { if (!cancelled(exc)) fail(exc); } finally { if (seq === mapSequence) layoutLoading.value = false; }
 }
 function fitMap(): void { if (viewport.value && layout.value.layout) zoom.value = Math.max(.25, Math.min(1.2, (viewport.value.clientWidth - 20) / layout.value.layout.width)); }
 function cellStyle(cell: Dict): Dict {
@@ -308,8 +315,8 @@ const selectedRack = computed(() => history.value.rack_state || (overview.value.
 const sortedEvents = (events: Dict[]) => [...events].sort((a, b) => (b.actual || '').localeCompare(a.actual || ''));
 async function focusModal(): Promise<void> { await nextTick(); (document.querySelector('.cabinet-page .confirm-modal') || document.querySelector('.editor-layer .modal') || document.querySelector('.scrim .modal'))?.querySelector<HTMLElement>('button, input, select')?.focus(); }
 async function openHistory(room: string, rack: string): Promise<void> {
-  historyRoom.value = room; historyRack.value = rack; historyOpen.value = true; historyLoading.value = true; history.value = {}; const seq = ++historySequence; void focusModal();
-  try { const data = await read('operations', { room, rack, page: 1 }); if (seq === historySequence) history.value = data; } catch (exc) { fail(exc); } finally { if (seq === historySequence) historyLoading.value = false; }
+  historyAbort?.abort(); historyAbort = new AbortController(); historyRoom.value = room; historyRack.value = rack; historyOpen.value = true; historyLoading.value = true; history.value = {}; const seq = ++historySequence; void focusModal();
+  try { const data = await read('operations', { room, rack, page: 1 },90000,historyAbort.signal); if (seq === historySequence) history.value = data; } catch (exc) { if (!cancelled(exc)) fail(exc); } finally { if (seq === historySequence) historyLoading.value = false; }
 }
 function openRecordDetails(op: Dict): void { void openHistory(op.room,op.rack); }
 async function moreHistory(): Promise<void> { try { const data = await read('operations', { room: historyRoom.value, rack: historyRack.value, page: history.value.page + 1 }); history.value = { ...data, items: [...history.value.items, ...data.items] }; } catch (exc) { fail(exc); } }
@@ -331,11 +338,18 @@ const saveStepLabel = computed(() => {
   return label + (s.elapsed_ms ? ' · ' + Math.floor(s.elapsed_ms/1000) + '秒' : '…');
 });
 const restoreDialogOpen = ref(false), discardMessage = ref('继续后，当前机柜记录中的修改会丢失。');
-const newGroup = () => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功' });
+const newGroup = () => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', _editing: true });
+const groupHasBusinessData = (group: Dict) => Boolean(group?.action || group?.expected || group?.actual);
+const editableGroups = computed(() => {
+  const populated = (form.groups || []).filter((group: Dict) => groupHasBusinessData(group) || group?._editing);
+  return populated.length ? populated : (form.groups || []).slice(0, 1);
+});
+function removeGroup(group: Dict): void { const index = form.groups.indexOf(group); if (index >= 0) form.groups.splice(index, 1); if (!form.groups.length) form.groups.push(newGroup()); }
 const draftKey = 'cabinet-draft:' + (props.userId || 'session') + ':' + props.scope;
-let pendingDiscard: (() => void) | undefined, draft: Dict | undefined, removeNavigationGuard: (() => void) | undefined;
-function persistDraft(): void { if (!editorOpen.value) return; try { sessionStorage.setItem(draftKey, JSON.stringify({ scope: props.scope, editingId: editingId.value, form, editBaseline, writeId, writeHash })); } catch { saveError.value = '本机草稿保存失败，请保持页面打开直到保存完成。'; } }
-function clearDraft(): void { sessionStorage.removeItem(draftKey); }
+let pendingDiscard: (() => void) | undefined, draft: Dict | undefined, removeNavigationGuard: (() => void) | undefined, draftTimer: number | undefined;
+function flushDraft(): void { window.clearTimeout(draftTimer); if (!editorOpen.value) return; try { sessionStorage.setItem(draftKey, JSON.stringify({ scope: props.scope, editingId: editingId.value, form, editBaseline, writeId, writeHash })); } catch { saveError.value = '本机草稿保存失败，请保持页面打开直到保存完成。'; } }
+function persistDraft(): void { window.clearTimeout(draftTimer); draftTimer = window.setTimeout(flushDraft,250); }
+function clearDraft(): void { window.clearTimeout(draftTimer); sessionStorage.removeItem(draftKey); }
 function askDiscard(action: () => void, text = '继续后，当前机柜记录中的修改会丢失。'): void { pendingDiscard = action; discardMessage.value = text; discardDialogOpen.value = true; void focusModal(); }
 async function restoreDraft(yes: boolean): Promise<void> { restoreDialogOpen.value = false; if (yes && draft) { Object.assign(form, draft.form); editingId.value = draft.editingId; editBaseline = draft.editBaseline; writeId = draft.writeId; writeHash = draft.writeHash; editorOpen.value = true; if (form.scope && form.scope !== props.scope) { moveLoading.value = true; try { moveOverview.value = await read('overview',{scope:form.scope}); } catch (e: any) { saveError.value = e.message; } finally { moveLoading.value = false; } } void focusModal(); } else clearDraft(); draft = undefined; }
 watch(form, persistDraft, { deep: true, flush: 'post' });
@@ -353,7 +367,7 @@ function openEditor(op?: Dict): void {
   form.scope = props.scope;
   Object.assign(form, { room: op?.room || historyRoom.value || currentRoom.value || '', rack: op?.rack || historyRack.value || '', rack_type: op?.rack_type || '', current_rack_type: op?.current_rack_type || '', power: op?.power ?? '', groups: op ? JSON.parse(JSON.stringify(op.groups)) : [newGroup()], source: op?.source || op?.display_sheet || query.sheet, category: op?.category || (['D','E'].includes(props.scope) ? 'mixed' : 'up'), expected_version: op?.version || '', original_scope: op?.scope || '', confirm_scope_move: false });
   if (!op) changeEditorSheet();
-  while (form.groups.length > 1 && !Object.values(form.groups[form.groups.length - 1]).some(Boolean)) form.groups.pop();
+  if (!form.groups.length) form.groups = [newGroup()];
   writeId = ''; writeHash = ''; saveError.value = ''; editBaseline = JSON.stringify(form); discardDialogOpen.value = false; editorOpen.value = true; void focusModal();
 }
 function changeEditorSheet(): void {
@@ -410,11 +424,11 @@ async function pollSave(id: string): Promise<void> {
     }
     if (state.status === 'cancelled') { if (localStorage.getItem(saveStorageKey) === id) localStorage.removeItem(saveStorageKey); saving.value = false; await loadPending(); return; }
     if (['pending','conflict'].includes(state.status)) { saving.value = false; saveError.value = state.error || '上传尚未完成，输入已保留'; await loadPending(); return; }
-    savePollTimer = window.setTimeout(() => pollSave(id),900);
+    savePollTimer = scheduleVisible(() => void pollSave(id),900);
   } catch (e: any) {
     if (disposed) return;
     if (e.status === 404) { saving.value = false; saveError.value = '暂未查到上传记录，输入已保留，请使用原操作再次保存。'; if (localStorage.getItem(saveStorageKey) === id) localStorage.removeItem(saveStorageKey); return; }
-    saveQueryError.value = true; savePollTimer = window.setTimeout(() => pollSave(id),4000);
+    saveQueryError.value = true; savePollTimer = scheduleVisible(() => void pollSave(id),4000);
   }
 }
 async function showSubmission(id: string): Promise<void> {
@@ -447,7 +461,7 @@ function keyboard(e: KeyboardEvent): void {
 }
 onMounted(async () => {
   window.addEventListener('keydown', keyboard);
-  window.addEventListener('pagehide', persistDraft);
+  window.addEventListener('pagehide', flushDraft);
   removeNavigationGuard = registerNavigationGuard((_target, proceed) => { if (saving.value && editorOpen.value) return false; if (!editorOpen.value || JSON.stringify(form) === editBaseline) return true; askDiscard(() => { clearDraft(); editorOpen.value = false; proceed(); }); return false; });
   await startBootstrap(); if (disposed) return;
   await loadPending(); if (disposed) return;
@@ -457,7 +471,7 @@ onMounted(async () => {
   const saved = localStorage.getItem(storageKey);
   if (saved && /^[a-f0-9]{32}$/.test(saved)) { job.value = { job_id: saved }; void pollJob(); } else if (saved) localStorage.removeItem(storageKey);
 });
-onBeforeUnmount(() => { persistDraft(); disposed = true; removeNavigationGuard?.(); window.removeEventListener('pagehide', persistDraft); window.removeEventListener('keydown', keyboard); window.clearTimeout(pollTimer); window.clearTimeout(bootstrapTimer); window.clearTimeout(savePollTimer); });
+onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); mapAbort?.abort(); historyAbort?.abort(); removeNavigationGuard?.(); window.removeEventListener('pagehide', flushDraft); window.removeEventListener('keydown', keyboard); window.clearTimeout(pollTimer); window.clearTimeout(bootstrapTimer); window.clearTimeout(savePollTimer); window.clearTimeout(draftTimer); });
 </script>
 
 <style scoped>

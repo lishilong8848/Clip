@@ -250,7 +250,12 @@ def main():
         sys.argv.remove("--safe-mode")
 
     if sys.platform == "win32":
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
+        qt_opengl = str(os.environ.get("QT_OPENGL") or "").strip().lower()
+        if qt_opengl == "software":
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
+        elif qt_opengl in {"desktop", "opengl"}:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseDesktopOpenGL)
+        print(f"[ClipFlow] Qt OpenGL mode: {qt_opengl or 'auto'}")
 
     stage_started_at = time.perf_counter()
     app = QApplication(sys.argv)

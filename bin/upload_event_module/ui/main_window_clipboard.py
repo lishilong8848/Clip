@@ -561,17 +561,6 @@ class MainWindowClipboardMixin:
             self.clipboard_event_file.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        self._clipboard_state_store = LanPortalStateStore()
-        try:
-            self._clipboard_state_store.import_jsonl_events_once(
-                "clipboard", self.clipboard_event_file
-            )
-            self._clipboard_sqlite_last_event_id = (
-                self._clipboard_state_store.get_last_event_id("clipboard")
-            )
-        except Exception as exc:
-            log_warning(f"剪贴板监听: 旧事件导入失败: {exc}")
-            self._clipboard_sqlite_last_event_id = 0
         self._clipboard_sqlite_event_failures = {}
         self._clipboard_sqlite_event_max_failures = 3
         try:
@@ -595,6 +584,41 @@ class MainWindowClipboardMixin:
             self._on_clipboard_entry_received,
             Qt.ConnectionType.QueuedConnection,
         )
+
+        def prepare_store():
+            try:
+                store = LanPortalStateStore(busy_timeout_ms=75)
+                store.import_jsonl_events_once("clipboard", self.clipboard_event_file)
+                return store, store.get_last_event_id("clipboard"), ""
+            except Exception as exc:
+                return None, 0, str(exc)
+
+        def store_ready(future):
+            store, last_event_id, load_error = future.result()
+            self._enqueue_ui_mutation(
+                "clipboard_ipc_ready",
+                lambda: self._finish_clipboard_ipc(
+                    store, last_event_id, load_error, started_at
+                ),
+            )
+
+        try:
+            self._qt_backend_command_executor.submit(prepare_store).add_done_callback(store_ready)
+        except RuntimeError:
+            self._clipboard_ipc_initialized = False
+
+    def _finish_clipboard_ipc(self, store, last_event_id, load_error, started_at):
+        if self._closing:
+            return
+        if store is None:
+            self._clipboard_ipc_initialized = False
+            log_warning(f"剪贴板监听: SQLite 初始化失败，稍后重试: {load_error}")
+            QTimer.singleShot(1000, self._init_clipboard_ipc)
+            return
+        self._clipboard_state_store = store
+        self._clipboard_sqlite_last_event_id = int(last_event_id or 0)
+        if load_error:
+            log_warning(f"剪贴板监听: 旧事件导入失败: {load_error}")
 
         if not self._is_clipboard_listener_disabled():
             poll_interval = self._clipboard_file_poll_interval_ms()
@@ -677,7 +701,7 @@ class MainWindowClipboardMixin:
             env.insert("CLIPFLOW_CLIPBOARD_FILE", str(self.clipboard_event_file))
             env.insert("CLIPFLOW_CLIPBOARD_TRACE_FILE", str(self._clipboard_trace_file))
             try:
-                state_store = getattr(self, "_clipboard_state_store", None) or LanPortalStateStore()
+                state_store = getattr(self, "_clipboard_state_store", None) or LanPortalStateStore(busy_timeout_ms=75)
                 self._clipboard_state_store = state_store
                 env.insert("CLIPFLOW_STATE_DB", str(state_store.db_path))
             except Exception:
@@ -961,7 +985,7 @@ class MainWindowClipboardMixin:
                 pass
         self._stop_clipboard_process(wait_ms=wait_ms)
 
-    def _poll_clipboard_event_file(self):
+    def _poll_clipboard_event_file(self, events=None):
         if self._closing:
             return
         if self._is_clipboard_listener_disabled():
@@ -971,34 +995,49 @@ class MainWindowClipboardMixin:
         if self._ui_update_in_progress:
             return
         cooldown = self._is_in_clipboard_cooldown()
-        try:
+        if events is None:
+            if getattr(self, "_clipboard_sqlite_poll_inflight", False):
+                return
             store = getattr(self, "_clipboard_state_store", None)
             if store is None:
-                store = LanPortalStateStore()
-                self._clipboard_state_store = store
+                return
             try:
-                sqlite_event_limit = max(
-                    5,
-                    min(
-                        int(
-                            os.environ.get(
-                                "CLIPFLOW_CLIPBOARD_SQLITE_EVENT_LIMIT",
-                                "25",
-                            )
-                            or 25
-                        ),
-                        100,
-                    ),
-                )
+                sqlite_event_limit = max(5, min(int(os.environ.get("CLIPFLOW_CLIPBOARD_SQLITE_EVENT_LIMIT", "25") or 25), 100))
             except Exception:
                 sqlite_event_limit = 25
-            events = store.list_events_after(
-                "clipboard",
-                int(getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0),
-                limit=sqlite_event_limit,
-            )
-        except Exception:
-            events = []
+            after_id = int(getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0)
+            self._clipboard_sqlite_poll_inflight = True
+
+            def loaded(future):
+                try:
+                    loaded_events = future.result()
+                except Exception:
+                    loaded_events = []
+                self._enqueue_ui_mutation(
+                    "clipboard_sqlite_poll",
+                    lambda: self._poll_clipboard_event_file(loaded_events),
+                )
+
+            executor = getattr(self, "_qt_backend_command_executor", None)
+            if executor is None:
+                try:
+                    loaded_events = store.list_events_after(
+                        "clipboard", after_id, limit=sqlite_event_limit
+                    )
+                except Exception:
+                    loaded_events = []
+                return self._poll_clipboard_event_file(loaded_events)
+            try:
+                executor.submit(
+                    store.list_events_after,
+                    "clipboard",
+                    after_id,
+                    limit=sqlite_event_limit,
+                ).add_done_callback(loaded)
+            except RuntimeError:
+                self._clipboard_sqlite_poll_inflight = False
+            return
+        self._clipboard_sqlite_poll_inflight = False
         if events:
             last_processed_event_id = int(
                 getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0

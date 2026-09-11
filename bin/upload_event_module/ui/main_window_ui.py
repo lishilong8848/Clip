@@ -1133,9 +1133,31 @@ class MainWindowUiMixin:
 
     def quit_app(self):
         log_info("================ 应用程序退出 ================")
+        self._shutdown_runtime()
+        QApplication.instance().quit()
+
+    def _shutdown_runtime(self):
+        if getattr(self, "_runtime_shutdown_done", False):
+            return
+        self._runtime_shutdown_done = True
+        try:
+            store = getattr(self, "cache_store", None)
+            if store:
+                store.replace_payload(self._collect_active_cache())
+        except Exception:
+            pass
         self._closing = True
         try:
-            for timer_name in ("remote_update_timer", "patch_check_timer"):
+            for timer_name in (
+                "remote_update_timer",
+                "patch_check_timer",
+                "clipboard_file_timer",
+                "active_cache_timer",
+                "_active_cache_delayed_save_timer",
+                "runtime_maintenance_timer",
+                "upload_state_watchdog_timer",
+                "ui_heartbeat_timer",
+            ):
                 timer = getattr(self, timer_name, None)
                 if timer and timer.isActive():
                     timer.stop()
@@ -1154,42 +1176,13 @@ class MainWindowUiMixin:
         if self.clipboard_preview_dialog:
             self.clipboard_preview_dialog.hide()
         self._shutdown_clipboard_ipc(wait_ms=1500)
+        if hasattr(self, "hot_reload_manager") and self.hot_reload_manager:
+            self.hot_reload_manager.stop()
         self._shutdown_qt_backend_command_executor()
-        self.request_active_cache_save(force=True)
-        QApplication.instance().quit()
 
     def closeEvent(self, event):
         try:
-            self._closing = True
-            try:
-                for timer_name in ("remote_update_timer", "patch_check_timer"):
-                    timer = getattr(self, timer_name, None)
-                    if timer and timer.isActive():
-                        timer.stop()
-            except Exception:
-                pass
-            try:
-                speech_manager.shutdown()
-            except Exception:
-                pass
-            try:
-                from ..services.system_alert_webhook import shutdown_system_alert_worker
-
-                shutdown_system_alert_worker(timeout=1.0)
-            except Exception:
-                pass
-            try:
-                if self.clipboard_preview_dialog:
-                    self.clipboard_preview_dialog.hide()
-                self._shutdown_clipboard_ipc(wait_ms=1500)
-                log_info("剪贴板监听进程已停止")
-            except Exception as e:
-                log_error(f"停止剪贴板监听进程失败: {e}")
-
-            # 停止热重载管理器
-            if hasattr(self, "hot_reload_manager"):
-                self.hot_reload_manager.stop()
-            self._shutdown_qt_backend_command_executor()
+            self._shutdown_runtime()
         except Exception as exc:
             log_error(f"关闭窗口清理失败: {exc}")
         super().closeEvent(event)

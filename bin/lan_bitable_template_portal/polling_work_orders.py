@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import hmac
 import io
+import json
 import math
 import os
 import re
@@ -18,7 +19,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from upload_event_module.utils import get_data_file_path
 from .polling_work_order_relay import public_link_with_configured_port
@@ -56,6 +57,23 @@ POLLING_STEP_PHOTO_MIME_TYPES = frozenset(
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
 POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v3.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
+POLLING_SOP_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
+POLLING_SOP_TABLE_ID = "tbl5KlqJAhpqWbK4"
+POLLING_SOP_CLOUD_FIELDS = {
+    "SOP标识": 1,
+    "楼栋": 1,
+    "工单类型": 1,
+    "步骤数据": 1,
+    "附件": 17,
+    "附件元数据": 1,
+    "记录版本": 2,
+    "创建时间": 1,
+    "更新时间": 1,
+    "创建人": 1,
+    "更新人": 1,
+    "内容哈希": 1,
+    "状态": 1,
+}
 WORK_ORDER_TYPES = frozenset({"polling", "maintenance", "adjust"})
 ADJUST_COOLING_MODES = {
     "1#": "停机状态",
@@ -127,11 +145,239 @@ def _adjust_cooling_sop_tokens(steps: list[dict]) -> set[str]:
     }
 
 
+class PollingSopCloudStore:
+    _schema_ready = False
+    _schema_lock = threading.Lock()
+
+    def __init__(self) -> None:
+        from upload_event_module.services.http_client import FeishuHttpClient
+
+        self.client = FeishuHttpClient(retries=1)
+        self.root = (
+            "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{POLLING_SOP_APP_TOKEN}/tables/{POLLING_SOP_TABLE_ID}"
+        )
+        self._cache_lock = threading.RLock()
+        self._cache: list[dict] = []
+        self._cache_until = 0.0
+
+    @staticmethod
+    def _token() -> str:
+        from upload_event_module.services.feishu_token_manager import token_manager
+
+        return token_manager.get_tenant_token()
+
+    def _request(self, method: str, path: str, body=None, params=None) -> dict:
+        if method != "GET":
+            from .portal_service import external_real_write_guard
+
+            guard = external_real_write_guard()
+            if not guard.get("real_write_allowed"):
+                raise PortalError(str(guard.get("reason") or "真实飞书写入未确认。"))
+        payload = self.client.request_json(
+            method,
+            self.root + "/" + path.lstrip("/"),
+            headers={"Authorization": "Bearer " + self._token()},
+            params=params or {},
+            json_payload=body,
+            retries=1 if method == "GET" else 0,
+        )
+        if int(payload.get("code") or 0):
+            raise PortalError(
+                f"SOP多维表请求失败：code={payload.get('code')}，{payload.get('msg') or ''}"
+            )
+        return payload.get("data") if isinstance(payload.get("data"), dict) else {}
+
+    def ensure_schema(self) -> None:
+        if type(self)._schema_ready:
+            return
+        with type(self)._schema_lock:
+            if type(self)._schema_ready:
+                return
+            fields = {
+                str(item.get("field_name") or ""): item
+                for item in self._request("GET", "fields", params={"page_size": 100}).get("items", [])
+            }
+            for name, field_type in POLLING_SOP_CLOUD_FIELDS.items():
+                current = fields.get(name)
+                if current and int(current.get("type") or 0) != field_type:
+                    raise PortalError(f"SOP多维表字段类型错误：{name}")
+                if not current:
+                    self._request("POST", "fields", {"field_name": name, "type": field_type})
+            type(self)._schema_ready = True
+
+    def list_records(self) -> list[dict]:
+        self.ensure_schema()
+        records: list[dict] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            page = self._request("GET", "records", params=params)
+            records.extend(item for item in page.get("items", []) if isinstance(item, dict))
+            if not page.get("has_more"):
+                return records
+            page_token = str(page.get("page_token") or "")
+            if not page_token:
+                raise PortalError("SOP多维表分页游标无效。")
+
+    @staticmethod
+    def _decode(record: dict) -> dict | None:
+        fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+        sop_id = str(fields.get("SOP标识") or "").strip()
+        if not sop_id or str(fields.get("状态") or "启用").strip() == "已删除":
+            return None
+        try:
+            steps = json.loads(str(fields.get("步骤数据") or "[]"))
+            attachment_meta = json.loads(str(fields.get("附件元数据") or "[]"))
+        except (TypeError, ValueError) as exc:
+            raise PortalError(f"SOP云端数据格式错误：{sop_id}") from exc
+        raw_attachments = fields.get("附件") if isinstance(fields.get("附件"), list) else []
+        tokens = {
+            str(item.get("file_token") or item.get("token") or ""): item
+            for item in raw_attachments
+            if isinstance(item, dict)
+        }
+        attachments = []
+        for index, item in enumerate(attachment_meta if isinstance(attachment_meta, list) else []):
+            if not isinstance(item, dict):
+                continue
+            token = str(item.get("file_token") or "")
+            remote = tokens.get(token) or (raw_attachments[index] if index < len(raw_attachments) else {})
+            attachments.append(
+                {
+                    **item,
+                    "file_token": token or str((remote or {}).get("file_token") or (remote or {}).get("token") or ""),
+                    "name": str(item.get("name") or (remote or {}).get("name") or "SOP附件"),
+                    "_cloud_download_url": str((remote or {}).get("url") or ""),
+                }
+            )
+        return {
+            "sop_id": sop_id,
+            "work_type": str(fields.get("工单类型") or "polling"),
+            "scope": str(fields.get("楼栋") or "").replace("楼", "").upper(),
+            "name": str(fields.get("文本") or ""),
+            "steps": steps if isinstance(steps, list) else [],
+            "attachments": attachments,
+            "version": int(float(fields.get("记录版本") or 0)),
+            "created_at": str(fields.get("创建时间") or ""),
+            "updated_at": str(fields.get("更新时间") or ""),
+            "created_by": str(fields.get("创建人") or ""),
+            "updated_by": str(fields.get("更新人") or ""),
+            "_cloud_record_id": str(record.get("record_id") or ""),
+        }
+
+    def list_sops(self, *, force: bool = False) -> list[dict]:
+        with self._cache_lock:
+            if not force and time.monotonic() < self._cache_until:
+                return copy.deepcopy(self._cache)
+        items = [sop for record in self.list_records() if (sop := self._decode(record))]
+        with self._cache_lock:
+            self._cache = copy.deepcopy(items)
+            self._cache_until = time.monotonic() + 15.0
+        return items
+
+    def get_sop(self, sop_id: str, *, force: bool = False) -> dict | None:
+        return next((sop for sop in self.list_sops(force=force) if sop["sop_id"] == sop_id), None)
+
+    def invalidate(self) -> None:
+        with self._cache_lock:
+            self._cache_until = 0.0
+
+    def close(self) -> None:
+        self.client.close()
+
+    @staticmethod
+    def _fields(sop: dict) -> dict:
+        attachments = [
+            {key: value for key, value in item.items() if key in {"attachment_id", "name", "size", "sha256", "file_token", "created_at", "created_by"}}
+            for item in sop.get("attachments") or []
+        ]
+        fields = {
+            "文本": str(sop.get("name") or ""),
+            "SOP标识": str(sop.get("sop_id") or ""),
+            "楼栋": str(sop.get("scope") or "") + "楼",
+            "工单类型": str(sop.get("work_type") or "polling"),
+            "步骤数据": json.dumps(sop.get("steps") or [], ensure_ascii=False, separators=(",", ":")),
+            "附件": [{"file_token": item["file_token"]} for item in attachments if item.get("file_token")],
+            "附件元数据": json.dumps(attachments, ensure_ascii=False, separators=(",", ":")),
+            "记录版本": int(sop.get("version") or 0),
+            "创建时间": str(sop.get("created_at") or ""),
+            "更新时间": str(sop.get("updated_at") or ""),
+            "创建人": str(sop.get("created_by") or ""),
+            "更新人": str(sop.get("updated_by") or ""),
+            "内容哈希": hashlib.sha256(json.dumps([sop.get("steps") or [], attachments], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+            "状态": "启用",
+        }
+        return fields
+
+    def save_sop(self, sop: dict, *, expected_version: int, allow_create: bool = False) -> dict:
+        existing = self.get_sop(str(sop.get("sop_id") or ""), force=True)
+        if existing and int(existing.get("version") or 0) != int(expected_version or 0):
+            raise PortalConflictError("SOP 已被其他电脑修改，请刷新后重试。")
+        if not existing and expected_version and not allow_create:
+            raise PortalConflictError("SOP 云端版本不存在，请刷新后重试。")
+        body = {"fields": self._fields(sop)}
+        if existing:
+            record = self._request("PUT", f"records/{existing['_cloud_record_id']}", body).get("record") or {}
+        else:
+            record = self._request("POST", "records", body).get("record") or {}
+        result = copy.deepcopy(sop)
+        result["_cloud_record_id"] = str(record.get("record_id") or (existing or {}).get("_cloud_record_id") or "")
+        self.invalidate()
+        return result
+
+    def upload_attachment(self, path: Path, file_name: str) -> str:
+        payload = self.client.request_file_json(
+            "POST",
+            "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+            headers={"Authorization": "Bearer " + self._token()},
+            data={"file_name": file_name, "parent_type": "bitable_file", "parent_node": POLLING_SOP_APP_TOKEN, "size": str(path.stat().st_size)},
+            file_path=str(path),
+            file_name=file_name,
+            retries=1,
+        )
+        if int(payload.get("code") or 0) or not str((payload.get("data") or {}).get("file_token") or ""):
+            raise PortalError(f"SOP附件上传失败：{payload.get('msg') or '未返回文件标识'}")
+        return str(payload["data"]["file_token"])
+
+    def download_attachment(self, attachment: dict) -> bytes:
+        file_token = str(attachment.get("file_token") or "").strip()
+        if not file_token:
+            raise PortalError("SOP附件缺少有效的飞书文件标识。")
+        download_url = str(attachment.get("_cloud_download_url") or "").strip()
+        if download_url:
+            parsed = urlsplit(download_url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "open.feishu.cn"
+                or not parsed.path.startswith("/open-apis/drive/v1/medias/")
+            ):
+                raise PortalError("SOP附件下载地址无效。")
+        content, _ = self.client.request_bytes(
+            "GET",
+            download_url
+            or "https://open.feishu.cn/open-apis/drive/v1/medias/" + quote(file_token, safe="") + "/download",
+            headers={"Authorization": "Bearer " + self._token()},
+            retries=1,
+            max_bytes=POLLING_SOP_MAX_FILE_BYTES,
+        )
+        return content
+
+    def delete_sop(self, sop: dict) -> None:
+        record_id = str(sop.get("_cloud_record_id") or "")
+        if record_id:
+            self._request("DELETE", f"records/{record_id}")
+            self.invalidate()
+
+
 class PollingWorkOrderService:
     _lock = threading.RLock()
 
-    def __init__(self, state_store) -> None:
+    def __init__(self, state_store, cloud: PollingSopCloudStore | None = None) -> None:
         self.state_store = state_store
+        self.cloud = cloud
         self.sop_root = Path(get_data_file_path("polling_sop")).resolve()
         self.work_order_root = Path(
             get_data_file_path("polling_work_orders")
@@ -141,6 +387,8 @@ class PollingWorkOrderService:
             / "templates"
             / POLLING_WORK_ORDER_TEMPLATE_NAME
         )
+        self._legacy_cloud_sync_lock = threading.Lock()
+        self._legacy_cloud_sync_done = False
 
     @staticmethod
     def _now_text() -> str:
@@ -149,10 +397,11 @@ class PollingWorkOrderService:
     @staticmethod
     def _public_sop(sop: dict) -> dict:
         result = copy.deepcopy(sop or {})
+        result.pop("_cloud_record_id", None)
         sop_id = str(result.get("sop_id") or "")
         result["attachments"] = [
             {
-                **{key: value for key, value in item.items() if key != "path"},
+                **{key: value for key, value in item.items() if key not in {"path", "file_token", "_cloud_download_url"}},
                 "download_url": (
                     f"/api/polling-sops/{quote(sop_id, safe='')}/attachments/"
                     f"{quote(str(item.get('attachment_id') or ''), safe='')}"
@@ -164,25 +413,182 @@ class PollingWorkOrderService:
         result["ready"] = bool(result.get("steps") and result.get("attachments"))
         return result
 
+    def _cache_cloud_sop(self, remote: dict) -> dict:
+        sop_id = str(remote.get("sop_id") or "")
+        scope = str(remote.get("scope") or "").strip().upper()
+        work_type = _work_order_type(remote.get("work_type"))
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", sop_id) or scope not in POLLING_SOP_SCOPES:
+            raise PortalError("SOP 云端标识或楼栋无效。")
+        remote = {
+            **copy.deepcopy(remote),
+            "scope": scope,
+            "work_type": work_type,
+            "steps": self._normalized_steps(remote.get("steps"), work_type=work_type),
+        }
+        name = str(remote.get("name") or "").strip()
+        if not name or len(name) > 160:
+            raise PortalError("SOP 云端名称不能为空且不能超过 160 个字符。")
+        remote["name"] = name
+        raw_attachments = remote.get("attachments") or []
+        if not isinstance(raw_attachments, list) or len(raw_attachments) > POLLING_SOP_MAX_FILES:
+            raise PortalError(f"SOP 云端附件不能超过 {POLLING_SOP_MAX_FILES} 个。")
+        local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id) or {}
+        local_attachments = {
+            str(item.get("attachment_id") or ""): item
+            for item in local.get("attachments") or []
+            if isinstance(item, dict)
+        }
+        attachments = []
+        total_size = 0
+        for item in raw_attachments:
+            if not isinstance(item, dict):
+                raise PortalError("SOP 云端附件格式无效。")
+            attachment = copy.deepcopy(item)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", str(attachment.get("attachment_id") or "")):
+                raise PortalError("SOP 云端附件标识无效。")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", str(attachment.get("file_token") or "")):
+                raise PortalError("SOP 云端附件缺少有效的飞书文件标识。")
+            try:
+                size = int(attachment.get("size") or 0)
+            except (TypeError, ValueError) as exc:
+                raise PortalError("SOP 云端附件大小无效。") from exc
+            if size < 0 or size > POLLING_SOP_MAX_FILE_BYTES:
+                raise PortalError("SOP 云端单个附件不能超过 20MB。")
+            total_size += size
+            if total_size > POLLING_SOP_MAX_TOTAL_BYTES:
+                raise PortalError("SOP 云端附件总大小不能超过 100MB。")
+            digest = str(attachment.get("sha256") or "").strip().lower()
+            if digest and not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise PortalError("SOP 云端附件校验值无效。")
+            attachment["size"] = size
+            attachment["sha256"] = digest
+            attachment["name"] = _safe_file_name(attachment.get("name"))
+            existing = local_attachments.get(str(attachment.get("attachment_id") or "")) or {}
+            path = str(existing.get("path") or "")
+            if not path:
+                directory = self._sop_directory(sop_id)
+                path = str((directory / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve())
+            attachment["path"] = path
+            attachments.append(attachment)
+        cached = {**copy.deepcopy(remote), "attachments": attachments}
+        if cached != local:
+            self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, cached)
+        return cached
+
+    def _sync_legacy_local_sops(self, cloud_items: list[dict]) -> tuple[list[dict], list[dict]]:
+        if not self.cloud or self._legacy_cloud_sync_done:
+            return cloud_items, []
+        with self._legacy_cloud_sync_lock:
+            if self._legacy_cloud_sync_done:
+                return cloud_items, []
+            known_ids = {str(item.get("sop_id") or "") for item in cloud_items}
+            pending: list[dict] = []
+            changed = False
+            documents = self.state_store.list_documents(POLLING_SOP_NAMESPACE)
+            for document in documents:
+                local = copy.deepcopy(document.get("payload") or {})
+                sop_id = str(local.get("sop_id") or "").strip()
+                if not sop_id or sop_id in known_ids:
+                    continue
+                try:
+                    scope = str(local.get("scope") or "").strip().upper()
+                    work_type = _work_order_type(local.get("work_type"))
+                    name = str(local.get("name") or "").strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", sop_id) or scope not in POLLING_SOP_SCOPES:
+                        raise PortalError("本地旧 SOP 标识或楼栋无效。")
+                    if not name or len(name) > 160:
+                        raise PortalError("本地旧 SOP 名称无效。")
+                    local.update(
+                        scope=scope,
+                        work_type=work_type,
+                        name=name,
+                        steps=self._normalized_steps(local.get("steps"), work_type=work_type),
+                    )
+                    attachments = copy.deepcopy(local.get("attachments") or [])
+                    if not isinstance(attachments, list) or len(attachments) > POLLING_SOP_MAX_FILES:
+                        raise PortalError("本地旧 SOP 附件数量无效。")
+                    total_size = 0
+                    for attachment in attachments:
+                        if not isinstance(attachment, dict):
+                            raise PortalError("本地旧 SOP 附件格式无效。")
+                        attachment_id = str(attachment.get("attachment_id") or "")
+                        if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", attachment_id):
+                            raise PortalError("本地旧 SOP 附件标识无效。")
+                        path = Path(str(attachment.get("path") or "")).resolve()
+                        directory = self._sop_directory(sop_id)
+                        if not path.is_file() or not path.is_relative_to(directory):
+                            raise PortalError(f"本地旧 SOP 附件不存在：{_safe_file_name(attachment.get('name'))}")
+                        size = path.stat().st_size
+                        total_size += size
+                        if size > POLLING_SOP_MAX_FILE_BYTES or total_size > POLLING_SOP_MAX_TOTAL_BYTES:
+                            raise PortalError("本地旧 SOP 附件大小超限。")
+                        digest_value = _file_sha256(path)
+                        expected_hash = str(attachment.get("sha256") or "").strip().lower()
+                        if expected_hash and digest_value != expected_hash:
+                            raise PortalError(f"本地旧 SOP 附件校验失败：{path.name}")
+                        attachment.update(size=size, sha256=digest_value, name=_safe_file_name(attachment.get("name")))
+                        if not str(attachment.get("file_token") or "").strip():
+                            attachment["file_token"] = self.cloud.upload_attachment(path, attachment["name"])
+                            local["attachments"] = attachments
+                            self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, local)
+                    local["attachments"] = attachments
+                    self.cloud.save_sop(local, expected_version=0, allow_create=True)
+                    known_ids.add(sop_id)
+                    changed = True
+                except PortalConflictError:
+                    existing = self.cloud.get_sop(sop_id, force=True)
+                    if existing:
+                        known_ids.add(sop_id)
+                        changed = True
+                    else:
+                        pending.append(local)
+                except Exception as exc:
+                    print(f"[ClipFlow] 本地旧 SOP 云端迁移待重试: sop_id={sop_id}, error={exc}")
+                    pending.append(local)
+            if changed:
+                cloud_items = self.cloud.list_sops(force=True)
+            self._legacy_cloud_sync_done = not pending
+            return cloud_items, pending
+
+    def _cloud_sops(self, *, force: bool = False) -> list[dict] | None:
+        if not self.cloud:
+            return None
+        try:
+            cloud_items, pending = self._sync_legacy_local_sops(
+                self.cloud.list_sops(force=force)
+            )
+            return [self._cache_cloud_sop(item) for item in cloud_items] + pending
+        except Exception as exc:
+            print(f"[ClipFlow] SOP cloud read failed, using local cache: {exc}")
+            return None
+
     def list_sops(self, scope: str, work_type: str = "polling") -> list[dict]:
         scope = str(scope or "").strip().upper()
         work_type = _work_order_type(work_type)
         if scope not in POLLING_SOP_SCOPES:
             raise PortalError("请在明确的单楼页面读取 SOP。")
-        items = [
-            self._public_sop(document.get("payload") or {})
+        cloud_items = self._cloud_sops()
+        source = cloud_items if cloud_items is not None else [
+            document.get("payload") or {}
             for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE)
             if isinstance(document.get("payload"), dict)
-            and (
-                str((document.get("payload") or {}).get("scope") or "").strip().upper()
-                == scope
-            )
-            and _stored_work_order_type(document.get("payload")) == work_type
         ]
+        items = [self._public_sop(item) for item in source if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
         return sorted(items, key=lambda item: str(item.get("name") or "").casefold())
 
-    def get_sop(self, sop_id: str, *, public: bool = True) -> dict:
+    def get_sop(self, sop_id: str, *, public: bool = True, refresh: bool = False) -> dict:
         sop_id = str(sop_id or "").strip()
+        if self.cloud:
+            try:
+                remote = self.cloud.get_sop(sop_id, force=refresh)
+            except Exception as exc:
+                print(f"[ClipFlow] SOP cloud read failed, using local cache: {exc}")
+            else:
+                if not remote:
+                    self.state_store.delete_document(POLLING_SOP_NAMESPACE, sop_id)
+                    raise PortalNotFoundError("轮巡 SOP 不存在。")
+                sop = self._cache_cloud_sop(remote)
+                return self._public_sop(sop) if public else copy.deepcopy(sop)
         sop = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id)
         if not isinstance(sop, dict):
             raise PortalNotFoundError("轮巡 SOP 不存在。")
@@ -290,6 +696,12 @@ class PollingWorkOrderService:
                 "updated_at": now,
                 "updated_by": str(actor_open_id or ""),
             }
+            if self.cloud:
+                sop = self.cloud.save_sop(
+                    sop,
+                    expected_version=expected_version,
+                    allow_create=bool(existing),
+                )
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, sop)
             self._sync_unstarted_work_order_limits(sop)
         return self._public_sop(sop)
@@ -359,6 +771,28 @@ class PollingWorkOrderService:
             raise PortalError("SOP 附件路径无效。")
         return path
 
+    def _ensure_local_attachment(self, sop: dict, attachment: dict) -> Path:
+        directory = self._sop_directory(str(sop.get("sop_id") or ""))
+        path = Path(str(attachment.get("path") or "")).resolve()
+        if path.is_file() and path.is_relative_to(directory):
+            return path
+        if not self.cloud or not str(attachment.get("file_token") or "").strip():
+            raise PortalNotFoundError("SOP 附件文件不存在。")
+        content = self.cloud.download_attachment(attachment)
+        if len(content) > POLLING_SOP_MAX_FILE_BYTES:
+            raise PortalError("SOP 单个附件不能超过 20MB。")
+        expected_hash = str(attachment.get("sha256") or "")
+        if expected_hash and hashlib.sha256(content).hexdigest() != expected_hash:
+            raise PortalError("SOP 附件下载后校验失败。")
+        directory.mkdir(parents=True, exist_ok=True)
+        path = (directory / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve()
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+        attachment["path"] = str(path)
+        self.state_store.put_document(POLLING_SOP_NAMESPACE, str(sop.get("sop_id") or ""), sop)
+        return path
+
     def add_sop_attachment(
         self,
         sop_id: str,
@@ -374,7 +808,7 @@ class PollingWorkOrderService:
         if len(content) > POLLING_SOP_MAX_FILE_BYTES:
             raise PortalError("SOP 单个附件不能超过 20MB。")
         with self._lock:
-            sop = self.get_sop(sop_id, public=False)
+            sop = self.get_sop(sop_id, public=False, refresh=True)
             if int(expected_version or 0) != int(sop.get("version") or 0):
                 raise PortalConflictError("SOP 已被修改，请刷新后重试。")
             attachments = list(sop.get("attachments") or [])
@@ -401,6 +835,12 @@ class PollingWorkOrderService:
                 "created_at": self._now_text(),
                 "created_by": str(actor_open_id or ""),
             }
+            if self.cloud:
+                try:
+                    attachment["file_token"] = self.cloud.upload_attachment(path, safe_name)
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    raise
             attachments.append(attachment)
             sop.update(
                 {
@@ -410,6 +850,12 @@ class PollingWorkOrderService:
                     "updated_by": str(actor_open_id or ""),
                 }
             )
+            if self.cloud:
+                try:
+                    sop = self.cloud.save_sop(sop, expected_version=expected_version)
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    raise
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, sop)
         return self._public_sop(sop)
 
@@ -425,10 +871,7 @@ class PollingWorkOrderService:
         )
         if not attachment:
             raise PortalNotFoundError("SOP 附件不存在。")
-        path = Path(str(attachment.get("path") or "")).resolve()
-        directory = self._sop_directory(str(sop.get("sop_id") or ""))
-        if not path.is_file() or not path.is_relative_to(directory):
-            raise PortalNotFoundError("SOP 附件文件不存在。")
+        path = self._ensure_local_attachment(sop, attachment)
         return path.read_bytes(), str(attachment.get("name") or path.name)
 
     def delete_sop_attachment(
@@ -440,7 +883,7 @@ class PollingWorkOrderService:
         actor_open_id: str = "",
     ) -> dict:
         with self._lock:
-            sop = self.get_sop(sop_id, public=False)
+            sop = self.get_sop(sop_id, public=False, refresh=True)
             if int(expected_version or 0) != int(sop.get("version") or 0):
                 raise PortalConflictError("SOP 已被修改，请刷新后重试。")
             attachments = list(sop.get("attachments") or [])
@@ -452,8 +895,6 @@ class PollingWorkOrderService:
                 raise PortalNotFoundError("SOP 附件不存在。")
             path = Path(str(attachment.get("path") or "")).resolve()
             directory = self._sop_directory(sop_id)
-            if path.is_relative_to(directory) and path.is_file():
-                path.unlink()
             sop.update(
                 {
                     "attachments": [item for item in attachments if item is not attachment],
@@ -462,14 +903,20 @@ class PollingWorkOrderService:
                     "updated_by": str(actor_open_id or ""),
                 }
             )
+            if self.cloud:
+                sop = self.cloud.save_sop(sop, expected_version=expected_version)
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, sop)
+            if path.is_relative_to(directory) and path.is_file():
+                path.unlink()
         return self._public_sop(sop)
 
     def delete_sop(self, sop_id: str, *, expected_version: int) -> dict:
         with self._lock:
-            sop = self.get_sop(sop_id, public=False)
+            sop = self.get_sop(sop_id, public=False, refresh=True)
             if int(expected_version or 0) != int(sop.get("version") or 0):
                 raise PortalConflictError("SOP 已被修改，请刷新后重试。")
+            if self.cloud:
+                self.cloud.delete_sop(sop)
             directory = self._sop_directory(sop_id)
             if directory.exists():
                 shutil.rmtree(directory)
@@ -524,7 +971,11 @@ class PollingWorkOrderService:
             return {}
         if _flag(request_payload.get("polling_work_order_exempt")):
             return {"polling_work_order_exempt": True}
-        sop = self.get_sop(str(request_payload.get("polling_sop_id") or ""), public=False)
+        sop = self.get_sop(
+            str(request_payload.get("polling_sop_id") or ""),
+            public=False,
+            refresh=bool(self.cloud),
+        )
         request_scope = str(request_payload.get("scope") or "").strip().upper()
         if request_scope not in POLLING_SOP_SCOPES or str(
             sop.get("scope") or ""
@@ -635,9 +1086,7 @@ class PollingWorkOrderService:
         staging.mkdir(parents=True, exist_ok=True)
         snapshot_attachments: list[dict] = []
         for attachment in sop.get("attachments") or []:
-            source = Path(str(attachment.get("path") or "")).resolve()
-            if not source.is_file() or not source.is_relative_to(self._sop_directory(str(sop.get("sop_id") or ""))):
-                raise PortalError(f"SOP 附件不存在：{attachment.get('name') or '-'}")
+            source = self._ensure_local_attachment(sop, attachment)
             target = (staging / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve()
             if not target.is_relative_to(staging):
                 raise PortalError("工单附件暂存路径无效。")

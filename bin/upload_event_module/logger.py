@@ -3,10 +3,11 @@ import atexit
 import faulthandler
 import logging
 import os
+import queue
 import sys
 import threading
 import time
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 
 from .utils import get_data_file_path, migrate_runtime_data_files
 
@@ -22,8 +23,23 @@ _crash_trace_pending_bytes = 0
 _crash_trace_last_flush = 0.0
 _crash_trace_lock = threading.RLock()
 _logging_initialized = False
+_logging_listener = None
 _orig_stdout = sys.stdout
 _orig_stderr = sys.stderr
+
+
+def _stop_logging_listener():
+    global _logging_listener
+    listener = _logging_listener
+    _logging_listener = None
+    if listener is not None:
+        try:
+            listener.stop()
+        except Exception:
+            pass
+
+
+atexit.register(_stop_logging_listener)
 
 
 def _roll_plain_log_file(path, backup_count):
@@ -253,7 +269,6 @@ class StreamLogger:
         if self.stream:
             try:
                 self.stream.write(message)
-                self.stream.flush()
             except Exception:
                 pass
         text = message.strip()
@@ -302,7 +317,7 @@ def _install_qt_message_handler():
 
 def setup_logging():
     """Configure logging once per process."""
-    global _logging_initialized, _crash_trace_file
+    global _logging_initialized, _crash_trace_file, _logging_listener
     if _logging_initialized:
         return
 
@@ -326,12 +341,19 @@ def setup_logging():
         encoding="utf-8",
     )
     console_handler = SafeConsoleHandler(console_stream)
+    log_queue = queue.Queue(maxsize=10_000)
+    queue_handler = QueueHandler(log_queue)
     logging.basicConfig(
         level=logging.ERROR,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[file_handler, console_handler],
+        handlers=[queue_handler],
         force=True,
     )
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    _logging_listener = QueueListener(log_queue, file_handler, console_handler, respect_handler_level=True)
+    _logging_listener.start()
     # Do not print logging internal exceptions to stderr.
     logging.raiseExceptions = False
 

@@ -9,6 +9,7 @@ import json
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -85,6 +86,9 @@ class PortalAuthManager:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._states: dict[str, dict[str, Any]] = {}
         self._last_persistent_cleanup = 0.0
+        self._permissions_cache: dict[str, Any] | None = None
+        self._permissions_cache_until = 0.0
+        self._cleanup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PortalAuthCleanup")
         self._permission_path = Path(get_data_file_path("lan_portal_auth.json"))
         self._permission_path.parent.mkdir(parents=True, exist_ok=True)
         self._state_store = LanPortalStateStore(
@@ -201,6 +205,8 @@ class PortalAuthManager:
         return payload
 
     def _load_permissions_locked(self) -> dict[str, Any]:
+        if self._permissions_cache is not None and time.monotonic() < self._permissions_cache_until:
+            return copy.deepcopy(self._permissions_cache)
         stored = self._state_store.get_auth_permissions()
         if isinstance(stored, dict):
             payload = stored
@@ -225,10 +231,15 @@ class PortalAuthManager:
         default_scopes = payload.get("default_scopes")
         if not isinstance(default_scopes, list):
             payload["default_scopes"] = []
-        return self._ensure_required_admins_locked(payload)
+        payload = self._ensure_required_admins_locked(payload)
+        self._permissions_cache = copy.deepcopy(payload)
+        self._permissions_cache_until = time.monotonic() + 5.0
+        return payload
 
     def _save_permissions_locked(self, payload: dict[str, Any]) -> None:
         self._state_store.put_auth_permissions(payload)
+        self._permissions_cache = copy.deepcopy(payload)
+        self._permissions_cache_until = time.monotonic() + 5.0
 
     def _backup_corrupt_permissions_locked(self) -> None:
         if not self._permission_path.exists():
@@ -264,12 +275,19 @@ class PortalAuthManager:
         self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
         self._trim_by_expiry_locked(self._states, AUTH_MAX_PENDING_STATES)
         if now - float(self._last_persistent_cleanup or 0) >= 60:
-            self._state_store.cleanup_auth_runtime(
-                now=now,
-                max_states=AUTH_MAX_PENDING_STATES,
-                max_sessions=AUTH_MAX_SESSIONS,
-            )
             self._last_persistent_cleanup = now
+            try:
+                self._cleanup_executor.submit(
+                    self._state_store.cleanup_auth_runtime,
+                    now=now,
+                    max_states=AUTH_MAX_PENDING_STATES,
+                    max_sessions=AUTH_MAX_SESSIONS,
+                )
+            except RuntimeError:
+                pass
+
+    def shutdown(self) -> None:
+        self._cleanup_executor.shutdown(wait=False, cancel_futures=True)
 
     def _scopes_from_raw(self, raw_scopes: Any) -> list[str]:
         scopes = raw_scopes if isinstance(raw_scopes, list) else []

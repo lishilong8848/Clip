@@ -15,6 +15,32 @@ from .display_state import persistent_active_item_data
 
 
 class ActiveCacheMixin:
+    def _submit_active_cache_io(self, task, on_done=None) -> bool:
+        executor = getattr(self, "_qt_backend_command_executor", None)
+        if executor is None:
+            try:
+                result = task()
+                if on_done:
+                    on_done(result)
+                return True
+            except Exception:
+                return False
+        try:
+            future = executor.submit(task)
+        except RuntimeError:
+            return False
+        if on_done:
+            def completed(done):
+                try:
+                    result = done.result()
+                except Exception:
+                    return
+                enqueue = getattr(self, "_enqueue_ui_mutation", None)
+                if callable(enqueue):
+                    enqueue("active_cache_io", lambda: on_done(result))
+            future.add_done_callback(completed)
+        return True
+
     def apply_qt_shell_bootstrap(self, payload: dict | None):
         payload = payload if isinstance(payload, dict) else {}
         active_items = payload.get("active_items") if isinstance(payload.get("active_items"), list) else []
@@ -143,13 +169,7 @@ class ActiveCacheMixin:
         self.save_active_cache()
 
     def _locked_level_map_for_active_cache(self):
-        store = getattr(self, "cache_store", None)
-        if not store or not hasattr(store, "get_locked_level_map"):
-            return {}
-        try:
-            return store.get_locked_level_map() or {}
-        except Exception:
-            return {}
+        return dict(getattr(self, "_active_cache_locked_level_map", {}) or {})
 
     def _upsert_active_cache_record(self, data_dict):
         if self._is_restoring_cache or not isinstance(data_dict, dict):
@@ -158,17 +178,26 @@ class ActiveCacheMixin:
         if not store or not hasattr(store, "upsert_record"):
             return False
         persistent_data = persistent_active_item_data(data_dict)
-        try:
-            if store.upsert_record(persistent_data):
+        def done(saved):
+            if saved:
+                record_id = str(canonical_target_record_id(persistent_data) or "")
+                if record_id:
+                    levels = getattr(self, "_active_cache_locked_level_map", {})
+                    if persistent_data.get("level_locked"):
+                        levels[record_id] = {"level": persistent_data.get("level"), "level_locked": True}
+                    else:
+                        levels.pop(record_id, None)
+                    self._active_cache_locked_level_map = levels
                 self._active_cache_last_save_at = time.time()
                 self._active_cache_dirty = False
                 if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
                     self._schedule_lan_ongoing_snapshot_refresh()
+        def persist():
+            saved = store.upsert_record(persistent_data)
+            if saved:
                 self._post_qt_active_items_delta(upserts=[{"data": persistent_data}])
-                return True
-        except Exception:
-            return False
-        return False
+            return saved
+        return self._submit_active_cache_io(persist, done)
 
     def _delete_active_cache_record(self, data_dict):
         if self._is_restoring_cache or not isinstance(data_dict, dict):
@@ -176,16 +205,13 @@ class ActiveCacheMixin:
         store = getattr(self, "cache_store", None)
         if not store or not hasattr(store, "delete_record"):
             return False
-        try:
+        def persist():
             target_record_id = canonical_target_record_id(data_dict)
-            if store.delete_record(
+            deleted = store.delete_record(
                 record_id=str(target_record_id or data_dict.get("record_id") or ""),
                 active_item_id=str(data_dict.get("active_item_id") or ""),
-            ):
-                self._active_cache_last_save_at = time.time()
-                self._active_cache_dirty = False
-                if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
-                    self._schedule_lan_ongoing_snapshot_refresh()
+            )
+            if deleted:
                 self._post_qt_active_items_delta(
                     deletes=[
                         {
@@ -194,10 +220,17 @@ class ActiveCacheMixin:
                         }
                     ]
                 )
-                return True
-        except Exception:
-            return False
-        return False
+            return deleted
+        def done(deleted):
+            if deleted:
+                record_id = str(canonical_target_record_id(data_dict) or "")
+                if record_id:
+                    getattr(self, "_active_cache_locked_level_map", {}).pop(record_id, None)
+                self._active_cache_last_save_at = time.time()
+                self._active_cache_dirty = False
+                if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
+                    self._schedule_lan_ongoing_snapshot_refresh()
+        return self._submit_active_cache_io(persist, done)
 
     def _collect_active_list_cache(self, list_widget, locked_level_map=None):
         locked_level_map = locked_level_map or {}
@@ -281,31 +314,16 @@ class ActiveCacheMixin:
         if signature == getattr(self, "_active_cache_last_signature", ""):
             self._active_cache_dirty = False
             return
-        has_clipboard_queue = bool(payload.get("clipboard_queue"))
-        if not payload["event"] and not payload["other"] and not has_clipboard_queue:
-            store = getattr(self, "cache_store", None)
-            if store:
-                try:
-                    if store.replace_payload(payload):
-                        self._active_cache_last_signature = signature
-                        self._active_cache_last_save_at = time.time()
-                        self._active_cache_dirty = False
-                except Exception:
-                    pass
+        store = getattr(self, "cache_store", None)
+        def done(saved):
+            if saved:
+                self._active_cache_last_signature = signature
+                self._active_cache_last_save_at = time.time()
+                self._active_cache_dirty = False
             if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
                 self._schedule_lan_ongoing_snapshot_refresh()
-            return
-        try:
-            store = getattr(self, "cache_store", None)
-            if store:
-                if store.replace_payload(payload):
-                    self._active_cache_last_signature = signature
-                    self._active_cache_last_save_at = time.time()
-                    self._active_cache_dirty = False
-            if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
-                self._schedule_lan_ongoing_snapshot_refresh()
-        except Exception:
-            pass
+        if store:
+            self._submit_active_cache_io(lambda: store.replace_payload(payload), done)
 
     def schedule_active_cache_save(self, delay_ms: int = 800):
         if self._is_restoring_cache:
@@ -409,11 +427,11 @@ class ActiveCacheMixin:
         except Exception:
             pass
 
-    def _restore_active_cache(self):
+    def _restore_active_cache(self, payload=None):
         store = getattr(self, "cache_store", None)
-        if store:
+        if payload is None and store:
             payload = store.load_payload()
-        else:
+        elif payload is None:
             if not os.path.exists(ACTIVE_CACHE_FILE):
                 return
             try:

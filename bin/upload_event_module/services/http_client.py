@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import email.utils
 import random
 import threading
 import time
@@ -69,6 +70,24 @@ class FeishuHttpClient:
         self._client = client
         return client
 
+    def _client_for_request(self) -> httpx.Client:
+        with self._lock:
+            return self._ensure_client_locked()
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
+        value = str(response.headers.get("retry-after") or "").strip() if response else ""
+        if value:
+            try:
+                return max(0.0, min(float(value), 30.0))
+            except ValueError:
+                try:
+                    target = email.utils.parsedate_to_datetime(value).timestamp()
+                    return max(0.0, min(target - time.time(), 30.0))
+                except Exception:
+                    pass
+        return 0.35 * (2**attempt) + random.random() * 0.2
+
     def close(self) -> None:
         with self._lock:
             client = self._client
@@ -105,16 +124,15 @@ class FeishuHttpClient:
         last_error = ""
         for attempt in range(retry_count + 1):
             try:
-                with self._lock:
-                    response = self._ensure_client_locked().request(
-                        method,
-                        url,
-                        headers=headers,
-                        params=params,
-                        json=json_payload,
-                    )
+                response = self._client_for_request().request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    json=json_payload,
+                )
                 if response.status_code in RETRY_STATUS_CODES and attempt < retry_count:
-                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    time.sleep(self._retry_delay(response, attempt))
                     continue
                 try:
                     payload = response.json()
@@ -131,7 +149,7 @@ class FeishuHttpClient:
                 status = int(exc.response.status_code if exc.response else 0)
                 last_error = str(exc)
                 if status in RETRY_STATUS_CODES and attempt < retry_count:
-                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    time.sleep(self._retry_delay(exc.response, attempt))
                     continue
                 raise FeishuHTTPError(
                     last_error,
@@ -180,16 +198,15 @@ class FeishuHttpClient:
                             str(content_type or "application/octet-stream"),
                         )
                     }
-                    with self._lock:
-                        response = self._ensure_client_locked().request(
-                            method,
-                            url,
-                            headers=headers,
-                            data=data,
-                            files=files,
-                        )
+                    response = self._client_for_request().request(
+                        method,
+                        url,
+                        headers=headers,
+                        data=data,
+                        files=files,
+                    )
                 if response.status_code in RETRY_STATUS_CODES and attempt < retry_count:
-                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    time.sleep(self._retry_delay(response, attempt))
                     continue
                 try:
                     payload = response.json()
@@ -206,7 +223,7 @@ class FeishuHttpClient:
                 status = int(exc.response.status_code if exc.response else 0)
                 last_error = str(exc)
                 if status in RETRY_STATUS_CODES and attempt < retry_count:
-                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    time.sleep(self._retry_delay(exc.response, attempt))
                     continue
                 raise FeishuHTTPError(
                     last_error,
@@ -238,15 +255,14 @@ class FeishuHttpClient:
         last_error = ""
         for attempt in range(retry_count + 1):
             try:
-                with self._lock:
-                    response = self._ensure_client_locked().request(
-                        method,
-                        url,
-                        headers=headers,
-                        params=params,
-                    )
+                response = self._client_for_request().request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                )
                 if response.status_code in RETRY_STATUS_CODES and attempt < retry_count:
-                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    time.sleep(self._retry_delay(response, attempt))
                     continue
                 response.raise_for_status()
                 content = response.content
@@ -257,7 +273,7 @@ class FeishuHttpClient:
                 status = int(exc.response.status_code if exc.response else 0)
                 last_error = str(exc)
                 if status in RETRY_STATUS_CODES and attempt < retry_count:
-                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    time.sleep(self._retry_delay(exc.response, attempt))
                     continue
                 raise FeishuHTTPError(
                     last_error,

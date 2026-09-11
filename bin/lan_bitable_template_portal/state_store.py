@@ -57,7 +57,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 40
+    SCHEMA_VERSION = 41
     _schema_process_lock = threading.RLock()
     _live_portal_restore_last: dict[str, float] = {}
     SOURCE_SCOPE_TABLES = {
@@ -206,10 +206,17 @@ class LanPortalStateStore:
         "idx_business_operation_audits_operation",
         "idx_business_operation_audits_target",
         "idx_deletion_audit_outbox_pending",
+        "idx_event_outbox_idempotency",
     ]
 
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        busy_timeout_ms: int = 5000,
+    ):
         self.db_path = Path(db_path or get_data_file_path(DEFAULT_STATE_DB_NAME))
+        self.busy_timeout_ms = max(0, int(busy_timeout_ms or 0))
         self._lock = threading.RLock()
         self._initialized = False
         self._initialized_db_identity: tuple[int, int] | None = None
@@ -231,9 +238,9 @@ class LanPortalStateStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=5.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=self.busy_timeout_ms / 1000.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         if not self._wal_initialized:
             current_mode = conn.execute("PRAGMA journal_mode").fetchone()
             if not current_mode or str(current_mode[0] or "").lower() != "wal":
@@ -1472,6 +1479,7 @@ class LanPortalStateStore:
             CREATE TABLE IF NOT EXISTS event_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -1480,6 +1488,12 @@ class LanPortalStateStore:
                 updated_at REAL NOT NULL
             )
             """
+        )
+        self._ensure_column_locked(
+            conn,
+            "event_outbox",
+            "idempotency_key",
+            "TEXT NOT NULL DEFAULT ''",
         )
         self._ensure_column_locked(
             conn,
@@ -1497,6 +1511,13 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_event_outbox_channel_status
             ON event_outbox(channel, status, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_event_outbox_idempotency
+            ON event_outbox(channel, idempotency_key)
+            WHERE idempotency_key <> ''
             """
         )
         conn.execute(
@@ -3707,7 +3728,6 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.execute(
                     """
                     DELETE FROM notice_upload_attachments
@@ -10389,7 +10409,7 @@ class LanPortalStateStore:
     ) -> dict[str, int]:
         done_retention_seconds = max(60, int(done_retention_seconds or 0))
         pending_retention_seconds = max(60, int(pending_retention_seconds or 0))
-        max_delete = max(1, min(int(max_delete or 1000), 5000))
+        max_delete = max(1, min(int(max_delete or 1000), 50_000))
         now = time.time()
         removed_terminal = 0
         removed_pending = 0
@@ -12850,16 +12870,24 @@ class LanPortalStateStore:
         payload: dict[str, Any] | None,
         now: float,
     ) -> int:
+        normalized = dict(payload or {})
+        idempotency_key = self._text(normalized.pop("idempotency_key", ""))
         cursor = conn.execute(
             """
-            INSERT INTO event_outbox(
-                channel, status, payload_json, attempts, last_error, created_at, updated_at
+            INSERT OR IGNORE INTO event_outbox(
+                channel, idempotency_key, status, payload_json, attempts, last_error, created_at, updated_at
             )
-            VALUES (?, 'pending', ?, 0, '', ?, ?)
+            VALUES (?, ?, 'pending', ?, 0, '', ?, ?)
             """,
-            (self._text(channel) or "default", self._json(dict(payload or {})), now, now),
+            (self._text(channel) or "default", idempotency_key, self._json(normalized), now, now),
         )
-        return int(cursor.lastrowid or 0)
+        if cursor.rowcount:
+            return int(cursor.lastrowid or 0)
+        row = conn.execute(
+            "SELECT id FROM event_outbox WHERE channel = ? AND idempotency_key = ?",
+            (self._text(channel) or "default", idempotency_key),
+        ).fetchone()
+        return int(row["id"] or 0) if row else 0
 
     def enqueue_outbox_event(
         self, channel: str, payload: dict[str, Any] | None
@@ -13137,6 +13165,22 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                eligible_count = int(
+                    (
+                        conn.execute(
+                            """
+                            SELECT COUNT(*) FROM event_outbox
+                            WHERE (status IN ('done', 'cancelled') AND updated_at < ?)
+                               OR (status = 'failed' AND updated_at < ?)
+                            """,
+                            (now - done_retention_seconds, now - failed_retention_seconds),
+                        ).fetchone()
+                        or [0]
+                    )[0]
+                    or 0
+                )
+                if eligible_count > max_delete * 2:
+                    max_delete = min(eligible_count, 50_000)
                 eligible_sql = """
                     SELECT id, status
                     FROM event_outbox
@@ -13178,6 +13222,8 @@ class LanPortalStateStore:
                     else:
                         removed_done += 1
                 conn.commit()
+                if rows:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return {
             "removed_done": removed_done,
             "removed_failed": removed_failed,
@@ -14326,6 +14372,21 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                pending = conn.execute(
+                    f"""
+                    SELECT 1 FROM runtime_task_queue
+                    WHERE queue_name = ?
+                      AND (
+                        (status = 'queued' AND available_at <= ?)
+                        OR (status = 'processing' AND lease_until > 0 AND lease_until <= ?)
+                      )
+                      {exclusion}
+                    LIMIT 1
+                    """,
+                    (queue_name, now, now, *excluded),
+                ).fetchone()
+                if not pending:
+                    return []
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     f"""
@@ -14453,7 +14514,6 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.execute(
                     """
                     UPDATE runtime_task_queue

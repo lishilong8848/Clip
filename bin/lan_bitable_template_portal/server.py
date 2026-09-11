@@ -60,7 +60,7 @@ from .identity_utils import (
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
-from .polling_work_orders import PollingWorkOrderService
+from .polling_work_orders import PollingSopCloudStore, PollingWorkOrderService
 from .polling_work_order_relay import probe_polling_relay_health
 from .local_notice_images import LocalNoticeImageStore
 from upload_event_module.config import (
@@ -199,9 +199,16 @@ class PortalRuntime:
     and Qt bridge while the service layer is being split further.
     """
 
+    _polling_sop_cloud = PollingSopCloudStore()
     service = MaintenancePortalService(enable_repair_snapshots=True)
+    service._polling_sop_cloud = (
+        _polling_sop_cloud
+        if external_real_write_guard().get("real_write_allowed")
+        else None
+    )
     auth_manager = PortalAuthManager()
     state_store = LanPortalStateStore()
+    _polling_work_order_manager: PollingWorkOrderService | None = None
     _polling_relay_connector: Any = None
     _polling_relay_connector_signature = ""
     _polling_relay_health_lock = threading.RLock()
@@ -210,7 +217,16 @@ class PortalRuntime:
 
     @classmethod
     def polling_work_orders(cls) -> PollingWorkOrderService:
-        return PollingWorkOrderService(cls.state_store)
+        cloud = (
+            cls._polling_sop_cloud
+            if external_real_write_guard().get("real_write_allowed")
+            else None
+        )
+        manager = cls._polling_work_order_manager
+        if manager is None or manager.state_store is not cls.state_store or manager.cloud is not cloud:
+            manager = PollingWorkOrderService(cls.state_store, cloud)
+            cls._polling_work_order_manager = manager
+        return manager
 
     @classmethod
     def polling_work_order_public_relay_enabled(cls) -> bool:
@@ -5984,6 +6000,7 @@ class PortalRuntime:
         event_id = cls.state_store.enqueue_outbox_event(
             cls.event_repair_queue_channel,
             {
+                "idempotency_key": f"event_repair:{event_record_id}",
                 "event_record_id": event_record_id,
                 "notice_data": dict(notice_data or {}),
                 "remote_fields": dict(remote_fields or {}),
@@ -6049,14 +6066,17 @@ class PortalRuntime:
         event_id = cls.state_store.enqueue_outbox_event(
             cls.event_repair_queue_channel,
             {
-                key: candidate.get(key)
-                for key in (
-                    "event_record_id",
-                    "notice_data",
-                    "remote_fields",
-                    "scope",
-                    "source_month",
-                )
+                "idempotency_key": "event_repair:" + str(candidate.get("event_record_id") or ""),
+                **{
+                    key: candidate.get(key)
+                    for key in (
+                        "event_record_id",
+                        "notice_data",
+                        "remote_fields",
+                        "scope",
+                        "source_month",
+                    )
+                },
             },
         )
         if event_id > 0:
@@ -6207,10 +6227,11 @@ class PortalRuntime:
                 return
             cls.message_worker_stop = False
             missing = cls.message_worker_count - len(cls.message_worker_threads)
-            for _ in range(max(0, missing)):
+            for worker_index in range(len(cls.message_worker_threads), cls.message_worker_count):
                 worker = threading.Thread(
                     target=cls._message_worker_loop,
-                    name="LANPersonalMessageQueue",
+                    args=(worker_index,),
+                    name=f"LANPersonalMessageQueue-{worker_index + 1}",
                     daemon=True,
                 )
                 cls.message_worker_threads.append(worker)
@@ -6278,11 +6299,13 @@ class PortalRuntime:
             )
 
     @classmethod
-    def _message_worker_loop(cls) -> None:
+    def _message_worker_loop(cls, worker_index: int = 0) -> None:
         while True:
-            cls.message_queue_event.wait(timeout=1)
+            signaled = cls.message_queue_event.wait(timeout=1)
             if cls.message_worker_stop:
                 return
+            if not signaled and worker_index:
+                continue
             job_id = cls._dequeue_runtime_job("message")
             if not job_id:
                 continue
@@ -6660,7 +6683,7 @@ class PortalRuntime:
                             cls.service.mark_job(job_id, phase="failed", error=str(exc))
                             cls.state_store.mark_runtime_queue_item("qt_action", job_id, "failed", error=str(exc))
                         del running[job_id]
-                cls.action_queue_event.wait(timeout=0.25)
+                cls.action_queue_event.wait(timeout=1.0)
                 cls.action_queue_event.clear()
                 if cls.action_worker_stop or len(running) >= 4:
                     continue
@@ -6680,7 +6703,11 @@ class PortalRuntime:
                     queue_position=0, qt_queue_position=0, upload_queue_position=0,
                     **({"qt_phase": "preparing"} if str(job.get("phase") or "") in {"accepted", "queued", "qt_queued"} and "event:serial" not in keys else {}),
                 )
-                running[job_id] = pool.submit(cls._process_maintenance_action_job, job_id)
+                future = pool.submit(cls._process_maintenance_action_job, job_id)
+                future.add_done_callback(lambda _future: cls.action_queue_event.set())
+                running[job_id] = future
+                if len(running) < 4:
+                    cls.action_queue_event.set()
 
     @classmethod
     def ensure_upload_wait_worker(cls) -> None:
@@ -11382,6 +11409,7 @@ class PortalRuntime:
             event_id = cls.state_store.enqueue_outbox_event(
                 "qt_action",
                 {
+                    "idempotency_key": f"qt_action:{job_id}:active_upsert" if job_id else "",
                     "kind": "active_upsert",
                     "job_id": str(job_id or event_payload.get("job_id") or ""),
                     "payload": {

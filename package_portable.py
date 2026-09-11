@@ -728,6 +728,12 @@ def write_patch_meta(
 
     }
 
+    meta["file_sha256"] = {
+        path.relative_to(patch_dir).as_posix(): _hash_file(path)
+        for path in sorted(patch_dir.rglob("*"))
+        if path.is_file() and path.name != "patch_meta.json"
+    }
+
     if venv_hash:
 
         meta["venv_hash"] = venv_hash

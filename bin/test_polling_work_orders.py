@@ -24,6 +24,7 @@ if str(BIN) not in sys.path:
 
 from lan_bitable_template_portal.local_notice_images import LocalNoticeImageStore
 from lan_bitable_template_portal.polling_work_orders import (
+    PollingSopCloudStore,
     PollingWorkOrderService,
     PollingWorkOrderTokenError,
 )
@@ -51,7 +52,117 @@ def _png_bytes(color: str = "#1678ff", size: tuple[int, int] = (160, 100)) -> by
     return output.getvalue()
 
 
+class _FakePollingSopCloud:
+    def __init__(self, sops=None, content: bytes = b"") -> None:
+        self.sops = {item["sop_id"]: copy.deepcopy(item) for item in (sops or [])}
+        self.content = content
+        self.saved = []
+        self.uploaded = []
+
+    def list_sops(self, *, force: bool = False):
+        return copy.deepcopy(list(self.sops.values()))
+
+    def get_sop(self, sop_id: str, *, force: bool = False):
+        return copy.deepcopy(self.sops.get(sop_id))
+
+    def save_sop(self, sop: dict, *, expected_version: int, allow_create: bool = False):
+        self.saved.append((copy.deepcopy(sop), expected_version, allow_create))
+        self.sops[sop["sop_id"]] = copy.deepcopy(sop)
+        return copy.deepcopy(sop)
+
+    def download_attachment(self, attachment: dict) -> bytes:
+        return self.content
+
+    def upload_attachment(self, path: Path, file_name: str) -> str:
+        self.uploaded.append((str(path), file_name))
+        return "cloud-file-token"
+
+    def delete_sop(self, sop: dict) -> None:
+        self.sops.pop(sop["sop_id"], None)
+
+
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_legacy_local_sop_is_uploaded_to_cloud_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = LanPortalStateStore(root / "state.sqlite3")
+            cloud = _FakePollingSopCloud()
+            service = PollingWorkOrderService(store, cloud)
+            service.sop_root = root / "sops"
+            sop_id = "legacy_sop_1234"
+            attachment_id = "legacy_attachment_1234"
+            directory = service.sop_root / sop_id
+            directory.mkdir(parents=True)
+            path = directory / f"{attachment_id}_guide.txt"
+            path.write_bytes(b"legacy-guide")
+            store.put_document("polling_sop", sop_id, {
+                "sop_id": sop_id,
+                "scope": "A",
+                "work_type": "maintenance",
+                "name": "旧版本地SOP",
+                "version": 1,
+                "steps": [{
+                    "step_id": "legacy_step_1234",
+                    "content": "检查设备",
+                    "operator_required": True,
+                    "reviewer_required": False,
+                    "photo_required": False,
+                    "time_limit_seconds": 0,
+                }],
+                "attachments": [{
+                    "attachment_id": attachment_id,
+                    "name": "guide.txt",
+                    "size": path.stat().st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "path": str(path),
+                }],
+            })
+
+            self.assertEqual([item["name"] for item in service.list_sops("A", "maintenance")], ["旧版本地SOP"])
+            self.assertEqual((len(cloud.uploaded), len(cloud.saved)), (1, 1))
+            self.assertEqual(
+                store.get_document("polling_sop", sop_id)["attachments"][0]["file_token"],
+                "cloud-file-token",
+            )
+            service.list_sops("A", "maintenance")
+            self.assertEqual((len(cloud.uploaded), len(cloud.saved)), (1, 1))
+
+    def test_cloud_attachment_rejects_untrusted_download_url(self) -> None:
+        cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+        cloud.client = MagicMock()
+        with self.assertRaisesRegex(Exception, "下载地址无效"):
+            cloud.download_attachment({
+                "file_token": "file_token_1234",
+                "_cloud_download_url": "https://example.invalid/private",
+            })
+        cloud.client.request_bytes.assert_not_called()
+
+    def test_sop_cloud_is_authoritative_and_attachment_is_cached_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            content = b"shared-sop-file"
+            sop = {
+                "sop_id": "shared_sop_1234",
+                "scope": "E",
+                "work_type": "polling",
+                "name": "共享SOP",
+                "version": 1,
+                "steps": [{"step_id": "step_12345678", "content": "检查设备", "operator_required": True, "reviewer_required": False, "photo_required": False, "time_limit_seconds": 0}],
+                "attachments": [{"attachment_id": "attachment_1234", "name": "说明.txt", "size": len(content), "sha256": hashlib.sha256(content).hexdigest(), "file_token": "secret-token"}],
+            }
+            root = Path(temp)
+            cloud = _FakePollingSopCloud([sop], content)
+            service = PollingWorkOrderService(LanPortalStateStore(root / "state.sqlite3"), cloud)
+            service.sop_root = root / "sops"
+
+            listed = service.list_sops("E")
+            self.assertEqual([item["name"] for item in listed], ["共享SOP"])
+            self.assertNotIn("file_token", listed[0]["attachments"][0])
+            downloaded, name = service.get_sop_attachment("shared_sop_1234", "attachment_1234")
+            self.assertEqual((downloaded, name), (content, "说明.txt"))
+            saved = service.save_sop({**listed[0], "name": "共享SOP更新", "expected_version": 1})
+            self.assertEqual((saved["name"], saved["version"]), ("共享SOP更新", 2))
+            self.assertEqual(cloud.saved[-1][1], 1)
+
     def test_step_photo_requirement_is_configurable_and_legacy_default_is_safe(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

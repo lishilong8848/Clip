@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import hashlib
 import re
 import os
 import shutil
@@ -54,6 +55,14 @@ RUNTIME_PATCH_DATA_SUFFIXES = (
 
 
 class PatchUpdateMixin:
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def _init_remote_patch_updater(self):
         from ..services.remote_patch_updater import RemotePatchUpdater
 
@@ -1023,6 +1032,14 @@ class PatchUpdateMixin:
                 if self._last_patch_source.startswith("remote"):
                     self._emit_remote_update_phase("远程更新: 依赖就绪，应用补丁中")
             patch_files = self._collect_patch_files(patch_dir)
+            expected_hashes = patch_meta.get("file_sha256") if isinstance(patch_meta, dict) else {}
+            if isinstance(expected_hashes, dict) and expected_hashes:
+                for src in patch_files:
+                    rel = src.relative_to(patch_dir).as_posix()
+                    expected = str(expected_hashes.get(rel) or "").lower()
+                    if not expected or self._sha256_file(src).lower() != expected:
+                        self.patch_update_finished.emit(False, f"补丁文件校验失败: {rel}")
+                        return
             deleted_files = self._parse_deleted_files(patch_dir)
             backup_dir, new_files, deleted_files = self._backup_patch_targets(
                 patch_dir, patch_files, deleted_files, root_dir
@@ -1046,6 +1063,21 @@ class PatchUpdateMixin:
                     False,
                     "补丁更新失败，以下文件处理失败：\n" + "\n".join(failed[:20]),
                 )
+                return
+
+            try:
+                import py_compile
+
+                for src in patch_files:
+                    rel = src.relative_to(patch_dir)
+                    dest = root_dir / rel
+                    if self._sha256_file(dest) != self._sha256_file(src):
+                        raise RuntimeError(f"写入后哈希不一致: {rel}")
+                    if dest.suffix.lower() == ".py":
+                        py_compile.compile(str(dest), doraise=True)
+            except Exception as exc:
+                self._rollback_patch(backup_dir, new_files)
+                self.patch_update_finished.emit(False, f"补丁验证失败，已回退: {exc}")
                 return
 
             self._update_build_meta(root_dir, self._last_patch_meta if hasattr(self, "_last_patch_meta") else {})

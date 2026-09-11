@@ -388,9 +388,11 @@ class CabinetPowerService:
     def snapshot(self,scope):
         return copy.deepcopy(self._snapshot(scope))
 
-    def overview(self,scope):
+    def overview(self,scope,include_racks=True):
         snap=self._snapshot(scope); config=snap["config"]
-        if "overview" in snap: return copy.deepcopy(snap["overview"])
+        if "overview" in snap:
+            result=snap["overview"]
+            return copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
         derived=derive_records(config,snap["operations"]); issues=derived["issues"]
         rooms=[]
         for room in config["rooms"]:
@@ -410,7 +412,11 @@ class CabinetPowerService:
             formats.append({**f,"columns":table_columns(f,scope),"count":len(selected)})
         result={"scope":scope,"configured":True,"activated":True,"history_ready":True,"source":"local","counts":derived["counts"],"rooms":rooms,"racks":derived["racks"],"issues":issues,"version":snap["version"],"updated_at":snap["updated_at"],"error":snap.get("error",""),"daily":derived["daily"],"record_count":len(snap["operations"]),"inventory_only":sum(o["empty"] for o in snap["operations"]),"sheet_formats":formats,"table_url":f"https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}"}
         snap["overview"]=result
-        return copy.deepcopy(result)
+        return copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
+
+    def racks(self,scope):
+        overview=self.overview(scope)
+        return {"items":overview["racks"],"version":overview["version"]}
 
     def layout(self,scope,room_id):
         config=self.config(scope); room=next((r for r in config["rooms"] if r["id"]==room_id),None)

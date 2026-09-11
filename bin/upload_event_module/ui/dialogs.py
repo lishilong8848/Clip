@@ -10,6 +10,8 @@ import threading
 
 import unicodedata
 
+from concurrent.futures import ThreadPoolExecutor
+
 from PyQt6.QtWidgets import (
 
     QDialog,
@@ -95,6 +97,12 @@ from PyQt6.QtGui import (
 from PyQt6 import sip
 
 from PIL import ImageGrab, Image, ImageChops, ImageStat, ImageEnhance
+
+
+_DIALOG_BACKGROUND_EXECUTOR = ThreadPoolExecutor(
+    max_workers=3,
+    thread_name_prefix="ClipFlowDialogBackground",
+)
 
 
 # RapidOCR 延迟导入，避免与 PyQt6 的 DLL 加载冲突
@@ -1278,6 +1286,8 @@ class ScreenshotConfirmOverlay(QWidget):
 
         super().__init__()
 
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
 
 
         # 无边框、置顶、工具窗口
@@ -1591,6 +1601,8 @@ class ScreenshotRegionSelector(QWidget):
     def __init__(self):
 
         super().__init__()
+
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
         self.setWindowFlags(
 
@@ -2244,11 +2256,23 @@ class ScreenshotConfirmDialog(QDialog):
 
     screenshot_finished = pyqtSignal()  # 通知父窗口截图完成，可以显示
 
+    screenshot_encoded = pyqtSignal(int, object, object)
+
+    extra_screenshot_encoded = pyqtSignal(int, object)
+
 
 
     def __init__(self, parent=None, theme="dark"):
 
         super().__init__(parent)
+
+        self._capture_generation = 0
+
+        self._extra_screenshot_encodes = 0
+
+        self.screenshot_encoded.connect(self._on_screenshot_encoded)
+
+        self.extra_screenshot_encoded.connect(self._on_extra_screenshot_encoded)
 
         self.theme = theme
 
@@ -6143,6 +6167,10 @@ class ScreenshotConfirmDialog(QDialog):
         specialty_valid = (not self.enable_specialty_select) or bool(
             self.selected_specialty
         )
+        images_ready = not (
+            getattr(self, "_extra_screenshot_encodes", 0)
+            or (self.screenshot_image is not None and self.screenshot_bytes is None)
+        )
 
         missing_fields = []
         if not time_valid:
@@ -6159,6 +6187,8 @@ class ScreenshotConfirmDialog(QDialog):
             missing_fields.append("执行方")
         if not specialty_valid:
             missing_fields.append("专业")
+        if not images_ready:
+            missing_fields.append("图片处理中")
 
         enable_btns = (
             time_valid
@@ -6168,6 +6198,7 @@ class ScreenshotConfirmDialog(QDialog):
             and cycle_valid
             and execution_party_valid
             and specialty_valid
+            and images_ready
         )
 
         self.btn_confirm.setEnabled(enable_btns)
@@ -6818,27 +6849,27 @@ class ScreenshotConfirmDialog(QDialog):
 
     def _on_extra_screenshot_captured(self, pil_image):
 
-        try:
+        generation = self._capture_generation
 
-            buffer = io.BytesIO()
+        self._extra_screenshot_encodes += 1
 
-            pil_image.save(buffer, format="PNG")
+        self._refresh_submit_state()
 
-            image_bytes = buffer.getvalue()
+        def encode():
 
-            buffer.close()
+            try:
 
-            if image_bytes:
+                buffer = io.BytesIO()
 
-                file_name = f"extra_{len(self.extra_images) + 1}.png"
+                pil_image.save(buffer, format="PNG")
 
-                self.extra_images.append((image_bytes, file_name))
+                self.extra_screenshot_encoded.emit(generation, buffer.getvalue())
 
-                self._update_extra_images_label()
+            except Exception:
 
-        except Exception:
+                self.extra_screenshot_encoded.emit(generation, None)
 
-            pass
+        _DIALOG_BACKGROUND_EXECUTOR.submit(encode)
 
 
 
@@ -6896,17 +6927,53 @@ class ScreenshotConfirmDialog(QDialog):
 
         try:
 
-            buffer = io.BytesIO()
+            self._capture_generation += 1
 
-            pil_image.save(buffer, format="JPEG", quality=85)
-
-            self.screenshot_bytes = buffer.getvalue()
-
-            buffer.close()
+            generation = self._capture_generation
 
             self.screenshot_image = pil_image
 
-            self._show_preview(pil_image)
+            self.screenshot_bytes = None
+
+            preview_size = (
+
+                max(1, self.preview_label.width() - 10),
+
+                max(1, self.preview_label.height() - 10),
+
+            )
+
+            def encode():
+
+                try:
+
+                    screenshot_buffer = io.BytesIO()
+
+                    pil_image.save(screenshot_buffer, format="JPEG", quality=85)
+
+                    preview = pil_image.copy()
+
+                    preview.thumbnail(preview_size, Image.Resampling.LANCZOS)
+
+                    preview_buffer = io.BytesIO()
+
+                    preview.save(preview_buffer, format="PNG")
+
+                    self.screenshot_encoded.emit(
+
+                        generation,
+
+                        screenshot_buffer.getvalue(),
+
+                        preview_buffer.getvalue(),
+
+                    )
+
+                except Exception:
+
+                    self.screenshot_encoded.emit(generation, None, None)
+
+            _DIALOG_BACKGROUND_EXECUTOR.submit(encode)
 
             # 先禁用确认按钮，等OCR完成或用户手动输入时间后再启用
 
@@ -6972,8 +7039,6 @@ class ScreenshotConfirmDialog(QDialog):
 
         import asyncio
 
-        import threading
-
         import weakref
 
 
@@ -6987,6 +7052,8 @@ class ScreenshotConfirmDialog(QDialog):
         self._ocr_vote_candidates = []
 
         self._ocr_vote_summary = {}
+
+        generation = self._capture_generation
 
 
 
@@ -7286,7 +7353,15 @@ class ScreenshotConfirmDialog(QDialog):
 
                     obj = obj_ref()
 
-                    if not obj or sip.isdeleted(obj):
+                    if (
+
+                        not obj
+
+                        or sip.isdeleted(obj)
+
+                        or generation != getattr(obj, "_capture_generation", -1)
+
+                    ):
 
                         return
 
@@ -7834,6 +7909,8 @@ class ScreenshotConfirmDialog(QDialog):
 
                         or getattr(obj, "_ocr_cancelled", False)
 
+                        or generation != getattr(obj, "_capture_generation", -1)
+
                     ):
 
                         return
@@ -7856,11 +7933,13 @@ class ScreenshotConfirmDialog(QDialog):
 
 
 
-            # daemon线程：主程序退出时自动终止
+            previous = getattr(self, "_ocr_future", None)
 
-            self._ocr_thread = threading.Thread(target=run_ocr, daemon=True)
+            if previous is not None:
 
-            self._ocr_thread.start()
+                previous.cancel()
+
+            self._ocr_future = _DIALOG_BACKGROUND_EXECUTOR.submit(run_ocr)
 
 
 
@@ -8323,33 +8402,15 @@ class ScreenshotConfirmDialog(QDialog):
         self._notify_state_changed()
 
 
-    def _show_preview(self, pil_image):
+    def _show_preview(self, image_bytes):
 
         try:
 
-            buffer = io.BytesIO()
-
-            pil_image.save(buffer, format="PNG")
-
-            buffer.seek(0)
-
             pixmap = QPixmap()
 
-            pixmap.loadFromData(buffer.getvalue())
+            pixmap.loadFromData(bytes(image_bytes or b""))
 
-            scaled_pixmap = pixmap.scaled(
-
-                self.preview_label.width() - 10,
-
-                self.preview_label.height() - 10,
-
-                Qt.AspectRatioMode.KeepAspectRatio,
-
-                Qt.TransformationMode.SmoothTransformation,
-
-            )
-
-            self.preview_label.setPixmap(scaled_pixmap)
+            self.preview_label.setPixmap(pixmap)
 
             self.preview_label.setText("")
 
@@ -8389,31 +8450,15 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._submit_accepted = True
 
-        # 跳过截图时也需要传递buildings
-
         buildings = list(self.selected_buildings) if self.selected_buildings else []
 
         extra_images = list(self.extra_images)
 
-        change_level = (
+        change_level = self.selected_change_level if self.enable_change_level_select else ""
 
-            self.selected_change_level if self.enable_change_level_select else ""
+        event_level = self.selected_event_level if self.enable_event_level_select else ""
 
-        )
-
-        event_level = (
-
-            self.selected_event_level if self.enable_event_level_select else ""
-
-        )
-
-        event_source = (
-
-            self.selected_event_source if self.enable_event_source_select else ""
-
-        )
-
-        response_time = self._current_response_time_text()
+        event_source = self.selected_event_source if self.enable_event_source_select else ""
 
         self.upload_confirmed.emit(
 
@@ -8423,7 +8468,7 @@ class ScreenshotConfirmDialog(QDialog):
 
             self.action_type,
 
-            response_time,
+            self._current_response_time_text(),
 
             buildings,
 
@@ -8450,6 +8495,54 @@ class ScreenshotConfirmDialog(QDialog):
         self._reset_recover_selection()
 
         self.hide()
+
+
+
+    def _on_screenshot_encoded(self, generation, screenshot_bytes, preview_bytes):
+
+        if generation != self._capture_generation or self._ocr_cancelled:
+
+            return
+
+        if not screenshot_bytes or not preview_bytes:
+
+            self.screenshot_bytes = None
+
+            self.hint_label.setText("截图处理失败，请重新截图。")
+
+            self._refresh_submit_state()
+
+            return
+
+        self.screenshot_bytes = bytes(screenshot_bytes or b"")
+
+        self._show_preview(preview_bytes)
+
+        self._refresh_submit_state()
+
+
+
+    def _on_extra_screenshot_encoded(self, generation, image_bytes):
+
+        self._extra_screenshot_encodes = max(0, self._extra_screenshot_encodes - 1)
+
+        self._refresh_submit_state()
+
+        if generation != self._capture_generation or self._ocr_cancelled:
+
+            return
+
+        if not image_bytes:
+
+            self.hint_label.setText("附加截图处理失败，请重试。")
+
+            return
+
+        file_name = f"extra_{len(self.extra_images) + 1}.png"
+
+        self.extra_images.append((bytes(image_bytes), file_name))
+
+        self._update_extra_images_label()
 
 
 

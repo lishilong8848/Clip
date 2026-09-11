@@ -26,7 +26,7 @@ class ActiveCacheStore:
 
     def __init__(self, cache_file: str, state_store: LanPortalStateStore | None = None):
         self.cache_file = str(cache_file or "")
-        self._state_store = state_store or LanPortalStateStore()
+        self._state_store = state_store or LanPortalStateStore(busy_timeout_ms=75)
         self._lock = threading.RLock()
 
     def _default_payload(self) -> dict:
