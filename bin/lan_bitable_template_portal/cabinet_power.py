@@ -159,6 +159,7 @@ class CabinetPowerService:
         self.root=(Path(root) if root else Path(store.db_path).parent/"cabinet_power").resolve()
         self.local=CabinetStore(self.root/"buildings")
         self._lock=threading.RLock()
+        self._bootstrap_lock=threading.Lock()
         self._scope_locks={scope:threading.RLock() for scope in TOTALS}
         self._cache={}; self._directory=None; self._layouts={}; self._remotes={}; self._directories={}
         self._pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-"+s) for s in TOTALS}
@@ -212,15 +213,34 @@ class CabinetPowerService:
 
     def ensure_loaded(self,scope):
         if self.local.version(scope): return
-        with self.local.locked([scope]):
+        with self._scope_locks[scope]:
             if self.local.version(scope): return
             saved=self.store.get_document(NAMESPACE,SNAPSHOT_KEY+scope) or {}
             cached=saved.get("snapshot")
-            if not cached: raise CabinetError("该楼本地资料尚未初始化，请点击刷新",409)
-            self.atomic_file(Path("backups")/(scope+"-legacy-snapshot.json"),json.dumps(saved,ensure_ascii=False).encode())
-            records=[{"record_id":o["record_id"],"fields":o["raw_fields"]} for o in cached["operations"]]
-            baseline=[e["id"] for r in records for e in from_feishu(r)["events"]]
-            self.local.replace(scope,cached["config"],records,baseline)
+            if cached:
+                self.atomic_file(Path("backups")/(scope+"-legacy-snapshot.json"),json.dumps(saved,ensure_ascii=False).encode())
+                records=[{"record_id":o["record_id"],"fields":o["raw_fields"]} for o in cached["operations"]]
+                baseline=[e["id"] for r in records for e in from_feishu(r)["events"]]
+                self.local.replace(scope,cached["config"],records,baseline)
+                return
+        self._refresh_missing_buildings(scope)
+
+    def _refresh_missing_buildings(self,requested_scope):
+        with self._bootstrap_lock:
+            missing=[scope for scope in TOTALS if not self.local.version(scope)]
+            if not missing: return
+            self.directory()
+            errors={}
+            with ThreadPoolExecutor(max_workers=len(missing),thread_name_prefix="cabinet-bootstrap") as pool:
+                futures={pool.submit(self.do_refresh,scope,{}, {}):scope for scope in missing}
+                for future,scope in futures.items():
+                    try: future.result()
+                    except Exception as exc: errors[scope]=exc
+            if not self.local.version(requested_scope):
+                raise errors.get(requested_scope) or CabinetError("该楼机柜资料从多维表初始化失败",503)
+            if errors:
+                from upload_event_module.logger import log_warning
+                log_warning("机柜资料首次初始化部分失败: "+"; ".join(f"{scope}楼={error}" for scope,error in errors.items()))
 
     def _snapshot(self,scope):
         self.ensure_loaded(scope)

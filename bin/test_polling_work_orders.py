@@ -92,7 +92,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "请先拍摄并上传"):
                 service.confirm(token, step_key="1:2", expected_version=session["version"])
 
-    def test_maintenance_and_polling_share_sops_and_build_generic_work_order(self) -> None:
+    def test_maintenance_and_polling_isolate_sops_and_build_generic_work_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             service = PollingWorkOrderService(
@@ -136,13 +136,13 @@ class PollingWorkOrderTests(unittest.TestCase):
             )
             self.assertEqual(
                 {item["sop_id"] for item in service.list_sops("A", "polling")},
-                {polling["sop_id"], maintenance["sop_id"]},
+                {polling["sop_id"]},
             )
             self.assertEqual(
                 {item["sop_id"] for item in service.list_sops("A", "maintenance")},
-                {polling["sop_id"], maintenance["sop_id"]},
+                {maintenance["sop_id"]},
             )
-            with self.assertRaisesRegex(Exception, "轮巡设备指向占位符"):
+            with self.assertRaisesRegex(Exception, "不适用于当前工单类型"):
                 service.prepare_start(
                     {
                         "work_type": "maintenance",
@@ -276,7 +276,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertTrue(deleted["deleted"])
             self.assertEqual(
                 [item["sop_id"] for item in service.list_sops("A", "maintenance")],
-                [polling["sop_id"]],
+                [],
             )
             self.assertEqual(
                 [item["sop_id"] for item in service.list_sops("A", "polling")],
@@ -817,6 +817,10 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("第${index+1}次起点", html)
         self.assertIn("SOP 必须至少包含一个附件", html)
         self.assertIn("非制冷单元/二次泵轮巡", html)
+        self.assertIn(".polling-cooling-mode[hidden] { display:none; }", html)
+        self.assertIn("workTypeText.textContent='适用类型'", html)
+        self.assertIn("[['adjust','调整'],['polling','轮巡'],['maintenance','维保']]", html)
+        self.assertIn("workType.disabled=Boolean(sop.sop_id)", html)
         self.assertIn('name="polling_work_order_exempt"', html)
         self.assertIn("function pollingWorkOrderExempt(form)", html)
         self.assertIn("patch.polling_work_order_exempt = pollingWorkOrderExempt(form)", html)

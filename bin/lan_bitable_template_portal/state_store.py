@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import queue
 import re
@@ -46,6 +47,7 @@ except ImportError:
 DEFAULT_STATE_DB_NAME = "lan_portal_state.sqlite3"
 LEGACY_CHANGE_NOTICE_TYPE = "设备变更"
 CANONICAL_CHANGE_NOTICE_TYPE = "变更通告"
+LOGGER = logging.getLogger(__name__)
 
 
 class LanPortalStateStore:
@@ -57,7 +59,6 @@ class LanPortalStateStore:
 
     SCHEMA_VERSION = 40
     _schema_process_lock = threading.RLock()
-    _schema_ready_paths: set[str] = set()
     _live_portal_restore_last: dict[str, float] = {}
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
@@ -234,7 +235,9 @@ class LanPortalStateStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
         if not self._wal_initialized:
-            conn.execute("PRAGMA journal_mode = WAL")
+            current_mode = conn.execute("PRAGMA journal_mode").fetchone()
+            if not current_mode or str(current_mode[0] or "").lower() != "wal":
+                conn.execute("PRAGMA journal_mode = WAL")
             self._wal_initialized = True
         conn.execute("PRAGMA synchronous = NORMAL")
         return conn
@@ -988,17 +991,8 @@ class LanPortalStateStore:
         ):
             return
         self._initialized = False
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            self._wal_initialized = True
-        except sqlite3.Error:
-            pass
-        schema_key = os.path.normcase(str(self.db_path.resolve()))
         with self._schema_process_lock:
-            if (
-                schema_key in self._schema_ready_paths
-                and self._schema_version_matches_locked(conn)
-            ):
+            if self._schema_version_matches_locked(conn):
                 self._migrate_legacy_change_notice_labels_locked(conn)
                 self._cleanup_invalid_notice_identity_targets_locked(conn)
                 conn.commit()
@@ -1006,7 +1000,6 @@ class LanPortalStateStore:
                 self._initialized_db_identity = self._database_file_identity()
                 return
             self._initialize_schema_locked(conn)
-            self._schema_ready_paths.add(schema_key)
             self._initialized = True
             self._initialized_db_identity = self._database_file_identity()
 
@@ -3035,6 +3028,15 @@ class LanPortalStateStore:
         replaced.
         """
 
+        marker_key = "legacy_change_notice_label_migration_v1"
+        marker = conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (marker_key,),
+        ).fetchone()
+        if marker:
+            return
+        started_at = time.perf_counter()
+
         def table_columns(table: str) -> set[str]:
             try:
                 return {
@@ -3135,14 +3137,15 @@ class LanPortalStateStore:
             set(self.DOCUMENT_NAMESPACE_TABLES.values()) | {"json_documents"}
         ):
             changed += update_json_table(table)
-        if changed:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO meta(key, value)
-                VALUES('legacy_change_notice_label_migration_v1', ?)
-                """,
-                (self._json({"changed_rows": changed, "at": time.time()}),),
-            )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (marker_key, self._json({"changed_rows": changed, "at": time.time()})),
+        )
+        LOGGER.info(
+            "SQLite legacy change-notice migration completed: changed_rows=%s elapsed_ms=%.1f",
+            changed,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
 
     def _notice_identity_candidate_payloads(self, payload: Any) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -13104,31 +13107,43 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                rows = conn.execute(
-                    """
-                    SELECT id, status, updated_at
+                eligible_sql = """
+                    SELECT id, status
                     FROM event_outbox
-                    WHERE status IN ('done', 'failed', 'cancelled')
+                    WHERE (status IN ('done', 'cancelled') AND updated_at < ?)
+                       OR (status = 'failed' AND updated_at < ?)
                     ORDER BY updated_at ASC
                     LIMIT ?
-                    """,
-                    (max_delete,),
+                """
+                rows = conn.execute(
+                    eligible_sql,
+                    (
+                        now - done_retention_seconds,
+                        now - failed_retention_seconds,
+                        max_delete,
+                    ),
                 ).fetchall()
-                for row in rows:
-                    status = str(row["status"] or "")
-                    updated_at = float(row["updated_at"] or 0)
-                    retention = (
-                        failed_retention_seconds
-                        if status == "failed"
-                        else done_retention_seconds
-                    )
-                    if updated_at and now - updated_at < retention:
-                        continue
+                if rows:
                     conn.execute(
-                        "DELETE FROM event_outbox WHERE id = ?",
-                        (int(row["id"] or 0),),
+                        """
+                        DELETE FROM event_outbox
+                        WHERE id IN (
+                            SELECT id
+                            FROM event_outbox
+                            WHERE (status IN ('done', 'cancelled') AND updated_at < ?)
+                               OR (status = 'failed' AND updated_at < ?)
+                            ORDER BY updated_at ASC
+                            LIMIT ?
+                        )
+                        """,
+                        (
+                            now - done_retention_seconds,
+                            now - failed_retention_seconds,
+                            max_delete,
+                        ),
                     )
-                    if status == "failed":
+                for row in rows:
+                    if str(row["status"] or "") == "failed":
                         removed_failed += 1
                     else:
                         removed_done += 1

@@ -1179,7 +1179,10 @@ class MainWindowWorkflowMixin:
     def _try_process_deferred_events(self):
         if self._ui_update_in_progress:
             return
-        if self.current_screenshot_record_id or self.screenshot_dialog.isVisible():
+        screenshot_dialog = getattr(self, "screenshot_dialog", None)
+        if getattr(self, "current_screenshot_record_id", None) or (
+            screenshot_dialog and screenshot_dialog.isVisible()
+        ):
             return
         if not self._deferred_events:
             return
@@ -1346,7 +1349,10 @@ class MainWindowWorkflowMixin:
             return
         if self._closing:
             return
-        if self.current_screenshot_record_id or self.screenshot_dialog.isVisible():
+        screenshot_dialog = getattr(self, "screenshot_dialog", None)
+        if getattr(self, "current_screenshot_record_id", None) or (
+            screenshot_dialog and screenshot_dialog.isVisible()
+        ):
             self._schedule_pending_update_after_upload(500)
             return
         for pending_key in list(self.pending_update_after_upload.keys()):

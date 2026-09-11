@@ -104,6 +104,20 @@ class BackendProcessControllerTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_startup_health_uses_lightweight_probe(self):
+        controller = BackendProcessPortalController(port=18766)
+        payload = {
+            "ok": True,
+            "service": "clipflow_backend",
+            "runtime_root_hash": controller._runtime_root_hash,
+            "build_version": controller._build_version,
+        }
+        with patch.object(controller, "_request_json", return_value=payload) as request:
+            self.assertEqual(controller._health_payload(), payload)
+        request.assert_called_once_with(
+            "GET", "/api/health?probe=1", timeout=1.2
+        )
         self.assertTrue(
             controller._health_matches_runtime(
                 {

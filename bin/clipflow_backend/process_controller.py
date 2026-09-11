@@ -307,7 +307,7 @@ class BackendProcessPortalController:
 
     def _health_payload(self) -> dict[str, Any] | None:
         try:
-            result = self._request_json("GET", "/api/health", timeout=1.2)
+            result = self._request_json("GET", "/api/health?probe=1", timeout=1.2)
             return result if bool(result.get("ok")) else None
         except Exception:
             return None

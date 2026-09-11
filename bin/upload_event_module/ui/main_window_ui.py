@@ -38,7 +38,6 @@ from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
 )
 from .styles import get_stylesheet
-from .dialogs import AddDialog
 from .active_notice_delegate import ActiveNoticeDelegate
 from .active_notice_model import ActiveNoticeListRoute
 from .deleted_notice_delegate import DeletedNoticeDelegate
@@ -660,6 +659,7 @@ class MainWindowUiMixin:
         self._clipboard_preview_auto_show_enabled = False
 
     def open_clipboard_preview(self):
+        self._init_deferred_dialogs()
         self._clipboard_preview_auto_show_enabled = True
         self._show_clipboard_preview(force_activate=True)
 
@@ -709,6 +709,7 @@ class MainWindowUiMixin:
         if block_reason:
             self.show_message(block_reason)
             return
+        self._init_deferred_dialogs()
         self.settings_dialog.load_current_settings()
         self.settings_dialog.setStyleSheet(get_stylesheet(self.current_theme))
         if not self.settings_dialog.isVisible():
@@ -770,6 +771,8 @@ class MainWindowUiMixin:
             return
         self._pause_clipboard_timer()
         if not self.add_dialog:
+            from .dialogs import AddDialog
+
             self.add_dialog = AddDialog(self, theme=self.current_theme)
             self.add_dialog.set_record_validator(self._validate_manual_record_id)
             self.add_dialog.set_existing_checker(self._manual_update_has_target)
@@ -843,6 +846,7 @@ class MainWindowUiMixin:
         is_active = self._is_active_view()
         data = item.data(Qt.ItemDataRole.UserRole)
         if data:
+            self._init_deferred_dialogs()
             record_id = data.get("record_id", "")
             display_data = self._load_record_from_cache(
                 record_id
@@ -868,6 +872,7 @@ class MainWindowUiMixin:
             if not self._restore_queued_upload_ui(record_id, requested=False):
                 self.restore_button_state(record_id=record_id)
             return
+        self._init_deferred_dialogs()
         if not config.user_token:
             self.show_message("未配置飞书用户令牌。")
             record_id = data.get("record_id") if data else None
@@ -1079,7 +1084,8 @@ class MainWindowUiMixin:
     def toggle_window(self):
         if self.isVisible():
             self.hide()
-            self.detail_dialog.hide()
+            if self.detail_dialog:
+                self.detail_dialog.hide()
             if self.clipboard_preview_dialog:
                 self.clipboard_preview_dialog.hide()
             if self.add_dialog:

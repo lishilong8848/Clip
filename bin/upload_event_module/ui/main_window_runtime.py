@@ -306,7 +306,10 @@ class MainWindowRuntimeMixin:
         if entry_id and not self._has_clipboard_pending_entry(entry_id):
             if not self._add_clipboard_pending_entry(entry):
                 return
-        if self.current_screenshot_record_id or self.screenshot_dialog.isVisible():
+        screenshot_dialog = getattr(self, "screenshot_dialog", None)
+        if getattr(self, "current_screenshot_record_id", None) or (
+            screenshot_dialog and screenshot_dialog.isVisible()
+        ):
             self._defer_event(
                 {
                     "content": entry.get("content", ""),
@@ -969,6 +972,9 @@ class MainWindowRuntimeMixin:
         return {"ok": True, "ignored": True}
 
     def _init_hot_reload(self):
+        if getattr(self, "_closing", False):
+            return
+        started_at = time.perf_counter()
         try:
             from pathlib import Path
 
@@ -985,6 +991,10 @@ class MainWindowRuntimeMixin:
         except Exception as exc:
             self._applied_disable_hot_reload = None
             log_error(f"HotReload: 初始化失败: {exc}")
+        finally:
+            log_info(
+                f"Startup[qt]: hot_reload_ms={(time.perf_counter() - started_at) * 1000:.1f}"
+            )
 
     def refresh_hot_reload_setting(self):
         try:

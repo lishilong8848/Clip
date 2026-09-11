@@ -553,6 +553,10 @@ class MainWindowClipboardMixin:
         return True
 
     def _init_clipboard_ipc(self):
+        if self._closing or getattr(self, "_clipboard_ipc_initialized", False):
+            return
+        self._clipboard_ipc_initialized = True
+        started_at = time.perf_counter()
         try:
             self.clipboard_event_file.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -605,6 +609,9 @@ class MainWindowClipboardMixin:
             and self._clipboard_process.state() == QProcess.ProcessState.Running
         )
         self._refresh_clipboard_toggle_ui()
+        log_info(
+            f"Startup[qt]: clipboard_ipc_ms={(time.perf_counter() - started_at) * 1000:.1f}"
+        )
 
     def _clipboard_backend_direct_event_available(self) -> bool:
         controller = getattr(self, "lan_template_portal_controller", None)

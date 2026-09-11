@@ -29,7 +29,7 @@ class AdjustWorkOrderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); service=PollingWorkOrderService(LanPortalStateStore(root/"state.sqlite3"))
             service.sop_root=root/"sops"; service.work_order_root=root/"orders"
-            sop=service.save_sop({"scope":"A","name":"调整作业","steps":[{"content":"核对设定值","photo_required":False,"operator_required":True,"reviewer_required":True}]})
+            sop=service.save_sop({"work_type":"adjust","scope":"A","name":"调整作业","steps":[{"content":"核对设定值","photo_required":False,"operator_required":True,"reviewer_required":True}]})
             sop=service.add_sop_attachment(sop["sop_id"],file_name="操作说明.txt",content=b"test",expected_version=sop["version"])
             request={"scope":"A","work_type":"adjust","action":"start","_web_action_request":True,"polling_sop_id":sop["sop_id"],"polling_sop_version":sop["version"],"polling_operator_record_id":"op","polling_reviewer_record_id":"rev"}
             people=[{"record_id":"op","name":"操作人"},{"record_id":"rev","name":"审核人"}]

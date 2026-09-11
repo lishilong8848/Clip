@@ -1,6 +1,7 @@
 import os
 import queue
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -12,8 +13,6 @@ from ..logger import log_info
 from ..hot_reload.state_store import get_user_data_dir
 from ..hot_reload.connection_registry import ConnectionRegistry
 from ..services.service_registry import check_token_status
-from .dialogs import ClipboardPreviewDialog, DetailDialog, ScreenshotConfirmDialog
-from .settings_dialog import SettingsDialog
 from .main_window_patch import PatchUpdateMixin
 from .main_window_cache import ActiveCacheMixin
 from .main_window_clipboard import MainWindowClipboardMixin
@@ -48,6 +47,7 @@ class ClipboardTool(
     lan_ongoing_delete_received = pyqtSignal(dict)
 
     def __init__(self):
+        startup_started_at = time.perf_counter()
         super().__init__()
         self._disable_effects = bool(
             os.environ.get("CLIPFLOW_DISABLE_EFFECTS")
@@ -178,107 +178,13 @@ class ClipboardTool(
             self._drain_ui_mutations,
         )
         self._ui_mutation_timer.start(80)
-        self.detail_dialog = DetailDialog(None, theme=self.current_theme)
-        self.connection_registry.connect(
-            "detail_dialog",
-            self.detail_dialog,
-            "record_id_bind_requested",
-            self._request_safe_bind_record_id,
-        )
-        self.connection_registry.connect(
-            "detail_dialog",
-            self.detail_dialog,
-            "content_changed",
-            self.sync_content_to_widget,
-        )
-        self.connection_registry.connect(
-            "detail_dialog",
-            self.detail_dialog,
-            "finished",
-            self._flush_pending_cache_refresh,
-        )
-
+        self.detail_dialog = None
         self.add_dialog = None
-        self.clipboard_preview_dialog = ClipboardPreviewDialog(
-            None, theme=self.current_theme
-        )
-        self.connection_registry.connect(
-            "clipboard_preview_dialog",
-            self.clipboard_preview_dialog,
-            "use_requested",
-            self._use_last_clipboard_snapshot,
-        )
-        self.connection_registry.connect(
-            "clipboard_preview_dialog",
-            self.clipboard_preview_dialog,
-            "closed_by_user",
-            self._on_clipboard_preview_closed_by_user,
-        )
-        self.settings_dialog = SettingsDialog(None)
+        self.clipboard_preview_dialog = None
+        self.settings_dialog = None
+        self.screenshot_dialog = None
         self.cache_store = ActiveCacheStore(ACTIVE_CACHE_FILE)
-        self.connection_registry.connect(
-            "settings_dialog",
-            self.settings_dialog,
-            "settings_saved",
-            self.refresh_table_links,
-        )
-        self.connection_registry.connect(
-            "settings_dialog",
-            self.settings_dialog,
-            "finished",
-            self._on_settings_closed,
-        )
-        self.connection_registry.connect(
-            "settings_dialog",
-            self.settings_dialog,
-            "settings_saved",
-            self.refresh_hot_reload_setting,
-        )
-        self.connection_registry.connect(
-            "settings_dialog",
-            self.settings_dialog,
-            "settings_saved",
-            self.refresh_alert_setting,
-        )
-        self.connection_registry.connect(
-            "settings_dialog",
-            self.settings_dialog,
-            "settings_saved",
-            self.refresh_lan_template_portal_setting,
-        )
-        self.screenshot_dialog = ScreenshotConfirmDialog(None, theme=self.current_theme)
-        self.screenshot_dialog.bind_cache_store(self.cache_store)
         self._active_messages = []
-        self.connection_registry.connect(
-            "screenshot_dialog",
-            self.screenshot_dialog,
-            "upload_confirmed",
-            self.on_screenshot_upload_confirmed,
-        )
-        self.connection_registry.connect(
-            "screenshot_dialog",
-            self.screenshot_dialog,
-            "cancelled",
-            self.on_screenshot_cancelled,
-        )
-        self.connection_registry.connect(
-            "screenshot_dialog",
-            self.screenshot_dialog,
-            "screenshot_started",
-            self._on_screenshot_started,
-        )
-        self.connection_registry.connect(
-            "screenshot_dialog",
-            self.screenshot_dialog,
-            "screenshot_finished",
-            self._on_screenshot_finished,
-        )
-        self.connection_registry.connect(
-            "screenshot_dialog",
-            self.screenshot_dialog,
-            "state_changed",
-            self.save_active_cache,
-        )
 
         # 已移除 item 引用缓存，结束流程按 record_id 动态查找
         self.last_history_mtime = 0
@@ -344,18 +250,21 @@ class ClipboardTool(
         self._restore_restart_overlay_geometry()
 
         self.drag_position = None
+        stage_started_at = time.perf_counter()
         self.init_ui()
+        log_info(
+            f"Startup[qt]: init_ui_ms={(time.perf_counter() - stage_started_at) * 1000:.1f}"
+        )
+        stage_started_at = time.perf_counter()
         self.setup_tray()
-        self._cache_id_repair_result = self._validate_cache_record_ids_on_startup()
-        self._restore_active_cache()
-        self._finalize_active_cache_restore_startup()
-        if self._cache_id_repair_result.get("changed"):
-            self.save_active_cache()
+        log_info(
+            f"Startup[qt]: tray_ms={(time.perf_counter() - stage_started_at) * 1000:.1f}"
+        )
+        self._cache_id_repair_result = {"changed": False}
         self._init_active_cache_timer()
         if hasattr(self, "_init_runtime_payload_cleanup_timer"):
             self._init_runtime_payload_cleanup_timer()
         self._init_runtime_maintenance_timer()
-        self._init_clipboard_ipc()
 
         self.timer = None
 
@@ -367,7 +276,6 @@ class ClipboardTool(
             self._refresh_patch_button,
         )
         self.patch_check_timer.start(30_000)
-        self._init_remote_patch_updater()
 
         self.connection_registry.connect(
             "main_window",
@@ -433,12 +341,99 @@ class ClipboardTool(
             Qt.ConnectionType.QueuedConnection,
         )
 
-        self._init_hot_reload()
-        QTimer.singleShot(0, lambda: self._log_runtime_health_snapshot("startup"))
+        QTimer.singleShot(100, self._restore_cache_after_first_paint)
+        QTimer.singleShot(300, self._init_clipboard_ipc)
+        QTimer.singleShot(500, self._init_deferred_dialogs)
+        QTimer.singleShot(1000, self._ensure_remote_patch_updater)
+        QTimer.singleShot(1500, self._init_hot_reload)
         QTimer.singleShot(0, self._refresh_lan_ongoing_snapshot_now)
         QTimer.singleShot(0, self._restore_update_overlay_state)
         QTimer.singleShot(600, self._close_restart_overlay_window)
         # 强制刷新和提升窗口，确保完全渲染
         QTimer.singleShot(0, self.repaint)
         QTimer.singleShot(0, self.raise_)
+        log_info(
+            f"Startup[qt]: constructor_ms={(time.perf_counter() - startup_started_at) * 1000:.1f}"
+        )
+
+    def _restore_cache_after_first_paint(self):
+        if self._closing or getattr(self, "_startup_cache_restored", False):
+            return
+        self._startup_cache_restored = True
+        started_at = time.perf_counter()
+        self._cache_id_repair_result = self._validate_cache_record_ids_on_startup()
+        self._restore_active_cache()
+        self._finalize_active_cache_restore_startup()
+        if self._cache_id_repair_result.get("changed"):
+            self.save_active_cache()
+        self._log_runtime_health_snapshot("startup")
+        log_info(
+            f"Startup[qt]: active_cache_ms={(time.perf_counter() - started_at) * 1000:.1f}"
+        )
+
+    def _init_deferred_dialogs(self):
+        if self._closing or self.detail_dialog is not None:
+            return
+        started_at = time.perf_counter()
+        from .dialogs import ClipboardPreviewDialog, DetailDialog, ScreenshotConfirmDialog
+        from .settings_dialog import SettingsDialog
+
+        detail_dialog = DetailDialog(None, theme=self.current_theme)
+        clipboard_preview_dialog = ClipboardPreviewDialog(
+            None, theme=self.current_theme
+        )
+        settings_dialog = SettingsDialog(None)
+        screenshot_dialog = ScreenshotConfirmDialog(None, theme=self.current_theme)
+        screenshot_dialog.bind_cache_store(self.cache_store)
+        self.detail_dialog = detail_dialog
+        self.clipboard_preview_dialog = clipboard_preview_dialog
+        self.settings_dialog = settings_dialog
+        self.screenshot_dialog = screenshot_dialog
+        self.connection_registry.connect(
+            "detail_dialog", self.detail_dialog, "record_id_bind_requested",
+            self._request_safe_bind_record_id,
+        )
+        self.connection_registry.connect(
+            "detail_dialog", self.detail_dialog, "content_changed",
+            self.sync_content_to_widget,
+        )
+        self.connection_registry.connect(
+            "detail_dialog", self.detail_dialog, "finished",
+            self._flush_pending_cache_refresh,
+        )
+        self.connection_registry.connect(
+            "clipboard_preview_dialog", self.clipboard_preview_dialog,
+            "use_requested", self._use_last_clipboard_snapshot,
+        )
+        self.connection_registry.connect(
+            "clipboard_preview_dialog", self.clipboard_preview_dialog,
+            "closed_by_user", self._on_clipboard_preview_closed_by_user,
+        )
+        for slot in (
+            self.refresh_table_links,
+            self.refresh_hot_reload_setting,
+            self.refresh_alert_setting,
+            self.refresh_lan_template_portal_setting,
+        ):
+            self.connection_registry.connect(
+                "settings_dialog", self.settings_dialog, "settings_saved", slot
+            )
+        self.connection_registry.connect(
+            "settings_dialog", self.settings_dialog, "finished", self._on_settings_closed
+        )
+        for signal_name, slot in (
+            ("upload_confirmed", self.on_screenshot_upload_confirmed),
+            ("cancelled", self.on_screenshot_cancelled),
+            ("screenshot_started", self._on_screenshot_started),
+            ("screenshot_finished", self._on_screenshot_finished),
+            ("state_changed", self.save_active_cache),
+        ):
+            self.connection_registry.connect(
+                "screenshot_dialog", self.screenshot_dialog, signal_name, slot
+            )
+        self.apply_theme(self.current_theme)
+        self._sync_clipboard_preview_visibility()
+        log_info(
+            f"Startup[qt]: deferred_dialogs_ms={(time.perf_counter() - started_at) * 1000:.1f}"
+        )
 

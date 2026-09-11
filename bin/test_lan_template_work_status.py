@@ -9901,6 +9901,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             }
             with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.execute(
+                    "DELETE FROM meta WHERE key = 'legacy_change_notice_label_migration_v1'"
+                )
+                conn.execute(
                     """
                     INSERT INTO qt_active_items(
                         active_item_id, record_id, notice_type, section, sort_order,
@@ -9976,6 +9979,32 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             del migrated
             del store
             gc.collect()
+
+    def test_current_schema_marker_skips_legacy_payload_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.sqlite3"
+            seed = LanPortalStateStore(db_path)
+            seed.schema_health()
+
+            store = LanPortalStateStore(db_path)
+            with patch.object(
+                store,
+                "_initialize_schema_locked",
+                side_effect=AssertionError("current schema must use the fast path"),
+            ), patch.object(
+                store,
+                "_canonicalize_legacy_change_notice_payload",
+                side_effect=AssertionError("completed migration must not scan payloads"),
+            ):
+                self.assertIsNone(store.get_settings())
+
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                marker = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'legacy_change_notice_label_migration_v1'"
+                ).fetchone()
+            self.assertIsNotNone(marker)
+            seed.shutdown_write_worker(timeout=1.0)
+            store.shutdown_write_worker(timeout=1.0)
 
     def test_state_store_canonicalizes_legacy_change_notice_on_upsert(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -22086,6 +22115,39 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             counts = store.count_outbox_events("qt_action", stale_lease_seconds=5)
             self.assertEqual(counts.get("pending"), 1)
             self.assertIsNone(counts.get("leased"))
+
+    def test_outbox_cleanup_deletes_expired_rows_in_bulk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.sqlite3"
+            store = LanPortalStateStore(db_path)
+            done_id = store.enqueue_outbox_event("qt_action", {"kind": "done"})
+            failed_id = store.enqueue_outbox_event("qt_action", {"kind": "failed"})
+            recent_id = store.enqueue_outbox_event("qt_action", {"kind": "recent"})
+            store.mark_outbox_event(done_id, "done")
+            store.mark_outbox_event(failed_id, "failed")
+            store.mark_outbox_event(recent_id, "done")
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.execute(
+                    "UPDATE event_outbox SET updated_at = 0 WHERE id IN (?, ?)",
+                    (done_id, failed_id),
+                )
+                conn.commit()
+
+            result = store.cleanup_outbox_events(
+                done_retention_seconds=60,
+                failed_retention_seconds=120,
+                max_delete=10,
+            )
+
+            self.assertEqual(result, {
+                "removed_done": 1,
+                "removed_failed": 1,
+                "removed_total": 2,
+            })
+            self.assertEqual(
+                [item["id"] for item in store.list_outbox_events("qt_action", status="done")],
+                [recent_id],
+            )
 
     def test_source_refresh_singleflight_returns_inflight_status(self):
         acquired = PortalRuntime.source_refresh_run_lock.acquire(blocking=False)

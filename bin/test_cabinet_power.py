@@ -118,6 +118,16 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual(overview["record_count"],988)
         cached.pool.shutdown(wait=True)
 
+    def test_first_missing_building_initializes_all_buildings_from_feishu(self):
+        fresh=CabinetPowerService(MemoryStore(),FakeFeishu(self.source_records),Path(self.tmp.name)/"fresh")
+        fresh._directory=FakeFeishu(self.directory_records)
+        try:
+            overview=fresh.overview("D")
+            self.assertEqual(overview["record_count"],988)
+            self.assertTrue(all(fresh.local.version(scope) for scope in "ABCDE"))
+        finally:
+            fresh.shutdown()
+
     def test_layout_does_not_open_xlsm_at_runtime(self):
         self.service.overview("D")
         layout=self.service.layout("D","201")

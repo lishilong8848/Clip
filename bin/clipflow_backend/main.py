@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import time
+
+_BACKEND_IMPORT_STARTED_AT = time.perf_counter()
+
 import argparse
 import asyncio
 import base64
@@ -16,7 +20,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -1266,7 +1269,16 @@ class FastAPIPortalController:
         async def health(request: Request) -> dict:
             if request.query_params.get("probe") == "1":
                 # Connectivity probes never wait for SQLite, Feishu, or runtime snapshots.
-                return JSONResponse({"ok": True, "service": "clipflow_backend", "instance_id": BACKEND_INSTANCE_ID}, headers={"Cache-Control": "no-store"})
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "service": "clipflow_backend",
+                        "instance_id": BACKEND_INSTANCE_ID,
+                        "runtime_root_hash": BACKEND_RUNTIME_ROOT_HASH,
+                        "build_version": BACKEND_BUILD_VERSION,
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
             cached = self._read_cache_get(("health",), ttl=1.5, stale_ttl=5.0)
             if cached is not None:
                 request.state.cache_hit = True
@@ -9309,15 +9321,19 @@ class FastAPIPortalController:
         return app
 
     def _initialize_portal_handler_state(self) -> None:
+        started_at = time.perf_counter()
         PortalRuntime.service = MaintenancePortalService(
             app_token=self.app_token,
             table_id=self.table_id,
             enable_repair_snapshots=True,
         )
+        service_ms = (time.perf_counter() - started_at) * 1000.0
+        stage_started_at = time.perf_counter()
         try:
             PortalRuntime.service.ensure_snapshot_loaded()
         except Exception:
             pass
+        snapshot_ms = (time.perf_counter() - stage_started_at) * 1000.0
         try:
             PortalRuntime.service.resume_repair_link_tasks_async()
         except Exception:
@@ -9387,6 +9403,11 @@ class FastAPIPortalController:
         with PortalRuntime.event_repair_queue_lock:
             PortalRuntime.event_repair_worker_stop = False
             PortalRuntime.event_repair_queue_event.clear()
+        print(
+            "[ClipFlow] Portal handler init elapsed: "
+            f"total_ms={(time.perf_counter() - started_at) * 1000.0:.1f} "
+            f"service_ms={service_ms:.1f} snapshot_ms={snapshot_ms:.1f}"
+        )
 
     @staticmethod
     def _qt_bridge_callback_ready(callback_key: str) -> bool:
@@ -12601,7 +12622,7 @@ class FastAPIPortalController:
         outbox_removed = PortalRuntime.state_store.cleanup_outbox_events(
             done_retention_seconds=24 * 3600,
             failed_retention_seconds=7 * 24 * 3600,
-            max_delete=1000,
+            max_delete=5000,
         )
         append_events_removed = PortalRuntime.state_store.cleanup_append_events(
             retention_seconds=3 * 24 * 3600,
@@ -13702,6 +13723,12 @@ class FastAPIPortalController:
             f"init_ms={init_ms:.1f} workers_ms={workers_ms:.1f} "
             f"app_ms={app_ms:.1f} listen_ms={listen_ms:.1f}"
         )
+        print(
+            "[ClipFlow] Portal controller startup elapsed: "
+            f"total_ms={(time.perf_counter() - startup_started_at) * 1000.0:.1f} "
+            f"init_ms={init_ms:.1f} workers_ms={workers_ms:.1f} "
+            f"app_ms={app_ms:.1f} listen_ms={listen_ms:.1f}"
+        )
         return self.get_url()
 
     def stop(self) -> None:
@@ -13945,6 +13972,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    print(
+        "[ClipFlow] Backend module import elapsed: "
+        f"{(time.perf_counter() - _BACKEND_IMPORT_STARTED_AT) * 1000.0:.1f} ms"
+    )
     args = build_arg_parser().parse_args()
     if args.mock_external:
         os.environ["CLIPFLOW_BACKEND_MOCK_EXTERNAL"] = "1"

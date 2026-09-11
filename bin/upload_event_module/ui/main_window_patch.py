@@ -32,7 +32,6 @@ from ..hot_reload.state_store import (
     write_state_atomic,
 )
 from ..config import config
-from ..services.remote_patch_updater import RemotePatchUpdater
 from ..services.dependency_bootstrap import (
     DEFAULT_MODULE_TO_PACKAGE,
     DEFAULT_WINDOWS_MODULE_TO_PACKAGE,
@@ -56,6 +55,8 @@ RUNTIME_PATCH_DATA_SUFFIXES = (
 
 class PatchUpdateMixin:
     def _init_remote_patch_updater(self):
+        from ..services.remote_patch_updater import RemotePatchUpdater
+
         self._remote_ui_manifest = None
         self._remote_non_ui_manifest = None
         self._remote_update_checking = False
@@ -77,6 +78,16 @@ class PatchUpdateMixin:
         )
         self.remote_update_timer.start(interval_seconds * 1000)
         QTimer.singleShot(20000, self._schedule_remote_update_check)
+
+    def _ensure_remote_patch_updater(self):
+        if getattr(self, "_closing", False):
+            return
+        if getattr(self, "_remote_patch_updater", None) is None:
+            started_at = time.perf_counter()
+            self._init_remote_patch_updater()
+            log_info(
+                f"Startup[qt]: remote_updater_ms={(time.perf_counter() - started_at) * 1000:.1f}"
+            )
 
     def _set_remote_update_check_button(self, checking: bool = False):
         button = getattr(self, "check_update_btn", None)
@@ -103,6 +114,7 @@ class PatchUpdateMixin:
             button.setToolTip("立即检查是否有最新版本")
 
     def check_remote_update_now(self, _checked: bool = False):
+        self._ensure_remote_patch_updater()
         self._schedule_remote_update_check(manual=True)
 
     def _set_remote_update_status(self, text: str):
@@ -187,10 +199,10 @@ class PatchUpdateMixin:
             if not manifest:
                 status_text = "远程更新: 清单为空"
             else:
-                local_meta = RemotePatchUpdater.load_local_build_meta(
+                local_meta = type(self._remote_patch_updater).load_local_build_meta(
                     self._get_app_root_dir()
                 )
-                if not RemotePatchUpdater.is_local_version_known(local_meta):
+                if not type(self._remote_patch_updater).is_local_version_known(local_meta):
                     status_text = "远程更新: 本地版本未标记(跳过)"
                 elif not self._remote_patch_updater.has_newer_patch(local_meta, manifest):
                     status_text = "远程更新: 已是最新"
@@ -790,7 +802,7 @@ class PatchUpdateMixin:
 
     def _discard_satisfied_remote_manifests(self):
         try:
-            local_meta = RemotePatchUpdater.load_local_build_meta(
+            local_meta = type(self._remote_patch_updater).load_local_build_meta(
                 self._get_app_root_dir()
             )
         except Exception:

@@ -1,9 +1,36 @@
 import sys
 import os
 import faulthandler
+import subprocess
 import threading
 import time
 from pathlib import Path
+
+_PROCESS_IMPORT_STARTED_AT = time.perf_counter()
+
+
+def _reexec_with_project_python():
+    if __name__ != "__main__" or getattr(sys, "frozen", False):
+        return
+    candidate = Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe"
+    if not candidate.is_file():
+        return
+    try:
+        if candidate.samefile(Path(sys.executable)):
+            return
+    except OSError:
+        if os.path.normcase(str(candidate.resolve())) == os.path.normcase(
+            str(Path(sys.executable).resolve())
+        ):
+            return
+    argv = [str(candidate), str(Path(__file__).resolve()), *sys.argv[1:]]
+    if sys.platform == "win32":
+        print(f"[ClipFlow] Switching to project Python: {candidate}", flush=True)
+        raise SystemExit(subprocess.call(argv))
+    os.execv(str(candidate), argv)
+
+
+_reexec_with_project_python()
 
 from upload_event_module.hot_reload.state_store import get_user_data_dir
 from upload_event_module.utils import migrate_runtime_data_files
@@ -25,7 +52,7 @@ if sys.platform == "win32":
 os.environ.setdefault("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM", "1")
 os.environ.setdefault("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", "1")
 
-from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from upload_event_module.hot_reload.restart_guard import RestartGuard
@@ -180,9 +207,28 @@ def is_already_running():
 
 
 def main():
+    print(
+        "[ClipFlow] Main module import elapsed: "
+        f"{(time.perf_counter() - _PROCESS_IMPORT_STARTED_AT) * 1000:.1f} ms"
+    )
+    stage_started_at = time.perf_counter()
     _migrate_runtime_data()
+    print(
+        "[ClipFlow] Runtime data migration elapsed: "
+        f"{(time.perf_counter() - stage_started_at) * 1000:.1f} ms"
+    )
+    stage_started_at = time.perf_counter()
     _init_crash_trace()
+    print(
+        "[ClipFlow] Crash trace init elapsed: "
+        f"{(time.perf_counter() - stage_started_at) * 1000:.1f} ms"
+    )
+    stage_started_at = time.perf_counter()
     _startup_dependency_healthcheck()
+    print(
+        "[ClipFlow] Dependency check elapsed: "
+        f"{(time.perf_counter() - stage_started_at) * 1000:.1f} ms"
+    )
     if "--clear-guard" in sys.argv:
         RestartGuard(
             window_seconds=HOT_RELOAD_SAFE_MODE_WINDOW_S,
@@ -197,7 +243,12 @@ def main():
     if sys.platform == "win32":
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
+    stage_started_at = time.perf_counter()
     app = QApplication(sys.argv)
+    print(
+        "[ClipFlow] QApplication init elapsed: "
+        f"{(time.perf_counter() - stage_started_at) * 1000:.1f} ms"
+    )
 
     # 单实例检测
     if is_already_running():
@@ -405,7 +456,19 @@ def main():
     if primary_screen:
         screen = primary_screen.geometry()
         window.move(screen.width() - 600, screen.height() - 790)
+    show_started_at = time.perf_counter()
     window.show()
+    print(
+        "[ClipFlow] Qt window show elapsed: "
+        f"{(time.perf_counter() - show_started_at) * 1000:.1f} ms"
+    )
+    QTimer.singleShot(
+        0,
+        lambda: print(
+            "[ClipFlow] Qt first event-loop turn elapsed: "
+            f"{(time.perf_counter() - show_started_at) * 1000:.1f} ms"
+        ),
+    )
     portal_relay_thread.start()
 
     sys.exit(app.exec())

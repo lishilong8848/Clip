@@ -166,7 +166,7 @@ class PollingWorkOrderService:
 
     def list_sops(self, scope: str, work_type: str = "polling") -> list[dict]:
         scope = str(scope or "").strip().upper()
-        _work_order_type(work_type)
+        work_type = _work_order_type(work_type)
         if scope not in POLLING_SOP_SCOPES:
             raise PortalError("请在明确的单楼页面读取 SOP。")
         items = [
@@ -177,6 +177,7 @@ class PollingWorkOrderService:
                 str((document.get("payload") or {}).get("scope") or "").strip().upper()
                 == scope
             )
+            and _stored_work_order_type(document.get("payload")) == work_type
         ]
         return sorted(items, key=lambda item: str(item.get("name") or "").casefold())
 
@@ -529,6 +530,8 @@ class PollingWorkOrderService:
             sop.get("scope") or ""
         ).strip().upper() != request_scope:
             raise PortalError("所选 SOP 不属于当前楼栋，请重新选择。")
+        if _stored_work_order_type(sop) != work_type:
+            raise PortalError("所选 SOP 不适用于当前工单类型，请重新选择。")
         sop_steps = [step for step in sop.get("steps") or [] if isinstance(step, dict)]
         adjust_tokens = _adjust_cooling_sop_tokens(sop_steps)
         has_adjust_cooling_step = work_type == "adjust" and adjust_tokens == {"{{from}}"}

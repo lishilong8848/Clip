@@ -96,7 +96,6 @@ from PyQt6 import sip
 
 from PIL import ImageGrab, Image, ImageChops, ImageStat, ImageEnhance
 
-import numpy as np
 
 # RapidOCR 延迟导入，避免与 PyQt6 的 DLL 加载冲突
 

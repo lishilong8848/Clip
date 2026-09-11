@@ -2968,8 +2968,10 @@ class MainWindowRecordsMixin:
         self._log_detail_preview_update(display_data, rid, reason="detail_dialog")
 
     def _should_defer_ui_refresh(self) -> bool:
+        screenshot_dialog = getattr(self, "screenshot_dialog", None)
         return bool(
-            self.current_screenshot_record_id or self.screenshot_dialog.isVisible()
+            getattr(self, "current_screenshot_record_id", None)
+            or (screenshot_dialog and screenshot_dialog.isVisible())
         )
 
     def _mark_cache_refresh_needed(self):
