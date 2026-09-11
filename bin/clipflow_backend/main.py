@@ -10138,9 +10138,10 @@ class FastAPIPortalController:
 
         body = (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-            f"<title>{html.escape(title)}</title></head><body>"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
+            f"<title>{html.escape(title)}</title><style>*{{box-sizing:border-box}}body{{margin:0;min-height:100dvh;display:grid;place-items:center;padding:16px;background:#eef5ff;color:#0c244d;font-family:'Microsoft YaHei',Arial,sans-serif}}main{{width:min(480px,100%);border:1px solid #d8e5f7;border-radius:18px;padding:24px;background:#fff;box-shadow:0 18px 48px rgba(15,73,153,.14)}}h2{{margin:0;font-size:22px}}p{{margin:14px 0;color:#5b6f8b;line-height:1.65;overflow-wrap:anywhere}}a{{display:inline-flex;min-height:44px;align-items:center;justify-content:center;border-radius:12px;padding:0 18px;background:#155fff;color:#fff;text-decoration:none;font-weight:800}}</style></head><body><main>"
             f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p>"
-            "<p><a href=\"/\">返回</a></p></body></html>"
+            "<a href=\"/\">返回</a></main></body></html>"
         ).encode("utf-8")
         return Response(
             content=body,

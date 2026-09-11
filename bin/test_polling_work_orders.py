@@ -58,8 +58,10 @@ class _FakePollingSopCloud:
         self.content = content
         self.saved = []
         self.uploaded = []
+        self.list_calls = 0
 
     def list_sops(self, *, force: bool = False):
+        self.list_calls += 1
         return copy.deepcopy(list(self.sops.values()))
 
     def get_sop(self, sop_id: str, *, force: bool = False):
@@ -119,13 +121,16 @@ class PollingWorkOrderTests(unittest.TestCase):
             })
 
             self.assertEqual([item["name"] for item in service.list_sops("A", "maintenance")], ["旧版本地SOP"])
+            service._wait_local_cache_bootstrap()
             self.assertEqual((len(cloud.uploaded), len(cloud.saved)), (1, 1))
             self.assertEqual(
                 store.get_document("polling_sop", sop_id)["attachments"][0]["file_token"],
                 "cloud-file-token",
             )
+            cloud_reads = cloud.list_calls
             service.list_sops("A", "maintenance")
             self.assertEqual((len(cloud.uploaded), len(cloud.saved)), (1, 1))
+            self.assertEqual(cloud.list_calls, cloud_reads)
 
     def test_legacy_local_sop_does_not_duplicate_cloud_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -148,6 +153,9 @@ class PollingWorkOrderTests(unittest.TestCase):
             service = PollingWorkOrderService(store, cloud)
 
             listed = service.list_sops("A", "maintenance")
+            self.assertEqual([item["sop_id"] for item in listed], ["local_sop_12345"])
+            service._wait_local_cache_bootstrap()
+            listed = service.list_sops("A", "maintenance")
             self.assertEqual([item["sop_id"] for item in listed], ["cloud_sop_12345"])
             self.assertEqual(cloud.saved, [])
 
@@ -163,6 +171,7 @@ class PollingWorkOrderTests(unittest.TestCase):
 
     def test_cloud_sop_create_uses_stable_client_token(self) -> None:
         cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+        cloud.ensure_schema = MagicMock()
         cloud.get_sop = MagicMock(return_value=None)
         cloud._request = MagicMock(return_value={"record": {"record_id": "recCloudSop"}})
         cloud.invalidate = MagicMock()
@@ -180,6 +189,15 @@ class PollingWorkOrderTests(unittest.TestCase):
         cloud.save_sop(sop, expected_version=0, allow_create=True)
         second_token = cloud._request.call_args.kwargs["params"]["client_token"]
         self.assertEqual(first_token, second_token)
+        self.assertEqual(cloud.ensure_schema.call_count, 2)
+
+    def test_cloud_sop_read_does_not_check_schema(self) -> None:
+        cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+        cloud.ensure_schema = MagicMock()
+        cloud._request = MagicMock(return_value={"items": [], "has_more": False})
+
+        self.assertEqual(cloud.list_records(), [])
+        cloud.ensure_schema.assert_not_called()
 
     def test_sop_cloud_is_authoritative_and_attachment_is_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -453,7 +471,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         )
         self.assertIn("维保工单", html)
         self.assertIn("本次维保不使用工单", html)
-        self.assertIn("work_type=${encodeURIComponent(pollingSopWorkType())}", html)
+        self.assertIn("work_type=${encodeURIComponent(workType)}", html)
         self.assertIn("countLabel.hidden=maintenance", html)
         self.assertIn("directionTitle.hidden=maintenance", html)
         self.assertIn("if(pollingSopWorkType()==='polling')for", html)
@@ -1002,7 +1020,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("time_limit_seconds", html)
         self.assertIn("是否需要拍照", html)
         self.assertIn("photo_required", html)
-        self.assertIn("SOP 已加载，正在读取人员", html)
+        self.assertIn("正在读取 SOP 和人员", html)
         self.assertIn("人员加载失败", html)
         self.assertIn("SOP 加载失败", html)
         self.assertIn("renderPollingSopList();", html)
@@ -1013,14 +1031,10 @@ class PollingWorkOrderTests(unittest.TestCase):
         open_source = html.split("async function openPollingSopModal", 1)[1].split(
             "function currentUrlScope", 1
         )[0]
-        self.assertLess(
-            open_source.index("await loadPollingSops()"),
-            open_source.index("renderPollingSopList()"),
-        )
-        self.assertLess(
-            open_source.index("renderPollingSopList()"),
-            open_source.index("await loadPollingPeople()"),
-        )
+        self.assertLess(open_source.index("modal.hidden=false"), open_source.index("await loadPollingSops()"))
+        self.assertLess(open_source.index("const peoplePromise="), open_source.index("await loadPollingSops()"))
+        self.assertIn("const peopleError=await peoplePromise", open_source)
+        self.assertIn("Date.now()-cached.loadedAt<60000", html)
 
     def test_polling_end_is_blocked_before_write_until_work_order_attachment_exists(self) -> None:
         prepared = {

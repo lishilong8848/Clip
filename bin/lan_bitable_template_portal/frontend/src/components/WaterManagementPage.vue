@@ -2509,5 +2509,19 @@ th {
   .abnormal-change-summary {
     grid-template-columns: 1fr;
   }
+
+  .lightbox {
+    padding: 52px 12px 18px;
+  }
+
+  .lightbox figure {
+    max-width: 100%;
+  }
+
+  .lightbox figcaption {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
 }
 </style>

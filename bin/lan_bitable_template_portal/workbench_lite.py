@@ -3218,6 +3218,31 @@ def render_workbench_lite(
       .notice-drawer-title h2 {{ font-size:16px; }}
       .notice-drawer-body {{ padding:10px 12px 18px; }}
     }}
+    @media (max-width: 820px) {{
+      .type-tab,.btn,.toolbar select,.toolbar input,.refresh-menu button,.scope-select {{ min-height:44px !important; }}
+      input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),select {{ min-height:44px !important; }}
+    }}
+    @media (max-width: 640px) {{
+      .topbar {{ gap:12px; padding:14px; }}
+      .brand {{ align-items:center; gap:11px; }}
+      .brand-logo {{ width:92px; height:38px; padding-right:12px; }}
+      .brand h1 {{ font-size:20px; }}
+      .brand p {{ margin-top:3px; font-size:12px; }}
+      .top-actions {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
+      .scope-switch {{ grid-column:1/-1; min-width:0; min-height:44px; }}
+      .scope-select {{ min-height:44px; }}
+      .top-actions .top-link,.top-actions .exit {{ min-height:44px; }}
+      .shell {{ padding:10px 10px 24px; }}
+      .type-tabs {{ width:100%; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }}
+      .toolbar form {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }}
+      .toolbar form input {{ grid-column:1/-1; }}
+      .manual-menu,.refresh-menu {{ top:auto; bottom:calc(100% + 6px); }}
+      .refresh-menu {{ right:0; left:auto; }}
+      .polling-sop-dialog {{ width:100%; max-height:calc(100dvh - 12px); }}
+      .end-check-backdrop {{ padding:6px; }}
+      .end-check-actions {{ flex-wrap:wrap; }}
+      .end-check-actions .btn {{ flex:1 1 120px; }}
+    }}
   </style>
 </head>
 <body>
@@ -3451,6 +3476,10 @@ def render_workbench_lite(
     let liteDraftServerVersion = 0;
     let liteDraftSavePromise = null;
     let litePollingSops = [];
+    const litePollingSopCache = new Map();
+    let litePollingPeopleLoadedAt = 0;
+    let litePollingPeopleLoadPromise = null;
+    let litePollingSopOpenSequence = 0;
     let litePollingSopMode = 'manage';
     let litePollingEditingSop = null;
     let litePollingSelectedSop = null;
@@ -3472,17 +3501,22 @@ def render_workbench_lite(
       const data = await response.json().catch(() => ({{}}));
       if (handleLiteAuthRequired(response, data)) throw new Error('登录已过期');
       if (!response.ok || data.ok === false) throw new Error(data.error || 'SOP 操作失败');
+      if(String(options.method||'GET').toUpperCase()!=='GET'&&String(url).startsWith('/api/polling-sops'))litePollingSopCache.clear();
       return data.data || data;
     }}
-    async function loadPollingSops() {{
+    async function loadPollingSops(force=false) {{
       const scope=pollingSopScope();
       if(!scope)throw new Error('请先切换到具体楼栋，再填写或选择 SOP 步骤');
-      const data = await pollingApi(`/api/polling-sops?scope=${{encodeURIComponent(scope)}}&work_type=${{encodeURIComponent(pollingSopWorkType())}}`);
-      litePollingSops = Array.isArray(data.items) ? data.items : [];
-      return litePollingSops;
+      const workType=pollingSopWorkType(),key=`${{scope}}:${{workType}}`,cached=litePollingSopCache.get(key);
+      if(!force&&cached?.items&&Date.now()-cached.loadedAt<60000){{litePollingSops=cached.items;return litePollingSops}}
+      if(!force&&cached?.promise){{const items=await cached.promise;if(`${{pollingSopScope()}}:${{pollingSopWorkType()}}`===key)litePollingSops=items;return items}}
+      const promise=pollingApi(`/api/polling-sops?scope=${{encodeURIComponent(scope)}}&work_type=${{encodeURIComponent(workType)}}`).then(data=>Array.isArray(data.items)?data.items:[]);
+      litePollingSopCache.set(key,{{items:cached?.items||null,loadedAt:cached?.loadedAt||0,promise}});
+      try{{const items=await promise;litePollingSopCache.set(key,{{items,loadedAt:Date.now(),promise:null}});if(`${{pollingSopScope()}}:${{pollingSopWorkType()}}`===key)litePollingSops=items;return items}}
+      catch(error){{if(litePollingSopCache.get(key)?.promise===promise)litePollingSopCache.delete(key);throw error}}
     }}
     function pollingSopModal() {{ return document.getElementById('lite-polling-sop-modal'); }}
-    function closePollingSopModal() {{ const modal=pollingSopModal(); if(modal) modal.hidden=true; }}
+    function closePollingSopModal() {{ litePollingSopOpenSequence+=1;const modal=pollingSopModal(); if(modal) modal.hidden=true; }}
     function setPollingSopFeedback(message,failed=false) {{const node=document.getElementById('lite-polling-sop-feedback');if(!node)return;node.textContent=String(message||'');node.hidden=!node.textContent;node.classList.toggle('failed',Boolean(failed))}}
     function openPollingSopDeleteConfirm(sop,trigger) {{litePollingSopDeleteTarget={{sop_id:String(sop?.sop_id||''),version:Number(sop?.version||0),name:String(sop?.name||'未命名 SOP')}};litePollingSopDeleteReturnFocus=trigger instanceof HTMLElement?trigger:null;const modal=document.getElementById('lite-polling-sop-delete-confirm'),name=document.getElementById('lite-polling-sop-delete-name'),error=document.getElementById('lite-polling-sop-delete-error'),apply=document.getElementById('lite-polling-sop-delete-apply');if(name)name.textContent=litePollingSopDeleteTarget.name;if(error){{error.textContent='';error.hidden=true}}if(modal)modal.hidden=false;if(apply)apply.focus()}}
     function closePollingSopDeleteConfirm() {{const modal=document.getElementById('lite-polling-sop-delete-confirm'),returnFocus=litePollingSopDeleteReturnFocus;if(modal)modal.hidden=true;litePollingSopDeleteTarget=null;litePollingSopDeleteReturnFocus=null;if(returnFocus?.isConnected)requestAnimationFrame(()=>returnFocus.focus())}}
@@ -3504,10 +3538,10 @@ def render_workbench_lite(
       let hour=new Date().getHours();try{{hour=Number(new Intl.DateTimeFormat('en-GB',{{timeZone:'Asia/Shanghai',hour:'2-digit',hourCycle:'h23'}}).format(new Date()))}}catch{{}}return pollingShiftFromHour(hour);
     }}
     async function loadPollingPeople() {{
-      const data=await pollingApi('/api/signatures/people?limit=200');
-      const people=Array.isArray(data.people)?data.people:[];
-      litePollingPeople=pollingSortedPeople([{{record_id:'h_duty_account',name:'H楼值班账号',employee_no:'',building:'H楼',position:'值班账号',shift:''}},...people.filter(person=>String(person.record_id||'')!=='h_duty_account')]);
-      return litePollingPeople;
+      if(litePollingPeople.length&&Date.now()-litePollingPeopleLoadedAt<60000)return litePollingPeople;
+      if(litePollingPeopleLoadPromise)return litePollingPeopleLoadPromise;
+      litePollingPeopleLoadPromise=pollingApi('/api/signatures/people?limit=200').then(data=>{{const people=Array.isArray(data.people)?data.people:[];litePollingPeople=pollingSortedPeople([{{record_id:'h_duty_account',name:'H楼值班账号',employee_no:'',building:'H楼',position:'值班账号',shift:''}},...people.filter(person=>String(person.record_id||'')!=='h_duty_account')]);litePollingPeopleLoadedAt=Date.now();return litePollingPeople}});
+      try{{return await litePollingPeopleLoadPromise}}finally{{litePollingPeopleLoadPromise=null}}
     }}
     function pollingNewDraft(workType=pollingCurrentSopWorkType()) {{ return {{sop_id:'',work_type:workType,scope:pollingSopScope(),name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true,photo_required:true,time_limit_seconds:0}}],attachments:[]}}; }}
     function pollingSopPlaceholderTokens(sop) {{const content=(sop?.steps||[]).map(step=>String(step.content||'')).join('\\n');return new Set(['{{{{other}}}}','{{{{from}}}}','{{{{to}}}}'].filter(token=>content.includes(token)))}}
@@ -3600,16 +3634,18 @@ def render_workbench_lite(
     async function openPollingSopModal(mode='manage') {{
       litePollingSopMode=mode;const modal=pollingSopModal();if(!modal)return;
       if(!pollingSopScope()){{showLiteError('请先切换到具体楼栋，再填写或选择 SOP 步骤');return}}
+      const sequence=++litePollingSopOpenSequence;
       setPollingSopFeedback('');
-      const list=document.getElementById('lite-polling-sop-list'),editor=document.getElementById('lite-polling-sop-editor');modal.hidden=true;
+      const list=document.getElementById('lite-polling-sop-list'),editor=document.getElementById('lite-polling-sop-editor'),loading=document.createElement('div');loading.className='empty';loading.textContent='正在读取 SOP…';list.replaceChildren(loading);const editorLoading=document.createElement('div');editorLoading.className='empty';editorLoading.textContent=mode==='select'?'正在读取 SOP 和人员…':'正在读取 SOP…';editor.replaceChildren(editorLoading);modal.hidden=false;requestAnimationFrame(()=>document.getElementById('lite-polling-sop-close')?.focus());
       document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':`${{pollingSopLabel()}} SOP步骤填写`;document.getElementById('lite-polling-sop-new').hidden=mode==='select';
+      const peoplePromise=mode==='select'?loadPollingPeople().then(()=>null,error=>error):Promise.resolve(null);
       try{{
-        await loadPollingSops();litePollingEditingSop=litePollingEditingSop&&litePollingEditingSop.scope===pollingSopScope()?litePollingEditingSop:pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id)||null):litePollingSelectedSop;renderPollingSopList();
-        if(mode==='manage'){{renderPollingSopEditor();modal.hidden=false;return}}
-        const loading=document.createElement('div');loading.className='empty';loading.textContent='SOP 已加载，正在读取人员…';editor.replaceChildren(loading);modal.hidden=false;
-        try{{await loadPollingPeople();renderPollingSelectionEditor()}}
+        await loadPollingSops();if(sequence!==litePollingSopOpenSequence||modal.hidden)return;litePollingEditingSop=litePollingEditingSop&&litePollingEditingSop.scope===pollingSopScope()?litePollingEditingSop:pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id)||null):litePollingSelectedSop;renderPollingSopList();
+        if(mode==='manage'){{renderPollingSopEditor();return}}
+        const peopleError=await peoplePromise;if(sequence!==litePollingSopOpenSequence||modal.hidden)return;
+        try{{if(peopleError)throw peopleError;renderPollingSelectionEditor()}}
         catch(error){{showLiteError(error.message);const failed=document.createElement('div'),message=document.createElement('div'),retry=document.createElement('button');failed.className='empty';message.textContent=`人员加载失败：${{error.message}}`;retry.type='button';retry.className='btn primary';retry.textContent='重试';retry.onclick=()=>openPollingSopModal(mode);failed.append(message,retry);editor.replaceChildren(failed)}}
-      }}catch(error){{showLiteError(error.message);const failed=document.createElement('div'),message=document.createElement('div'),retry=document.createElement('button');failed.className='empty';message.textContent=`SOP 加载失败：${{error.message}}`;retry.type='button';retry.className='btn primary';retry.textContent='重试';retry.onclick=()=>openPollingSopModal(mode);failed.append(message,retry);list.replaceChildren();editor.replaceChildren(failed);modal.hidden=false}}
+      }}catch(error){{if(sequence!==litePollingSopOpenSequence||modal.hidden)return;showLiteError(error.message);const failed=document.createElement('div'),message=document.createElement('div'),retry=document.createElement('button');failed.className='empty';message.textContent=`SOP 加载失败：${{error.message}}`;retry.type='button';retry.className='btn primary';retry.textContent='重试';retry.onclick=()=>openPollingSopModal(mode);failed.append(message,retry);list.replaceChildren();editor.replaceChildren(failed)}}
     }}
     function currentUrlScope() {{
       return new URLSearchParams(location.search).get('scope') || initialScope;

@@ -390,7 +390,14 @@ header.app-topbar .settings-entry {
     min-height: auto;
     align-items: flex-start;
     flex-direction: column;
-    padding: 20px;
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .brand {
+    width: 100%;
+    flex: 0 0 auto;
+    gap: 14px;
   }
 
   .brand-logo {
@@ -407,6 +414,7 @@ header.app-topbar .settings-entry {
 
   .topbar-actions {
     width: 100%;
+    flex: 0 0 auto;
     min-width: 0;
     justify-content: flex-start;
   }
@@ -439,6 +447,48 @@ header.app-topbar .settings-entry {
 
   header.app-topbar.home-mode .danger-text span {
     display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  header.app-topbar {
+    gap: 12px;
+    padding: 13px 14px 14px;
+  }
+
+  .brand {
+    gap: 11px;
+    align-items: center;
+  }
+
+  .brand-logo {
+    width: 92px;
+    height: 38px;
+    padding-right: 12px;
+  }
+
+  .brand h1 {
+    font-size: 20px;
+    line-height: 1.16;
+  }
+
+  .brand p {
+    margin-top: 3px;
+    font-size: 12px;
+  }
+
+  .topbar-actions {
+    gap: 8px;
+  }
+
+  header.app-topbar .user-chip {
+    min-width: 0;
+    flex: 1 1 150px;
+  }
+
+  header.app-topbar .scope-switch {
+    min-width: 0;
+    flex: 1 1 210px;
   }
 }
 

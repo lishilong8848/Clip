@@ -1585,6 +1585,31 @@ button:disabled {
   }
 }
 
+@media (max-width: 640px) {
+  .date-toolbar {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 58px 44px;
+  }
+
+  .date-input,
+  .date-input input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .generated-time {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .category-tabs {
+    width: 100%;
+    max-width: 100%;
+    overscroll-behavior-x: contain;
+  }
+}
+
 @media print {
   .morning-print-page {
     width: 277mm;

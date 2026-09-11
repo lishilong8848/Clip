@@ -527,6 +527,7 @@ onBeforeUnmount(() => {
 
 .vnet-select-options {
   max-height: 280px;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 5px;

@@ -2615,9 +2615,13 @@ input[readonly] { background: #f3f7fc; color: #536987; }
   .scope-file-preview-card > header button { width: 100%; }
   .template-editor-overlay { padding: 8px; }
   .template-editor-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .image-viewer { padding: 10px; }
+  .image-viewer header button { width: 44px; height: 44px; }
   .template-editor-table-head { display: none; }
-  .template-editor-row { grid-template-columns: 34px minmax(0, 1fr) 38px; }
+  .template-editor-row { grid-template-columns: 44px minmax(0, 1fr) 44px; }
   .template-editor-row textarea { grid-column: 2 / -1; }
+  .template-editor-close,
+  .template-row-delete { width: 44px; height: 44px; }
   .template-editor-dialog > footer { align-items: stretch; flex-direction: column; }
   .template-editor-dialog > footer > div { display: grid; grid-template-columns: 1fr 1fr; }
 }

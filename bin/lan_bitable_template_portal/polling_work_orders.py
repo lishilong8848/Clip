@@ -33,6 +33,8 @@ from .portal_service import (
 
 
 POLLING_SOP_NAMESPACE = "polling_sop"
+POLLING_SOP_META_NAMESPACE = "polling_sop_meta"
+POLLING_SOP_CLOUD_CACHE_KEY = "cloud_initialized_v1"
 POLLING_WORK_ORDER_NAMESPACE = "polling_work_order"
 POLLING_WORK_ORDER_SECRET_NAMESPACE = "polling_work_order_secret"
 POLLING_WORK_ORDER_SECRET_KEY = "hmac"
@@ -207,7 +209,6 @@ class PollingSopCloudStore:
             type(self)._schema_ready = True
 
     def list_records(self) -> list[dict]:
-        self.ensure_schema()
         records: list[dict] = []
         page_token = ""
         while True:
@@ -313,6 +314,7 @@ class PollingSopCloudStore:
         return fields
 
     def save_sop(self, sop: dict, *, expected_version: int, allow_create: bool = False) -> dict:
+        self.ensure_schema()
         existing = self.get_sop(str(sop.get("sop_id") or ""), force=True)
         if existing and int(existing.get("version") or 0) != int(expected_version or 0):
             raise PortalConflictError("SOP 已被其他电脑修改，请刷新后重试。")
@@ -394,6 +396,9 @@ class PollingWorkOrderService:
         )
         self._legacy_cloud_sync_lock = threading.Lock()
         self._legacy_cloud_sync_done = False
+        self._cloud_bootstrap_lock = threading.Lock()
+        self._cloud_bootstrap_running = False
+        self._cloud_bootstrap_thread: threading.Thread | None = None
 
     @staticmethod
     def _now_text() -> str:
@@ -592,25 +597,91 @@ class PollingWorkOrderService:
             print(f"[ClipFlow] SOP cloud read failed, using local cache: {exc}")
             return None
 
+    def _local_sops(self) -> list[dict]:
+        return [
+            document.get("payload") or {}
+            for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE)
+            if isinstance(document.get("payload"), dict)
+        ]
+
+    def _local_cache_initialized(self) -> bool:
+        marker = self.state_store.get_document(
+            POLLING_SOP_META_NAMESPACE, POLLING_SOP_CLOUD_CACHE_KEY
+        )
+        return bool(isinstance(marker, dict) and marker.get("initialized"))
+
+    def _refresh_local_cache_from_cloud(self) -> bool:
+        if not self.cloud:
+            return False
+        with self._lock:
+            cloud_items = self._cloud_sops(force=True)
+            if cloud_items is None or not self._legacy_cloud_sync_done:
+                return False
+            cloud_ids = {
+                str(item.get("sop_id") or "")
+                for item in cloud_items
+                if str(item.get("sop_id") or "")
+            }
+            for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE):
+                sop_id = str(document.get("key") or "")
+                if sop_id and sop_id not in cloud_ids:
+                    self.state_store.delete_document(POLLING_SOP_NAMESPACE, sop_id)
+            self.state_store.put_document(
+                POLLING_SOP_META_NAMESPACE,
+                POLLING_SOP_CLOUD_CACHE_KEY,
+                {
+                    "initialized": True,
+                    "record_count": len(cloud_ids),
+                    "updated_at": self._now_text(),
+                },
+            )
+            return True
+
+    def _start_local_cache_bootstrap(self) -> None:
+        with self._cloud_bootstrap_lock:
+            if self._cloud_bootstrap_running:
+                return
+            self._cloud_bootstrap_running = True
+
+        def worker() -> None:
+            try:
+                self._refresh_local_cache_from_cloud()
+            finally:
+                with self._cloud_bootstrap_lock:
+                    self._cloud_bootstrap_running = False
+
+        thread = threading.Thread(
+            target=worker,
+            name="PollingSopLocalCacheBootstrap",
+            daemon=True,
+        )
+        self._cloud_bootstrap_thread = thread
+        thread.start()
+
+    def _wait_local_cache_bootstrap(self, timeout: float = 5.0) -> None:
+        thread = self._cloud_bootstrap_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=max(0.0, float(timeout or 0.0)))
+
     def list_sops(self, scope: str, work_type: str = "polling") -> list[dict]:
         scope = str(scope or "").strip().upper()
         work_type = _work_order_type(work_type)
         if scope not in POLLING_SOP_SCOPES:
             raise PortalError("请在明确的单楼页面读取 SOP。")
-        cloud_items = self._cloud_sops()
-        source = cloud_items if cloud_items is not None else [
-            document.get("payload") or {}
-            for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE)
-            if isinstance(document.get("payload"), dict)
-        ]
+        source = self._local_sops()
+        if self.cloud and not self._local_cache_initialized():
+            if source:
+                self._start_local_cache_bootstrap()
+            elif self._refresh_local_cache_from_cloud():
+                source = self._local_sops()
         items = [self._public_sop(item) for item in source if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
         return sorted(items, key=lambda item: str(item.get("name") or "").casefold())
 
     def get_sop(self, sop_id: str, *, public: bool = True, refresh: bool = False) -> dict:
         sop_id = str(sop_id or "").strip()
-        if self.cloud:
+        if self.cloud and refresh:
             try:
-                remote = self.cloud.get_sop(sop_id, force=refresh)
+                remote = self.cloud.get_sop(sop_id, force=True)
             except Exception as exc:
                 print(f"[ClipFlow] SOP cloud read failed, using local cache: {exc}")
             else:
@@ -620,6 +691,9 @@ class PollingWorkOrderService:
                 sop = self._cache_cloud_sop(remote)
                 return self._public_sop(sop) if public else copy.deepcopy(sop)
         sop = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id)
+        if not isinstance(sop, dict) and self.cloud and not self._local_cache_initialized():
+            if self._refresh_local_cache_from_cloud():
+                sop = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id)
         if not isinstance(sop, dict):
             raise PortalNotFoundError("轮巡 SOP 不存在。")
         return self._public_sop(sop) if public else copy.deepcopy(sop)

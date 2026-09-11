@@ -54,6 +54,16 @@ class _SmokeSignatureManagement:
             },
         }
 
+    def session(self, _payload: dict | None = None) -> dict:
+        return {
+            "request_id": "smoke-request",
+            "status": "pending",
+            "name": "烟测人员",
+            "building": "A楼",
+            "employee_no": "S001",
+            "expires_at": time.time() + 3600,
+        }
+
 
 class _SmokePortalService:
     _last_loaded_at = "smoke"
@@ -130,6 +140,213 @@ class _SmokePortalService:
                 "B": "https://example.invalid/b",
             }
         }
+
+    @staticmethod
+    def _empty_event_stats() -> dict:
+        return {
+            "total": 0,
+            "high_level": 0,
+            "under_repair": 0,
+            "i2_or_higher": 0,
+            "i3": 0,
+            "statuses": {},
+            "levels": {},
+            "sources": {},
+            "specialties": {},
+        }
+
+    @staticmethod
+    def _smoke_event() -> dict:
+        return {
+            "record_id": "smoke-event-a-001",
+            "title": "A楼制冷系统告警",
+            "alarm_desc": "A楼制冷系统压力异常",
+            "building": "A楼",
+            "building_codes": ["A"],
+            "status": "处理中",
+            "level": "I2",
+            "source": "监控告警",
+            "specialty": "暖通",
+            "occurrence_time": "2026-09-11 10:30",
+            "progress_update": "现场正在排查",
+            "high_level": True,
+            "under_repair": True,
+        }
+
+    def _smoke_event_stats(self) -> dict:
+        stats = self._empty_event_stats()
+        stats.update({
+            "total": 1,
+            "high_level": 1,
+            "under_repair": 1,
+            "i2_or_higher": 1,
+            "statuses": {"处理中": 1},
+            "levels": {"I2": 1},
+            "sources": {"监控告警": 1},
+            "specialties": {"暖通": 1},
+        })
+        return stats
+
+    def get_event_monthly_snapshot(self, *, scope: str, month: str = "") -> dict:
+        records = [self._smoke_event()] if self._normalize_scope(scope) in {"ALL", "A"} else []
+        return {
+            "scope": self._normalize_scope(scope),
+            "month": month or time.strftime("%Y-%m"),
+            "records": records,
+            "stats": self._smoke_event_stats() if records else self._empty_event_stats(),
+            "snapshot_exists": True,
+            "last_refreshed_at": time.time(),
+        }
+
+    def get_event_monthly_overview(self, *, month: str = "") -> dict:
+        return {
+            "scope": "ALL",
+            "month": month or time.strftime("%Y-%m"),
+            "stats": self._smoke_event_stats(),
+            "building_stats": [
+                {"code": code, "label": f"{code}楼", **(self._smoke_event_stats() if code == "A" else self._empty_event_stats())}
+                for code in ("A", "B", "C", "D", "E", "H")
+            ],
+            "snapshot_exists": True,
+            "last_refreshed_at": time.time(),
+        }
+
+    def get_daily_task_checklist(self, *, scope: str = "ALL", date: str = "") -> dict:
+        categories = [
+            {"key": key, "label": label, "count": 0, "tasks": []}
+            for key, label in (
+                ("notice", "通告"),
+                ("event", "事件"),
+                ("repair", "检修"),
+                ("mop", "维护单"),
+                ("water", "水耗"),
+            )
+        ]
+        return {
+            "scope": self._normalize_scope(scope),
+            "date": date or time.strftime("%Y-%m-%d"),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "stats": {"total": 0, "ongoing": 0, "completed": 0, "attention": 0},
+            "categories": categories,
+            "tasks": [],
+            "warnings": [],
+        }
+
+    def get_morning_meeting_preview(self, *, date: str = "", prefer_generated: bool = True, temperature_only: bool = False) -> dict:
+        return {
+            "date": date or time.strftime("%Y-%m-%d"),
+            "weather_condition": "晴",
+            "dry_bulb_temperature": 26,
+            "wet_bulb_temperature": 22,
+            "rows": [
+                {"scope": code, "label": f"{code}楼" if code != "110" else "110站", "lines": ["值班巡检"], "notice_count": 0}
+                for code in ("A", "B", "C", "D", "E", "H", "110")
+            ],
+            "notice_count": 0,
+            "warnings": [],
+            "generated": False,
+            "generated_at": "",
+            "download_url": "",
+            "print_url": "",
+        }
+
+    def get_generated_morning_meeting(self, *, date: str) -> dict:
+        return {
+            "model": self.get_morning_meeting_preview(date=date),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def water_consumption_bootstrap(self, *, scope: str) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "building": f"{self._normalize_scope(scope)}楼",
+            "month": time.strftime("%Y-%m"),
+            "summary": {},
+            "options": {"meters": [], "preferred_meters": [], "frequencies": ["日", "周", "月"], "shifts": ["白", "夜"]},
+            "snapshot": {"ready": True, "refreshing": False, "updated_at": time.time()},
+            "writable_fields": [],
+            "readonly_fields": [],
+        }
+
+    def water_consumption_buildings(self, *, allowed_scopes: list[str] | tuple[str, ...]) -> dict:
+        allowed = {self._normalize_scope(scope) for scope in allowed_scopes}
+        return {
+            "month": time.strftime("%Y-%m"),
+            "scopes": [
+                {"value": code, "label": f"{code}楼", "month_record_count": 0, "month_total_usage": 0, "record_count": 0, "latest_date_ms": 0}
+                for code in ("A", "B", "C", "D", "E", "H") if "ALL" in allowed or code in allowed
+            ],
+            "snapshot": {"ready": True, "refreshing": False, "updated_at": time.time()},
+        }
+
+    def list_water_consumption_records(self, **kwargs: object) -> dict:
+        page = max(1, int(kwargs.get("page") or 1))
+        page_size = max(1, int(kwargs.get("page_size") or 50))
+        return {
+            "scope": self._normalize_scope(str(kwargs.get("scope") or "")),
+            "records": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "snapshot": {"ready": True, "refreshing": False, "updated_at": time.time()},
+        }
+
+    def critical_guard_bootstrap(self, **_kwargs: object) -> dict:
+        return {
+            "scopes": [
+                {"value": code, "label": f"{code}楼", "authorized": True, "total": 0, "pending": 0, "completed": 0}
+                for code in ("A", "B", "C", "D", "E", "H")
+            ],
+            "is_admin": True,
+            "sheet_types": [],
+            "catalog": {"sheets": []},
+            "current_signer": {},
+        }
+
+    def list_critical_guard_tasks(self, *, scope: str = "", include_all: bool = False) -> dict:
+        return {"tasks": [], "count": 0, "scope": self._normalize_scope(scope) if scope else ""}
+
+    def critical_guard_weather_status(self) -> dict:
+        return {
+            "running": False,
+            "paused": False,
+            "phase": "idle",
+            "tasks": [],
+            "current_warnings": [],
+            "last_query_at": 0,
+            "last_success_at": 0,
+            "next_query_at": 0,
+        }
+
+    def drill_signature_people(self, *, refresh: bool = False) -> list[dict]:
+        return []
+
+    def signature_people(self, **kwargs: object) -> dict:
+        return {
+            "people": [],
+            "count": 0,
+            "returned": 0,
+            "scope": self._normalize_scope(str(kwargs.get("scope") or "ALL")),
+            "loaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def engineer_mop_bootstrap(self, *, scope: str = "ALL", ongoing_items: list[dict] | None = None) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "scope_label": f"{self._normalize_scope(scope)}楼",
+            "date": time.strftime("%Y-%m-%d"),
+            "notices": [],
+            "mop_candidates": [],
+            "bindings": [],
+            "mop_settings": {"configured": True, "title_field": "标题", "attachment_field": "附件"},
+            "warnings": [],
+        }
+
+    def _engineer_mop_settings(self) -> dict[str, str]:
+        return {"app_token": "smoke", "table_id": "smoke", "view_id": "", "title_field": "文件名", "attachment_field": "文件"}
+
+    def get_permission_directory_people(self, *, force_refresh: bool = False, query: str = "") -> dict:
+        return {"items": [], "total": 0, "selectable_total": 0, "loaded_at": time.strftime("%Y-%m-%d %H:%M:%S"), "loaded_ts": time.time()}
 
     def query_records(
         self,
@@ -1337,6 +1554,226 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }});
             if (issues.length) throw new Error(`layout issues at ${{stage}}: ${{issues.join('; ')}}`);
           }}
+
+          async function inspectMobileSurface(targetPage, stage, width = 390, height = 844) {{
+            await targetPage.setViewportSize({{ width, height }});
+            await targetPage.waitForSelector('body', {{ state: 'attached', timeout: 10000 }});
+            await targetPage.waitForTimeout(450);
+            const report = await targetPage.evaluate(() => {{
+              const visible = node => {{
+                const style = getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+              }};
+              const scrollOwner = node => node.closest(
+                '.table-wrap,.table-shell,.table-scroll,.map-viewport,.sheet-scroll,.preview-table-wrap,.matrix-scroll,.timeline-scroll,[class*="scroll"]'
+              );
+              const viewportWidth = document.documentElement.clientWidth;
+              const overflow = [];
+              for (const node of document.querySelectorAll('main,section,header,footer,aside,nav,form,dialog,.modal,.drawer,.panel')) {{
+                if (!visible(node) || scrollOwner(node)) continue;
+                const rect = node.getBoundingClientRect();
+                if (rect.left < -3 || rect.right > viewportWidth + 3) {{
+                  overflow.push(`${{node.tagName.toLowerCase()}}.${{String(node.className || '').trim().replace(/\\s+/g,'.').slice(0,90)}}:${{Math.round(rect.left)}}..${{Math.round(rect.right)}}`);
+                }}
+              }}
+              const smallTargets = [];
+              for (const node of document.querySelectorAll('button,a[href],input,select,textarea')) {{
+                if (!visible(node) || node.matches(':disabled,[type="hidden"],[type="checkbox"],[type="radio"],.map-cell') || scrollOwner(node)) continue;
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                if (style.position === 'absolute' || style.position === 'fixed') continue;
+                if (rect.height < 38 && rect.width < 120) {{
+                  smallTargets.push(`${{node.tagName.toLowerCase()}}.${{String(node.className || '').trim().replace(/\\s+/g,'.').slice(0,70)}}:${{Math.round(rect.width)}}x${{Math.round(rect.height)}}`);
+                }}
+              }}
+              const oversizedImages = Array.from(document.images).filter(visible).filter(image => {{
+                const rect = image.getBoundingClientRect();
+                return rect.width > viewportWidth + 3 || rect.width > image.parentElement.getBoundingClientRect().width + 3;
+              }}).map(image => `${{image.alt || image.className || 'image'}}:${{Math.round(image.getBoundingClientRect().width)}}`);
+              const documentOffenders = document.documentElement.scrollWidth > viewportWidth + 3
+                ? Array.from(document.querySelectorAll('body *')).filter(visible).map(node => [node, node.getBoundingClientRect()]).filter(([, rect]) => rect.left < -3 || rect.right > viewportWidth + 3).slice(0, 20).map(([node, rect]) => `${{node.tagName.toLowerCase()}}.${{String(node.className || '').trim().replace(/\\s+/g,'.').slice(0,90)}}:${{Math.round(rect.left)}}..${{Math.round(rect.right)}}`)
+                : [];
+              return {{
+                viewportWidth,
+                documentWidth: document.documentElement.scrollWidth,
+                horizontalOverflow: document.documentElement.scrollWidth > viewportWidth + 3,
+                overflow: overflow.slice(0, 12),
+                documentOffenders,
+                smallTargets: smallTargets.slice(0, 20),
+                oversizedImages: oversizedImages.slice(0, 12),
+              }};
+            }});
+            if (width === 390) {{
+              require('fs').mkdirSync('output/playwright/mobile', {{ recursive: true }});
+              await targetPage.screenshot({{ path: `output/playwright/mobile/${{stage}}.png`, fullPage: false }});
+            }}
+            return report;
+          }}
+
+          async function inspectMobileFloatingSurfaces(targetPage, stage) {{
+            await targetPage.setViewportSize({{ width: 390, height: 844 }});
+            await targetPage.waitForTimeout(120);
+            const probe = () => targetPage.evaluate(() => {{
+              const visible = node => {{
+                const style = getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+              }};
+              const surfaces = Array.from(document.querySelectorAll(
+                '[role="dialog"],dialog[open],[role="listbox"],[role="menu"],.vnet-select-menu,.repair-people-popover,.floating-cell-popover,.refresh-menu-panel,#refresh-menu,#manual-menu,.admin-card,.event-drawer'
+              )).filter(visible);
+              const issues = [];
+              for (const surface of surfaces) {{
+                const rect = surface.getBoundingClientRect();
+                const name = `${{surface.tagName.toLowerCase()}}.${{String(surface.className || '').trim().replace(/\\s+/g,'.').slice(0,90)}}`;
+                if (rect.left < -2 || rect.top < -2 || rect.right > innerWidth + 2 || rect.bottom > innerHeight + 2) {{
+                  issues.push(`${{name}} outside viewport ${{Math.round(rect.left)}},${{Math.round(rect.top)}}..${{Math.round(rect.right)}},${{Math.round(rect.bottom)}}`);
+                }}
+                if (surface.scrollHeight > surface.clientHeight + 2) {{
+                  const ownOverflow = getComputedStyle(surface).overflowY;
+                  const nestedScroller = Array.from(surface.querySelectorAll('*')).filter(visible).some(node => {{
+                    const overflow = getComputedStyle(node).overflowY;
+                    return ['auto', 'scroll'].includes(overflow) && node.scrollHeight > node.clientHeight + 2;
+                  }});
+                  if (!['auto', 'scroll'].includes(ownOverflow) && !nestedScroller) issues.push(`${{name}} clips vertical content without scrolling`);
+                }}
+              }}
+              const smallTargets = surfaces.flatMap(surface => Array.from(surface.querySelectorAll('button,a[href],input,select,textarea'))).filter(visible).filter(node => !node.matches('[type="hidden"],[type="checkbox"],[type="radio"],.sr-only')).map(node => [node, node.getBoundingClientRect()]).filter(([, rect]) => rect.height < 38 && rect.width < 120).slice(0, 20).map(([node, rect]) => `${{node.tagName.toLowerCase()}}.${{String(node.className || '').trim().replace(/\\s+/g,'.').slice(0,70)}}:${{Math.round(rect.width)}}x${{Math.round(rect.height)}}`);
+              return {{
+                surfaceCount: surfaces.length,
+                issues,
+                smallTargets,
+                documentWidth: document.documentElement.scrollWidth,
+                viewportWidth: document.documentElement.clientWidth,
+              }};
+            }});
+            const report = await probe();
+            await targetPage.setViewportSize({{ width: 360, height: 800 }});
+            await targetPage.waitForTimeout(120);
+            const compactReport = await probe();
+            await targetPage.setViewportSize({{ width: 390, height: 844 }});
+            await targetPage.waitForTimeout(120);
+            require('fs').mkdirSync('output/playwright/mobile-overlays', {{ recursive: true }});
+            await targetPage.screenshot({{ path: `output/playwright/mobile-overlays/${{stage}}.png`, fullPage: false }});
+            for (const [size, result] of [['390x844', report], ['360x800', compactReport]]) {{
+              if (!result.surfaceCount || result.issues.length || result.smallTargets.length || result.documentWidth > result.viewportWidth + 3) {{
+                throw new Error(`mobile floating surface issues at ${{stage}} (${{size}}): ${{JSON.stringify(result)}}`);
+              }}
+            }}
+            return {{ phone: report, compactPhone: compactReport }};
+          }}
+
+          async function auditAllMobileRoutes(targetPage) {{
+            const routes = [
+              ['home', '/', '.home-dashboard'],
+              ...[
+                'cabinet_power','event','maintenance','maintenance_mop','change','repair','repair_management','water',
+                'critical_guard','drill','tools','daily','power','polling','adjust','handover',
+              ].map(entry => [`scope-${{entry.replaceAll('_','-')}}`, `/?entry=${{entry}}`, '.feature-section']),
+              ['events', '/?scope=A&mode=events', '.event-page'],
+              ['daily-tasks', '/daily-tasks?scope=A', '.daily-page'],
+              ['daily-tasks-h', '/daily-tasks?scope=H', '.daily-page'],
+              ['daily-morning-print', `/daily-tasks/morning-meeting/print?date=${{new Date().toISOString().slice(0,10)}}`, '.morning-print-page'],
+              ['water-management', '/water-management?scope=A', '.water-page'],
+              ['cabinet-power', '/cabinet-power?scope=A', '.cabinet-page'],
+              ['critical-guard', '/critical-guard?scope=A', '.guard-page'],
+              ['critical-guard-admin', '/critical-guard?scope=A&mode=admin', '.guard-page'],
+              ['drill-management', '/drill-management?scope=A', '.drill-page'],
+              ['drill-management-admin', '/drill-management?scope=A&mode=admin', '.drill-page'],
+              ['drill-print', '/drill-management/print?scope=A&task_id=smoke&sheet=record', '.drill-print-page'],
+              ['engineer-mop', '/engineer/mop?scope=A', '.engineer-mop'],
+              ['repair-management', '/repair-management?scope=A', '.repair-management-page'],
+              ['repair-status', '/repair-status?scope=A', '.repair-status-page'],
+              ['signature-management', '/signature-management', '.signature-management'],
+              ['signature', '/signature?request_id=smoke-request&token=smoke-token', '.signature-page'],
+              ['history-memory', '/admin/history-memory', '.history-memory'],
+              ['workbench-lite', '/workbench-lite?scope=A&work_type=maintenance&entry=maintenance', '.shell'],
+              ['polling-work-order', '/polling-work-order', '.shell'],
+              ['polling-work-order-steps', '/polling-work-order/steps?run_index=1', '.shell'],
+            ];
+            const reports = [];
+            for (const [stage, route, selector] of routes) {{
+              await targetPage.goto(new URL(route, cfg.url).toString(), {{ waitUntil: 'domcontentloaded', timeout: 20000 }});
+              await targetPage.waitForSelector(selector, {{ state: 'visible', timeout: 15000 }});
+              reports.push([`${{stage}}-phone`, await inspectMobileSurface(targetPage, stage)]);
+              reports.push([`${{stage}}-compact-phone`, await inspectMobileSurface(targetPage, stage, 360, 800)]);
+              reports.push([`${{stage}}-tablet`, await inspectMobileSurface(targetPage, stage, 768, 1024)]);
+              if (stage === 'home') {{
+                await targetPage.getByRole('button', {{ name: '打开管理员诊断和权限管理' }}).click();
+                await targetPage.waitForSelector('.admin-card', {{ state: 'visible' }});
+                await inspectMobileFloatingSurfaces(targetPage, 'admin-tools');
+                for (const [label, slug] of [['权限管理','permissions'],['交接班链接','handover'],['MOP 配置','mop-settings'],['后台状态','status']]) {{
+                  const tab = targetPage.locator('.admin-card').getByRole('button', {{ name: label, exact: true }});
+                  if (await tab.count()) {{
+                    await tab.click();
+                    await targetPage.waitForTimeout(120);
+                    await inspectMobileFloatingSurfaces(targetPage, `admin-${{slug}}`);
+                  }}
+                }}
+                await targetPage.locator('.admin-card > header').getByRole('button', {{ name: '关闭', exact: true }}).click();
+              }} else if (stage === 'events') {{
+                const refreshMenu = targetPage.getByRole('button', {{ name: '刷新数据', exact: true }});
+                if (await refreshMenu.count()) {{
+                  await refreshMenu.click();
+                  await targetPage.waitForSelector('.refresh-menu-panel', {{ state: 'visible' }});
+                  await inspectMobileFloatingSurfaces(targetPage, 'event-refresh-menu');
+                  await targetPage.keyboard.press('Escape');
+                }}
+                const metric = targetPage.locator('.event-stat-card:not(:disabled)').first();
+                if (await metric.count()) {{
+                  await metric.click();
+                  await targetPage.waitForSelector('.event-metric-dialog', {{ state: 'visible' }});
+                  await inspectMobileFloatingSurfaces(targetPage, 'event-metric-dialog');
+                  await targetPage.locator('.event-metric-dialog').getByRole('button', {{ name: '关闭', exact: true }}).click();
+                }}
+                const building = targetPage.locator('.building-card:not(:disabled)').first();
+                if (await building.count()) {{
+                  await building.click();
+                  await targetPage.waitForSelector('.priority-row', {{ state: 'visible' }});
+                  await targetPage.locator('.priority-row').first().click();
+                  await targetPage.waitForSelector('.event-drawer', {{ state: 'visible' }});
+                  await inspectMobileFloatingSurfaces(targetPage, 'event-detail-drawer');
+                  await targetPage.locator('.event-drawer').getByRole('button', {{ name: '关闭', exact: true }}).click();
+                }}
+              }} else if (stage === 'daily-tasks') {{
+                await targetPage.getByRole('button', {{ name: '发送今日工作至飞书', exact: true }}).click();
+                await targetPage.waitForSelector('.send-dialog', {{ state: 'visible' }});
+                await inspectMobileFloatingSurfaces(targetPage, 'daily-send-dialog');
+                const peopleSearch = targetPage.locator('.send-dialog .repair-people-search input');
+                if (await peopleSearch.count()) {{
+                  await peopleSearch.click();
+                  await targetPage.waitForSelector('.repair-people-popover', {{ state: 'visible' }});
+                  await inspectMobileFloatingSurfaces(targetPage, 'daily-people-popover');
+                  await targetPage.keyboard.press('Escape');
+                }}
+                await targetPage.locator('.send-dialog').getByRole('button', {{ name: '关闭', exact: true }}).click();
+              }} else if (stage === 'daily-tasks-h') {{
+                await targetPage.getByRole('button', {{ name: '生成晨会表格', exact: true }}).click();
+                await targetPage.waitForSelector('.morning-dialog', {{ state: 'visible' }});
+                await inspectMobileFloatingSurfaces(targetPage, 'daily-morning-dialog');
+                await targetPage.locator('.morning-dialog').getByRole('button', {{ name: '关闭', exact: true }}).click();
+              }} else if (stage === 'water-management') {{
+                await targetPage.getByRole('button', {{ name: '新增录入', exact: true }}).click();
+                await targetPage.waitForSelector('.record-drawer', {{ state: 'visible' }});
+                await inspectMobileFloatingSurfaces(targetPage, 'water-record-drawer');
+                await targetPage.locator('.record-drawer').getByRole('button', {{ name: '关闭', exact: true }}).click();
+              }} else if (stage === 'signature-management') {{
+                await targetPage.getByRole('button', {{ name: '新增临时人员', exact: true }}).click();
+                await targetPage.locator('dialog[open]').waitFor({{ state: 'visible' }});
+                await inspectMobileFloatingSurfaces(targetPage, 'signature-create-dialog');
+                await targetPage.locator('dialog[open]').getByRole('button', {{ name: '关闭', exact: true }}).click();
+                const sendSignature = targetPage.getByRole('button', {{ name: '发送签名链接', exact: true }}).first();
+                if (await sendSignature.count()) {{
+                  await sendSignature.click();
+                  await targetPage.locator('dialog[open]').waitFor({{ state: 'visible' }});
+                  await inspectMobileFloatingSurfaces(targetPage, 'signature-send-dialog');
+                  await targetPage.locator('dialog[open]').getByRole('button', {{ name: '关闭', exact: true }}).click();
+                }}
+              }}
+            }}
+            return reports.filter(([, report]) => report.horizontalOverflow || report.overflow.length || report.oversizedImages.length || report.smallTargets.length);
+          }}
           async function assertVnetSkin(targetPage, stage) {{
             await targetPage.waitForFunction(() => Boolean(document.querySelector(
               '.center-state, .feature-card, .panel, .permission-row, .match-layout, .module-card, .home-metrics article'
@@ -1430,6 +1867,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertHeaderSubtitle(unauthPage, '功能选择 · 请先登录', 'unauth');
           await assertLayout(unauthPage, 'unauth');
           await assertVnetSkin(unauthPage, 'unauth');
+          const unauthMobile = await inspectMobileSurface(unauthPage, 'unauth');
+          if (unauthMobile.horizontalOverflow || unauthMobile.overflow.length || unauthMobile.smallTargets.length) throw new Error(`unauth mobile layout issues: ${{JSON.stringify(unauthMobile)}}`);
           await unauthContext.close();
 
           const noScopeContext = await browser.newContext();
@@ -1458,6 +1897,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!selectedPillText.includes('A楼')) throw new Error(`permission request pill selection failed: ${{selectedPillText}}`);
           await assertLayout(noScopePage, 'no-scope');
           await assertVnetSkin(noScopePage, 'no-scope');
+          const noScopeMobile = await inspectMobileSurface(noScopePage, 'no-scope');
+          if (noScopeMobile.horizontalOverflow || noScopeMobile.overflow.length || noScopeMobile.smallTargets.length) throw new Error(`no-scope mobile layout issues: ${{JSON.stringify(noScopeMobile)}}`);
           await noScopeContext.close();
 
           const context = await browser.newContext({{ viewport: {{ width: 1366, height: 768 }} }});
@@ -1566,12 +2007,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.locator('button.map-cell').filter({{ hasText: /^B03$/ }}).click();
           await page.waitForSelector('.timeline li');
           if (!(await page.locator('.timeline li').innerText()).includes('上正式电')) throw new Error('cabinet history is not scoped to room/rack');
+          await inspectMobileFloatingSurfaces(page, 'cabinet-history');
           await page.locator('.history-record').first().getByRole('button', {{ name: '编辑', exact: true }}).click();
           await page.waitForSelector('.editor-layer form');
           if (await page.locator('.editor-layer .group-editor').count() !== 1) throw new Error('blank cabinet history groups were rendered');
           await page.getByRole('button', {{ name: '添加一组', exact: true }}).click();
           if (await page.locator('.editor-layer .group-editor').count() !== 2) throw new Error('new cabinet operation group was not rendered');
           for (let index = 0; index < 10; index += 1) await page.getByRole('button', {{ name: '添加一组', exact: true }}).click();
+          await inspectMobileFloatingSurfaces(page, 'cabinet-editor-many-history');
           const cabinetEditorLayout = await page.evaluate(() => {{
             const modal = document.querySelector('.editor-layer .modal');
             const body = document.querySelector('.editor-layer .editor-body');
@@ -1594,6 +2037,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '关闭编辑', exact: true }}).click();
           await page.getByRole('button', {{ name: '放弃修改', exact: true }}).click();
           await page.getByRole('button', {{ name: '关闭历史', exact: true }}).click();
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           require('fs').mkdirSync('output/playwright', {{ recursive: true }});
           await page.screenshot({{ path: 'output/playwright/cabinet-desktop.png', fullPage: true }});
           await page.goto(cfg.url, {{ waitUntil: 'domcontentloaded' }});
@@ -1672,6 +2116,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '任务中心', exact: true }}).click();
           const repairTaskCenter = page.getByRole('dialog', {{ name: '维修任务中心' }});
           await repairTaskCenter.getByText('当前没有失败或处理中任务', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-task-center');
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           await repairTaskCenter.getByRole('button', {{ name: '校验飞书读取', exact: true }}).click();
           await repairTaskCenter.getByText(/飞书读取正常/).waitFor({{ state: 'visible' }});
           await repairTaskCenter.getByRole('button', {{ name: '关闭任务中心', exact: true }}).click();
@@ -1698,6 +2144,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (repairRecordRequestCount !== repairRequestsBeforeOpen) {{
             throw new Error(`cached repair management page reloaded: ${{repairRequestsBeforeOpen}} -> ${{repairRecordRequestCount}}`);
           }}
+          await inspectMobileFloatingSurfaces(page, 'repair-project-drawer');
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           const statusRequestsBeforeReturn = repairStatusRequestCount;
           await page.getByRole('button', {{ name: '检修状态', exact: true }}).click();
@@ -1711,6 +2159,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
           const crossProjectFollowupPanel = page.locator('.followup-panel');
           await crossProjectFollowupPanel.locator('.followup-editor-head strong').filter({{ hasText: 'A楼测试维修跟进记录' }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-followup-history');
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           await page.locator('.record-row').filter({{ hasText: 'A楼第二测试检修管理记录' }}).click();
           await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
@@ -1731,6 +2181,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`event candidates should load on demand once, got ${{repairEventCandidateRequestCount}}`);
           }}
           const eventPicker = page.getByRole('dialog', {{ name: '选择关联事件单' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-event-picker');
           await eventPicker.locator('tbody tr').filter({{ hasText: 'A楼测试事件转检修' }}).click();
           await eventPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
           if (repairNoticeCandidateRequestCount !== 0) {{
@@ -1742,8 +2193,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           const repairPicker = page.getByRole('dialog', {{ name: '选择设备检修通告' }});
           await repairPicker.getByText('A楼测试设备检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-notice-picker');
           await repairPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
           await waitForTextOrDump(page, 'A楼测试设备检修', 'repair-management-autofill');
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           const projectColumnCount = await page.locator('.project-field-grid').first().evaluate((node) => (
             getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
           ));
@@ -1771,6 +2224,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error('followup hyperlink field must stay hidden');
           }}
           await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
+          await inspectMobileFloatingSurfaces(page, 'repair-followup-create');
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           const followupColumnCount = await followupPanel.locator('.followup-field-grid').first().evaluate((node) => (
             getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
           ));
@@ -1785,10 +2240,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           const followupDevice = followupPanel.getByRole('combobox', {{ name: '设备名称', exact: true }});
           const scopedBrand = followupPanel.getByRole('combobox', {{ name: '设备品牌', exact: true }});
+          await page.setViewportSize({{ width: 390, height: 844 }});
           await followupDevice.click({{ force: true }});
+          await page.getByRole('option', {{ name: '精密空调', exact: true }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-device-select');
           await page.getByRole('option', {{ name: '精密空调', exact: true }}).click();
           await scopedBrand.click({{ force: true }});
           await page.getByRole('option', {{ name: '双登', exact: true }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-brand-select');
           if (await page.getByRole('option', {{ name: '圣阳', exact: true }}).count()) {{
             throw new Error('followup brand options were not filtered by selected device name');
           }}
@@ -1797,6 +2256,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           const cmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备（可多选）', exact: true }});
           await cmdbDialog.waitFor({{ state: 'visible' }});
           await cmdbDialog.getByText('A-219-CRAH-01', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-cmdb-picker');
           const cmdbCheckboxes = cmdbDialog.locator('tbody input[type="checkbox"]');
           const cmdbCheckboxCount = await cmdbCheckboxes.count();
           if (cmdbCheckboxCount !== 2) {{
@@ -1855,7 +2315,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await inspectMobileFloatingSurfaces(page, 'repair-unsaved-confirm');
           await page.getByRole('button', {{ name: '取消', exact: true }}).click();
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           if (await followupDescription.inputValue() !== '烟测新增跟进') {{
             throw new Error('cancelling repair drawer close discarded unsaved followup draft');
           }}
@@ -2032,6 +2494,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.locator('.ongoing-row').filter({{ hasText: 'A楼纯手填待关联维保通告' }}).first().click();
             await page.waitForSelector('text=目标多维关系', {{ state: 'attached', timeout: 10000 }});
             await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
+            await inspectMobileFloatingSurfaces(page, 'workbench-notice-drawer');
+            await page.setViewportSize({{ width: 1366, height: 768 }});
             const markerAfterOngoingClick = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
             if (markerAfterOngoingClick !== 'alive') {{
               throw new Error('lite ongoing click caused full page reload');
@@ -2114,6 +2578,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.waitForSelector('text=刷新本页', {{ timeout: 10000 }});
             await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
             await page.waitForSelector('text=刷新变更', {{ timeout: 10000 }});
+            await inspectMobileFloatingSurfaces(page, 'workbench-refresh-menu');
+            await page.setViewportSize({{ width: 1366, height: 768 }});
             const oldRefreshCopyVisible = await page.locator('text=只重新读取当前楼栋和类型').count();
             if (oldRefreshCopyVisible) throw new Error('lite refresh menu still shows verbose helper copy');
             await page.keyboard.press('Escape');
@@ -2124,6 +2590,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (refreshClosedByEscape.open || refreshClosedByEscape.expanded !== 'false') {{
               throw new Error(`lite refresh menu did not close on Escape: ${{JSON.stringify(refreshClosedByEscape)}}`);
             }}
+            await page.locator('#lite-polling-sop-open').click();
+            await page.waitForFunction(() => !document.querySelector('#lite-polling-sop-modal')?.hidden, null, {{ timeout: 10000 }});
+            await inspectMobileFloatingSurfaces(page, 'workbench-sop-manage');
+            await page.locator('#lite-polling-sop-close').click();
+            await page.setViewportSize({{ width: 1366, height: 768 }});
             await page.getByRole('button', {{ name: '刷新数据' }}).click();
             await page.locator('#lite-refresh-page').click();
             await page.waitForFunction(() => document.querySelector('#lite-refresh-page')?.disabled === false, null, {{ timeout: 10000 }});
@@ -2216,6 +2687,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (await parsedSpecialtyInput.count() === 1) {{
               await parsedSpecialtyInput.fill('暖通');
             }}
+            const liteSopOpen = page.locator('#lite-polling-select-open');
+            if (await liteSopOpen.count() === 1) {{
+              await liteSopOpen.click();
+              await page.waitForFunction(() => !document.querySelector('#lite-polling-sop-modal')?.hidden, null, {{ timeout: 10000 }});
+              await inspectMobileFloatingSurfaces(page, 'workbench-sop-selection');
+              await page.locator('#lite-polling-sop-close').click();
+              await page.setViewportSize({{ width: 1366, height: 768 }});
+            }}
             const datalistProbe = await page.evaluate(() => ({{
               specialties: Array.from(document.querySelectorAll('#specialty-options option')).map(node => node.getAttribute('value') || ''),
               cycles: Array.from(document.querySelectorAll('#maintenance-cycle-options option')).map(node => node.getAttribute('value') || ''),
@@ -2288,6 +2767,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
             }}
             const pageTitle = await page.title().catch(() => '');
+            const mobileIssues = await auditAllMobileRoutes(page);
+            if (mobileIssues.length) throw new Error(`mobile layout issues: ${{JSON.stringify(mobileIssues)}}`);
             await assertConnectionGuard();
             await browser.close();
             console.log(JSON.stringify({{
@@ -2324,6 +2805,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`manual adjust draft not visible: ${{draftPanelText}}`);
           }}
           await page.locator('#lite-polling-sop-open').click();
+          await inspectMobileFloatingSurfaces(page, 'workbench-sop-editor');
           const sopType = page.getByLabel('SOP 类型');
           await sopType.selectOption('cooling');
           await page.getByText('使用 {{{{from}}}} 的位置会在创建工单时替换为所选制冷单元。', {{ exact: false }}).waitFor();
@@ -2331,6 +2813,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await insertCoolingUnit.click();
           if (!(await page.locator('.polling-step-edit textarea').first().inputValue()).includes('{{{{from}}}}')) throw new Error('adjust cooling unit placeholder was not inserted');
           await page.locator('#lite-polling-sop-close').click();
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           await page.getByRole('button', {{ name: '解析粘贴' }}).click();
           await page.waitForSelector('text=解析到待发起通告', {{ timeout: 10000 }});
           const pastePanel = page.locator('.paste-panel');
@@ -2492,6 +2975,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertHeaderSubtitle(page, '管理工具 · 历史通告记忆导入', 'history-memory');
           await assertLayout(page, 'history-memory');
           await assertVnetSkin(page, 'history-memory');
+          const mobileIssues = await auditAllMobileRoutes(page);
+          if (mobileIssues.length) throw new Error(`mobile layout issues: ${{JSON.stringify(mobileIssues)}}`);
           if (errors.length || failedResponses.length) {{
             throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
           }}
@@ -2520,6 +3005,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
           await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
           await guardPage.getByRole('heading', {{ name: '页面连接已中断' }}).waitFor();
+          const connectionMobile = await inspectMobileSurface(guardPage, 'connection-lost');
+          if (connectionMobile.horizontalOverflow || connectionMobile.overflow.length || connectionMobile.smallTargets.length) throw new Error(`connection guard mobile layout issues: ${{JSON.stringify(connectionMobile)}}`);
           if (await guardPage.locator('#app').isVisible()) throw new Error('disconnected business page still visible');
           guardHealthy = true;
           await guardPage.getByRole('button', {{ name: '重新检测连接' }}).click();

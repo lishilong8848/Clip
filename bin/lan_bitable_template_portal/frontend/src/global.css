@@ -183,3 +183,79 @@ body {
     animation-iteration-count: 1 !important;
   }
 }
+
+@media (max-width: 820px) {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    overflow-x: hidden;
+  }
+
+  .app-shell:not(.drill-print-shell):not(.morning-print-shell) {
+    min-height: 100dvh;
+  }
+
+  .app-shell:not(.drill-print-shell):not(.morning-print-shell) :is(
+    button:not(.map-cell),
+    a.btn,
+    a.primary,
+    a.secondary,
+    select,
+    input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])
+  ) {
+    min-height: 44px !important;
+  }
+
+  body :is([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]) :is(
+    button,
+    a[href],
+    select,
+    input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])
+  ) {
+    min-height: 44px !important;
+  }
+
+  body :is([role="dialog"], [role="alertdialog"]) button[aria-label] {
+    min-width: 44px !important;
+  }
+
+  .app-shell :is(button.icon-button, button.icon-btn, button.close-button, button.close-btn) {
+    min-width: 44px !important;
+    width: 44px;
+    padding: 0 !important;
+  }
+
+  .app-shell :is(img, video, canvas) {
+    max-width: 100%;
+  }
+
+  .app-shell :is(.row-actions, .card-actions, .header-actions, .hero-actions, .toolbar-actions) {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  body :is(dialog, [role="dialog"], [role="alertdialog"]),
+  .app-shell :is(.modal) {
+    max-width: calc(100vw - 16px) !important;
+    max-height: calc(100dvh - 16px) !important;
+    overscroll-behavior: contain;
+  }
+
+  .app-shell :is(.table-wrap, .table-shell, .table-scroll, .sheet-scroll, .preview-table-wrap, .matrix-scroll) {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 440px) {
+  :root {
+    --cf-radius-panel: 16px;
+    --cf-radius-card: 14px;
+    --cf-radius-control: 12px;
+  }
+}

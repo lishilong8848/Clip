@@ -848,6 +848,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-items: center;
   overflow: hidden;
+  contain: strict;
   pointer-events: none;
   user-select: none;
   opacity: 0.055;
@@ -873,8 +874,14 @@ onBeforeUnmount(() => {
 
 @media (max-width: 760px) {
   .security-watermark {
-    grid-template-columns: repeat(3, minmax(150px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     grid-auto-rows: 110px;
+  }
+
+  .security-watermark span {
+    width: 100%;
+    overflow: hidden;
+    text-align: center;
   }
 }
 
