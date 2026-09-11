@@ -36,11 +36,32 @@ try {
   await page.evaluate(()=>location.assign('/workbench-lite?scope=D&work_type=maintenance'));
   await page.locator('#lite-back-link').click();
   await page.waitForURL(base+'/cabinet-power');
+  await page.goto(base+'/');
+  await page.getByRole('button',{name:'进入维护管理',exact:true}).click();
+  await page.getByRole('heading',{name:'选择楼栋进入维护管理',exact:true}).waitFor();
+  await page.getByRole('button',{name:'进入维护管理：D楼',exact:true}).click();
+  await page.locator('#lite-back-link').click();
+  await page.waitForURL(base+'/?entry=maintenance');
+  await page.getByRole('heading',{name:'选择楼栋进入维护管理',exact:true}).waitFor();
+  await page.locator('.vnet-back-button').click();
+  await page.waitForURL(base+'/');
+  const entryPages={
+    maintenance:'选择楼栋进入维护管理', maintenance_mop:'选择楼栋进入 MOP 填写',
+    change:'选择楼栋进入变更管理', repair:'选择楼栋进入检修通告管理',
+    repair_management:'选择楼栋进入检修单管理', water:'选择楼栋进入水耗管理',
+    tools:'选择辅助工具', daily:'选择楼栋查看每日任务',
+    power:'选择楼栋进入上/下电通告', polling:'选择楼栋进入设备轮巡',
+    adjust:'选择楼栋进入设备调整', handover:'选择楼栋打开交接班审核页',
+  };
+  for(const [entry,title] of Object.entries(entryPages)){
+    await page.goto(base+'/?entry='+entry);
+    await page.getByRole('heading',{name:title,exact:true}).waitFor();
+  }
   for(const file of ['bin/lan_bitable_template_portal/server.py','bin/clipflow_backend/main.py']){
     const source=await fs.readFile(path.join(root,file),'utf8');
     assert(source.includes('onclick=\\"if(history.length>1){event.preventDefault();history.back()}\\"'),file);
   }
-  console.log(JSON.stringify({ok:true,pages:targets.length+1,errorPages:2}));
+  console.log(JSON.stringify({ok:true,pages:targets.length+1,errorPages:2,restoredEntryPages:Object.keys(entryPages).length}));
 } finally {
   await browser?.close(); server.kill();
 }

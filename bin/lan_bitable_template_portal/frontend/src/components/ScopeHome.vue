@@ -266,6 +266,7 @@ import VnetBackButton from "./VnetBackButton.vue";
 
 type Dict = Record<string, any>;
 const props = defineProps<{
+  initialMode?: string;
   scopeOptions: Array<{ value: string; label: string }>;
   overview: Record<string, Dict>;
   handoverLinks: Record<string, string>;
@@ -287,7 +288,12 @@ const emit = defineEmits<{
   "dashboard-visible": [visible: boolean];
 }>();
 
-const activeMode = ref<EntryKey>("");
+function entryMode(value: unknown): EntryKey {
+  const key = String(value || "") as EntryKey;
+  return key && Object.prototype.hasOwnProperty.call(entryConfigs, key) ? key : "";
+}
+
+const activeMode = ref<EntryKey>(entryMode(props.initialMode));
 const openingWorkbenchKey = ref("");
 const repairOverviewLoading = ref(false);
 const repairOverviewLoaded = ref(false);
@@ -605,6 +611,7 @@ function selectEntry(key: EntryKey): void {
     return;
   }
   activeMode.value = key;
+  syncEntryUrl(key);
   emit("dashboard-visible", false);
   if (key === "repair_management") void loadRepairOverview();
   if (key === "water") void loadWaterBuildings();
@@ -689,7 +696,15 @@ function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
 function returnFromFeature(): void {
   if (activeMode.value === "water") clearWaterBuildingsPoll();
   activeMode.value = isToolScopeMode.value ? "tools" : "";
+  syncEntryUrl(activeMode.value);
   emit("dashboard-visible", !activeMode.value);
+}
+
+function syncEntryUrl(mode: EntryKey): void {
+  const url = new URL(window.location.href);
+  if (mode) url.searchParams.set("entry", mode);
+  else url.searchParams.delete("entry");
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function enterNoticeWorkbench(scope: string): void {
@@ -799,7 +814,11 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   return "进行中";
 }
 
-onMounted(() => emit("dashboard-visible", !activeMode.value));
+onMounted(() => {
+  emit("dashboard-visible", !activeMode.value);
+  if (activeMode.value === "repair_management") void loadRepairOverview();
+  if (activeMode.value === "water") void loadWaterBuildings();
+});
 onBeforeUnmount(clearWaterBuildingsPoll);
 
 </script>

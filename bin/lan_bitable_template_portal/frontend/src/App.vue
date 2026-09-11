@@ -159,6 +159,7 @@
 
     <ScopeHome
       v-else
+      :initial-mode="routeParams.get('entry') || ''"
       :scope-options="visibleScopeOptions"
       :overview="scopeOverview"
       :handover-links="handoverLinks"

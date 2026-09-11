@@ -14,7 +14,6 @@ sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(ROOT/'bin'))
 from bin.test_cabinet_power import fixtures,MemoryStore,FakeFeishu
 from bin.lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
-from bin.lan_bitable_template_portal.workbench_lite import render_workbench_lite
 
 class Controller:
     def _current_session(self,request): return {"open_id":"fixture-user"}
@@ -47,6 +46,7 @@ def health(): return {"ok":True,"service":"clipflow_backend","instance_id":"cabi
 
 @app.get('/workbench-lite')
 def workbench():
+    from bin.lan_bitable_template_portal.workbench_lite import render_workbench_lite
     return HTMLResponse(render_workbench_lite(payload={'records':[],'ongoing':[],'stats':{}},session={'role':'admin'},scope='D',work_type='maintenance'))
 
 @app.get('/api/{path:path}')
