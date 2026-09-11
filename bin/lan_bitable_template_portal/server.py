@@ -2815,7 +2815,7 @@ class PortalRuntime:
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
             f"<title>{html.escape(title)}</title></head><body>"
             f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p>"
-            "<p><a href=\"/\" onclick=\"if(history.length>1){event.preventDefault();history.back()}\">返回</a></p></body></html>"
+            "<p><a href=\"/\">返回</a></p></body></html>"
         ).encode("utf-8")
         self._write_response(
             status,
@@ -5947,6 +5947,12 @@ class PortalRuntime:
                 daemon=True,
             )
             cls.event_repair_worker_thread.start()
+            if cls.state_store.list_outbox_events(
+                cls.event_repair_queue_channel,
+                status="pending",
+                limit=1,
+            ):
+                cls.event_repair_queue_event.set()
 
     @classmethod
     def stop_event_repair_worker(cls) -> None:
@@ -6030,6 +6036,11 @@ class PortalRuntime:
                 item
                 for item in candidates
                 if str(item.get("event_record_id") or "").strip() not in blocked_ids
+                and not cls.state_store.has_outbox_event_payload(
+                    cls.event_repair_queue_channel,
+                    "event_record_id",
+                    str(item.get("event_record_id") or "").strip(),
+                )
             ),
             None,
         )
@@ -6142,7 +6153,7 @@ class PortalRuntime:
 
     @classmethod
     def _event_repair_worker_loop(cls) -> None:
-        next_wait = 1.0
+        next_wait = 5 * 60.0
         while True:
             cls.event_repair_queue_event.wait(timeout=next_wait)
             cls.event_repair_queue_event.clear()
@@ -6159,7 +6170,7 @@ class PortalRuntime:
             if result.get("status") == "pending":
                 next_wait = max(1.0, float(result.get("retry_after") or 1.0))
             elif result.get("status") == "idle":
-                next_wait = 30.0
+                next_wait = 5 * 60.0
             else:
                 next_wait = 1.0
             if result.get("processed") and result.get("status") != "pending":

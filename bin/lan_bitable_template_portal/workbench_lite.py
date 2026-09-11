@@ -2557,6 +2557,7 @@ def render_workbench_lite(
     stats = daily.get("stats") if isinstance(daily.get("stats"), dict) else {}
     view_work = _view_work_type(work_type)
     work_filter = "" if view_work == ALL_WORK_TYPE else view_work
+    back_url = "/?" + urlencode({"entry": view_work}) if view_work in WORK_TYPE_LABELS else "/"
     payload_record_counts = payload.get("record_type_counts") if isinstance(payload.get("record_type_counts"), dict) else {}
     payload_ongoing_counts = payload.get("ongoing_type_counts") if isinstance(payload.get("ongoing_type_counts"), dict) else {}
     fallback_record_counts = {key: 0 for key in WORK_TYPE_LABELS}
@@ -3227,7 +3228,7 @@ def render_workbench_lite(
     </div>
     <nav class="top-actions">
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
-      <a class="top-link" id="lite-back-link" href="/" aria-label="返回">返回</a>
+      <a class="top-link" id="lite-back-link" href="{_e(back_url)}" aria-label="返回">返回</a>
       <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
       {change_confirmation_button}
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
@@ -7514,8 +7515,7 @@ def render_workbench_lite(
       if (backLink) {{
         event.preventDefault();
         if (!(await prepareLiteNavigation())) return;
-        if (history.length > 1) history.back();
-        else location.assign(backLink.href);
+        location.assign(backLink.href);
         return;
       }}
       const nativePickerInput = target.matches('input[type="date"],input[type="time"],input[type="month"],input[type="datetime-local"]') ? target : null;

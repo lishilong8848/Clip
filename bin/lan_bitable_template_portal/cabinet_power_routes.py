@@ -26,6 +26,10 @@ def install_cabinet_power_routes(app,controller,runtime):
             query=dict(request.query_params)
             payload=await controller._read_json_request(request,max_bytes=512*1024) if request.method in ("POST","PATCH") else {}
             scope=str(payload.get("scope") or query.get("scope") or "")
+            if path=="bootstrap":
+                if scope and scope not in allowed: raise CabinetError("无权访问该楼栋",403)
+                data=await asyncio.to_thread(service.bootstrap,owner,request.method=="POST")
+                return controller._json_ok(request,session,data)
             resource=None
             if path.startswith("jobs/"): resource=await asyncio.to_thread(service.job_status,path.split("/")[1])
             elif path.startswith("exports/"): resource=await asyncio.to_thread(service.read,"export:"+path.split("/")[1])
@@ -69,6 +73,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],
         "writes/{operation_id}/reconcile":["POST"],
         "export-history":["GET"],"exports/{export_id}/cleanup":["POST"],
+        "bootstrap":["GET","POST"],
     }.items():
         app.add_api_route("/api/cabinet-power/"+path,endpoint,methods=methods,name="cabinet_"+path.replace("/","_"))
     app.add_event_handler("shutdown",lambda:service.pool.shutdown(wait=False,cancel_futures=True))

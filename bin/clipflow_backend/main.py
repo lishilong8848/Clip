@@ -345,6 +345,7 @@ class FastAPIPortalController:
         self._thread: threading.Thread | None = None
         self._scheduler = None
         self._shutdown_event = threading.Event()
+        self._stopping_event = threading.Event()
         self._polling_relay_stop = threading.Event()
         self._polling_relay_thread: threading.Thread | None = None
         self._state_store = LanPortalStateStore()
@@ -415,7 +416,7 @@ class FastAPIPortalController:
         )
 
     def _submit_background(self, name: str, fn, *args) -> bool:
-        if self._shutdown_event.is_set():
+        if self._stopping_event.is_set() or self._shutdown_event.is_set():
             return False
 
         def _run() -> None:
@@ -8333,7 +8334,6 @@ class FastAPIPortalController:
                     or str(info.get("status") or "").strip() == "结束"
                 )
 
-            reconcile_items: list[dict] = []
             ended_rows: list[dict] = []
             event_lifecycle_rows: list[dict] = []
             visible_candidate_rows = 0
@@ -8345,21 +8345,6 @@ class FastAPIPortalController:
                     continue
                 if str(payload.get("notice_type") or row.get("notice_type") or "").strip() == "事件通告":
                     event_lifecycle_rows.append(row)
-                reconcile_item = dict(payload)
-                reconcile_item.setdefault(
-                    "active_item_id",
-                    str(row.get("active_item_id") or ""),
-                )
-                reconcile_item.setdefault(
-                    "target_record_id",
-                    str(row.get("record_id") or ""),
-                )
-                reconcile_item.setdefault(
-                    "record_id",
-                    str(row.get("record_id") or ""),
-                )
-                reconcile_item.setdefault("notice_type", row.get("notice_type"))
-                reconcile_items.append(reconcile_item)
                 visible_candidate_rows += 1
             active_items = [
                 item
@@ -8369,11 +8354,6 @@ class FastAPIPortalController:
             hidden_duplicate_rows = max(
                 0,
                 visible_candidate_rows - len(active_items),
-            )
-            self._reconcile_orphan_started_items(
-                "ALL",
-                reconcile_items,
-                force=True,
             )
             clipboard_candidates = PortalRuntime.state_store.list_clipboard_candidates(
                 status="pending",
@@ -9338,10 +9318,6 @@ class FastAPIPortalController:
             PortalRuntime.service.resume_repair_link_tasks_async()
         except Exception:
             pass
-        try:
-            PortalRuntime.service.start_signature_crypto_migration_async(delay_seconds=30.0)
-        except Exception:
-            pass
         PortalRuntime.auth_manager = PortalAuthManager()
         PortalRuntime.state_store = PortalRuntime.service._state_store
         PortalRuntime.apply_runtime_settings()
@@ -10027,7 +10003,7 @@ class FastAPIPortalController:
 
     def _sse_active(self, key: tuple, connection_id: int) -> bool:
         with self._sse_lock:
-            return self._sse_connections.get(key) == connection_id
+            return not self._stopping_event.is_set() and self._sse_connections.get(key) == connection_id
 
     def _unregister_sse(self, key: tuple, connection_id: int) -> None:
         with self._sse_lock:
@@ -10139,7 +10115,7 @@ class FastAPIPortalController:
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
             f"<title>{html.escape(title)}</title></head><body>"
             f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p>"
-            "<p><a href=\"/\" onclick=\"if(history.length>1){event.preventDefault();history.back()}\">返回</a></p></body></html>"
+            "<p><a href=\"/\">返回</a></p></body></html>"
         ).encode("utf-8")
         return Response(
             content=body,
@@ -13052,11 +13028,6 @@ class FastAPIPortalController:
                 PortalRuntime.service.start_repair_maintenance_async()
             except Exception as exc:
                 log_warning(f"启动检修后台维护失败: {exc}")
-        try:
-            PortalRuntime.service.start_daily_attachment_cache_refresh_async()
-        except Exception as exc:
-            log_warning(f"启动附件缓存维护失败: {exc}")
-
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
             return
@@ -13456,7 +13427,7 @@ class FastAPIPortalController:
     async def _heartbeat_stream(
         self, request: Request, *, event_name: str
     ) -> AsyncIterator[bytes]:
-        while not await request.is_disconnected():
+        while not self._stopping_event.is_set() and not await request.is_disconnected():
             payload = json.dumps(
                 {"time": time.time(), "stats": _queue_stats()},
                 ensure_ascii=False,
@@ -13732,6 +13703,8 @@ class FastAPIPortalController:
         return self.get_url()
 
     def stop(self) -> None:
+        self._stopping_event.set()
+        self._notify_qt_active_streams()
         self._stop_polling_relay_worker()
         self._stop_scheduler()
         try:

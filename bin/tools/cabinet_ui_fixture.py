@@ -4,7 +4,7 @@ import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from fastapi import FastAPI
+from fastapi import FastAPI,Request
 from fastapi.responses import FileResponse,HTMLResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -45,9 +45,9 @@ def auth(): return {"ok":True,"data":{"logged_in":True,"user":{"name":"本地测
 def health(): return {"ok":True,"service":"clipflow_backend","instance_id":"cabinet-ui-fixture"}
 
 @app.get('/workbench-lite')
-def workbench():
+def workbench(request:Request):
     from bin.lan_bitable_template_portal.workbench_lite import render_workbench_lite
-    return HTMLResponse(render_workbench_lite(payload={'records':[],'ongoing':[],'stats':{}},session={'role':'admin'},scope='D',work_type='maintenance'))
+    return HTMLResponse(render_workbench_lite(payload={'records':[],'ongoing':[],'stats':{}},session={'role':'admin'},scope=request.query_params.get('scope','D'),work_type=request.query_params.get('work_type','maintenance')))
 
 @app.get('/api/{path:path}')
 def empty(path): return {"ok":True,"data":{}}

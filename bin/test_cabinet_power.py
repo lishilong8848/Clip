@@ -128,6 +128,27 @@ class CabinetPowerTests(unittest.TestCase):
         finally:
             fresh.shutdown()
 
+    def test_first_bootstrap_reports_all_building_progress(self):
+        fresh=CabinetPowerService(MemoryStore(),FakeFeishu(),Path(self.tmp.name)/"progress")
+        release=threading.Event()
+        def refresh(scope,payload,job):
+            release.wait(5)
+            fresh.local.replace(scope,{"scope":scope,"rooms":[],"inventory":[]},[],[])
+            return {"count":0}
+        fresh.do_refresh=refresh
+        try:
+            started=fresh.bootstrap("owner",start=True)
+            self.assertEqual(started["total"],5)
+            self.assertEqual(started["status"],"running")
+            self.assertTrue(all(item["status"] in ("pending","running") for item in started["buildings"]))
+            release.set()
+            deadline=time.time()+10
+            while time.time()<deadline and fresh.bootstrap("owner")["status"]=="running": time.sleep(.02)
+            completed=fresh.bootstrap("owner")
+            self.assertEqual((completed["status"],completed["ready"]),("succeeded",5))
+        finally:
+            release.set(); fresh.shutdown()
+
     def test_layout_does_not_open_xlsm_at_runtime(self):
         self.service.overview("D")
         layout=self.service.layout("D","201")
@@ -246,6 +267,7 @@ class CabinetPowerTests(unittest.TestCase):
             def _auth_required_response(self): return JSONResponse({},status_code=401)
             def _json_ok(self,request,session,data): return JSONResponse({"ok":True,"data":data})
             def _portal_error_response(self,exc,default_status): return JSONResponse({"error":str(exc)},status_code=default_status)
+            async def _read_json_request(self,request,max_bytes): return await request.json()
         app=FastAPI(); controller=Controller()
         runtime=SimpleNamespace(state_store=self.store,auth_manager=SimpleNamespace(is_admin=lambda s:False,scope_allowed=lambda s,scope:scope=="A"))
         install_cabinet_power_routes(app,controller,runtime)
@@ -256,6 +278,8 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual(client.get("/api/cabinet-power/buildings").status_code,401)
             self.assertEqual(client.get("/api/cabinet-power/overview?scope=B",headers={"x-test-login":"1"}).status_code,403)
             self.assertEqual(client.post("/api/cabinet-power/imports/commit",headers={"x-test-login":"1"}).status_code,404)
+            bootstrap=client.post("/api/cabinet-power/bootstrap",headers={"x-test-login":"1"},json={"scope":"A"}).json()["data"]
+            self.assertEqual((bootstrap["status"],bootstrap["ready"]),("succeeded",5))
             data=client.get("/api/cabinet-power/overview?scope=A",headers={"x-test-login":"1"}).json()["data"]
             self.assertEqual(data["record_count"],1031)
 

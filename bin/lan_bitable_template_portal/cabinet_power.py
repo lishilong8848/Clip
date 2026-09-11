@@ -204,17 +204,19 @@ class CabinetPowerService:
 
     def directory(self,scope=None):
         if self._directory is None:
-            found=[t for t in CabinetFeishu("").list_all("tables") if t["name"]==DIRECTORY_NAME]
-            if len(found)!=1: raise CabinetError("飞书机柜基础资料表不存在或重名")
-            self._directory=CabinetFeishu(found[0]["table_id"])
+            with self._lock:
+                if self._directory is None:
+                    found=[t for t in CabinetFeishu("").list_all("tables") if t["name"]==DIRECTORY_NAME]
+                    if len(found)!=1: raise CabinetError("飞书机柜基础资料表不存在或重名")
+                    self._directory=CabinetFeishu(found[0]["table_id"])
         if scope and isinstance(self._directory,CabinetFeishu):
             with self._lock: return self._directories.setdefault(scope,CabinetFeishu(self._directory.table_id))
         return self._directory
 
-    def ensure_loaded(self,scope):
-        if self.local.version(scope): return
+    def _migrate_legacy_snapshot(self,scope):
+        if self.local.version(scope): return True
         with self._scope_locks[scope]:
-            if self.local.version(scope): return
+            if self.local.version(scope): return True
             saved=self.store.get_document(NAMESPACE,SNAPSHOT_KEY+scope) or {}
             cached=saved.get("snapshot")
             if cached:
@@ -222,25 +224,47 @@ class CabinetPowerService:
                 records=[{"record_id":o["record_id"],"fields":o["raw_fields"]} for o in cached["operations"]]
                 baseline=[e["id"] for r in records for e in from_feishu(r)["events"]]
                 self.local.replace(scope,cached["config"],records,baseline)
-                return
+                return True
+        return False
+
+    def ensure_loaded(self,scope):
+        if self._migrate_legacy_snapshot(scope): return
         self._refresh_missing_buildings(scope)
 
     def _refresh_missing_buildings(self,requested_scope):
-        with self._bootstrap_lock:
-            missing=[scope for scope in TOTALS if not self.local.version(scope)]
-            if not missing: return
-            self.directory()
-            errors={}
-            with ThreadPoolExecutor(max_workers=len(missing),thread_name_prefix="cabinet-bootstrap") as pool:
-                futures={pool.submit(self.do_refresh,scope,{}, {}):scope for scope in missing}
-                for future,scope in futures.items():
-                    try: future.result()
-                    except Exception as exc: errors[scope]=exc
-            if not self.local.version(requested_scope):
-                raise errors.get(requested_scope) or CabinetError("该楼机柜资料从多维表初始化失败",503)
-            if errors:
-                from upload_event_module.logger import log_warning
-                log_warning("机柜资料首次初始化部分失败: "+"; ".join(f"{scope}楼={error}" for scope,error in errors.items()))
+        self.bootstrap("system",start=True)
+        while True:
+            status=self.bootstrap("system")
+            if status["status"] not in ("pending","running"): break
+            time.sleep(.1)
+        target=next(item for item in status["buildings"] if item["scope"]==requested_scope)
+        if not self.local.version(requested_scope):
+            raise CabinetError(target.get("error") or "该楼机柜资料从多维表初始化失败",503)
+
+    def bootstrap(self,owner="",start=False):
+        if start:
+            with self._bootstrap_lock:
+                for scope in TOTALS: self._migrate_legacy_snapshot(scope)
+                for scope in TOTALS:
+                    if not self.local.version(scope): self.job(scope,"refresh",owner or "system",{})
+        buildings=[]
+        for scope in TOTALS:
+            if self.local.version(scope):
+                buildings.append({"scope":scope,"status":"succeeded","error":""})
+                continue
+            jobs=sorted(
+                (item for item in self.local.documents(scope,"job:") if item.get("kind")=="refresh"),
+                key=lambda item:str(item.get("created_at") or ""),reverse=True,
+            )
+            current=self.job_status(jobs[0]["job_id"],scope) if jobs else {}
+            status=str(current.get("status") or "idle")
+            if status=="succeeded": status="failed"
+            buildings.append({"scope":scope,"status":status,"error":str(current.get("error") or ("初始化未生成本地数据" if status=="failed" else ""))})
+        ready=sum(item["status"]=="succeeded" for item in buildings)
+        failed=sum(item["status"]=="failed" for item in buildings)
+        active=any(item["status"] in ("pending","running") for item in buildings)
+        status="running" if active else "succeeded" if ready==len(TOTALS) else "partial" if ready else "failed" if failed else "idle"
+        return {"status":status,"total":len(TOTALS),"completed":ready+failed,"ready":ready,"failed":failed,"buildings":buildings,"updated_at":stamp()}
 
     def _snapshot(self,scope):
         self.ensure_loaded(scope)
@@ -716,8 +740,8 @@ class CabinetPowerService:
             finally:
                 with self._lock: self._running.pop(job["job_id"],None)
 
-    def job_status(self,jid):
-        job=self.read("job:"+jid)
+    def job_status(self,jid,scope=None):
+        job=self.local.document(scope,"job:"+jid) if scope in TOTALS else self.read("job:"+jid)
         if not job: raise CabinetError("任务不存在",404)
         if job["status"] in ("pending","running") and (not process_alive(job.get("pid")) or job.get("pid")==os.getpid() and jid not in self._running): job.update(status="failed",error="任务已中断，请重新执行")
         return {k:v for k,v in job.items() if k!="payload"}

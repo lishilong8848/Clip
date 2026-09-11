@@ -12921,6 +12921,36 @@ class LanPortalStateStore:
             )
         return result
 
+    def has_outbox_event_payload(
+        self,
+        channel: str,
+        key: str,
+        value: str,
+        *,
+        statuses: tuple[str, ...] = ("pending", "leased", "done"),
+    ) -> bool:
+        channel = self._text(channel)
+        key = self._text(key)
+        value = self._text(value)
+        normalized_statuses = tuple(self._text(status) for status in statuses if self._text(status))
+        if not channel or not key or not value or not normalized_statuses or not self.db_path.exists():
+            return False
+        placeholders = ",".join("?" for _ in normalized_statuses)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    f"""
+                    SELECT 1 FROM event_outbox
+                    WHERE channel = ? AND status IN ({placeholders})
+                      AND json_extract(payload_json, ?) = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (channel, *normalized_statuses, f"$.{key}", value),
+                ).fetchone()
+        return row is not None
+
     def count_outbox_events(
         self, channel: str, *, stale_lease_seconds: int = 120
     ) -> dict[str, int]:

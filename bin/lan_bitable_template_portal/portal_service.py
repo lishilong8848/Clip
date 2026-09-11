@@ -28287,6 +28287,21 @@ class MaintenancePortalService:
         text = str(exc or "")
         return "code=1254002" in text or "msg=Fail" in text
 
+    @staticmethod
+    def _is_shared_feishu_failure(exc: Exception) -> bool:
+        text = str(exc or "").casefold()
+        return any(str(code) in text for code in TOKEN_ERROR_CODES) or any(
+            marker in text
+            for marker in (
+                "10014",
+                "token",
+                "code=1254002",
+                "msg=fail",
+                "连接",
+                "超时",
+            )
+        )
+
     def _is_orphan_started_item(
         self,
         item: dict[str, Any],
@@ -28504,11 +28519,12 @@ class MaintenancePortalService:
             seen_active_ids.add(active_item_id)
 
         field_cache: dict[
-            tuple[str, str], tuple[list[FieldMeta], dict[str, FieldMeta]]
+            tuple[str, str], tuple[list[FieldMeta], dict[str, FieldMeta]] | Exception
         ] = {}
         record_cache: dict[
             tuple[str, str, str], dict[str, Any] | Exception | None
         ] = {}
+        shared_failure: Exception | None = None
         removed_items: list[dict[str, Any]] = []
         errors: list[str] = []
         for candidate in candidates:
@@ -28518,13 +28534,21 @@ class MaintenancePortalService:
             table_key = (app_token, table_id)
             record_key = (app_token, table_id, target_record_id)
             try:
+                if shared_failure is not None:
+                    raise shared_failure
                 if table_key not in field_cache:
-                    field_cache[table_key] = self._load_table_fields(
-                        app_token=app_token,
-                        table_id=table_id,
-                    )
+                    try:
+                        field_cache[table_key] = self._load_table_fields(
+                            app_token=app_token,
+                            table_id=table_id,
+                        )
+                    except Exception as exc:
+                        field_cache[table_key] = exc
+                table_fields = field_cache[table_key]
+                if isinstance(table_fields, Exception):
+                    raise table_fields
                 if record_key not in record_cache:
-                    _metas, meta_by_name = field_cache[table_key]
+                    _metas, meta_by_name = table_fields
                     try:
                         records = self._load_table_records_by_ids(
                             app_token=app_token,
@@ -28598,6 +28622,8 @@ class MaintenancePortalService:
                     }
                 )
             except Exception as exc:
+                if self._is_shared_feishu_failure(exc):
+                    shared_failure = exc
                 errors.append(
                     f"{candidate['notice_type']} {target_record_id}: {exc}"
                 )

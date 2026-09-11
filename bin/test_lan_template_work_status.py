@@ -9763,12 +9763,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.service,
                 "start_daily_attachment_cache_refresh_async",
                 return_value=None,
-            ),
+            ) as attachment_refresh,
             patch("clipflow_backend.main._mock_external_enabled", return_value=True),
         ):
             controller._run_deferred_startup_maintenance()
 
         restore.assert_called_once_with()
+        attachment_refresh.assert_not_called()
 
     def test_qt_shell_bootstrap_returns_all_cross_month_ongoing_items(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -9808,8 +9809,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 controller,
                 "_reconcile_orphan_started_items",
                 return_value={"ok": True},
-            ):
+            ) as reconcile:
                 response = client.get("/api/qt/shell/bootstrap")
+
+            reconcile.assert_not_called()
 
             self.assertEqual(response.status_code, 200)
             data = response.json()["data"]
@@ -12137,6 +12140,32 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertFalse(
                 any("目标表孤儿状态校验失败" in item for item in service._load_warnings)
             )
+
+    def test_finished_active_reconcile_reuses_table_field_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            ongoing = [
+                {
+                    "active_item_id": f"active-{index}",
+                    "record_id": f"rec-target-{index}",
+                    "target_record_id": f"rec-target-{index}",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "building_codes": ["A"],
+                }
+                for index in range(2)
+            ]
+            with patch.object(
+                service,
+                "_load_table_fields",
+                side_effect=PortalError("飞书接口失败: code=99991663"),
+            ) as load_fields:
+                result = service._reconcile_finished_qt_active_items(
+                    scope="A", ongoing_items=ongoing
+                )
+
+            self.assertEqual(load_fields.call_count, 1)
+            self.assertEqual(len(result["errors"]), 2)
 
     def test_deleted_ongoing_item_clears_today_summary_and_work_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -42083,13 +42112,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ):
                     first = PortalRuntime._enqueue_unlinked_event_repair_project()
                     second = PortalRuntime._enqueue_unlinked_event_repair_project()
+                    store.mark_outbox_event(first, "done")
+                    third = PortalRuntime._enqueue_unlinked_event_repair_project()
                 self.assertGreater(first, 0)
                 self.assertEqual(second, 0)
-                queued = store.list_outbox_events(
+                self.assertEqual(third, 0)
+                done = store.list_outbox_events(
                     PortalRuntime.event_repair_queue_channel,
-                    status="pending",
+                    status="done",
                 )
-                self.assertEqual(len(queued), 1)
+                self.assertEqual(len(done), 1)
             finally:
                 store.shutdown_write_worker(timeout=2.0)
 

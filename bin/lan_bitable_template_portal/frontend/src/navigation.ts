@@ -57,9 +57,5 @@ export function replaceRoute(target: string | URL): void {
 }
 
 export function navigateBack(fallback = "/", hardFallback = false): void {
-  if (window.history.length > 1) {
-    window.history.back();
-    return;
-  }
   navigate(fallback, { replace: !hardFallback, hard: hardFallback });
 }

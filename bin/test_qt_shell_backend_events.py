@@ -322,6 +322,19 @@ class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_stopping_controller_invalidates_active_sse_connections(self):
+        controller = object.__new__(FastAPIPortalController)
+        controller._stopping_event = threading.Event()
+        controller._sse_lock = threading.RLock()
+        controller._sse_connections = {("qt-active", "127.0.0.1", "session", "A"): 1}
+        key = next(iter(controller._sse_connections))
+
+        self.assertTrue(controller._sse_active(key, 1))
+        controller._stopping_event.set()
+        self.assertFalse(controller._sse_active(key, 1))
+        controller._shutdown_event = threading.Event()
+        self.assertFalse(controller._submit_background("after-stop", lambda: None))
+
     def test_startup_event_reconcile_removes_finished_and_missing_targets_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_store = PortalRuntime.state_store
