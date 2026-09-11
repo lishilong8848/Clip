@@ -206,6 +206,15 @@ def is_already_running():
     return False
 
 
+def _wait_for_previous_instance(timeout_seconds=20.0):
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0))
+    while is_already_running():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+    return True
+
+
 def main():
     print(
         "[ClipFlow] Main module import elapsed: "
@@ -250,10 +259,20 @@ def main():
         f"{(time.perf_counter() - stage_started_at) * 1000:.1f} ms"
     )
 
-    # 单实例检测
+    wait_for_previous = "--wait-for-previous-instance" in sys.argv
+    if wait_for_previous:
+        sys.argv.remove("--wait-for-previous-instance")
+
+    # 旧版更新器不会传等待参数；普通启动也给正在退出的上一实例一个
+    # 短暂宽限期，确保首个修复补丁可以完成接管。
     if is_already_running():
-        print("[ClipFlow] 程序已在运行，退出重复实例")
-        sys.exit(0)
+        timeout_seconds = 20.0 if wait_for_previous else 10.0
+        if not _wait_for_previous_instance(timeout_seconds):
+            if wait_for_previous:
+                print("[ClipFlow] 等待旧程序退出超时，请关闭旧程序后重新启动")
+                sys.exit(1)
+            print("[ClipFlow] 程序已在运行，退出重复实例")
+            sys.exit(0)
 
     # 创建本地服务器，供后续实例检测
     server = QLocalServer()
@@ -286,6 +305,7 @@ def main():
                 controller = None
         except Exception as exc:
             error = str(exc)
+            controller = None
         with portal_holder_lock:
             portal_holder["controller"] = controller
             portal_holder["error"] = error

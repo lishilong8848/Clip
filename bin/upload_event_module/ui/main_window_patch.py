@@ -1129,7 +1129,13 @@ class PatchUpdateMixin:
                     else (BASE_DIR / "refactored_main.py").resolve()
                 )
                 forwarded = [str(x) for x in sys.argv[1:] if x != "--safe-mode"]
-                args = [str(sys.executable), str(script_path), *forwarded]
+                forwarded = [x for x in forwarded if x != "--wait-for-previous-instance"]
+                args = [
+                    str(sys.executable),
+                    str(script_path),
+                    *forwarded,
+                    "--wait-for-previous-instance",
+                ]
 
             if os.name == "nt":
                 if args:

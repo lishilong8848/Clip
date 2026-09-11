@@ -21,14 +21,26 @@ def install_cabinet_power_routes(app,controller,runtime):
             allowed=[s for s in TOTALS if admin or runtime.auth_manager.scope_allowed(session,s)]
             if path=="buildings":
                 def buildings():
-                    return {"buildings":[{k:v for k,v in service.overview(s).items() if k in ("scope","counts","updated_at","record_count","inventory_only","source")} for s in allowed]}
+                    status={item["scope"]:item for item in service.bootstrap(owner).get("buildings",[])}
+                    items=[]
+                    for scope_code in allowed:
+                        current=status.get(scope_code,{"scope":scope_code,"status":"idle","error":""})
+                        if current["status"]=="succeeded":
+                            try:
+                                item={k:v for k,v in service.overview(scope_code).items() if k in ("scope","counts","updated_at","record_count","inventory_only","source")}
+                                item["bootstrap_status"]="succeeded"; item["bootstrap_error"]=""
+                                items.append(item); continue
+                            except Exception as exc:
+                                current={**current,"status":"failed","error":str(exc)}
+                        items.append({"scope":scope_code,"counts":{"total":0,"formal":0,"test":0,"off":0,"unknown":0},"updated_at":"","record_count":0,"inventory_only":0,"source":"local","bootstrap_status":current["status"],"bootstrap_error":current.get("error","")})
+                    return {"buildings":items}
                 return controller._json_ok(request,session,await asyncio.to_thread(buildings))
             query=dict(request.query_params)
             payload=await controller._read_json_request(request,max_bytes=512*1024) if request.method in ("POST","PATCH") else {}
             scope=str(payload.get("scope") or query.get("scope") or "")
             if path=="bootstrap":
                 if scope and scope not in allowed: raise CabinetError("无权访问该楼栋",403)
-                data=await asyncio.to_thread(service.bootstrap,owner,request.method=="POST")
+                data=await asyncio.to_thread(service.bootstrap,owner,request.method=="POST",bool(payload.get("retry_failed")))
                 return controller._json_ok(request,session,data)
             resource=None
             if path.startswith("jobs/"): resource=await asyncio.to_thread(service.job_status,path.split("/")[1])

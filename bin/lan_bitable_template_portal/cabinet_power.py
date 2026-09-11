@@ -77,8 +77,9 @@ class CabinetFeishu:
         with self._lock:
             if self._token and time.monotonic()<self._expires: return self._token
             from upload_event_module.config import config
-            from upload_event_module.services.feishu_token_manager import FeishuTokenManager
-            token,error=FeishuTokenManager().get_tenant_token_for_credentials(config.app_id,config.app_secret)
+            from upload_event_module.services.feishu_token_manager import token_manager
+            try: token=token_manager.get_tenant_token()
+            except Exception as exc: raise CabinetError("机柜台账授权失败，请检查飞书应用配置与表权限") from exc
             if not token: raise CabinetError("机柜台账授权失败，请检查飞书应用配置与表权限")
             self._token=token; self._expires=time.monotonic()+3000
             return token
@@ -91,12 +92,14 @@ class CabinetFeishu:
 
     def request(self,method,path,body=None,params=None):
         if method != "GET": self.require_write()
+        import httpx
         from upload_event_module.services.http_client import FeishuHttpClient
-        if self._http is None: self._http=FeishuHttpClient(retries=0)
+        if self._http is None:
+            self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
         for attempt in range(3 if method=="GET" else 1):
-            data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=2 if method=="GET" else 0)
+            data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if method=="GET" else 0)
             if method!="GET" or data.get("code") not in (1255002,1254290,1254291,1254607) or attempt==2: break
             time.sleep(0.5*(2**attempt))
         if data.get("code"):
@@ -160,10 +163,13 @@ class CabinetPowerService:
         self.local=CabinetStore(self.root/"buildings")
         self._lock=threading.RLock()
         self._bootstrap_lock=threading.Lock()
+        self._refresh_slots=threading.BoundedSemaphore(2)
         self._scope_locks={scope:threading.RLock() for scope in TOTALS}
         self._cache={}; self._directory=None; self._layouts={}; self._remotes={}; self._directories={}
         self._pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-"+s) for s in TOTALS}
         self._upload_pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix='cabinet-upload-'+s) for s in TOTALS}
+        self._bootstrap_download_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-bootstrap")
+        self._bootstrap_batches={}
         self._writing=set()
         self._exports=None
         self._running={}
@@ -171,6 +177,7 @@ class CabinetPowerService:
     def shutdown(self,wait=True,**_kwargs):
         for pool in self._upload_pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
         for pool in self._pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
+        self._bootstrap_download_pool.shutdown(wait=wait,cancel_futures=not wait)
         if self._exports: self._exports.shutdown(wait=wait,cancel_futures=not wait)
 
     @property
@@ -241,28 +248,56 @@ class CabinetPowerService:
         if not self.local.version(requested_scope):
             raise CabinetError(target.get("error") or "该楼机柜资料从多维表初始化失败",503)
 
-    def bootstrap(self,owner="",start=False):
+    def _latest_refresh_job(self,scope):
+        jobs=sorted(
+            (item for item in self.local.documents(scope,"job:") if item.get("kind")=="refresh"),
+            key=lambda item:str(item.get("created_at") or ""),reverse=True,
+        )
+        return self.job_status(jobs[0]["job_id"],scope) if jobs else {}
+
+    def _download_bootstrap_source(self):
+        return self.remote.list_all(),self.directory().list_all()
+
+    def _start_bootstrap_batch(self):
+        batch_id=uuid.uuid4().hex
+        with self._lock:
+            self._bootstrap_batches={key:value for key,value in self._bootstrap_batches.items() if not value.done()}
+            self._bootstrap_batches[batch_id]=self._bootstrap_download_pool.submit(self._download_bootstrap_source)
+        return batch_id
+
+    def _bootstrap_source(self,batch_id):
+        with self._lock: future=self._bootstrap_batches.get(batch_id)
+        if future is None: raise CabinetError("初始化下载任务已中断，请点击重试",503)
+        return future.result()
+
+    def bootstrap(self,owner="",start=False,retry_failed=False):
         if start:
             with self._bootstrap_lock:
                 for scope in TOTALS: self._migrate_legacy_snapshot(scope)
+                pending=[]
                 for scope in TOTALS:
-                    if not self.local.version(scope): self.job(scope,"refresh",owner or "system",{})
+                    if self.local.version(scope): continue
+                    current=self._latest_refresh_job(scope)
+                    if current and current.get("status") in ("pending","running"): continue
+                    if current and not retry_failed: continue
+                    pending.append(scope)
+                if pending:
+                    batch_id=self._start_bootstrap_batch()
+                    for scope in pending: self.job(scope,"refresh",owner or "system",{"bootstrap_batch_id":batch_id})
         buildings=[]
         for scope in TOTALS:
             if self.local.version(scope):
                 buildings.append({"scope":scope,"status":"succeeded","error":""})
                 continue
-            jobs=sorted(
-                (item for item in self.local.documents(scope,"job:") if item.get("kind")=="refresh"),
-                key=lambda item:str(item.get("created_at") or ""),reverse=True,
-            )
-            current=self.job_status(jobs[0]["job_id"],scope) if jobs else {}
+            current=self._latest_refresh_job(scope)
             status=str(current.get("status") or "idle")
             if status=="succeeded": status="failed"
             buildings.append({"scope":scope,"status":status,"error":str(current.get("error") or ("初始化未生成本地数据" if status=="failed" else ""))})
         ready=sum(item["status"]=="succeeded" for item in buildings)
         failed=sum(item["status"]=="failed" for item in buildings)
         active=any(item["status"] in ("pending","running") for item in buildings)
+        if not active:
+            with self._lock: self._bootstrap_batches={key:value for key,value in self._bootstrap_batches.items() if not value.done()}
         status="running" if active else "succeeded" if ready==len(TOTALS) else "partial" if ready else "failed" if failed else "idle"
         return {"status":status,"total":len(TOTALS),"completed":ready+failed,"ready":ready,"failed":failed,"buildings":buildings,"updated_at":stamp()}
 
@@ -287,16 +322,22 @@ class CabinetPowerService:
         if isinstance(remote,CabinetFeishu):
             field,value=("数据标识",data_id) if data_id else ("楼栋",scope+"楼")
             return remote.list_all(filters="CurrentValue.["+field+"]="+json.dumps(value,ensure_ascii=False))
-        records=remote.list_all()
+        records=remote if isinstance(remote,list) else remote.list_all()
         return [r for r in records if (text_value(r["fields"].get("数据标识"))==data_id if data_id else text_value(r["fields"].get("楼栋"))==scope+"楼")]
 
     def do_refresh(self,scope,payload,job):
         if not scope:
-            results=[self.do_refresh(s,payload,job) for s in TOTALS]
+            source=self._download_bootstrap_source()
+            results=[self.do_refresh(s,{**payload,"_bootstrap_source":source},job) for s in TOTALS]
             return {"updated_at":stamp(),"count":sum(r["count"] for r in results)}
-        with self.local.locked([scope]):
+        with self._refresh_slots, self.local.locked([scope]):
             if self.pending_writes(scope): raise CabinetError("该楼有尚未完成的上传，请先继续处理",409)
-            records=self.list_remote(self.remote_for(scope),scope); directory=self.list_remote(self.directory(scope),scope)
+            source=payload.get("_bootstrap_source")
+            if not source and payload.get("bootstrap_batch_id"): source=self._bootstrap_source(payload["bootstrap_batch_id"])
+            if source:
+                records=self.list_remote(source[0],scope); directory=self.list_remote(source[1],scope)
+            else:
+                records=self.list_remote(self.remote_for(scope),scope); directory=self.list_remote(self.directory(scope),scope)
             if len({r["record_id"] for r in records})!=len(records): raise CabinetError("飞书分页存在重复记录")
             ops=[from_feishu(r) for r in records]
             configs={scope:{"scope":scope,"rooms":[],"inventory":[],"history_ready":True,"issues":[]}}

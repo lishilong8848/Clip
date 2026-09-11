@@ -129,6 +129,39 @@ class BackendProcessControllerTests(unittest.TestCase):
             )
         )
 
+    def test_legacy_probe_falls_back_to_detailed_health(self):
+        controller = BackendProcessPortalController(port=18766)
+        probe = {"ok": True, "service": "clipflow_backend", "instance_id": "old"}
+        detailed = {
+            "ok": True,
+            "service": "clipflow_backend",
+            "runtime_root_hash": controller._runtime_root_hash,
+            "build_version": "older-build",
+        }
+        with patch.object(
+            controller, "_request_json", side_effect=[probe, detailed]
+        ) as request:
+            self.assertEqual(controller._health_payload(), detailed)
+        self.assertEqual(
+            [call.args[:2] for call in request.call_args_list],
+            [("GET", "/api/health?probe=1"), ("GET", "/api/health")],
+        )
+
+    def test_start_attempts_to_replace_older_backend_from_same_runtime(self):
+        controller = BackendProcessPortalController(port=18766)
+        older = {
+            "ok": True,
+            "service": "clipflow_backend",
+            "runtime_root_hash": controller._runtime_root_hash,
+            "build_version": "older-build",
+        }
+        with patch.object(controller, "_health_payload", return_value=older), patch.object(
+            controller, "_shutdown_existing_backend", return_value=False
+        ) as shutdown:
+            with self.assertRaisesRegex(RuntimeError, "旧版后端无法安全关闭"):
+                controller.start()
+        shutdown.assert_called_once_with()
+
     def test_port_owner_summary_reports_pid_and_process(self):
         netstat = SimpleNamespace(
             stdout=(

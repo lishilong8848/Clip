@@ -20,8 +20,8 @@ class MemoryStore:
 
 class FakeFeishu:
     def __init__(self,records=()):
-        self.records={r["record_id"]:copy.deepcopy(r) for r in records}; self.creates=0; self.fail_after_create=False
-    def list_all(self,path="records"): return copy.deepcopy(list(self.records.values()))
+        self.records={r["record_id"]:copy.deepcopy(r) for r in records}; self.creates=0; self.fail_after_create=False; self.list_calls=0
+    def list_all(self,path="records"): self.list_calls+=1; return copy.deepcopy(list(self.records.values()))
     def ensure_fields(self): return True
     def get(self,rid): return copy.deepcopy(self.records[rid])
     def create(self,fields,operation_id):
@@ -125,11 +125,14 @@ class CabinetPowerTests(unittest.TestCase):
             overview=fresh.overview("D")
             self.assertEqual(overview["record_count"],988)
             self.assertTrue(all(fresh.local.version(scope) for scope in "ABCDE"))
+            self.assertEqual(fresh.remote.list_calls,1)
+            self.assertEqual(fresh._directory.list_calls,1)
         finally:
             fresh.shutdown()
 
     def test_first_bootstrap_reports_all_building_progress(self):
         fresh=CabinetPowerService(MemoryStore(),FakeFeishu(),Path(self.tmp.name)/"progress")
+        fresh._directory=FakeFeishu()
         release=threading.Event()
         def refresh(scope,payload,job):
             release.wait(5)
@@ -148,6 +151,29 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual((completed["status"],completed["ready"]),("succeeded",5))
         finally:
             release.set(); fresh.shutdown()
+
+    def test_bootstrap_retries_only_failed_buildings(self):
+        fresh=CabinetPowerService(MemoryStore(),FakeFeishu(),Path(self.tmp.name)/"retry")
+        fresh._directory=FakeFeishu()
+        attempts={scope:0 for scope in "ABCDE"}
+        def refresh(scope,payload,job):
+            attempts[scope]+=1
+            if scope!="A" and attempts[scope]==1: raise TimeoutError("read timed out")
+            fresh.local.replace(scope,{"scope":scope,"rooms":[],"inventory":[]},[],[])
+            return {"count":0}
+        fresh.do_refresh=refresh
+        try:
+            fresh.bootstrap("owner",start=True)
+            deadline=time.time()+10
+            while time.time()<deadline and fresh.bootstrap("owner")["status"]=="running": time.sleep(.02)
+            self.assertEqual((fresh.bootstrap("owner")["ready"],fresh.bootstrap("owner")["failed"]),(1,4))
+            fresh.bootstrap("owner",start=True)
+            self.assertEqual(attempts,{scope:1 for scope in "ABCDE"})
+            fresh.bootstrap("owner",start=True,retry_failed=True)
+            deadline=time.time()+10
+            while time.time()<deadline and fresh.bootstrap("owner")["status"]=="running": time.sleep(.02)
+            self.assertEqual(attempts,{"A":1,"B":2,"C":2,"D":2,"E":2})
+        finally: fresh.shutdown()
 
     def test_layout_does_not_open_xlsm_at_runtime(self):
         self.service.overview("D")

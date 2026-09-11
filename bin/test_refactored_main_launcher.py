@@ -37,6 +37,25 @@ class RefactoredMainLauncherTests(unittest.TestCase):
             namespace["_reexec_with_project_python"]()
         call.assert_called_once()
 
+    def test_patch_restart_waits_until_previous_instance_exits(self):
+        tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_wait_for_previous_instance"
+        )
+        checks = iter((True, True, False))
+        namespace = {
+            "time": SimpleNamespace(monotonic=Mock(side_effect=(0.0, 0.1, 0.2)), sleep=Mock()),
+            "is_already_running": Mock(side_effect=lambda: next(checks)),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(MAIN_PATH), "exec"), namespace)
+
+        self.assertTrue(namespace["_wait_for_previous_instance"](20))
+        self.assertEqual(namespace["is_already_running"].call_count, 3)
+        self.assertEqual(namespace["time"].sleep.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

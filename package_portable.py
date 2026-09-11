@@ -3043,11 +3043,9 @@ def main() -> None:
 
     force_ui_update = bool(DEFAULT_FORCE_UI_UPDATE or args.force_ui_update)
 
-    # UI restart policy is explicitly controlled by force_ui_update.
-
-    # No automatic UI change detection is performed.
-
-    ui_changed = force_ui_update
+    # Python code is loaded by the running Qt/backend processes, so every code
+    # patch must restart even when the visible UI assets did not change.
+    ui_changed = bool(force_ui_update or code_changed)
 
     if force_ui_update:
 
@@ -3055,7 +3053,7 @@ def main() -> None:
 
     else:
 
-        log("未启用强制界面更新，本次补丁将使用热更新（无需重启）。")
+        log("未启用强制界面更新；根据代码变化决定是否重启程序。")
 
     if ui_changed:
 

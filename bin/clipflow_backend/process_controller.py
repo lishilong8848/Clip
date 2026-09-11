@@ -308,9 +308,34 @@ class BackendProcessPortalController:
     def _health_payload(self) -> dict[str, Any] | None:
         try:
             result = self._request_json("GET", "/api/health?probe=1", timeout=1.2)
-            return result if bool(result.get("ok")) else None
+            if not bool(result.get("ok")):
+                return None
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            if not (
+                result.get("runtime_root_hash")
+                or data.get("runtime_root_hash")
+            ) or not (result.get("build_version") or data.get("build_version")):
+                detailed = self._request_json("GET", "/api/health", timeout=1.2)
+                if bool(detailed.get("ok")):
+                    return detailed
+            return result
         except Exception:
             return None
+
+    def _health_matches_runtime_root(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        return (
+            str(payload.get("service") or data.get("service") or "").strip()
+            == "clipflow_backend"
+            and str(
+                payload.get("runtime_root_hash")
+                or data.get("runtime_root_hash")
+                or ""
+            ).strip()
+            == self._runtime_root_hash
+        )
 
     def _health_matches_runtime(self, payload: dict[str, Any] | None) -> bool:
         if not isinstance(payload, dict):
@@ -479,7 +504,7 @@ class BackendProcessPortalController:
             return False
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
-            if not self._health_ok():
+            if self._health_payload() is None:
                 return True
             time.sleep(0.25)
         log_warning("旧后端关闭超时。")
@@ -556,6 +581,16 @@ class BackendProcessPortalController:
             )
             self.host = DEFAULT_HOST
         existing_health = self._health_payload()
+        if existing_health and not self._health_matches_runtime(existing_health):
+            if self._health_matches_runtime_root(existing_health):
+                if self._shutdown_existing_backend():
+                    existing_health = None
+                    time.sleep(0.2)
+                else:
+                    raise RuntimeError(
+                        f"固定端口 {self.preferred_port} 上的旧版后端无法安全关闭。"
+                        "请结束旧程序后重新启动。"
+                    )
         if existing_health and not self._health_matches_runtime(existing_health):
             data = (
                 existing_health.get("data")
