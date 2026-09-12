@@ -2628,8 +2628,30 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (refreshClosedByEscape.open || refreshClosedByEscape.expanded !== 'false') {{
               throw new Error(`lite refresh menu did not close on Escape: ${{JSON.stringify(refreshClosedByEscape)}}`);
             }}
+            let sopRefreshCalls = 0, sopRefreshFail = false;
+            const sopItems = (scope, workType, fresh) => [{{sop_id:'manual_refresh_sop',scope,work_type:workType,name:'同步示例 SOP',version:fresh?2:1,ready:true,steps:[{{step_id:'step_manual_123',content:fresh?'多维最新步骤':'本地旧步骤',operator_required:true,reviewer_required:true,photo_required:false,time_limit_seconds:0}}],attachments:[{{attachment_id:'file_manual_123',name:'guide.txt',size:10,download_url:'#'}}]}},...(fresh?[{{sop_id:'manual_refresh_new',scope,work_type:workType,name:'多维新增 SOP',version:1,ready:true,steps:[{{content:'新增步骤',operator_required:true}}],attachments:[{{name:'guide.txt',size:10}}]}}]:[])];
+            await page.route('**/api/polling-sops?*', route => {{const url=new URL(route.request().url());return route.fulfill({{json:{{ok:true,data:{{items:sopItems(url.searchParams.get('scope'),url.searchParams.get('work_type'),false)}}}}}})}});
+            await page.route('**/api/polling-sops/refresh', async route => {{
+              sopRefreshCalls+=1;const payload=route.request().postDataJSON();
+              await new Promise(resolve=>setTimeout(resolve,350));
+              return route.fulfill({{json:sopRefreshFail?{{ok:false,error:'模拟多维读取失败'}}:{{ok:true,data:{{items:sopItems(payload.scope,payload.work_type,true),synced_count:2}}}}}});
+            }});
             await page.locator('#lite-polling-sop-open').click();
             await page.waitForFunction(() => !document.querySelector('#lite-polling-sop-modal')?.hidden, null, {{ timeout: 10000 }});
+            await page.locator('#lite-polling-sop-list button').filter({{hasText:'同步示例 SOP'}}).click();
+            await page.locator('#lite-polling-sop-refresh').click();
+            await page.getByText(/正在从多维同步/).waitFor();
+            if(!(await page.locator('#lite-polling-sop-refresh').isDisabled()))throw new Error('SOP sync did not disable duplicate clicks');
+            await page.getByText('已从多维同步 2 份 SOP。',{{exact:true}}).waitFor();
+            if(await page.locator('.polling-step-edit textarea').first().inputValue()!=='多维最新步骤')throw new Error('SOP editor did not receive cloud changes');
+            await page.getByLabel('SOP 名称',{{exact:true}}).fill('尚未保存的 SOP 修改');
+            await page.locator('#lite-polling-sop-refresh').click();
+            await page.getByText(/已从多维同步 2 份 SOP。当前输入已保留/).waitFor();
+            if(await page.getByLabel('SOP 名称',{{exact:true}}).inputValue()!=='尚未保存的 SOP 修改')throw new Error('SOP refresh discarded editor input');
+            sopRefreshFail=true;await page.locator('#lite-polling-sop-refresh').click();
+            await page.getByText(/同步失败：模拟多维读取失败/).waitFor();
+            if(await page.getByLabel('SOP 名称',{{exact:true}}).inputValue()!=='尚未保存的 SOP 修改')throw new Error('failed SOP refresh discarded editor input');
+            sopRefreshFail=false;
             await inspectMobileFloatingSurfaces(page, 'workbench-sop-manage');
             await page.locator('#lite-polling-sop-close').click();
             await page.setViewportSize({{ width: 1366, height: 768 }});
@@ -2730,6 +2752,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               await liteSopOpen.click();
               await page.waitForFunction(() => !document.querySelector('#lite-polling-sop-modal')?.hidden, null, {{ timeout: 10000 }});
               await inspectMobileFloatingSurfaces(page, 'workbench-sop-selection');
+              await page.locator('#lite-polling-sop-refresh').click();
+              await page.getByText(/已从多维同步 2 份 SOP/).waitFor();
+              await page.locator('#lite-polling-sop-list button').filter({{hasText:'多维新增 SOP'}}).waitFor();
+              if(sopRefreshCalls!==4)throw new Error('SOP refresh request count mismatch');
               await page.locator('#lite-polling-sop-close').click();
               await page.setViewportSize({{ width: 1366, height: 768 }});
             }}

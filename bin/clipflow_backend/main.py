@@ -5927,6 +5927,25 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
 
+        @app.post("/api/polling-sops/refresh")
+        async def polling_sops_refresh(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = await self._read_json_request(request, max_bytes=4096)
+                try:
+                    scope = self._authorized_scope_or_error(session, payload.get("scope") or "")
+                except Exception as exc:
+                    return self._portal_error_response(exc, default_status=403)
+                result = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().refresh_sops,
+                    scope, str(payload.get("work_type") or "polling"),
+                )
+                return self._json_ok(request, session, result)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.post("/api/polling-sops")
         async def polling_sops_create(request: Request):
             session = self._current_session(request)

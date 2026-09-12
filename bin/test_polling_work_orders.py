@@ -84,6 +84,120 @@ class _FakePollingSopCloud:
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def _refresh_fixture(self, root):
+        content = b"old-guide"
+        sop = {"sop_id": "refresh_sop_1234", "scope": "A", "work_type": "polling", "name": "同步测试", "version": 1,
+               "steps": [{"step_id": "refresh_step_1234", "content": "检查设备", "operator_required": True}],
+               "attachments": [{"attachment_id": "refresh_file_1234", "file_token": "refresh_token_1234", "name": "guide.txt", "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}]}
+        cloud = _FakePollingSopCloud([sop], content)
+        service = PollingWorkOrderService(LanPortalStateStore(root / "state.sqlite3"), cloud)
+        service.sop_root = root / "sops"
+        service.list_sops("A")
+        return service, cloud, sop
+
+    def test_manual_refresh_updates_initialized_cache_without_cloud_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            store = service.state_store
+            store.put_document("polling_sop", "local_only_1234", {**sop, "sop_id": "local_only_1234", "name": "本地独有"})
+            store.put_document("polling_sop", "other_scope_1234", {**sop, "sop_id": "other_scope_1234", "scope": "B"})
+            store.put_document("polling_sop", "other_type_1234", {**sop, "sop_id": "other_type_1234", "work_type": "maintenance"})
+            cloud.sops[sop["sop_id"]]["steps"].append({"step_id": "new_step_1234", "content": "新增步骤", "operator_required": True})
+            cloud.sops[sop["sop_id"]]["version"] = 2
+            cloud.sops["new_sop_123456"] = {**copy.deepcopy(sop), "sop_id": "new_sop_123456", "name": "新增 SOP"}
+            self.assertEqual(len(service.get_sop(sop["sop_id"])["steps"]), 1)
+            result = service.refresh_sops("A")
+            self.assertEqual(result["synced_count"], 2)
+            self.assertEqual(len(result["items"]), 3)
+            self.assertEqual(len(service.get_sop(sop["sop_id"])["steps"]), 2)
+            count = cloud.list_calls
+            service.list_sops("A")
+            self.assertEqual(cloud.list_calls, count)
+            self.assertEqual((cloud.saved, cloud.uploaded), ([], []))
+            self.assertEqual(store.get_document("polling_sop", "other_scope_1234")["scope"], "B")
+            self.assertEqual(store.get_document("polling_sop", "other_type_1234")["work_type"], "maintenance")
+
+    def test_manual_refresh_failure_keeps_local_data_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            before = service.get_sop(sop["sop_id"])
+            cloud.sops[sop["sop_id"]]["name"] = "尚未提交的更新"
+            cloud.sops["invalid_sop_1234"] = {**sop, "sop_id": "invalid_sop_1234", "name": ""}
+            with self.assertRaisesRegex(Exception, "名称"):
+                service.refresh_sops("A")
+            self.assertEqual(service.get_sop(sop["sop_id"]), before)
+            del cloud.sops["invalid_sop_1234"]
+            with patch.object(cloud, "list_sops", side_effect=TimeoutError("cloud timeout")), self.assertRaises(TimeoutError):
+                service.refresh_sops("A")
+            self.assertEqual(service.get_sop(sop["sop_id"]), before)
+            self.assertEqual(service.refresh_sops("A")["items"][0]["name"], "尚未提交的更新")
+
+    def test_manual_refresh_changed_attachment_does_not_reuse_old_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            service.get_sop_attachment(sop["sop_id"], "refresh_file_1234")
+            old = Path(service.get_sop(sop["sop_id"], public=False)["attachments"][0]["path"])
+            cloud.content = b"new-guide"
+            attachment = cloud.sops[sop["sop_id"]]["attachments"][0]
+            attachment.update(file_token="new_token_12345", sha256=hashlib.sha256(cloud.content).hexdigest(), size=len(cloud.content))
+            service.refresh_sops("A")
+            self.assertEqual(service.get_sop_attachment(sop["sop_id"], "refresh_file_1234")[0], b"new-guide")
+            self.assertEqual(old.read_bytes(), b"old-guide")
+
+    def test_manual_refresh_scope_marker_keeps_future_reads_local(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            service.state_store.delete_document("polling_sop_meta", "cloud_initialized_v1")
+            service.refresh_sops("A")
+            count = cloud.list_calls
+            service.list_sops("A")
+            service._wait_local_cache_bootstrap()
+            self.assertEqual(cloud.list_calls, count)
+
+    def test_manual_refresh_rejects_duplicate_ids_or_older_cloud_version(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            before = service.get_sop(sop["sop_id"])
+            with patch.object(cloud, "list_sops", return_value=[sop, sop]), self.assertRaisesRegex(Exception, "重复"):
+                service.refresh_sops("A")
+            cloud.sops[sop["sop_id"]]["version"] = 0
+            with self.assertRaisesRegex(Exception, "版本冲突"):
+                service.refresh_sops("A")
+            self.assertEqual(service.get_sop(sop["sop_id"]), before)
+
+    def test_manual_refresh_batch_rolls_back_on_database_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            before = service.get_sop(sop["sop_id"])
+            cloud.sops[sop["sop_id"]]["name"] = "更新"
+            cloud.sops["next_sop_12345"] = {**sop, "sop_id": "next_sop_12345", "name": "序列化失败"}
+            original = service.state_store._json
+            def encode(payload):
+                if payload.get("name") == "序列化失败":
+                    raise OSError("disk failure")
+                return original(payload)
+            with patch.object(service.state_store, "_json", side_effect=encode), self.assertRaises(OSError):
+                service.refresh_sops("A")
+            self.assertEqual(service.get_sop(sop["sop_id"]), before)
+            self.assertIsNone(service.state_store.get_document("polling_sop", "next_sop_12345"))
+
+    def test_manual_refresh_requires_login_and_scope_permission(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        manager = MagicMock()
+        manager.refresh_sops.return_value = {"items": [], "synced_count": 0}
+        with patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            with patch.object(controller, "_current_session", return_value=None):
+                self.assertEqual(client.post("/api/polling-sops/refresh", json={"scope": "A"}).status_code, 401)
+            with patch.object(controller, "_current_session", return_value={"user": {"open_id": "ou_a"}}):
+                with patch.object(controller, "_authorized_scope_or_error", side_effect=portal_server.PortalError("无权访问 B 楼")):
+                    self.assertEqual(client.post("/api/polling-sops/refresh", json={"scope": "B"}).status_code, 403)
+                manager.refresh_sops.assert_not_called()
+                with patch.object(controller, "_authorized_scope_or_error", return_value="A"):
+                    response = client.post("/api/polling-sops/refresh", json={"scope": "A", "work_type": "maintenance"})
+                self.assertEqual(response.status_code, 200, response.text)
+                manager.refresh_sops.assert_called_once_with("A", "maintenance")
+
     def test_legacy_local_sop_is_uploaded_to_cloud_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

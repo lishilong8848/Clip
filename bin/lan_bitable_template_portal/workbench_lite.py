@@ -3219,6 +3219,7 @@ def render_workbench_lite(
       .notice-drawer-body {{ padding:10px 12px 18px; }}
     }}
     @media (max-width: 820px) {{
+      .polling-sop-attachment > a {{ min-height:44px; display:flex; align-items:center; min-width:0; overflow-wrap:anywhere; }}
       .type-tab,.btn,.toolbar select,.toolbar input,.refresh-menu button,.scope-select {{ min-height:44px !important; }}
       input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),select {{ min-height:44px !important; }}
     }}
@@ -3360,7 +3361,7 @@ def render_workbench_lite(
     <section class="end-check-dialog polling-sop-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-polling-sop-title">
       <header class="end-check-head"><span>工单 SOP</span><strong id="lite-polling-sop-title">SOP 管理</strong></header>
       <div class="polling-sop-body"><aside class="polling-sop-list" id="lite-polling-sop-list"></aside><section class="polling-sop-editor" id="lite-polling-sop-editor"></section></div>
-      <footer class="end-check-actions"><span class="job-status" id="lite-polling-sop-feedback" aria-live="polite" hidden></span><button class="btn ghost" type="button" id="lite-polling-sop-new">新增 SOP</button><button class="btn primary" type="button" id="lite-polling-sop-close">关闭</button></footer>
+      <footer class="end-check-actions"><span class="job-status" id="lite-polling-sop-feedback" aria-live="polite" hidden></span><button class="btn ghost" type="button" id="lite-polling-sop-refresh" title="从多维表同步当前楼栋和类型的 SOP">从多维同步</button><button class="btn ghost" type="button" id="lite-polling-sop-new">新增 SOP</button><button class="btn primary" type="button" id="lite-polling-sop-close">关闭</button></footer>
     </section>
   </div>
   <div class="end-check-backdrop" id="lite-polling-sop-delete-confirm" hidden>
@@ -3484,6 +3485,7 @@ def render_workbench_lite(
     let litePollingPeopleLoadedAt = 0;
     let litePollingPeopleLoadPromise = null;
     let litePollingSopOpenSequence = 0;
+    let litePollingSopRefreshing = false;
     let litePollingSopMode = 'manage';
     let litePollingEditingSop = null;
     let litePollingSelectedSop = null;
@@ -3516,12 +3518,37 @@ def render_workbench_lite(
       if(!force&&cached?.promise){{const items=await cached.promise;if(`${{pollingSopScope()}}:${{pollingSopWorkType()}}`===key)litePollingSops=items;return items}}
       const promise=pollingApi(`/api/polling-sops?scope=${{encodeURIComponent(scope)}}&work_type=${{encodeURIComponent(workType)}}`).then(data=>Array.isArray(data.items)?data.items:[]);
       litePollingSopCache.set(key,{{items:cached?.items||null,loadedAt:cached?.loadedAt||0,promise}});
-      try{{const items=await promise;litePollingSopCache.set(key,{{items,loadedAt:Date.now(),promise:null}});if(`${{pollingSopScope()}}:${{pollingSopWorkType()}}`===key)litePollingSops=items;return items}}
+      try{{const items=await promise;if(litePollingSopCache.get(key)?.promise!==promise)return litePollingSopCache.get(key)?.items||items;litePollingSopCache.set(key,{{items,loadedAt:Date.now(),promise:null}});if(`${{pollingSopScope()}}:${{pollingSopWorkType()}}`===key)litePollingSops=items;return items}}
       catch(error){{if(litePollingSopCache.get(key)?.promise===promise)litePollingSopCache.delete(key);throw error}}
     }}
     function pollingSopModal() {{ return document.getElementById('lite-polling-sop-modal'); }}
     function closePollingSopModal() {{ litePollingSopOpenSequence+=1;const modal=pollingSopModal(); if(modal) modal.hidden=true; }}
     function setPollingSopFeedback(message,failed=false) {{const node=document.getElementById('lite-polling-sop-feedback');if(!node)return;node.textContent=String(message||'');node.hidden=!node.textContent;node.classList.toggle('failed',Boolean(failed))}}
+    async function refreshPollingSopsFromCloud() {{
+      if(litePollingSopRefreshing)return;
+      const modal=pollingSopModal(),body=modal.querySelector('.polling-sop-body'),button=document.getElementById('lite-polling-sop-refresh'),newButton=document.getElementById('lite-polling-sop-new');
+      if(body.querySelector('[aria-busy="true"]')){{setPollingSopFeedback('请等待当前 SOP 保存完成后再同步。',true);return}}
+      const scope=pollingSopScope(),workType=pollingSopWorkType(),key=`${{scope}}:${{workType}}`,sequence=litePollingSopOpenSequence;
+      const editing=litePollingEditingSop,original=litePollingSops.find(item=>item.sop_id===editing?.sop_id);
+      const signature=sop=>JSON.stringify([sop?.name,sop?.work_type,sop?.steps,sop?.attachments]);
+      const preserveDraft=Boolean(litePollingPendingSopFiles.length||!editing?.sop_id||!original||signature(editing)!==signature(original));
+      litePollingSopRefreshing=true;setButtonBusy(button,true);button.textContent='同步中…';body.inert=true;newButton.disabled=true;
+      setPollingSopFeedback(`正在从多维同步 ${{scope}}楼${{pollingSopLabel()}} SOP…`);
+      const controller=new AbortController(),timer=window.setTimeout(()=>controller.abort(),120000);
+      try{{
+        const data=await pollingApi('/api/polling-sops/refresh',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{scope,work_type:workType}}),signal:controller.signal}});
+        if(!Array.isArray(data.items))throw new Error('同步响应格式异常，请重试');
+        litePollingSopCache.set(key,{{items:data.items,loadedAt:Date.now(),promise:null}});
+        if(sequence!==litePollingSopOpenSequence||modal.hidden||key!==`${{pollingSopScope()}}:${{pollingSopWorkType()}}`)return;
+        litePollingSops=data.items;
+        if(litePollingSopMode==='manage'&&!preserveDraft){{litePollingEditingSop=structuredClone(data.items.find(item=>item.sop_id===editing.sop_id)||editing);renderPollingSopEditor()}}
+        renderPollingSopList();
+        const kept=litePollingSopMode==='manage'?preserveDraft:Boolean(litePollingSelectedSop);
+        setPollingSopFeedback(`已从多维同步 ${{data.synced_count||0}} 份 SOP。${{kept?'当前输入已保留，重新选择 SOP 可载入最新步骤。':''}}`);
+      }}catch(error){{
+        if(sequence===litePollingSopOpenSequence&&!modal.hidden)setPollingSopFeedback(controller.signal.aborted?'同步等待超时，当前输入已保留，可稍后重试。':`同步失败：${{error.message}}。当前输入已保留。`,true);
+      }}finally{{window.clearTimeout(timer);litePollingSopRefreshing=false;setButtonBusy(button,false);button.textContent='从多维同步';body.inert=false;newButton.disabled=false}}
+    }}
     function openPollingSopDeleteConfirm(sop,trigger) {{litePollingSopDeleteTarget={{sop_id:String(sop?.sop_id||''),version:Number(sop?.version||0),name:String(sop?.name||'未命名 SOP')}};litePollingSopDeleteReturnFocus=trigger instanceof HTMLElement?trigger:null;const modal=document.getElementById('lite-polling-sop-delete-confirm'),name=document.getElementById('lite-polling-sop-delete-name'),error=document.getElementById('lite-polling-sop-delete-error'),apply=document.getElementById('lite-polling-sop-delete-apply');if(name)name.textContent=litePollingSopDeleteTarget.name;if(error){{error.textContent='';error.hidden=true}}if(modal)modal.hidden=false;if(apply)apply.focus()}}
     function closePollingSopDeleteConfirm() {{const modal=document.getElementById('lite-polling-sop-delete-confirm'),returnFocus=litePollingSopDeleteReturnFocus;if(modal)modal.hidden=true;litePollingSopDeleteTarget=null;litePollingSopDeleteReturnFocus=null;if(returnFocus?.isConnected)requestAnimationFrame(()=>returnFocus.focus())}}
     async function confirmPollingSopDelete(button) {{const target=litePollingSopDeleteTarget;if(!target)return;const error=document.getElementById('lite-polling-sop-delete-error');setButtonBusy(button,true);try{{await pollingApi(`/api/polling-sops/${{encodeURIComponent(target.sop_id)}}?expected_version=${{target.version}}`,{{method:'DELETE'}})}}catch(exc){{if(error){{error.textContent=exc.message||'删除 SOP 失败';error.hidden=false}}showLiteError(exc.message);setButtonBusy(button,false);return}}closePollingSopDeleteConfirm();litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft();litePollingSelectedSop=null;try{{await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setPollingSopFeedback(`已删除：${{target.name}}`)}}catch(exc){{setPollingSopFeedback(`SOP 已删除，列表刷新失败：${{exc.message}}`,true)}}finally{{setButtonBusy(button,false)}}}}
@@ -7570,6 +7597,8 @@ def render_workbench_lite(
       if (pollingSelectOpen) {{ event.preventDefault(); await openPollingSopModal('select'); return; }}
       const pollingSopClose = target.closest('#lite-polling-sop-close');
       if (pollingSopClose) {{ event.preventDefault(); closePollingSopModal(); return; }}
+      const pollingSopRefresh = target.closest('#lite-polling-sop-refresh');
+      if (pollingSopRefresh) {{ event.preventDefault(); await refreshPollingSopsFromCloud(); return; }}
       const pollingSopNew = target.closest('#lite-polling-sop-new');
       if (pollingSopNew) {{ event.preventDefault(); setPollingSopFeedback(''); litePollingPendingSopFiles=[]; litePollingEditingSop=pollingNewDraft(); renderPollingSopList(); renderPollingSopEditor(); return; }}
       const pollingSopDeleteCancel = target.closest('#lite-polling-sop-delete-cancel');

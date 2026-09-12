@@ -399,6 +399,7 @@ class PollingWorkOrderService:
         self._cloud_bootstrap_lock = threading.Lock()
         self._cloud_bootstrap_running = False
         self._cloud_bootstrap_thread: threading.Thread | None = None
+        self._manual_refresh_lock = threading.Lock()
 
     @staticmethod
     def _now_text() -> str:
@@ -423,7 +424,7 @@ class PollingWorkOrderService:
         result["ready"] = bool(result.get("steps") and result.get("attachments"))
         return result
 
-    def _cache_cloud_sop(self, remote: dict) -> dict:
+    def _cache_cloud_sop(self, remote: dict, *, persist: bool = True) -> dict:
         sop_id = str(remote.get("sop_id") or "")
         scope = str(remote.get("scope") or "").strip().upper()
         work_type = _work_order_type(remote.get("work_type"))
@@ -475,13 +476,16 @@ class PollingWorkOrderService:
             attachment["name"] = _safe_file_name(attachment.get("name"))
             existing = local_attachments.get(str(attachment.get("attachment_id") or "")) or {}
             path = str(existing.get("path") or "")
+            if any(existing.get(key) != attachment.get(key) for key in ("file_token", "sha256", "size")):
+                revision = hashlib.sha256(str((attachment.get("file_token"), digest, size)).encode()).hexdigest()[:12]
+                path = str(self._sop_directory(sop_id) / f"{attachment['attachment_id']}_{revision}_{attachment['name']}")
             if not path:
                 directory = self._sop_directory(sop_id)
                 path = str((directory / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve())
             attachment["path"] = path
             attachments.append(attachment)
         cached = {**copy.deepcopy(remote), "attachments": attachments}
-        if cached != local:
+        if persist and cached != local:
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, cached)
         return cached
 
@@ -604,11 +608,46 @@ class PollingWorkOrderService:
             if isinstance(document.get("payload"), dict)
         ]
 
-    def _local_cache_initialized(self) -> bool:
+    def _local_cache_initialized(self, scope: str = "", work_type: str = "") -> bool:
         marker = self.state_store.get_document(
             POLLING_SOP_META_NAMESPACE, POLLING_SOP_CLOUD_CACHE_KEY
         )
-        return bool(isinstance(marker, dict) and marker.get("initialized"))
+        if isinstance(marker, dict) and marker.get("initialized"):
+            return True
+        scoped = self.state_store.get_document(POLLING_SOP_META_NAMESPACE, f"refresh:{scope}:{work_type}") if scope else None
+        return bool(scoped and scoped.get("initialized"))
+
+    def refresh_sops(self, scope: str, work_type: str = "polling") -> dict:
+        scope = str(scope or "").strip().upper()
+        work_type = _work_order_type(work_type)
+        if scope not in POLLING_SOP_SCOPES:
+            raise PortalError("请在明确的单楼页面同步 SOP。")
+        if not self.cloud:
+            raise PortalError("尚未配置 SOP 多维表连接。")
+        if not self._manual_refresh_lock.acquire(blocking=False):
+            raise PortalConflictError("SOP 正在同步，请稍后重试。")
+        try:
+            with self._lock:
+                # Manual refresh only downloads; it must not upload legacy drafts.
+                remote = self.cloud.list_sops(force=True)
+                if not isinstance(remote, list):
+                    raise PortalError("SOP 多维数据格式无效，本地资料未修改。")
+                matching = [item for item in remote if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
+                prepared = [self._cache_cloud_sop(item, persist=False) for item in matching]
+                updates = {item["sop_id"]: item for item in prepared}
+                if len(updates) != len(prepared):
+                    raise PortalConflictError("多维表存在重复 SOP 标识，请先处理后再同步。")
+                for sop_id, item in updates.items():
+                    local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id)
+                    if local and (str(local.get("scope") or "").upper() != scope or _stored_work_order_type(local) != work_type or int(local.get("version") or 0) > int(item.get("version") or 0)):
+                        raise PortalConflictError("本地 SOP 与云端存在范围或版本冲突，本地资料未修改。")
+                self.state_store.put_documents(POLLING_SOP_NAMESPACE, updates)
+                updated_at = self._now_text()
+                self.state_store.put_document(POLLING_SOP_META_NAMESPACE, f"refresh:{scope}:{work_type}", {"initialized": True, "updated_at": updated_at, "record_count": len(updates)})
+                items = [self._public_sop(item) for item in self._local_sops() if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
+                return {"items": sorted(items, key=lambda item: str(item.get("name") or "").casefold()), "synced_count": len(updates), "updated_at": updated_at}
+        finally:
+            self._manual_refresh_lock.release()
 
     def _refresh_local_cache_from_cloud(self) -> bool:
         if not self.cloud:
@@ -669,7 +708,7 @@ class PollingWorkOrderService:
         if scope not in POLLING_SOP_SCOPES:
             raise PortalError("请在明确的单楼页面读取 SOP。")
         source = self._local_sops()
-        if self.cloud and not self._local_cache_initialized():
+        if self.cloud and not self._local_cache_initialized(scope, work_type):
             if source:
                 self._start_local_cache_bootstrap()
             elif self._refresh_local_cache_from_cloud():
@@ -889,7 +928,8 @@ class PollingWorkOrderService:
         if expected_hash and hashlib.sha256(content).hexdigest() != expected_hash:
             raise PortalError("SOP 附件下载后校验失败。")
         directory.mkdir(parents=True, exist_ok=True)
-        path = (directory / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve()
+        if not path.is_relative_to(directory) or path == directory:
+            path = (directory / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve()
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_bytes(content)
         os.replace(temporary, path)

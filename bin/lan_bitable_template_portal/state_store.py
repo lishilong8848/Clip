@@ -8355,6 +8355,25 @@ class LanPortalStateStore:
                     )
                 conn.commit()
 
+    def put_documents(self, namespace: str, payloads: dict[str, dict[str, Any]]) -> None:
+        """Commit a validated document batch without exposing a partial refresh."""
+        namespace = self._text(namespace)
+        if not namespace or any(not self._text(key) for key in payloads):
+            raise ValueError("Document namespace and keys are required")
+        table = self._document_table_for_namespace(namespace)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                with conn:
+                    for key, payload in payloads.items():
+                        if table:
+                            self._put_table_document_locked(conn, table, key, dict(payload))
+                        else:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO json_documents(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)",
+                                (namespace, key, self._json(dict(payload)), time.time()),
+                            )
+
     def delete_document(self, namespace: str, key: str) -> None:
         namespace = self._text(namespace)
         key = self._text(key)
