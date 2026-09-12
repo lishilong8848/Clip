@@ -1,6 +1,8 @@
 import os
 import json
+import logging
 import sys
+import time
 import urllib.parse
 from typing import Dict, Any, Tuple, Optional
 
@@ -10,6 +12,7 @@ except ImportError:
     from upload_event_module.services.http_client import FeishuHttpClient
 
 _HTTP_CLIENT = FeishuHttpClient(retries=3)
+_LOG = logging.getLogger(__name__)
 TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 
 # === input params start
@@ -47,14 +50,14 @@ def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exceptio
         )
         if int(result.get("code") or 0) != 0:
             message = result.get("msg") or f"code={result.get('code')}"
-            print(f"ERROR: getting tenant_access_token: {message}", file=sys.stderr)
+            _LOG.warning("tenant_token failed code=%s", result.get("code"))
             return "", Exception(str(message))
         token = str(result.get("tenant_access_token") or "").strip()
         if not token:
             return "", Exception("empty tenant_access_token")
         return token, None
     except Exception as err:
-        print(f"ERROR: getting tenant_access_token: {err}", file=sys.stderr)
+        _LOG.warning("tenant_token failed error_type=%s", type(err).__name__)
         return "", err
 
 def get_wiki_node_info(tenant_access_token: str, node_token: str) -> Dict[str, Any]:
@@ -73,29 +76,23 @@ def get_wiki_node_info(tenant_access_token: str, node_token: str) -> Dict[str, A
         "Content-Type": "application/json; charset=utf-8"
     }
 
+    started = time.monotonic()
     try:
-        print(f"GET: {url}")
         result = _HTTP_CLIENT.request_json("GET", url, headers=headers)
-        print(f"Response: {json.dumps(result)}")
         
         if result.get("code", 0) != 0:
-            print(f"ERROR: 获取知识空间节点信息失败 {result}", file=sys.stderr)
+            _LOG.warning("wiki_node failed code=%s", result.get("code"))
             raise Exception(f"failed to get wiki node info: {result.get('msg', 'unknown error')}")
 
         if not result.get("data") or not result["data"].get("node"):
             raise Exception("未获取到节点信息")
 
         node_info = result["data"]["node"]
-        print("节点信息获取成功:", {
-            "node_token": node_info.get("node_token"),
-            "obj_type": node_info.get("obj_type"),
-            "obj_token": node_info.get("obj_token"),
-            "title": node_info.get("title")
-        })
+        _LOG.info("wiki_node succeeded count=1 elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
         return node_info
 
     except Exception as e:
-        print(f"ERROR: getting wiki node info: {e}", file=sys.stderr)
+        _LOG.warning("wiki_node failed error_type=%s elapsed_ms=%.1f", type(e).__name__, (time.monotonic() - started) * 1000)
         raise
 
 def parse_base_url(tenant_access_token: str, base_url_string: str) -> Dict[str, Optional[str]]:
@@ -150,25 +147,24 @@ def get_bitable_record(tenant_access_token: str, app_token: str, table_id: str, 
         "Content-Type": "application/json; charset=utf-8"
     }
 
+    started = time.monotonic()
     try:
-        print(f"GET: {url}")
-        print(f"Params: {json.dumps(params)}")
         result = _HTTP_CLIENT.request_json(
             "GET",
             url,
             headers=headers,
             params=params,
         )
-        print(f"Response: {json.dumps(result)}")
 
         if result.get("code", 0) != 0:
-            print(f"ERROR: 查询记录失败: {result.get('msg', 'unknown error')}", file=sys.stderr)
-            return {}, Exception(f"failed to get record: {json.dumps(result, ensure_ascii=False)}")
+            _LOG.warning("bitable_record failed code=%s", result.get("code"))
+            return {}, Exception(f"failed to get record: {result.get('msg', 'unknown error')}")
 
+        _LOG.info("bitable_record succeeded count=1 elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
         return result["data"], None
 
     except Exception as e:
-        print(f"ERROR: getting bitable record: {e}", file=sys.stderr)
+        _LOG.warning("bitable_record failed error_type=%s elapsed_ms=%.1f", type(e).__name__, (time.monotonic() - started) * 1000)
         return {}, e
 
 if __name__ == "__main__":

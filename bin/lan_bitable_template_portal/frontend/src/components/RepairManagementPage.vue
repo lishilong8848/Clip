@@ -574,6 +574,7 @@
 </template>
 
 <script setup lang="ts">
+import { acquireModal } from "../modalState";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
@@ -874,7 +875,7 @@ let repairAbortController: AbortController | null = null;
 let prefillAbortController: AbortController | null = null;
 let recordDetailAbortController: AbortController | null = null;
 let repairManagementStream: EventSource | null = null;
-let bodyOverflowBeforeDrawer = "";
+let projectModal: ReturnType<typeof acquireModal> | undefined;
 let projectDrawerReturnFocus: HTMLElement | null = null;
 
 const routeParams = new URLSearchParams(window.location.search);
@@ -1606,6 +1607,7 @@ function focusProjectDrawer(): void {
 }
 
 function handleProjectDrawerKeydown(event: KeyboardEvent): void {
+  if (!projectModal?.isTop() || event.defaultPrevented) return;
   if (event.key === "Escape") {
     event.preventDefault();
     requestCloseProjectDrawer();
@@ -3533,12 +3535,12 @@ watch(projectDrawerOpen, (open) => {
     projectDrawerReturnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    bodyOverflowBeforeDrawer = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    projectModal = acquireModal();
     focusProjectDrawer();
     return;
   }
-  document.body.style.overflow = bodyOverflowBeforeDrawer;
+  projectModal?.release();
+  projectModal = undefined;
   clearSyncStatusTimer();
 });
 
@@ -3589,6 +3591,7 @@ onActivated(() => {
 
 onDeactivated(() => {
   repairPageActive = false;
+  activePicker.value = "";
   stopRepairManagementStream();
   if (postSaveRefreshTimer) {
     clearTimeout(postSaveRefreshTimer);
@@ -3599,7 +3602,8 @@ onDeactivated(() => {
   followupPanelMounted.value = false;
   activeWorkspaceTab.value = "project";
   projectDrawerReturnFocus = null;
-  document.body.style.overflow = bodyOverflowBeforeDrawer;
+  projectModal?.release();
+  projectModal = undefined;
 });
 
 watch(searchText, () => {
@@ -3637,7 +3641,8 @@ onBeforeUnmount(() => {
     handleRepairStreamVisibilityChange,
   );
   stopRepairManagementStream();
-  document.body.style.overflow = bodyOverflowBeforeDrawer;
+  projectModal?.release();
+  projectModal = undefined;
   if (searchTimer) clearTimeout(searchTimer);
   if (postSaveRefreshTimer) {
     clearTimeout(postSaveRefreshTimer);

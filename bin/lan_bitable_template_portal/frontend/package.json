@@ -7,6 +7,8 @@
     "build": "vite build && node scripts/prune-dist-assets.mjs",
     "check:navigation": "node scripts/check-navigation-back.mjs",
     "check:drill": "node scripts/check-drill-management.mjs",
+    "check:reliability": "node scripts/check-request-reliability.mjs",
+    "check:cabinet-reliability": "node scripts/check-cabinet-reliability.mjs",
     "smoke": "python ../../tools/frontend_runtime_smoke.py",
     "typecheck": "vue-tsc --noEmit"
   },

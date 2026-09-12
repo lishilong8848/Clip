@@ -809,12 +809,12 @@ class FastAPIPortalController:
                     status_code=302,
                     headers={"Location": f"/workbench-lite?{urlencode(params)}"},
                 )
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/admin/history-memory")
         @app.get("/admin/history-memory/")
         async def admin_history_memory_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/workbench-lite")
         @app.get("/workbench-lite/")
@@ -1160,43 +1160,43 @@ class FastAPIPortalController:
         @app.get("/engineer/mop")
         @app.get("/engineer/mop/")
         async def engineer_mop_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/repair-management")
         @app.get("/repair-management/")
         async def repair_management_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/repair-status")
         @app.get("/repair-status/")
         async def repair_status_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/water-management")
         @app.get("/water-management/")
         @app.get("/cabinet-power")
         @app.get("/cabinet-power/")
         async def water_management_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/critical-guard")
         @app.get("/critical-guard/")
         async def critical_guard_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/drill-management")
         @app.get("/drill-management/")
         @app.get("/drill-management/print")
         @app.get("/drill-management/print/")
         async def drill_management_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/daily-tasks")
         @app.get("/daily-tasks/")
         @app.get("/daily-tasks/morning-meeting/print")
         @app.get("/daily-tasks/morning-meeting/print/")
         async def morning_meeting_print_page(request: Request):
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/signature")
         @app.get("/signature/")
@@ -1208,16 +1208,16 @@ class FastAPIPortalController:
                 for key in ("request_id", "record_id", "temporary_id")
             ):
                 return Response(status_code=302, headers={"Location": "/signature-management"})
-            return self._static_file_response(request, portal_index_file(), html=True)
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/assets/{asset_path:path}")
         async def assets(asset_path: str, request: Request):
             relative = Path(*str(asset_path or "").split("/"))
-            return self._static_file_response(request, portal_asset_file(relative))
+            return await asyncio.to_thread(self._static_file_response, request, portal_asset_file(relative))
 
         @app.get("/favicon.ico", include_in_schema=False)
         async def favicon(request: Request):
-            return self._static_file_response(
+            return await asyncio.to_thread(self._static_file_response,
                 request,
                 portal_asset_file(Path("clipflow-favicon.svg")),
             )
@@ -2264,8 +2264,8 @@ class FastAPIPortalController:
                     date=str(request.query_params.get("date") or "").strip(),
                 )
                 file_name = str(generated.get("file_name") or "晨会表格.xlsx")
-                return Response(
-                    content=Path(str(generated.get("file_path") or "")).read_bytes(),
+                return FileResponse(
+                    path=str(generated.get("file_path") or ""),
                     media_type=(
                         "application/vnd.openxmlformats-officedocument."
                         "spreadsheetml.sheet"
@@ -3346,7 +3346,7 @@ class FastAPIPortalController:
                 )
                 if not content_type.startswith("image/"):
                     raise PortalError("只能上传图片作为水表照片。")
-                body = await request.body()
+                body = await self._read_bounded_body(request, MAX_SITE_PHOTO_BYTES)
                 if not body:
                     raise PortalError("水表照片内容为空。")
                 if len(body) > MAX_SITE_PHOTO_BYTES:
@@ -6649,7 +6649,7 @@ class FastAPIPortalController:
                 content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].strip()
                 if not content_type.startswith("image/"):
                     raise PortalError("只能上传图片作为现场照片。")
-                body = await request.body()
+                body = await self._read_bounded_body(request, MAX_SITE_PHOTO_BYTES)
                 if not body:
                     raise PortalError("现场照片内容为空。")
                 if len(body) > MAX_SITE_PHOTO_BYTES:
@@ -6785,7 +6785,7 @@ class FastAPIPortalController:
                 content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].strip()
                 if not content_type.startswith("image/"):
                     raise PortalError("只能上传图片。")
-                body = await request.body()
+                body = await self._read_bounded_body(request, MAX_SITE_PHOTO_BYTES)
                 if not body:
                     raise PortalError("图片内容为空。")
                 if len(body) > MAX_SITE_PHOTO_BYTES:
@@ -10544,9 +10544,7 @@ class FastAPIPortalController:
         )
 
     @staticmethod
-    async def _read_json_request(
-        request: Request, *, max_bytes: int | None = None
-    ) -> dict:
+    async def _read_bounded_body(request: Request, limit: int) -> bytes:
         raw_length = request.headers.get("content-length", "0") or "0"
         try:
             length = int(raw_length)
@@ -10554,10 +10552,21 @@ class FastAPIPortalController:
             raise ValueError("请求体长度无效。") from exc
         if length < 0:
             raise ValueError("请求体长度无效。")
-        limit = int(max_bytes or MAX_JSON_BODY_BYTES)
         if length > limit:
             raise ValueError("请求体过大，请减少粘贴内容后重试。")
-        payload = await request.json()
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > limit:
+                raise ValueError("请求体过大，请减少内容后重试。")
+            body.extend(chunk)
+        return bytes(body)
+
+    @classmethod
+    async def _read_json_request(
+        cls, request: Request, *, max_bytes: int | None = None
+    ) -> dict:
+        body = await cls._read_bounded_body(request, int(max_bytes or MAX_JSON_BODY_BYTES))
+        payload = json.loads(body)
         if not isinstance(payload, dict):
             raise ValueError("请求体必须是 JSON 对象。")
         return payload

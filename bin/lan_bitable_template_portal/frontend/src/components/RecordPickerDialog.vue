@@ -105,7 +105,7 @@
                 @keydown.enter.prevent="toggle(record)"
                 @keydown.space.prevent="toggle(record)"
               >
-                <td class="select-column">
+                <td class="select-column" data-label="选择">
                   <input
                     :type="multiple ? 'checkbox' : 'radio'"
                     :name="multiple ? undefined : titleId"
@@ -119,6 +119,7 @@
                   v-for="column in columns"
                   :key="column.key"
                   :class="{ 'wrap-column': column.wrap }"
+                  :data-label="column.label"
                   :title="cellText(record, column.key)"
                 >
                   <span>{{ cellText(record, column.key) || "-" }}</span>
@@ -175,6 +176,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { RefreshCw, Search, X } from "lucide-vue-next";
 import { repairFieldValueToText } from "../repairManagementUtils";
 import type { LooseDict } from "../types";
+import { acquireModal } from "../modalState";
 
 type RecordPickerColumn = {
   key: string;
@@ -226,7 +228,7 @@ const draftSelection = ref<string[]>([]);
 const page = ref(1);
 const dialogRef = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
-let previousBodyOverflow = "";
+let modal: ReturnType<typeof acquireModal> | undefined;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let returnFocusElement: HTMLElement | null = null;
 const PAGE_SIZE = 30;
@@ -288,8 +290,10 @@ function runSearchNow(): void {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
-  if (!props.open) return;
+  if (!props.open || !modal?.isTop() || event.defaultPrevented) return;
   if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopImmediatePropagation();
     emit("close");
     return;
   }
@@ -327,17 +331,17 @@ watch(
       returnFocusElement = document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
-      previousBodyOverflow = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
+      modal = acquireModal();
       window.addEventListener("keydown", handleKeydown);
       void nextTick(() => searchInput.value?.focus());
     } else {
-      document.body.style.overflow = previousBodyOverflow;
+      modal?.release();
+      modal = undefined;
       window.removeEventListener("keydown", handleKeydown);
       const returnFocus = returnFocusElement;
       returnFocusElement = null;
       void nextTick(() => {
-        if (returnFocus?.isConnected) returnFocus.focus();
+        if (returnFocus?.isConnected && returnFocus.getClientRects().length) returnFocus.focus();
       });
     }
   },
@@ -366,7 +370,8 @@ watch(
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   returnFocusElement = null;
-  document.body.style.overflow = previousBodyOverflow;
+  modal?.release();
+  modal = undefined;
   window.removeEventListener("keydown", handleKeydown);
 });
 </script>
@@ -771,13 +776,142 @@ onBeforeUnmount(() => {
 
   .record-picker-dialog {
     width: 100vw;
-    height: 100vh;
+    height: 100dvh;
     border: 0;
     border-radius: 0;
   }
 
+  .record-picker-head,
+  .record-picker-toolbar,
+  .record-picker-footer {
+    padding-inline: 14px;
+  }
+
+  .record-picker-toolbar {
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .record-picker-toolbar-actions {
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  .record-picker-toolbar-actions > * {
+    flex: 1 1 auto;
+  }
+
+  .record-picker-table-wrap {
+    overflow-x: hidden;
+    padding: 10px 12px;
+    background: #f4f7fb;
+  }
+
+  .record-picker-table,
+  .record-picker-table tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .record-picker-table thead {
+    display: none;
+  }
+
+  .record-picker-table tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  .record-picker-table tbody tr {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    border: 1px solid #d8e3f0;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .record-picker-table tbody tr:focus-visible {
+    outline: 3px solid rgba(39, 117, 232, 0.28);
+    outline-offset: 1px;
+  }
+
+  .record-picker-table tbody tr.selected {
+    border-color: #6ba2e9;
+    box-shadow: inset 3px 0 0 #176de0;
+  }
+
+  .record-picker-table tbody td {
+    display: grid;
+    grid-template-columns: minmax(76px, 30%) minmax(0, 1fr);
+    gap: 10px;
+    width: auto;
+    height: auto;
+    min-height: 40px;
+    padding: 9px 12px;
+    border-right: 0;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .record-picker-table tbody td::before {
+    content: attr(data-label);
+    color: #647990;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .record-picker-table tbody td span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .record-picker-table tbody .recommended-mark {
+    grid-column: 2;
+  }
+
+  .record-picker-table tbody .select-column {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: auto;
+    min-width: 0;
+  }
+
+  .record-picker-table tbody .select-column::before {
+    content: "选择此记录";
+  }
+
+  .record-picker-table tbody .picker-empty {
+    display: block;
+    height: auto !important;
+    min-height: 160px;
+    padding: 56px 16px;
+    text-align: center !important;
+  }
+
+  .record-picker-table tbody .picker-empty::before {
+    content: none;
+  }
+
   .record-picker-footer {
     flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .picker-result-summary {
+    min-width: 0;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .picker-result-summary small {
+    max-width: 100%;
+    white-space: normal;
   }
 
   .picker-pager {

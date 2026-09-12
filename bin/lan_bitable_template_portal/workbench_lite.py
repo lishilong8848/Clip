@@ -3240,6 +3240,10 @@ def render_workbench_lite(
       .refresh-menu {{ right:0; left:auto; }}
       .polling-sop-dialog {{ width:100%; max-height:calc(100dvh - 12px); }}
       .end-check-backdrop {{ padding:6px; }}
+      .target-candidate-dialog {{ width:100%; max-height:calc(100dvh - 12px); border-radius:16px; }}
+      .target-candidate-list {{ padding:12px; }}
+      .target-candidate-row strong,.target-candidate-row span,.target-candidate-row small {{ min-width:0; overflow-wrap:anywhere; }}
+      .manual-source-tools {{ padding:10px 12px 0; }}
       .end-check-actions {{ flex-wrap:wrap; }}
       .end-check-actions .btn {{ flex:1 1 120px; }}
     }}

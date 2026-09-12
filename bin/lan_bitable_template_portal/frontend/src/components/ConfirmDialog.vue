@@ -1,18 +1,20 @@
 <template>
   <div v-if="open" class="confirm-backdrop" @click.self="emit('resolve', false)">
     <section
+      ref="dialog"
+      tabindex="-1"
       class="confirm-modal"
       :class="`tone-${tone}`"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="confirm-dialog-title"
+      :aria-labelledby="titleId"
     >
       <div class="confirm-icon" aria-hidden="true"></div>
       <div class="confirm-content">
         <header>
           <div>
             <span>{{ kicker || "操作确认" }}</span>
-            <strong id="confirm-dialog-title">{{ title }}</strong>
+            <strong :id="titleId">{{ title }}</strong>
           </div>
           <button type="button" class="confirm-close" aria-label="关闭确认弹窗" @click="emit('resolve', false)">×</button>
         </header>
@@ -34,7 +36,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { acquireModal } from "../modalState";
 
 const props = withDefaults(defineProps<{
   open: boolean;
@@ -60,6 +63,47 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   resolve: [confirmed: boolean];
 }>();
+
+const dialog = ref<HTMLElement | null>(null);
+const titleId = `confirm-${Math.random().toString(36).slice(2)}`;
+let modal: ReturnType<typeof acquireModal> | undefined;
+let returnFocus: HTMLElement | null = null;
+function keydown(event: KeyboardEvent): void {
+  if (!modal?.isTop() || !dialog.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    emit("resolve", false);
+  } else if (event.key === "Tab") {
+    const nodes = Array.from(dialog.value.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),[tabindex="0"]')).filter(node => node.getClientRects().length);
+    const first = nodes[0], last = nodes[nodes.length - 1];
+    if (!dialog.value.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  }
+}
+function release(): void {
+  modal?.release();
+  modal = undefined;
+  window.removeEventListener("keydown", keydown, true);
+}
+watch(() => props.open, async open => {
+  if (open) {
+    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    modal = acquireModal();
+    window.addEventListener("keydown", keydown, true);
+    await nextTick();
+    if (props.open) dialog.value?.querySelector<HTMLElement>("button")?.focus();
+  } else {
+    release();
+    const target = returnFocus;
+    returnFocus = null;
+    await nextTick();
+    if (target?.isConnected && target.getClientRects().length) target.focus();
+  }
+}, { immediate: true });
+onBeforeUnmount(release);
 
 const defaultConfirmClass = computed(() => (
   props.tone === "danger" ? "danger" : props.tone === "warning" ? "green" : "blue"

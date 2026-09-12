@@ -21,6 +21,7 @@ import time
 import zipfile
 
 from pathlib import Path
+from bin.frontend_assets import is_frontend_asset
 
 from urllib.parse import urlparse
 
@@ -2468,7 +2469,8 @@ def build_patch(
 
         for rel in baseline_files.keys():
 
-            if rel not in current_set:
+            # Installed clients retain the previous entry's hashed resources.
+            if rel not in current_set and not is_frontend_asset(rel):
 
                 deleted += 1
 

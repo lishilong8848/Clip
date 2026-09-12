@@ -113,57 +113,67 @@ export async function requestJson(
   options: ApiRequestOptions = {},
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
-  let response: Response;
+  return requestResponseJson(path, options, hooks, buildHeaders(options));
+}
+
+async function requestResponseJson(
+  path: string,
+  options: ApiRequestOptions,
+  hooks: ApiClientHooks,
+  headers?: HeadersInit,
+): Promise<Dict> {
   const { timeoutMs = 45_000, ...fetchOptions } = options;
   const requestSignal = requestSignalWithTimeout(fetchOptions.signal, timeoutMs);
   try {
-    response = await fetch(path, {
+    const response = await fetch(path, {
       ...fetchOptions,
       credentials: fetchOptions.credentials || "same-origin",
-      headers: buildHeaders(fetchOptions),
+      headers,
       signal: requestSignal.signal,
     });
+    let payload: Dict = {};
+    let invalidPayload = false;
+    if (response.status !== 204 && fetchOptions.method?.toUpperCase() !== "HEAD") {
+      try {
+        const parsed: unknown = await response.json();
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalidPayload = true;
+        else payload = parsed as Dict;
+      } catch (error) {
+        if (requestSignal.signal.aborted || (response.status !== 401 && !(error instanceof SyntaxError))) throw error;
+        invalidPayload = true;
+      }
+    }
+    if (response.status === 401 || payload.auth_required) {
+      const message = String(payload.error || "登录已过期，请重新扫码登录。");
+      const detail = authExpiredDetail(message, payload);
+      hooks.onAuthExpired?.(message, response, payload);
+      window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
+      scheduleAuthRedirect(String(detail.login_url || ""));
+      throw new ApiError(message, { status: response.status, payload, authRequired: true });
+    }
+    if (response.status >= 500) {
+      hooks.onServerError?.(String(payload.error || "服务异常，稍后会自动重试。"), response, payload);
+    }
+    if (!response.ok || payload.ok === false) {
+      throw new ApiError(String(payload.error || `HTTP ${response.status}`), { status: response.status, payload });
+    }
+    if (invalidPayload) {
+      throw new ApiError("服务器响应格式异常，当前输入已保留，请重试。", { status: response.status });
+    }
     hooks.onOnline?.();
+    return Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === "AbortError") {
+    if (requestSignal.signal.aborted) {
       throw new ApiError(requestSignal.timedOut() ? "请求超时，请稍后重试。" : "请求已取消。");
     }
+    if (error instanceof ApiError) throw error;
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
-    window.dispatchEvent(new Event('clipflow-api-offline'));
+    window.dispatchEvent(new Event("clipflow-api-offline"));
     throw new ApiError(message, { offline: true });
   } finally {
     requestSignal.cleanup();
   }
-
-  const payload = await response.json().catch(() => ({} as Dict));
-  if (response.status === 401 || payload.auth_required) {
-    const message = String(payload.error || "登录已过期，请重新扫码登录。");
-    const detail = authExpiredDetail(message, payload);
-    hooks.onAuthExpired?.(message, response, payload);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
-      scheduleAuthRedirect(String(detail.login_url || ""));
-    }
-    throw new ApiError(message, {
-      status: response.status,
-      payload,
-      authRequired: true,
-    });
-  }
-
-  if (response.status >= 500) {
-    hooks.onServerError?.(String(payload.error || "服务异常，稍后会自动重试。"), response, payload);
-  }
-
-  if (!response.ok || payload.ok === false) {
-    throw new ApiError(String(payload.error || `HTTP ${response.status}`), {
-      status: response.status,
-      payload,
-    });
-  }
-
-  return Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
 }
 
 export type RemoteSourceRefreshKind = "maintenance" | "repair" | "change" | "event";
@@ -303,56 +313,7 @@ export async function requestBinaryJson(
   options: RequestInit = {},
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
-  let response: Response;
-  const requestSignal = requestSignalWithTimeout(options.signal, 120_000);
-  try {
-    response = await fetch(path, {
-      ...options,
-      method: options.method || "POST",
-      credentials: options.credentials || "same-origin",
-      headers: options.headers,
-      body,
-      signal: requestSignal.signal,
-    });
-    hooks.onOnline?.();
-  } catch (error: unknown) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiError(requestSignal.timedOut() ? "请求超时，请稍后重试。" : "请求已取消。");
-    }
-    const message = error instanceof Error && error.message ? error.message : "服务连接中断";
-    hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
-    window.dispatchEvent(new Event('clipflow-api-offline'));
-    throw new ApiError(message, { offline: true });
-  } finally {
-    requestSignal.cleanup();
-  }
-
-  const payload = await response.json().catch(() => ({} as Dict));
-  if (response.status === 401 || payload.auth_required) {
-    const message = String(payload.error || "登录已过期，请重新扫码登录。");
-    const detail = authExpiredDetail(message, payload);
-    hooks.onAuthExpired?.(message, response, payload);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
-      scheduleAuthRedirect(String(detail.login_url || ""));
-    }
-    throw new ApiError(message, {
-      status: response.status,
-      payload,
-      authRequired: true,
-    });
-  }
-
-  if (response.status >= 500) {
-    hooks.onServerError?.(String(payload.error || "服务异常，稍后会自动重试。"), response, payload);
-  }
-
-  if (!response.ok || payload.ok === false) {
-    throw new ApiError(String(payload.error || `HTTP ${response.status}`), {
-      status: response.status,
-      payload,
-    });
-  }
-
-  return Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
+  return requestResponseJson(path, {
+    ...options, method: options.method || "POST", body, timeoutMs: 120_000,
+  }, hooks, options.headers);
 }

@@ -1638,6 +1638,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                   }});
                   if (!['auto', 'scroll'].includes(ownOverflow) && !nestedScroller) issues.push(`${{name}} clips vertical content without scrolling`);
                 }}
+                for (const wrap of surface.querySelectorAll('.record-picker-table-wrap')) {{
+                  if (wrap.scrollWidth > wrap.clientWidth + 2) issues.push(`${{name}} record table still requires horizontal scrolling`);
+                }}
               }}
               const smallTargets = surfaces.flatMap(surface => Array.from(surface.querySelectorAll('button,a[href],input,select,textarea'))).filter(visible).filter(node => !node.matches('[type="hidden"],[type="checkbox"],[type="radio"],.sr-only')).map(node => [node, node.getBoundingClientRect()]).filter(([, rect]) => rect.height < 38 && rect.width < 120).slice(0, 20).map(([node, rect]) => `${{node.tagName.toLowerCase()}}.${{String(node.className || '').trim().replace(/\\s+/g,'.').slice(0,70)}}:${{Math.round(rect.width)}}x${{Math.round(rect.height)}}`);
               return {{
@@ -1757,8 +1760,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                 await targetPage.getByRole('button', {{ name: '新增录入', exact: true }}).click();
                 await targetPage.waitForSelector('.record-drawer', {{ state: 'visible' }});
                 await inspectMobileFloatingSurfaces(targetPage, 'water-record-drawer');
-                await targetPage.locator('.record-drawer').getByRole('button', {{ name: '关闭', exact: true }}).click();
-              }} else if (stage === 'signature-management') {{
+                  await targetPage.locator('.record-drawer').getByRole('button', {{ name: '关闭', exact: true }}).click();
+                }} else if (stage === 'signature-management') {{
                 await targetPage.getByRole('button', {{ name: '新增临时人员', exact: true }}).click();
                 await targetPage.locator('dialog[open]').waitFor({{ state: 'visible' }});
                 await inspectMobileFloatingSurfaces(targetPage, 'signature-create-dialog');
@@ -1770,6 +1773,29 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                   await inspectMobileFloatingSurfaces(targetPage, 'signature-send-dialog');
                   await targetPage.locator('dialog[open]').getByRole('button', {{ name: '关闭', exact: true }}).click();
                 }}
+              }} else if (stage === 'cabinet-power') {{
+                await targetPage.setViewportSize({{ width: 390, height: 844 }});
+                const ledgerTab = targetPage.getByRole('button', {{ name: '机柜台账', exact: true }});
+                await ledgerTab.click();
+                await targetPage.waitForSelector('.source-table tbody tr', {{ state: 'visible' }});
+                const ledgerLayout = await targetPage.locator('.source-table-wrap').evaluate((wrap) => {{
+                  const table = wrap.querySelector('table');
+                  const row = wrap.querySelector('tbody tr');
+                  const cells = Array.from(row?.querySelectorAll('td:not(.empty-cell)') || []);
+                  return {{
+                    horizontalOverflow: wrap.scrollWidth > wrap.clientWidth + 2,
+                    tableWidth: Math.round(table?.getBoundingClientRect().width || 0),
+                    wrapWidth: Math.round(wrap.getBoundingClientRect().width),
+                    rowDisplay: row ? getComputedStyle(row).display : '',
+                    unlabeledCells: cells.filter(cell => !cell.getAttribute('data-label')).length,
+                  }};
+                }});
+                if (ledgerLayout.horizontalOverflow || ledgerLayout.tableWidth > ledgerLayout.wrapWidth + 2 || ledgerLayout.rowDisplay !== 'block' || ledgerLayout.unlabeledCells) {{
+                  throw new Error(`cabinet mobile ledger is not card-based: ${{JSON.stringify(ledgerLayout)}}`);
+                }}
+                require('fs').mkdirSync('output/playwright/mobile', {{ recursive: true }});
+                await targetPage.locator('.source-table tbody tr').first().evaluate((row) => row.scrollIntoView({{ block: 'start' }}));
+                await targetPage.screenshot({{ path: 'output/playwright/mobile/cabinet-power-ledger.png', fullPage: false }});
               }}
             }}
             return reports.filter(([, report]) => report.horizontalOverflow || report.overflow.length || report.oversizedImages.length || report.smallTargets.length);
@@ -2182,8 +2208,12 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           const eventPicker = page.getByRole('dialog', {{ name: '选择关联事件单' }});
           await inspectMobileFloatingSurfaces(page, 'repair-event-picker');
+          await eventPicker.getByRole('button', {{ name: '确认', exact: true }}).focus();
+          await page.keyboard.press('Tab');
+          if (!(await eventPicker.evaluate(node => node.contains(document.activeElement)))) throw new Error('record picker focus escaped');
           await eventPicker.locator('tbody tr').filter({{ hasText: 'A楼测试事件转检修' }}).click();
           await eventPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
+          if (await page.evaluate(() => document.body.style.overflow) !== 'hidden') throw new Error('closing child picker unlocked the parent drawer');
           if (repairNoticeCandidateRequestCount !== 0) {{
             throw new Error(`repair candidates loaded before opening their picker: ${{repairNoticeCandidateRequestCount}}`);
           }}
@@ -2277,6 +2307,12 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await followupPanel.getByRole('button', {{ name: '重新选择', exact: true }}).click();
           const clearCmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备（可多选）', exact: true }});
+          await page.keyboard.press('Escape');
+          await clearCmdbDialog.waitFor({{ state: 'hidden' }});
+          if (!(await page.locator('.repair-project-drawer').isVisible())) throw new Error('Escape closed the parent drawer');
+          if (await page.evaluate(() => document.body.style.overflow) !== 'hidden') throw new Error('Escape released the parent scroll lock');
+          if (!(await followupPanel.getByRole('button', {{ name: '重新选择', exact: true }}).evaluate(node => node === document.activeElement))) throw new Error('picker did not restore opener focus');
+          await followupPanel.getByRole('button', {{ name: '重新选择', exact: true }}).click();
           await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-219-CRAH-01' }}).click();
           await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-220-CRAH-02' }}).click();
           await clearCmdbDialog.getByRole('button', {{ name: '清空关联', exact: true }}).click();
@@ -2316,7 +2352,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await inspectMobileFloatingSurfaces(page, 'repair-unsaved-confirm');
-          await page.getByRole('button', {{ name: '取消', exact: true }}).click();
+          await page.keyboard.press('Escape');
+          await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'hidden' }});
+          if (await page.evaluate(() => document.body.style.overflow) !== 'hidden') throw new Error('confirmation released the parent scroll lock');
           await page.setViewportSize({{ width: 1366, height: 768 }});
           if (await followupDescription.inputValue() !== '烟测新增跟进') {{
             throw new Error('cancelling repair drawer close discarded unsaved followup draft');
@@ -2744,23 +2782,33 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (!page.url().includes('entry=maintenance')) {{
               throw new Error(`lite workbench return lost module entry: ${{page.url()}}`);
             }}
-            const heapBeforeSoak = await page.evaluate(() => {{
-              if (typeof globalThis.gc === 'function') globalThis.gc();
-              return performance.memory?.usedJSHeapSize || 0;
-            }});
+            const heapSession = await page.context().newCDPSession(page);
+            const heapSamples = [];
+            const sampleHeap = async cycle => {{
+              const pageReportedBytes = await page.evaluate(() => {{
+                if (typeof globalThis.gc === 'function') globalThis.gc();
+                return performance.memory?.usedJSHeapSize || 0;
+              }});
+              await heapSession.send('HeapProfiler.collectGarbage');
+              const heap = await heapSession.send('Runtime.getHeapUsage');
+              const dom = await heapSession.send('Memory.getDOMCounters');
+              heapSamples.push({{ cycle, pageReportedBytes, usedBytes: heap.usedSize, ...dom }});
+              return heap.usedSize;
+            }};
+            const heapBeforeSoak = await sampleHeap(0);
+            // Locator waits do not retain detached page trees via ElementHandles.
             for (let cycle = 0; cycle < 100; cycle += 1) {{
               await page.getByRole('button', {{ name: /^返回$/ }}).click();
-              await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
+              await page.getByRole('heading', {{ name: '业务模块', exact: true }}).waitFor({{ timeout: 10000 }});
               await page.locator('.module-maintenance .module-card__main').click();
-              await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
+              await page.getByRole('heading', {{ name: '选择楼栋进入维护管理', exact: true }}).waitFor({{ timeout: 10000 }});
+              if ((cycle + 1) % 25 === 0) await sampleHeap(cycle + 1);
             }}
-            const heapAfterSoak = await page.evaluate(() => {{
-              if (typeof globalThis.gc === 'function') globalThis.gc();
-              return performance.memory?.usedJSHeapSize || 0;
-            }});
+            const heapAfterSoak = heapSamples[heapSamples.length - 1].usedBytes;
+            await heapSession.detach();
             const heapGrowth = heapAfterSoak - heapBeforeSoak;
             if (heapBeforeSoak && heapGrowth > 12 * 1024 * 1024 && heapGrowth > heapBeforeSoak * 0.35) {{
-              throw new Error(`100-cycle navigation heap growth too high: before=${{heapBeforeSoak}} after=${{heapAfterSoak}}`);
+              throw new Error(`100-cycle navigation heap growth too high: ${{JSON.stringify(heapSamples)}}`);
             }}
             await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-scope-after-return');
             if (errors.length || failedResponses.length) {{
@@ -2770,6 +2818,19 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             const mobileIssues = await auditAllMobileRoutes(page);
             if (mobileIssues.length) throw new Error(`mobile layout issues: ${{JSON.stringify(mobileIssues)}}`);
             await assertConnectionGuard();
+            const recoveryPage = await context.newPage();
+            await recoveryPage.route('**/CabinetPowerPage-*.js', route => route.abort());
+            await recoveryPage.goto(new URL('/cabinet-power?scope=A', cfg.url).toString());
+            await recoveryPage.getByText('页面加载失败', {{ exact: true }}).waitFor();
+            await recoveryPage.locator('.async-page-state > button').click();
+            const reloadDialog = recoveryPage.getByRole('dialog', {{ name: '重新加载页面？', exact: true }});
+            await reloadDialog.getByRole('button', {{ name: '取消', exact: true }}).click();
+            await recoveryPage.getByText('页面加载失败', {{ exact: true }}).waitFor();
+            await recoveryPage.unroute('**/CabinetPowerPage-*.js');
+            await recoveryPage.locator('.async-page-state > button').click();
+            await reloadDialog.getByRole('button', {{ name: '重新加载', exact: true }}).click();
+            await recoveryPage.locator('.cabinet-page .metrics').waitFor();
+            await recoveryPage.close();
             await browser.close();
             console.log(JSON.stringify({{
               ok: true,
@@ -2777,6 +2838,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               mode: 'workbench-lite',
               markers: ['飞书扫码登录', ...required, 'A楼轻量工作台', '计划通告列表', '未结束通告', 'VNET蓝白皮肤', 'worker提交不卡顿', '100次导航堆稳定'],
               heapGrowthBytes: heapGrowth,
+              heapSamples,
             }}));
             return;
           }}

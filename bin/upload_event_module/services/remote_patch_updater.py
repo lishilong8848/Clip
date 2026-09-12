@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 import hashlib
 import json
+import os
 import re
 import shutil
 import stat
+import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit, unquote
 
 import requests
 
@@ -100,31 +103,50 @@ class RemotePatchUpdater:
 
     def _download_zip(self, manifest: dict) -> Path:
         zip_url = (manifest.get("zip_url") or "").strip()
-        zip_name = (manifest.get("zip_name") or "").strip()
+        zip_name = str(manifest.get("zip_name") or "")
         if not zip_url:
             raise RuntimeError("remote manifest missing zip_url")
         if not zip_name:
-            zip_name = Path(zip_url).name or "patch.zip"
-        target_zip = self.data_dir / zip_name
-        with requests.get(zip_url, stream=True, timeout=(5, 60)) as resp:
-            resp.raise_for_status()
-            with target_zip.open("wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 512):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
+            zip_name = unquote(urlsplit(zip_url).path.rsplit("/", 1)[-1]) or "patch.zip"
+        if (
+            zip_name in {".", ".."}
+            or re.search(r'[<>:"/\\|?*\x00-\x1f]', zip_name)
+            or zip_name.endswith((".", " "))
+            or getattr(os.path, "isreserved", lambda name: PureWindowsPath(name).is_reserved())(zip_name)
+        ):
+            raise RuntimeError("remote manifest contains an unsafe zip_name")
+        root = self.data_dir.resolve()
+        target_zip = root / zip_name
+        if not target_zip.resolve().is_relative_to(root):
+            raise RuntimeError("remote manifest contains an unsafe zip path")
         expected_sha256 = (manifest.get("zip_sha256") or "").strip().lower()
-        if expected_sha256:
-            actual_sha256 = self._sha256_file(target_zip).lower()
-            if actual_sha256 != expected_sha256:
-                target_zip.unlink(missing_ok=True)
-                raise RuntimeError("zip sha256 mismatch")
         expected_size = self._safe_int(manifest.get("zip_size"), 0)
-        if expected_size > 0:
-            actual_size = target_zip.stat().st_size
-            if actual_size != expected_size:
-                target_zip.unlink(missing_ok=True)
+        temporary = None
+        try:
+            digest = hashlib.sha256()
+            size = 0
+            with tempfile.NamedTemporaryFile(dir=root, prefix=".download-", suffix=".part", delete=False) as stream:
+                temporary = Path(stream.name)
+                with requests.get(zip_url, stream=True, timeout=(5, 60)) as resp:
+                    resp.raise_for_status()
+                    for chunk in resp.iter_content(chunk_size=1024 * 512):
+                        if not chunk:
+                            continue
+                        size += len(chunk)
+                        if expected_size > 0 and size > expected_size:
+                            raise RuntimeError("zip size mismatch")
+                        stream.write(chunk)
+                        digest.update(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if expected_sha256 and digest.hexdigest() != expected_sha256:
+                raise RuntimeError("zip sha256 mismatch")
+            if expected_size > 0 and size != expected_size:
                 raise RuntimeError("zip size mismatch")
+            os.replace(temporary, target_zip)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return target_zip
 
     def _extract_patch_dir(self, zip_path: Path) -> Path:

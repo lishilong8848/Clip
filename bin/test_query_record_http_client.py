@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -39,6 +40,21 @@ class _FakeFeishuClient:
 
 
 class QueryRecordHttpClientTests(unittest.TestCase):
+    def test_query_logs_do_not_include_record_content_or_tokens(self):
+        secret = "private-record-content"
+        fake = _FakeFeishuClient()
+        original = fake.request_json
+        fake.request_json = lambda *args, **kwargs: {**original(*args, **kwargs), "data": {"record": {"body": secret}}}
+        stdout = io.StringIO()
+        with patch.object(query_module, "_HTTP_CLIENT", fake), contextlib.redirect_stdout(stdout), self.assertLogs(query_module._LOG, level="INFO") as logs:
+            record, error = query_module.get_bitable_record("private-token", "app-secret", "table-id", "rec-private")
+        self.assertIsNone(error)
+        self.assertEqual(record["record"]["body"], secret)
+        output = stdout.getvalue() + "\n".join(logs.output)
+        for value in [secret, "private-token", "app-secret", "rec-private"]:
+            self.assertNotIn(value, output)
+        self.assertIn("elapsed_ms", output)
+
     def test_token_and_record_queries_use_unified_client(self):
         original = query_module._HTTP_CLIENT
         fake = _FakeFeishuClient()

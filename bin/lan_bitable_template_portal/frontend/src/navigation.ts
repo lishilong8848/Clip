@@ -52,6 +52,12 @@ export function navigateHard(target: string | URL): void {
   navigate(target, { hard: true });
 }
 
+export function requestPageReload(confirm: (proceed: () => void) => void): void {
+  const proceed = () => window.location.reload();
+  if (!navigationGuard) confirm(proceed);
+  else if (navigationGuard(window.location.href, proceed)) proceed();
+}
+
 export function replaceRoute(target: string | URL): void {
   navigate(target, { replace: true });
 }

@@ -6,9 +6,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
+from frontend_assets import FRONTEND_INDEX, patch_deletions
 
 from PyQt6.QtWidgets import (
     QFrame,
@@ -637,12 +639,24 @@ class PatchUpdateMixin:
 
     def _copy_with_retry(self, src: Path, dest: Path, attempts: int = 3) -> bool:
         for _ in range(attempts):
+            temporary = None
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
+                with tempfile.NamedTemporaryFile(dir=dest.parent, prefix=".patch-", delete=False) as stream:
+                    temporary = Path(stream.name)
+                shutil.copy2(src, temporary)
+                if dest.name == "index.html" and self._sha256_file(src) != self._sha256_file(temporary):
+                    raise OSError("前端入口写入校验失败")
+                os.replace(temporary, dest)
                 return True
             except Exception:
                 time.sleep(0.2)
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        log_warning("补丁临时文件清理失败，原文件保持不变")
         return False
 
     def _delete_with_retry(self, target: Path, attempts: int = 3) -> bool:
@@ -685,25 +699,20 @@ class PatchUpdateMixin:
         return backup_dir, new_files, deleted_files
 
     def _rollback_patch(self, backup_dir: Path, new_files: list[Path]):
-        for path in new_files:
-            try:
-                if path.exists():
-                    if path.is_dir():
-                        shutil.rmtree(path)
-                    else:
-                        path.unlink()
-            except Exception:
-                pass
-        for src in backup_dir.rglob("*"):
+        for src in sorted(backup_dir.rglob("*"), key=lambda path: path.relative_to(backup_dir) == FRONTEND_INDEX):
             if src.is_dir():
                 continue
             rel = src.relative_to(backup_dir)
             dest = self._get_app_root_dir() / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.copy2(src, dest)
-            except Exception:
-                pass
+                if not self._copy_with_retry(src, dest):
+                    raise OSError(f"补丁回退文件失败: {rel}，备份保留于 {backup_dir}")
+            except Exception as exc:
+                raise RuntimeError(f"补丁回退未完成，备份保留于 {backup_dir}") from exc
+        for path in new_files:
+            if path.is_file():
+                path.unlink()
 
     def _update_build_meta(self, root_dir: Path, patch_meta: dict):
         if not patch_meta:
@@ -1045,6 +1054,10 @@ class PatchUpdateMixin:
                         self.patch_update_finished.emit(False, f"补丁文件校验失败: {rel}")
                         return
             deleted_files = self._parse_deleted_files(patch_dir)
+            for rel in deleted_files:
+                if rel.is_absolute() or ".." in rel.parts or not (root_dir / rel).resolve().is_relative_to(root_dir.resolve()):
+                    raise ValueError("补丁删除清单包含不安全路径")
+            deleted_files = patch_deletions(root_dir, patch_dir, deleted_files)
             backup_dir, new_files, deleted_files = self._backup_patch_targets(
                 patch_dir, patch_files, deleted_files, root_dir
             )
@@ -1052,13 +1065,10 @@ class PatchUpdateMixin:
             failed: list[str] = []
             for src in patch_files:
                 rel = src.relative_to(patch_dir)
+                if rel == FRONTEND_INDEX:
+                    continue
                 dest = root_dir / rel
                 if not self._copy_with_retry(src, dest):
-                    failed.append(str(rel))
-
-            for rel in deleted_files:
-                target = root_dir / rel
-                if target.exists() and not self._delete_with_retry(target):
                     failed.append(str(rel))
 
             if failed:
@@ -1074,6 +1084,8 @@ class PatchUpdateMixin:
 
                 for src in patch_files:
                     rel = src.relative_to(patch_dir)
+                    if rel == FRONTEND_INDEX:
+                        continue
                     dest = root_dir / rel
                     if self._sha256_file(dest) != self._sha256_file(src):
                         raise RuntimeError(f"写入后哈希不一致: {rel}")
@@ -1083,6 +1095,18 @@ class PatchUpdateMixin:
                 self._rollback_patch(backup_dir, new_files)
                 self.patch_update_finished.emit(False, f"补丁验证失败，已回退: {exc}")
                 return
+
+            entry = patch_dir / FRONTEND_INDEX
+            if entry.is_file() and not self._copy_with_retry(entry, root_dir / FRONTEND_INDEX):
+                self._rollback_patch(backup_dir, new_files)
+                self.patch_update_finished.emit(False, "前端入口发布失败，已回退")
+                return
+            for rel in deleted_files:
+                target = root_dir / rel
+                if target.exists() and not self._delete_with_retry(target):
+                    self._rollback_patch(backup_dir, new_files)
+                    self.patch_update_finished.emit(False, f"补丁清理失败，已回退: {rel}")
+                    return
 
             self._update_build_meta(root_dir, self._last_patch_meta if hasattr(self, "_last_patch_meta") else {})
             patch_meta = self._last_patch_meta or {}

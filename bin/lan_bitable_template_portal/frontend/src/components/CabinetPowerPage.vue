@@ -27,10 +27,11 @@
     <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ job.kind === 'export' ? '正在生成原模板表格…' : '正在同步飞书…' }}</div>
     <div v-if="job.status === 'failed'" class="notice danger">{{ job.error }}<button @click="startJob(job.kind === 'export' ? 'exports' : 'refresh')">重试</button></div>
     <div v-if="exported.export_id" class="notice success"><FileCheck2 :size="18" />{{ exported.filename }}<a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a></div>
+    <div v-if="storageWarning" class="notice danger" role="status">{{ storageWarning }}</div>
     <div v-if="message" class="notice success" role="status">{{ message }}</div>
     <div v-if="saving && !editorOpen" class="notice" role="status"><Loader2 class="spin" :size="16" /><span>{{ saveStepLabel }}</span><button v-if="saveStatus.operation_id" @click="showSubmission(saveStatus.operation_id)">查看提交内容</button></div>
     <div v-for="pending in pendingWrites.filter(p => !saving || p.operation_id !== saveStatus.operation_id)" :key="pending.operation_id" class="notice danger" role="alert"><span>{{ pending.status === 'conflict' ? '上传存在冲突' : '上传待完成' }}：{{ pending.error || pending.error_stage }}</span><button @click="showSubmission(pending.operation_id)">查看提交内容</button><button :disabled="saving" @click="resumePending(pending.operation_id)">继续核验</button><button :disabled="saving" @click="reconcilePending(pending.operation_id)">载入云端版本</button></div>
-    <section v-if="exportListOpen" class="table-wrap"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><table><tbody><tr v-for="item in exportList" :key="item.export_id"><td>{{ item.filename }}</td><td>{{ item.created_at }}</td><td><a :href="api + '/exports/' + item.export_id + '/download'">下载</a></td><td><button title="清理导出文件" aria-label="清理导出文件" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table></section>
+    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><table><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="下载"><a :href="api + '/exports/' + item.export_id + '/download'">下载</a></td><td data-label="操作"><button title="清理导出文件" aria-label="清理导出文件" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table></section>
 
     <section v-if="!scope" class="buildings">
       <button v-for="building in buildings" :key="building.scope" class="building" :disabled="building.bootstrap_status !== 'succeeded'" @click="navigate('/cabinet-power?scope=' + building.scope)">
@@ -47,20 +48,20 @@
         <button v-for="item in tabs" :key="item.key" :class="{ active: tab === item.key }" @click="changeTab(item.key)">{{ item.label }}</button>
         <span>{{ overview.record_count }} 条台账</span>
       </nav>
-      <section v-if="tab === 'overview'" class="table-wrap">
+      <section v-if="tab === 'overview'" class="table-wrap mobile-card-table">
         <table><thead><tr><th>包间</th><th>总数</th><th>已上电</th><th>正式电</th><th>测试电</th><th>未上电/已下电</th><th>待核实</th><th>网络机柜</th><th>服务器机柜</th><th>平面图</th></tr></thead><tbody>
           <tr v-for="room in overview.rooms" :key="room.id">
-            <td><button class="link" @click="showRoomRecords(room.id)">{{ room.carrier ? 'B-' + room.id + '运营商机房' : room.name }}<small>{{ room.id }} 包间</small></button></td><td><button class="link" @click="showStateRacks('total',room.id)">{{ room.total }}</button></td>
-            <td><button class="link" :aria-label="room.id + '包间已上电'" @click="showStateRacks('powered',room.id)">{{ room.counts.formal + room.counts.test }}</button></td>
-            <td v-for="state in ['formal','test','off','unknown']" :key="state"><button class="link" :class="state + '-text'" :aria-label="room.id + '包间' + stateLabels[state]" @click="showStateRacks(state,room.id)">{{ room.counts[state] }}</button></td>
-            <td>{{ room.types['网络机柜'] }}</td><td>{{ room.types['服务器机柜'] }}</td><td><button v-if="room.carrier" class="link" @click="tab = 'carrier'; rackRoom = room.id; rackState = ''">运营商机房</button><button v-else class="link" @click="tab = 'layout'; selectRoom(room.id)">{{ room.sheet ? '查看平面图' : '查看目录' }}</button></td>
+            <td data-label="包间"><button class="link" @click="showRoomRecords(room.id)">{{ room.carrier ? 'B-' + room.id + '运营商机房' : room.name }}<small>{{ room.id }} 包间</small></button></td><td data-label="总数"><button class="link" @click="showStateRacks('total',room.id)">{{ room.total }}</button></td>
+            <td data-label="已上电"><button class="link" :aria-label="room.id + '包间已上电'" @click="showStateRacks('powered',room.id)">{{ room.counts.formal + room.counts.test }}</button></td>
+            <td v-for="state in ['formal','test','off','unknown']" :key="state" :data-label="stateLabels[state]"><button class="link" :class="state + '-text'" :aria-label="room.id + '包间' + stateLabels[state]" @click="showStateRacks(state,room.id)">{{ room.counts[state] }}</button></td>
+            <td data-label="网络机柜">{{ room.types['网络机柜'] }}</td><td data-label="服务器机柜">{{ room.types['服务器机柜'] }}</td><td data-label="平面图"><button v-if="room.carrier" class="link" @click="tab = 'carrier'; rackRoom = room.id; rackState = ''">运营商机房</button><button v-else class="link" @click="tab = 'layout'; selectRoom(room.id)">{{ room.sheet ? '查看平面图' : '查看目录' }}</button></td>
           </tr>
         </tbody></table>
       </section>
       <section v-else-if="tab === 'racks' || tab === 'carrier'">
         <div class="filter-bar"><select v-model="rackState" aria-label="筛选机柜状态"><option value="">全部状态</option><option value="powered">已上电</option><option v-for="(label, state) in stateLabels" :key="state" :value="state">{{ label }}</option></select><select v-model="rackRoom" aria-label="筛选机柜包间"><option value="">全部包间</option><option v-for="room in rackRooms" :key="room.id" :value="room.id">{{ room.carrier ? 'B-' + room.id + '运营商机房' : room.name }}</option></select><label class="search"><Search :size="16" /><input v-model="rackSearch" placeholder="机柜号" aria-label="筛选机柜号" /></label></div>
         <div v-if="tab === 'carrier'" class="carrier-summary"><div v-for="room in rackRooms" :key="room.id"><h3>B-{{ room.id }}运营商机房</h3><span>共 {{ room.total }} 柜</span><button v-for="state in ['formal','test','off','unknown']" :key="state" class="link" @click="rackState = state; rackRoom = room.id">{{ stateLabels[state] }} {{ room.counts[state] }}</button><button :disabled="!room.unlocated || saving" @click="registerCarrier(room.id)"><Plus :size="16" />补登机柜编号</button></div></div>
-        <div class="table-wrap"><table aria-label="机柜状态明细"><thead><tr><th>包间</th><th>机柜</th><th>状态</th><th>类型</th><th>最近成功操作</th><th>操作</th></tr></thead><tbody><tr v-for="rack in stateRacks.slice((rackPage-1)*50,rackPage*50)" :key="rack.room + rack.rack"><td>{{ rack.room }}</td><td><button class="link" @click="openHistory(rack.room,rack.rack)">{{ rack.rack }}</button></td><td><i :style="{ background: stateColors[rack.state] }" /> {{ stateLabels[rack.state] }}</td><td>{{ rack.rack_type || '未填写' }}</td><td>{{ rack.last_operation || '无已完成操作' }}</td><td><button class="link" @click="openHistory(rack.room,rack.rack)">操作历史</button><button v-if="rack.positions?.length" class="link rack-map-link" @click="locateRack(rack)">查看平面图</button><span v-else class="rack-map-link">无平面图</span></td></tr><tr v-for="room in unnumberedRooms" :key="room.id + '-unnumbered'"><td>{{ room.id }}</td><td>编号未提供（{{ unnumberedCount(room) }} 柜）</td><td>{{ rackState ? stateLabels[rackState] : '原表汇总' }}</td><td>网络机柜</td><td>原汇总数量</td><td><button class="link" @click="tab = 'carrier'; rackRoom = room.id">运营商机房</button></td></tr></tbody></table><p v-if="!stateRacks.length && !unnumberedRooms.length" class="empty">没有符合条件的机柜</p></div>
+        <div class="table-wrap mobile-card-table"><table aria-label="机柜状态明细"><thead><tr><th>包间</th><th>机柜</th><th>状态</th><th>类型</th><th>最近成功操作</th><th>操作</th></tr></thead><tbody><tr v-for="rack in stateRacks.slice((rackPage-1)*50,rackPage*50)" :key="rack.room + rack.rack"><td data-label="包间">{{ rack.room }}</td><td data-label="机柜"><button class="link" @click="openHistory(rack.room,rack.rack)">{{ rack.rack }}</button></td><td data-label="状态"><span><i :style="{ background: stateColors[rack.state] }" /> {{ stateLabels[rack.state] }}</span></td><td data-label="类型">{{ rack.rack_type || '未填写' }}</td><td data-label="最近成功操作">{{ rack.last_operation || '无已完成操作' }}</td><td data-label="操作"><button class="link" @click="openHistory(rack.room,rack.rack)">操作历史</button><button v-if="rack.positions?.length" class="link rack-map-link" @click="locateRack(rack)">查看平面图</button><span v-else class="rack-map-link">无平面图</span></td></tr><tr v-for="room in unnumberedRooms" :key="room.id + '-unnumbered'"><td data-label="包间">{{ room.id }}</td><td data-label="机柜">编号未提供（{{ unnumberedCount(room) }} 柜）</td><td data-label="状态">{{ rackState ? stateLabels[rackState] : '原表汇总' }}</td><td data-label="类型">网络机柜</td><td data-label="最近成功操作">原汇总数量</td><td data-label="操作"><button class="link" @click="tab = 'carrier'; rackRoom = room.id">运营商机房</button></td></tr></tbody></table><p v-if="!stateRacks.length && !unnumberedRooms.length" class="empty">没有符合条件的机柜</p></div>
         <footer class="pagination"><span>{{ stateRacks.length }} 个已编号机柜<span v-if="unnumberedRooms.length">，另有 {{ unnumberedRooms.reduce((n: number,r: Dict) => n + unnumberedCount(r),0) }} 柜编号未提供</span></span><template v-for="(page,i) in rackPageNumbers" :key="page"><span v-if="i && page-rackPageNumbers[i-1]>1">…</span><button class="page-number" :class="{ active: page === rackPage }" :aria-label="'第 ' + page + ' 页'" @click="rackPage = page">{{ page }}</button></template></footer>
       </section>
       <section v-else-if="tab === 'layout'" class="map-shell">
@@ -88,12 +89,12 @@
           <label class="checkbox"><input v-model="onlyIssues" type="checkbox" @change="loadRecords(1)" />待核实</label><button @click="loadRecords(1)">查询</button><button class="link" @click="resetFilters">重置</button>
         </div>
         <p v-if="recordsLoading" role="status">正在读取记录…</p>
-        <div class="table-wrap source-table-wrap"><table class="source-table" :style="{ width: sourceTableWidth + 'px' }">
+        <div class="table-wrap source-table-wrap mobile-card-table"><table class="source-table" :style="{ width: sourceTableWidth + 'px' }">
           <colgroup><col v-for="column in activeFormat?.columns || []" :key="column.column" :style="{ width: column.width + 'px' }" /><col style="width:150px" /></colgroup>
           <thead><tr><th v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4 }" :style="frozenStyle(column)">{{ column.label }}<small v-if="column.group !== undefined">{{ groupLabel(column.group, activeFormat) }}</small></th><th class="row-actions">操作</th></tr></thead>
           <tbody><tr v-for="op in records.items || []" :key="op.record_id" :class="{ 'source-issue': op.issues.length }">
-            <td v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4 }" :style="frozenStyle(column)"><button v-if="column.field === 'rack'" :disabled="recordsLoading" class="link" @click="openHistory(op.room, op.rack)">{{ op.rack }}</button><span v-else>{{ sourceCell(op, column) }}</span></td>
-            <td class="row-actions"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button :disabled="recordsLoading" class="icon-button" title="编辑记录" aria-label="编辑记录" @click="openEditor(op)"><Pencil :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
+            <td v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4, 'empty-cell': !sourceCell(op, column) }" :data-label="column.group === undefined ? column.label : groupLabel(column.group, activeFormat) + ' · ' + column.label" :style="frozenStyle(column)"><button v-if="column.field === 'rack'" :disabled="recordsLoading" class="link" @click="openHistory(op.room, op.rack)">{{ op.rack }}</button><span v-else>{{ sourceCell(op, column) }}</span></td>
+            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button :disabled="recordsLoading" class="icon-button" title="编辑记录" aria-label="编辑记录" @click="openEditor(op)"><Pencil :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
           </tr></tbody>
         </table><p v-if="!recordsLoading && !records.total" class="empty">没有符合条件的记录</p></div>
         <footer class="pagination"><span>共 {{ records.total || 0 }} 条记录</span><button :disabled="recordsLoading || records.page <= 1" aria-label="上一页" @click="loadRecords(records.page - 1)"><ChevronLeft :size="16" /></button><template v-for="(pageNumber, index) in pageNumbers" :key="pageNumber"><span v-if="index && pageNumber - pageNumbers[index - 1] > 1" class="ellipsis">…</span><button class="page-number" :class="{ active: pageNumber === records.page }" :disabled="recordsLoading" :aria-label="'第 ' + pageNumber + ' 页'" :aria-current="pageNumber === records.page ? 'page' : undefined" @click="loadRecords(pageNumber)">{{ pageNumber }}</button></template><button :disabled="recordsLoading || records.page >= totalPages" aria-label="下一页" @click="loadRecords(records.page + 1)"><ChevronRight :size="16" /></button></footer>
@@ -161,6 +162,7 @@
 </template>
 
 <script setup lang="ts">
+import { resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Download, ExternalLink, FileCheck2, FileSpreadsheet, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
@@ -171,6 +173,10 @@ const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string }>(
 const api = '/api/cabinet-power';
 const read = (path: string, params: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs, signal });
 const write = (path: string, data: Dict, method = 'POST') => requestJson(api + '/' + path, { method, body: JSON.stringify({ ...data, scope: data.scope || props.scope }), timeoutMs: 90000 });
+const storageWarning = ref('');
+const storageFailed = () => { storageWarning.value = '浏览器无法保存恢复信息，请保持页面打开直到任务完成；未保存草稿在关闭页面后可能丢失。'; };
+const taskStorage = resilientStorage('localStorage', storageFailed);
+const draftStorage = resilientStorage('sessionStorage', storageFailed);
 const overview = ref<Dict>({}), buildings = ref<Dict[]>([]), loading = ref(false), error = ref(''), message = ref(''), bootstrap = ref<Dict>({});
 const bootstrapActive = computed(() => ['starting','pending','running'].includes(String(bootstrap.value.status || '')));
 const bootstrapTarget = computed(() => props.scope ? (bootstrap.value.buildings || []).find((item: Dict) => item.scope === props.scope) : null);
@@ -249,14 +255,14 @@ const busy = computed(() => startingJob.value || ['pending', 'running'].includes
 const storageKey = 'cabinet-job:' + props.scope;
 async function startJob(path: string): Promise<void> {
   if (busy.value) return; startingJob.value = true; error.value = '';
-  try { job.value = await write(path, {}); localStorage.setItem(storageKey, job.value.job_id); void pollJob(); } catch (exc) { fail(exc); } finally { startingJob.value = false; }
+  try { job.value = await write(path, {}); taskStorage.setItem(storageKey, job.value.job_id); void pollJob(); } catch (exc) { fail(exc); } finally { startingJob.value = false; }
 }
 async function pollJob(): Promise<void> {
   if (disposed) return;
   try {
     job.value = await read('jobs/' + job.value.job_id);
     if (['pending', 'running'].includes(job.value.status)) { pollTimer = scheduleVisible(pollJob,1800); return; }
-    localStorage.removeItem(storageKey);
+    taskStorage.removeItem(storageKey);
     if (job.value.status === 'succeeded') {
       if (job.value.kind === 'export') exported.value = job.value.result;
       await load();
@@ -348,9 +354,9 @@ const editableGroups = computed(() => {
 function removeGroup(group: Dict): void { const index = form.groups.indexOf(group); if (index >= 0) form.groups.splice(index, 1); if (!form.groups.length) form.groups.push(newGroup()); }
 const draftKey = 'cabinet-draft:' + (props.userId || 'session') + ':' + props.scope;
 let pendingDiscard: (() => void) | undefined, draft: Dict | undefined, removeNavigationGuard: (() => void) | undefined, draftTimer: number | undefined;
-function flushDraft(): void { window.clearTimeout(draftTimer); if (!editorOpen.value) return; try { sessionStorage.setItem(draftKey, JSON.stringify({ scope: props.scope, editingId: editingId.value, form, editBaseline, writeId, writeHash })); } catch { saveError.value = '本机草稿保存失败，请保持页面打开直到保存完成。'; } }
+function flushDraft(): void { window.clearTimeout(draftTimer); if (!editorOpen.value) return; try { draftStorage.setItem(draftKey, JSON.stringify({ scope: props.scope, editingId: editingId.value, form, editBaseline, writeId, writeHash })); } catch { saveError.value = '本机草稿保存失败，请保持页面打开直到保存完成。'; } }
 function persistDraft(): void { window.clearTimeout(draftTimer); draftTimer = window.setTimeout(flushDraft,250); }
-function clearDraft(): void { window.clearTimeout(draftTimer); sessionStorage.removeItem(draftKey); }
+function clearDraft(): void { window.clearTimeout(draftTimer); draftStorage.removeItem(draftKey); }
 function askDiscard(action: () => void, text = '继续后，当前机柜记录中的修改会丢失。'): void { pendingDiscard = action; discardMessage.value = text; discardDialogOpen.value = true; void focusModal(); }
 async function restoreDraft(yes: boolean): Promise<void> { restoreDialogOpen.value = false; if (yes && draft) { Object.assign(form, draft.form); editingId.value = draft.editingId; editBaseline = draft.editBaseline; writeId = draft.writeId; writeHash = draft.writeHash; editorOpen.value = true; if (form.scope && form.scope !== props.scope) { moveLoading.value = true; try { moveOverview.value = await read('overview',{scope:form.scope}); } catch (e: any) { saveError.value = e.message; } finally { moveLoading.value = false; } } void focusModal(); } else clearDraft(); draft = undefined; }
 watch(form, persistDraft, { deep: true, flush: 'post' });
@@ -399,13 +405,13 @@ async function saveRecord(): Promise<void> {
   if (writeId && hash === writeHash && pendingWrites.value.some(p=>p.operation_id === writeId)) { await resumePending(writeId); return; }
   saving.value = true; saveError.value = ''; saveStatus.value = {}; saveQueryError.value = false; message.value = '';
   if (hash !== writeHash) { writeId = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''); writeHash = hash; }
-  persistDraft();
+  flushDraft();
   try {
     saveStatus.value = await write((editingId.value ? 'operations/' + editingId.value : 'operations') + '?defer=1', { ...form, operation_id: writeId }, editingId.value ? 'PATCH' : 'POST');
-    localStorage.setItem(saveStorageKey,writeId); void pollSave(writeId);
+    saveStatus.value.operation_id = writeId; taskStorage.setItem(saveStorageKey,writeId); void pollSave(writeId);
   } catch (exc: any) {
     saveError.value = exc?.message || '提交结果待核实，输入已保留';
-    if (!exc.status || exc.status >= 500) { saveStatus.value = {operation_id:writeId,status:'unknown'}; localStorage.setItem(saveStorageKey,writeId); void pollSave(writeId); }
+    if (!exc.status || exc.status < 400 || exc.status >= 500) { saveStatus.value = {operation_id:writeId,status:'unknown'}; taskStorage.setItem(saveStorageKey,writeId); void pollSave(writeId); }
     else { saving.value = false; await loadPending(); }
   }
 }
@@ -418,17 +424,17 @@ async function pollSave(id: string): Promise<void> {
     const state = await read('writes/' + id,{},8000); if (disposed) return;
     saveStatus.value = state; saveQueryError.value = false;
     if (state.status === 'completed') {
-      if (localStorage.getItem(saveStorageKey) === id) localStorage.removeItem(saveStorageKey);
-      try { if (JSON.parse(sessionStorage.getItem(draftKey) || '{}').writeId === id) clearDraft(); } catch {}
+      if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey);
+      try { if (JSON.parse(draftStorage.getItem(draftKey) || '{}').writeId === id) clearDraft(); } catch {}
       if (writeId === id) editorOpen.value = false;
       saving.value = false; saveError.value = ''; message.value = '已保存到飞书，回读核验成功。'; await refreshSavedViews(); return;
     }
-    if (state.status === 'cancelled') { if (localStorage.getItem(saveStorageKey) === id) localStorage.removeItem(saveStorageKey); saving.value = false; await loadPending(); return; }
+    if (state.status === 'cancelled') { if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey); saving.value = false; await loadPending(); return; }
     if (['pending','conflict'].includes(state.status)) { saving.value = false; saveError.value = state.error || '上传尚未完成，输入已保留'; await loadPending(); return; }
     savePollTimer = scheduleVisible(() => void pollSave(id),900);
   } catch (e: any) {
     if (disposed) return;
-    if (e.status === 404) { saving.value = false; saveError.value = '暂未查到上传记录，输入已保留，请使用原操作再次保存。'; if (localStorage.getItem(saveStorageKey) === id) localStorage.removeItem(saveStorageKey); return; }
+    if (e.status === 404) { saving.value = false; saveError.value = '暂未查到上传记录，输入已保留，请使用原操作再次保存。'; if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey); return; }
     saveQueryError.value = true; savePollTimer = scheduleVisible(() => void pollSave(id),4000);
   }
 }
@@ -442,10 +448,10 @@ async function showSubmission(id: string): Promise<void> {
   } catch (e) { fail(e); }
 }
 async function loadPending(): Promise<void> { if (props.scope) try { pendingWrites.value = (await read('writes')).items || []; } catch {} }
-async function resumePending(id: string): Promise<void> { if (saving.value) return; saving.value = true; saveQueryError.value = false; try { saveStatus.value = await write('writes/' + id + '/resume?defer=1', {}); localStorage.setItem(saveStorageKey,id); void pollSave(id); } catch (e) { saving.value = false; fail(e); await loadPending(); } }
+async function resumePending(id: string): Promise<void> { if (saving.value) return; saving.value = true; saveQueryError.value = false; try { saveStatus.value = await write('writes/' + id + '/resume?defer=1', {}); taskStorage.setItem(saveStorageKey,id); void pollSave(id); } catch (e) { saving.value = false; fail(e); await loadPending(); } }
 function reconcilePending(id: string): void {
   askDiscard(() => { saving.value = true; saveStatus.value = {status:'checking',error_stage:'main'}; window.clearTimeout(savePollTimer);
-    void write('writes/' + id + '/reconcile', {}).then(async () => { clearDraft(); editorOpen.value = false; if (localStorage.getItem(saveStorageKey) === id) localStorage.removeItem(saveStorageKey); await refreshSavedViews(); }).catch(fail).finally(()=>{saving.value = false; saveStatus.value = {};});
+    void write('writes/' + id + '/reconcile', {}).then(async () => { clearDraft(); editorOpen.value = false; if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey); await refreshSavedViews(); }).catch(fail).finally(()=>{saving.value = false; saveStatus.value = {};});
   }, '将载入云端最新记录。原提交内容保留在上传日志中。');
 }
 async function showExports(): Promise<void> { try { exportList.value = (await read('export-history')).items; exportListOpen.value = true; } catch (e) { fail(e); } }
@@ -466,11 +472,11 @@ onMounted(async () => {
   removeNavigationGuard = registerNavigationGuard((_target, proceed) => { if (saving.value && editorOpen.value) return false; if (!editorOpen.value || JSON.stringify(form) === editBaseline) return true; askDiscard(() => { clearDraft(); editorOpen.value = false; proceed(); }); return false; });
   await startBootstrap(); if (disposed) return;
   await loadPending(); if (disposed) return;
-  const uploadId = localStorage.getItem(saveStorageKey);
+  const uploadId = taskStorage.getItem(saveStorageKey);
   if (uploadId && /^[A-Za-z0-9_-]{16,128}$/.test(uploadId)) { saving.value = true; saveStatus.value = {operation_id:uploadId,status:'queued'}; await pollSave(uploadId); if (disposed) return; }
-  try { const savedDraft = sessionStorage.getItem(draftKey); if (savedDraft && !saving.value) { draft = JSON.parse(savedDraft); if (draft?.scope === props.scope && Array.isArray(draft.form?.groups)) { restoreDialogOpen.value = true; void focusModal(); } } } catch { clearDraft(); }
-  const saved = localStorage.getItem(storageKey);
-  if (saved && /^[a-f0-9]{32}$/.test(saved)) { job.value = { job_id: saved }; void pollJob(); } else if (saved) localStorage.removeItem(storageKey);
+  try { const savedDraft = draftStorage.getItem(draftKey); if (savedDraft && !saving.value) { draft = JSON.parse(savedDraft); if (draft?.scope === props.scope && Array.isArray(draft.form?.groups)) { restoreDialogOpen.value = true; void focusModal(); } } } catch { clearDraft(); }
+  const saved = taskStorage.getItem(storageKey);
+  if (saved && /^[a-f0-9]{32}$/.test(saved)) { job.value = { job_id: saved }; void pollJob(); } else if (saved) taskStorage.removeItem(storageKey);
 });
 onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); mapAbort?.abort(); historyAbort?.abort(); removeNavigationGuard?.(); window.removeEventListener('pagehide', flushDraft); window.removeEventListener('keydown', keyboard); window.clearTimeout(pollTimer); window.clearTimeout(bootstrapTimer); window.clearTimeout(savePollTimer); window.clearTimeout(draftTimer); });
 </script>
@@ -491,4 +497,22 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 .event-times,.state-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0}.event-times dt,.state-facts dt{font-size:12px;color:#627b94}.event-times dd,.state-facts dd{margin:5px 0 0;overflow-wrap:anywhere;font-size:13px}.event-times time{color:#203650}.state-facts{padding:0 0 18px}
 :deep(.confirm-modal){box-sizing:border-box;max-height:calc(100dvh - 48px);overflow:auto;overscroll-behavior:contain}:deep(.confirm-content){min-width:0;overflow-wrap:anywhere}
 @media(max-width:1100px){.group-editor{grid-template-columns:75px minmax(0,1fr) minmax(0,1fr) 36px}.group-editor>b{grid-column:1;grid-row:1 / span 2}.group-editor>button{grid-column:4;grid-row:1 / span 2}.group-editor>label{grid-column:auto}.editor{width:calc(100vw - 32px);max-height:calc(100dvh - 32px)}}
+@media(max-width:820px){
+  .mobile-card-table{max-height:none!important;overflow-x:hidden;background:transparent}
+  .mobile-card-table>table,.mobile-card-table>table>tbody{display:block;width:100%!important;min-width:0!important}
+  .mobile-card-table colgroup,.mobile-card-table thead{display:none}
+  .mobile-card-table tbody{display:grid!important;gap:10px}
+  .mobile-card-table tbody tr{display:block;overflow:hidden;border:1px solid #dce6f1;border-radius:8px;background:#fff}
+  .mobile-card-table tbody td{position:static!important;display:flex;width:auto;height:auto;min-height:42px;align-items:flex-start;gap:10px;padding:10px 12px;border-right:0;border-bottom:1px solid #e8eef5;background:transparent!important;white-space:normal;overflow-wrap:anywhere;text-align:left}
+  .mobile-card-table tbody td:last-child{border-bottom:0}
+  .mobile-card-table tbody td::before{content:attr(data-label);flex:0 0 104px;color:#60758b;font-size:12px;font-weight:700}
+  .mobile-card-table tbody td>*{min-width:0}
+  .mobile-card-table tbody td>span:not(.rack-map-link){flex:1;white-space:normal}
+  .mobile-card-table tbody .row-actions{right:auto;flex-wrap:wrap;justify-content:flex-start}
+  .mobile-card-table tbody .empty-cell{display:none}
+  .source-table-wrap{border:0}
+  .filter-bar>*{flex:1 1 100%;width:100%}
+  .pagination{flex-wrap:wrap;justify-content:center}
+  .pagination>span:first-child{width:100%;margin:0;text-align:center}
+}
 </style>

@@ -3,20 +3,35 @@
     <span class="state-mark" aria-hidden="true"></span>
     <div class="state-copy">
       <strong>{{ error ? "页面加载失败" : "正在打开页面" }}</strong>
-      <p v-if="error">{{ error.message || "当前模块没有加载成功。" }}</p>
+      <p v-if="error">当前模块未能加载，请重新加载页面。</p>
     </div>
-    <button type="button" v-if="error && retry" class="btn blue" @click="retry">
+    <button type="button" v-if="error" class="btn blue" @click="reload">
       重新加载
     </button>
+    <ConfirmDialog :open="confirmReload" title="重新加载页面？" message="重新加载会丢失尚未保存的输入，请确认后继续。" confirm-label="重新加载" @resolve="resolveReload" />
   </section>
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { ref } from "vue";
+import { requestPageReload } from "../navigation";
+import ConfirmDialog from "./ConfirmDialog.vue";
+const props = defineProps<{
   error?: Error;
   retry?: () => void;
   attempts?: number;
 }>();
+const confirmReload = ref(false);
+let pendingReload: (() => void) | undefined;
+function reload(): void {
+  if (props.retry) props.retry();
+  else requestPageReload(proceed => { pendingReload = proceed; confirmReload.value = true; });
+}
+function resolveReload(confirmed: boolean): void {
+  confirmReload.value = false;
+  if (confirmed) pendingReload?.();
+  pendingReload = undefined;
+}
 </script>
 
 <style scoped>
