@@ -6,6 +6,7 @@ import subprocess
 import sys
 from ..logger import log_error, log_info
 from ..config import config
+from ..services.process_lifetime import register_child_process
 
 
 class SpeechManager:
@@ -182,6 +183,8 @@ class SpeechManager:
                 startupinfo=startupinfo,
                 creationflags=creationflags,
             )
+            if not register_child_process(proc.pid):
+                log_error("语音进程未加入 Windows 生命周期 Job。")
             with self._lock:
                 self._current_process = proc
             try:

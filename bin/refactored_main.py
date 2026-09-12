@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 _PROCESS_IMPORT_STARTED_AT = time.perf_counter()
+_LAUNCH_PARENT_ARG = "--clipflow-launch-parent-pid"
 
 
 def _reexec_with_project_python():
@@ -23,7 +24,10 @@ def _reexec_with_project_python():
             str(Path(sys.executable).resolve())
         ):
             return
-    argv = [str(candidate), str(Path(__file__).resolve()), *sys.argv[1:]]
+    forwarded = list(sys.argv[1:])
+    if _LAUNCH_PARENT_ARG not in forwarded:
+        forwarded.extend([_LAUNCH_PARENT_ARG, str(os.getpid())])
+    argv = [str(candidate), str(Path(__file__).resolve()), *forwarded]
     if sys.platform == "win32":
         print(f"[ClipFlow] Switching to project Python: {candidate}", flush=True)
         raise SystemExit(subprocess.call(argv))
@@ -31,6 +35,34 @@ def _reexec_with_project_python():
 
 
 _reexec_with_project_python()
+
+from upload_event_module.services.process_lifetime import (
+    cleanup_orphaned_processes,
+    close_child_process_job,
+    start_parent_exit_watchdog,
+)
+
+
+def _consume_launch_parent_pid() -> int:
+    try:
+        index = sys.argv.index(_LAUNCH_PARENT_ARG)
+    except ValueError:
+        return 0
+    parent_pid = 0
+    if index + 1 < len(sys.argv):
+        try:
+            parent_pid = int(sys.argv[index + 1])
+        except (TypeError, ValueError):
+            pass
+        else:
+            del sys.argv[index + 1]
+    del sys.argv[index]
+    return parent_pid
+
+
+_launch_parent_pid = _consume_launch_parent_pid()
+if _launch_parent_pid and not start_parent_exit_watchdog(_launch_parent_pid):
+    raise SystemExit(0)
 
 from upload_event_module.hot_reload.state_store import get_user_data_dir
 from upload_event_module.utils import migrate_runtime_data_files
@@ -286,6 +318,18 @@ def main():
     if not server.listen(SINGLE_INSTANCE_KEY):
         print(f"[ClipFlow] 无法创建单实例锁: {server.errorString()}")
 
+    def _cleanup_legacy_clipboard_processes():
+        for pid in cleanup_orphaned_processes(
+            "upload_event_module/ui/剪贴板监听测试.py"
+        ):
+            print(f"[ClipFlow] 已清理旧剪贴板监听孤儿进程: PID={pid}")
+
+    threading.Thread(
+        target=_cleanup_legacy_clipboard_processes,
+        name="ClipFlowLegacyProcessCleanup",
+        daemon=True,
+    ).start()
+
     portal_holder = {"controller": None, "error": ""}
     portal_holder_lock = threading.Lock()
     portal_ready = threading.Event()
@@ -301,19 +345,21 @@ def main():
                 port=int(getattr(config, "lan_template_portal_port", 18766) or 18766),
             )
             controller.start()
-            with portal_holder_lock:
-                should_stop = portal_cancelled.is_set()
-                if not should_stop:
-                    portal_holder["controller"] = controller
-            if should_stop:
-                controller.stop()
-                controller = None
         except Exception as exc:
             error = str(exc)
             controller = None
+        controller_to_stop = None
         with portal_holder_lock:
+            if controller is not None and portal_cancelled.is_set():
+                controller_to_stop = controller
+                controller = None
             portal_holder["controller"] = controller
             portal_holder["error"] = error
+        if controller_to_stop is not None:
+            try:
+                controller_to_stop.stop()
+            except Exception:
+                pass
         portal_ready.set()
         print(
             "[ClipFlow] Portal startup elapsed: "
@@ -357,6 +403,7 @@ def main():
         portal_cancelled.set()
         with portal_holder_lock:
             controller = portal_holder.get("controller")
+            portal_holder["controller"] = None
         if controller is None:
             return
         try:
@@ -496,7 +543,19 @@ def main():
     )
     portal_relay_thread.start()
 
-    sys.exit(app.exec())
+    exit_code = 1
+    try:
+        exit_code = app.exec()
+    finally:
+        try:
+            window._shutdown_runtime()
+        except Exception:
+            pass
+        portal_cancelled.set()
+        portal_ready.wait(3.0)
+        _stop_portal_if_started()
+        close_child_process_job()
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

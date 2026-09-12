@@ -21,6 +21,10 @@ from upload_event_module.config import (
     DEFAULT_LAN_TEMPLATE_PORTAL_PORT as DEFAULT_PORT,
 )
 from upload_event_module.logger import log_error, log_info, log_warning
+from upload_event_module.services.process_lifetime import (
+    register_child_process,
+    windows_process_command_line,
+)
 from upload_event_module.utils import get_data_file_path
 
 
@@ -322,19 +326,14 @@ class BackendProcessPortalController:
         except Exception:
             return None
 
-    def _health_matches_runtime_root(self, payload: dict[str, Any] | None) -> bool:
+    @staticmethod
+    def _is_clipflow_backend(payload: dict[str, Any] | None) -> bool:
         if not isinstance(payload, dict):
             return False
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         return (
             str(payload.get("service") or data.get("service") or "").strip()
             == "clipflow_backend"
-            and str(
-                payload.get("runtime_root_hash")
-                or data.get("runtime_root_hash")
-                or ""
-            ).strip()
-            == self._runtime_root_hash
         )
 
     def _health_matches_runtime(self, payload: dict[str, Any] | None) -> bool:
@@ -432,9 +431,9 @@ class BackendProcessPortalController:
             return False
 
     @staticmethod
-    def _port_owner_summary(port: int) -> str:
+    def _port_owner_pid(port: int) -> int:
         if os.name != "nt":
-            return ""
+            return 0
         try:
             result = subprocess.run(
                 ["netstat", "-ano", "-p", "TCP"],
@@ -445,8 +444,7 @@ class BackendProcessPortalController:
                 check=False,
             )
         except Exception:
-            return ""
-        owner_pid = ""
+            return 0
         for raw_line in str(result.stdout or "").splitlines():
             parts = raw_line.split()
             if len(parts) < 5 or parts[0].upper() != "TCP":
@@ -456,8 +454,12 @@ class BackendProcessPortalController:
             state = str(parts[-2] or "").upper()
             pid = str(parts[-1] or "").strip()
             if local_port == str(int(port)) and "LISTEN" in state and pid.isdigit():
-                owner_pid = pid
-                break
+                return int(pid)
+        return 0
+
+    @classmethod
+    def _port_owner_summary(cls, port: int) -> str:
+        owner_pid = cls._port_owner_pid(port)
         if not owner_pid:
             return ""
         process_name = ""
@@ -488,6 +490,39 @@ class BackendProcessPortalController:
             else f"PID={owner_pid}"
         )
 
+    def _force_stop_verified_backend(self) -> bool:
+        if os.name != "nt":
+            return False
+        pid = self._port_owner_pid(self.preferred_port)
+        if pid <= 0:
+            return False
+        try:
+            import win32api
+            import win32con
+
+            process = win32api.OpenProcess(
+                win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE,
+                False,
+                pid,
+            )
+            try:
+                command_line = windows_process_command_line(pid).lower()
+                if "clipflow_backend.main" not in command_line:
+                    return False
+                win32api.TerminateProcess(process, 0)
+            finally:
+                process.Close()
+        except Exception as exc:
+            log_warning(f"强制结束旧后端失败: {exc}")
+            return False
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if self._health_payload() is None:
+                log_warning(f"已结束无响应的旧 ClipFlow 后端: PID={pid}")
+                return True
+            time.sleep(0.1)
+        return False
+
     @staticmethod
     def _is_specific_bind_host(host: str) -> bool:
         text = str(host or "").strip()
@@ -508,7 +543,7 @@ class BackendProcessPortalController:
                 return True
             time.sleep(0.25)
         log_warning("旧后端关闭超时。")
-        return False
+        return self._force_stop_verified_backend()
 
     def get_qt_shell_bootstrap(self) -> dict[str, Any]:
         result = self._request_json("GET", "/api/qt/shell/bootstrap", timeout=10.0)
@@ -547,6 +582,8 @@ class BackendProcessPortalController:
             self.host,
             "--port",
             str(self.preferred_port),
+            "--parent-pid",
+            str(os.getpid()),
         ]
         return args, env, os.fspath(bin_dir)
 
@@ -582,7 +619,7 @@ class BackendProcessPortalController:
             self.host = DEFAULT_HOST
         existing_health = self._health_payload()
         if existing_health and not self._health_matches_runtime(existing_health):
-            if self._health_matches_runtime_root(existing_health):
+            if self._is_clipflow_backend(existing_health):
                 if self._shutdown_existing_backend():
                     existing_health = None
                     time.sleep(0.2)
@@ -605,24 +642,20 @@ class BackendProcessPortalController:
                 f"（{owner_text}）。请关闭旧实例后重试。"
             )
         if existing_health:
-            if os.environ.get("CLIPFLOW_REUSE_EXISTING_BACKEND") != "1":
-                if self._shutdown_existing_backend():
-                    time.sleep(0.2)
-                else:
-                    raise RuntimeError(
-                        f"固定端口 {self.preferred_port} 上的旧后端无法安全关闭，"
-                        "请关闭旧实例后重试。"
-                    )
+            if self._shutdown_existing_backend():
+                time.sleep(0.2)
             else:
-                self._owns_process = False
-                self._stop_event.clear()
-                self._ensure_bridge_threads()
-                return self.get_url()
+                raise RuntimeError(
+                    f"固定端口 {self.preferred_port} 上的旧后端无法安全关闭，"
+                    "请关闭旧实例后重试。"
+                )
         if self._health_ok():
-            self._owns_process = False
-            self._stop_event.clear()
-            self._ensure_bridge_threads()
-            return self.get_url()
+            if not self._shutdown_existing_backend():
+                raise RuntimeError(
+                    f"固定端口 {self.preferred_port} 上的并发后端无法安全关闭，"
+                    "请关闭旧实例后重试。"
+                )
+            time.sleep(0.2)
         args, env, cwd = self._build_backend_command()
         startupinfo = None
         creationflags = 0
@@ -646,10 +679,12 @@ class BackendProcessPortalController:
             for port in self._candidate_ports():
                 self.bound_port = int(port)
                 if self._health_ok():
-                    self._owns_process = False
-                    self._stop_event.clear()
-                    self._ensure_bridge_threads()
-                    return self.get_url()
+                    if not self._shutdown_existing_backend():
+                        errors.append(
+                            f"固定端口 {self.bound_port} 上的并发后端无法安全关闭"
+                        )
+                        continue
+                    time.sleep(0.2)
                 available, bind_error = self._port_is_available(self.host, self.bound_port)
                 if not available:
                     owner = self._port_owner_summary(self.bound_port)
@@ -664,7 +699,7 @@ class BackendProcessPortalController:
                     continue
                 launch_args = list(args)
                 launch_args[launch_args.index("--host") + 1] = self.host
-                launch_args[-1] = str(self.bound_port)
+                launch_args[launch_args.index("--port") + 1] = str(self.bound_port)
                 log_handle = self._open_backend_log_file()
                 self._process = subprocess.Popen(
                     launch_args,
@@ -676,6 +711,11 @@ class BackendProcessPortalController:
                     startupinfo=startupinfo,
                     creationflags=creationflags,
                 )
+                if not register_child_process(self._process.pid):
+                    log_warning(
+                        "后端进程未加入 Windows 生命周期 Job，"
+                        "将使用父进程监视兜底。"
+                    )
                 self._owns_process = True
                 self._stop_event.clear()
                 if self._wait_for_health(timeout_s=float(self._startup_timeout_s)):

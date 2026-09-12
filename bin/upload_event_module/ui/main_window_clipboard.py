@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, QTimer, QProcess, QProcessEnvironment
 from ..config import config
 from ..logger import log_info, log_error, log_warning
 from ..core.parser import extract_event_info
+from ..services.process_lifetime import register_child_process
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 class MainWindowClipboardMixin:
@@ -759,7 +760,10 @@ class MainWindowClipboardMixin:
                         python_exe = pythonw_exe
                 except Exception:
                     pass
-            self._clipboard_process.start(python_exe, ["-u", script_path])
+            self._clipboard_process.start(
+                python_exe,
+                ["-u", script_path, "--parent-pid", str(os.getpid())],
+            )
             self._clipboard_effective_running = False
             self._refresh_clipboard_toggle_ui()
         except Exception as exc:
@@ -781,6 +785,14 @@ class MainWindowClipboardMixin:
         current = getattr(self, "_clipboard_process", None)
         if process is not None and process is not current:
             return
+        try:
+            if process is not None and not register_child_process(process.processId()):
+                log_warning(
+                    "剪贴板监听进程未加入 Windows 生命周期 Job，"
+                    "将使用父进程监视兜底。"
+                )
+        except Exception:
+            pass
         self._clipboard_last_error = ""
         self._clipboard_effective_running = True
         self._clipboard_health_restart_attempted = False

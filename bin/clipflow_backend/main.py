@@ -198,6 +198,7 @@ from lan_bitable_template_portal.drill_management import (
 from upload_event_module.config import config
 from upload_event_module.core.parser import extract_event_info
 from upload_event_module.services.service_registry import check_token_status
+from upload_event_module.services.process_lifetime import start_parent_exit_watchdog
 
 INLINE_IMAGE_B64_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
 from upload_event_module.services.service_registry import query_record_by_id
@@ -13990,6 +13991,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ClipFlow FastAPI 后端门户")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--parent-pid", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument(
         "--mock-external",
         action="store_true",
@@ -14009,6 +14011,8 @@ def main() -> None:
         f"{(time.perf_counter() - _BACKEND_IMPORT_STARTED_AT) * 1000.0:.1f} ms"
     )
     args = build_arg_parser().parse_args()
+    if args.parent_pid and not start_parent_exit_watchdog(args.parent_pid):
+        return
     if args.mock_external:
         os.environ["CLIPFLOW_BACKEND_MOCK_EXTERNAL"] = "1"
     if args.allow_real_external:

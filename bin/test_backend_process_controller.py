@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -161,6 +161,74 @@ class BackendProcessControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "旧版后端无法安全关闭"):
                 controller.start()
         shutdown.assert_called_once_with()
+
+    def test_start_attempts_to_replace_backend_from_other_runtime(self):
+        controller = BackendProcessPortalController(port=18766)
+        older = {
+            "ok": True,
+            "service": "clipflow_backend",
+            "runtime_root_hash": "other-runtime",
+            "build_version": "older-build",
+        }
+        with patch.object(controller, "_health_payload", return_value=older), patch.object(
+            controller, "_shutdown_existing_backend", return_value=False
+        ) as shutdown:
+            with self.assertRaisesRegex(RuntimeError, "旧版后端无法安全关闭"):
+                controller.start()
+        shutdown.assert_called_once_with()
+
+    def test_start_does_not_shutdown_unrelated_health_service(self):
+        controller = BackendProcessPortalController(port=18766)
+        unrelated = {
+            "ok": True,
+            "service": "unrelated_service",
+            "runtime_root_hash": "other-runtime",
+            "build_version": "1",
+        }
+        with patch.object(controller, "_health_payload", return_value=unrelated), patch.object(
+            controller, "_shutdown_existing_backend"
+        ) as shutdown, patch.object(
+            controller, "_port_owner_summary", return_value="PID=4321，进程=python.exe"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "其他或旧版后端占用"):
+                controller.start()
+        shutdown.assert_not_called()
+
+    def test_backend_command_contains_parent_pid(self):
+        controller = BackendProcessPortalController(port=18766)
+        args, _env, _cwd = controller._build_backend_command()
+        index = args.index("--parent-pid")
+        self.assertEqual(args[index + 1], str(os.getpid()))
+
+    def test_reuse_flag_cannot_leave_backend_unmanaged(self):
+        controller = BackendProcessPortalController(port=18766)
+        current = {
+            "ok": True,
+            "service": "clipflow_backend",
+            "runtime_root_hash": controller._runtime_root_hash,
+            "build_version": controller._build_version,
+        }
+        with patch.dict(os.environ, {"CLIPFLOW_REUSE_EXISTING_BACKEND": "1"}), patch.object(
+            controller, "_health_payload", return_value=current
+        ), patch.object(
+            controller, "_shutdown_existing_backend", return_value=False
+        ) as shutdown:
+            with self.assertRaisesRegex(RuntimeError, "旧后端无法安全关闭"):
+                controller.start()
+        shutdown.assert_called_once_with()
+
+    def test_force_stop_rejects_pid_with_unrelated_command(self):
+        controller = BackendProcessPortalController(port=18766)
+        process = SimpleNamespace(Close=Mock())
+        with patch.object(controller, "_port_owner_pid", return_value=4321), patch(
+            "clipflow_backend.process_controller.windows_process_command_line",
+            return_value="python.exe unrelated.py",
+        ), patch("win32api.OpenProcess", return_value=process), patch(
+            "win32api.TerminateProcess"
+        ) as terminate:
+            self.assertFalse(controller._force_stop_verified_backend())
+        terminate.assert_not_called()
+        process.Close.assert_called_once_with()
 
     def test_port_owner_summary_reports_pid_and_process(self):
         netstat = SimpleNamespace(

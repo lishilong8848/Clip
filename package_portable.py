@@ -161,6 +161,8 @@ FORCE_PATCH_INCLUDE_FILES = {
 
     Path("bin") / "upload_event_module" / "web" / "index.html",
 
+    Path("bin") / "upload_event_module" / "services" / "process_lifetime.py",
+
 }
 
 
@@ -209,9 +211,15 @@ WINDOWS_RUNTIME_MODULE_TO_PACKAGE = {
 
     "win32api": "pywin32",
 
+    "win32com.client": "pywin32",
+
     "win32gui": "pywin32",
 
+    "win32job": "pywin32",
+
     "win32clipboard": "pywin32",
+
+    "pythoncom": "pywin32",
 
     "pywintypes": "pywin32",
 
@@ -271,6 +279,7 @@ if sys.platform == "win32":
 
 SMOKE_IMPORT_MODULES = [
     "upload_event_module.services.event_relay_server",
+    "upload_event_module.services.process_lifetime",
     "upload_event_module.ui.event_relay_bridge",
     "upload_event_module.ui.main_window",
     "upload_event_module.ui.main_window_clipboard",
@@ -1377,6 +1386,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "clipflow_backend" / "preflight.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "process_controller.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
+        PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "process_lifetime.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",

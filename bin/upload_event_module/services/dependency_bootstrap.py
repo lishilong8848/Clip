@@ -30,8 +30,11 @@ DEFAULT_MODULE_TO_PACKAGE = {
 
 DEFAULT_WINDOWS_MODULE_TO_PACKAGE = {
     "win32api": "pywin32",
+    "win32com.client": "pywin32",
     "win32gui": "pywin32",
+    "win32job": "pywin32",
     "win32clipboard": "pywin32",
+    "pythoncom": "pywin32",
     "pywintypes": "pywin32",
 }
 

@@ -4,13 +4,42 @@ import os
 import json
 import sys
 import ctypes
+import argparse
 import hashlib
 import sqlite3
+import threading
 import traceback
 import urllib.request
 import win32gui
 import win32con
 import win32clipboard
+
+
+def _start_parent_exit_watchdog(parent_pid: int) -> bool:
+    if os.name != "nt" or parent_pid <= 0:
+        return True
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.OpenProcess(0x00100000, False, int(parent_pid))
+    if not handle:
+        return False
+
+    def wait_for_parent():
+        try:
+            kernel.WaitForSingleObject(handle, 0xFFFFFFFF)
+        finally:
+            kernel.CloseHandle(handle)
+        os._exit(0)
+
+    threading.Thread(
+        target=wait_for_parent,
+        name="ClipFlowClipboardParentWatchdog",
+        daemon=True,
+    ).start()
+    return True
 
 
 class StableClipboardMonitor:
@@ -162,6 +191,11 @@ class StableClipboardMonitor:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--parent-pid", type=int, default=0)
+    args, _unknown = parser.parse_known_args()
+    if args.parent_pid and not _start_parent_exit_watchdog(args.parent_pid):
+        raise SystemExit(0)
     trace_file = os.environ.get("CLIPFLOW_CLIPBOARD_TRACE_FILE", "").strip()
     try:
         monitor = StableClipboardMonitor()
