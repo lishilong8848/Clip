@@ -11,9 +11,6 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit, unquote
 
-import requests
-
-
 class RemotePatchUpdater:
     def __init__(self, app_root: Path, data_dir: Path, manifest_url: str):
         self.app_root = app_root
@@ -44,6 +41,8 @@ class RemotePatchUpdater:
     def fetch_manifest(self, timeout: tuple[float, float] = (5.0, 20.0)) -> dict:
         if not self.manifest_url:
             return {}
+        import requests
+
         response = requests.get(self.manifest_url, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
@@ -102,6 +101,8 @@ class RemotePatchUpdater:
         return hasher.hexdigest()
 
     def _download_zip(self, manifest: dict) -> Path:
+        import requests
+
         zip_url = (manifest.get("zip_url") or "").strip()
         zip_name = str(manifest.get("zip_name") or "")
         if not zip_url:

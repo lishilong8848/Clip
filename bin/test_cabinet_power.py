@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline
-from .lan_bitable_template_portal.cabinet_power import CabinetPowerService
+from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class MemoryStore:
@@ -70,6 +70,16 @@ class CabinetPowerTests(unittest.TestCase):
 
     def tearDown(self):
         self.service.shutdown(); self.tmp.cleanup()
+
+    def test_create_uses_stable_uuid4_client_token_helper(self):
+        self.assertIn("_stable_uuid4_client_token",CabinetFeishu.create.__code__.co_names)
+
+    def test_editor_hides_blank_template_groups_and_names_real_transition(self):
+        source=(Path(__file__).parent/"lan_bitable_template_portal/frontend/src/components/CabinetPowerPage.vue").read_text(encoding="utf-8")
+        self.assertIn("map(() => newGroup(false))",source)
+        self.assertIn("editorGroupLabel(group, i)",source)
+        self.assertIn("stateAction(target)",source)
+        self.assertIn("!!form.target_state && group._editing",source)
 
     def test_all_source_rows_and_idle_cabinets_are_retained(self):
         counts={s:sum(r["fields"]["楼栋"]==s+"楼" for r in self.source_records) for s in "ABCDE"}

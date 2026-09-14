@@ -1235,6 +1235,7 @@ class PortalRuntime:
             NOTICE_TYPE_CHANGE,
             WORK_TYPE_CHANGE,
         )
+        stopped_rechecks = 0
         for record in records:
             target_record_id = str(record.get("record_id") or "").strip()
             if not target_record_id:
@@ -1253,6 +1254,27 @@ class PortalRuntime:
                     continue
                 active_record = record
                 if existing:
+                    fingerprint_payload = {
+                        "record_id": target_record_id,
+                        "updated_at": record.get("updated_at"),
+                        "display_fields": record.get("display_fields") or {},
+                        "raw_fields": record.get("raw_fields") or {},
+                    }
+                    candidate_fingerprint = hashlib.sha256(
+                        json.dumps(
+                            fingerprint_payload,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if (
+                        str(existing.get("stopped_seed_fingerprint") or "")
+                        == candidate_fingerprint
+                        or stopped_rechecks >= 2
+                    ):
+                        continue
+                    stopped_rechecks += 1
                     ok, result = query_record_by_id(
                         target_record_id,
                         NOTICE_TYPE_CHANGE,
@@ -1260,13 +1282,16 @@ class PortalRuntime:
                     if not ok:
                         continue
                     active_record = result if isinstance(result, dict) else record
-                cls._put_change_confirmation_task(
-                    cls._change_confirmation_task_from_record(
-                        target_record_id,
-                        active_record,
-                        existing=existing,
-                    )
+                seeded = cls._change_confirmation_task_from_record(
+                    target_record_id,
+                    active_record,
+                    existing=existing,
                 )
+                if existing and str(seeded.get("state") or "") == "stopped":
+                    seeded["stopped_seed_fingerprint"] = candidate_fingerprint
+                else:
+                    seeded.pop("stopped_seed_fingerprint", None)
+                cls._put_change_confirmation_task(seeded)
 
     @classmethod
     def list_change_confirmations(cls) -> dict:
@@ -5929,9 +5954,9 @@ class PortalRuntime:
     @classmethod
     def _source_refresh_loop(cls) -> None:
         try:
-            next_wait = float(os.environ.get("CLIPFLOW_SOURCE_REFRESH_STARTUP_DELAY_SECONDS", "") or 8.0)
+            next_wait = float(os.environ.get("CLIPFLOW_SOURCE_REFRESH_STARTUP_DELAY_SECONDS", "") or 60.0)
         except Exception:
-            next_wait = 8.0
+            next_wait = 60.0
         next_wait = max(0.0, min(next_wait, 120.0))
         while True:
             if cls.source_refresh_event.wait(timeout=next_wait):
@@ -5940,11 +5965,15 @@ class PortalRuntime:
                 if cls.source_refresh_stop:
                     return
             has_snapshot = cls.source_snapshot_ready("ALL")
-            cls.refresh_sources_once(force=True, defer_if_busy=has_snapshot)
             try:
                 ttl = int(cls.service._source_cache_ttl_seconds())
             except Exception:
                 ttl = SOURCE_CACHE_TTL_SECONDS
+            cls.refresh_sources_once(
+                force=not has_snapshot,
+                min_interval_seconds=max(60, int(ttl or SOURCE_CACHE_TTL_SECONDS)),
+                defer_if_busy=has_snapshot,
+            )
             next_wait = max(60.0, float(ttl or SOURCE_CACHE_TTL_SECONDS))
 
     @classmethod
@@ -6311,7 +6340,7 @@ class PortalRuntime:
     ) -> None:
         generation = cls.message_worker_generation if generation is None else generation
         while True:
-            signaled = cls.message_queue_event.wait(timeout=1)
+            signaled = cls.message_queue_event.wait(timeout=5)
             if cls.message_worker_stop or generation != cls.message_worker_generation:
                 return
             if not signaled and worker_index:
@@ -6729,7 +6758,7 @@ class PortalRuntime:
                 for job_id, future in list(running.items()):
                     if future.done():
                         del running[job_id]
-                cls.action_queue_event.wait(timeout=1.0)
+                cls.action_queue_event.wait(timeout=5.0)
                 cls.action_queue_event.clear()
                 if (
                     generation != cls.action_worker_generation

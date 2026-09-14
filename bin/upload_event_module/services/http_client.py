@@ -9,10 +9,8 @@ import time
 import weakref
 from typing import Any
 
-import httpx
 
-
-DEFAULT_TIMEOUT = httpx.Timeout(connect=3.0, read=15.0, write=60.0, pool=3.0)
+DEFAULT_TIMEOUT = None
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 _CLIENTS: "weakref.WeakSet[FeishuHttpClient]" = weakref.WeakSet()
 
@@ -48,34 +46,39 @@ class FeishuHttpClient:
     def __init__(
         self,
         *,
-        timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+        timeout: Any = DEFAULT_TIMEOUT,
         retries: int = 2,
-        transport: httpx.BaseTransport | None = None,
+        transport: Any = None,
     ) -> None:
         self.timeout = timeout
         self.retries = max(0, int(retries or 0))
         self._transport = transport
-        self._client: httpx.Client | None = None
+        self._client: Any = None
         self._lock = threading.RLock()
         _CLIENTS.add(self)
 
-    def _ensure_client_locked(self) -> httpx.Client:
+    def _ensure_client_locked(self):
+        import httpx
+
         client = self._client
         if client is not None:
             return client
-        client_kwargs = {"timeout": self.timeout, "follow_redirects": False}
+        timeout = self.timeout or httpx.Timeout(
+            connect=3.0, read=15.0, write=60.0, pool=3.0
+        )
+        client_kwargs = {"timeout": timeout, "follow_redirects": False}
         if self._transport is not None:
             client_kwargs["transport"] = self._transport
         client = httpx.Client(**client_kwargs)
         self._client = client
         return client
 
-    def _client_for_request(self) -> httpx.Client:
+    def _client_for_request(self):
         with self._lock:
             return self._ensure_client_locked()
 
     @staticmethod
-    def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
+    def _retry_delay(response: Any, attempt: int) -> float:
         value = str(response.headers.get("retry-after") or "").strip() if response else ""
         if value:
             try:
@@ -111,6 +114,8 @@ class FeishuHttpClient:
         json_payload: Any = None,
         retries: int | None = None,
     ) -> dict[str, Any]:
+        import httpx
+
         retry_count = self.retries if retries is None else max(0, int(retries or 0))
         last_error = ""
         for attempt in range(retry_count + 1):
@@ -175,6 +180,8 @@ class FeishuHttpClient:
         the next attempt reading from the previous file position.
         """
 
+        import httpx
+
         retry_count = self.retries if retries is None else max(0, int(retries or 0))
         last_error = ""
         for attempt in range(retry_count + 1):
@@ -238,6 +245,8 @@ class FeishuHttpClient:
         retries: int | None = None,
         max_bytes: int = 15 * 1024 * 1024,
     ) -> tuple[bytes, str]:
+        import httpx
+
         retry_count = self.retries if retries is None else max(0, int(retries or 0))
         last_error = ""
         for attempt in range(retry_count + 1):
@@ -295,7 +304,7 @@ def request_json(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     json_payload: Any = None,
-    timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+    timeout: Any = DEFAULT_TIMEOUT,
     retries: int = 2,
 ) -> dict[str, Any]:
     client = FeishuHttpClient(timeout=timeout, retries=retries)

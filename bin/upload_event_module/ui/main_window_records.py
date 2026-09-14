@@ -119,14 +119,19 @@ class MainWindowRecordsMixin:
             self._recover_stale_upload_states
         )
         self.upload_state_watchdog_timer.start(15 * 1000)
-        self._ui_heartbeat_expected = time.monotonic() + 0.5
+        # The timer is constructed before app.exec(); calibrate on its first
+        # callback so window construction is not reported as event-loop lag.
+        self._ui_heartbeat_expected = 0.0
         self.ui_heartbeat_timer = QTimer(self)
         self.ui_heartbeat_timer.timeout.connect(self._measure_ui_event_loop_lag)
         self.ui_heartbeat_timer.start(500)
 
     def _measure_ui_event_loop_lag(self):
         now = time.monotonic()
-        expected = float(getattr(self, "_ui_heartbeat_expected", now) or now)
+        expected = float(getattr(self, "_ui_heartbeat_expected", 0.0) or 0.0)
+        if expected <= 0:
+            self._ui_heartbeat_expected = now + 0.5
+            return
         lag_ms = max(0.0, (now - expected) * 1000.0)
         self._ui_heartbeat_expected = now + 0.5
         if lag_ms >= 120.0:
@@ -4197,10 +4202,10 @@ class MainWindowRecordsMixin:
             item = self._active_model_item(list_widget, data_dict)
             if item is None:
                 return None, None
-            self._schedule_today_in_progress_sync(data_dict)
-            self._schedule_record_binding_validation(data_dict)
-            self._schedule_active_route_reconcile(data_dict)
             if not skip_cache:
+                self._schedule_today_in_progress_sync(data_dict)
+                self._schedule_record_binding_validation(data_dict)
+                self._schedule_active_route_reconcile(data_dict)
                 if not (
                     hasattr(self, "_upsert_active_cache_record")
                     and self._upsert_active_cache_record(data_dict)

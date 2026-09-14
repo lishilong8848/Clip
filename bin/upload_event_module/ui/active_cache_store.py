@@ -28,6 +28,26 @@ class ActiveCacheStore:
         self.cache_file = str(cache_file or "")
         self._state_store = state_store or LanPortalStateStore(busy_timeout_ms=75)
         self._lock = threading.RLock()
+        self._field_snapshot: dict[str, dict[str, Any]] = {}
+
+    def _cache_record_fields_unlocked(self, data: dict | None) -> None:
+        if not isinstance(data, dict):
+            return
+        snapshot = dict(data)
+        for value in (
+            canonical_target_record_id(snapshot),
+            snapshot.get("record_id"),
+            snapshot.get("active_item_id"),
+        ):
+            key = self._normalize_key(value)
+            if key:
+                self._field_snapshot[key] = snapshot
+
+    def _replace_field_snapshot_unlocked(self, items: list[dict]) -> None:
+        self._field_snapshot = {}
+        for item in items:
+            if isinstance(item, dict):
+                self._cache_record_fields_unlocked(item.get("payload"))
 
     def _default_payload(self) -> dict:
         return {
@@ -47,6 +67,7 @@ class ActiveCacheStore:
             qt_items = self._state_store.list_visible_qt_active_items()
         except Exception:
             qt_items = []
+        self._replace_field_snapshot_unlocked(qt_items)
         payload = self._default_payload()
         for item in qt_items:
             if not isinstance(item, dict):
@@ -100,6 +121,9 @@ class ActiveCacheStore:
         except Exception as exc:
             log_warning(f"Qt active items 规范表写入失败: {exc}")
             return False
+        self._field_snapshot = {}
+        for _, _, data in self._iter_record_entries_unlocked(normalized):
+            self._cache_record_fields_unlocked(data)
         return True
 
     def save_payload(self, payload: dict) -> bool:
@@ -237,6 +261,25 @@ class ActiveCacheStore:
             return {key: data.get(key) for key in fields if key in data}
         return {}
 
+    def get_cached_record_fields(
+        self,
+        record_id: str = "",
+        active_item_id: str = "",
+        fields: list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
+        """Return the latest already-read fields without touching SQLite."""
+        if not fields:
+            return {}
+        with self._lock:
+            data = self._field_snapshot.get(self._normalize_key(record_id))
+            if data is None:
+                data = self._field_snapshot.get(self._normalize_key(active_item_id))
+            return {
+                key: data.get(key)
+                for key in fields
+                if isinstance(data, dict) and key in data
+            }
+
     def get_locked_level_map(self) -> dict[str, dict[str, Any]]:
         """Return level-lock fields for all cached active records in one read."""
         with self._lock:
@@ -284,12 +327,16 @@ class ActiveCacheStore:
                     changed = True
             if not changed:
                 return False
-            return self._state_store.upsert_qt_active_item(
+            saved = self._state_store.upsert_qt_active_item(
                 persistent_active_item_data(data),
                 section=str(item.get("section") or ""),
                 sort_order=int(item.get("sort_order") or 0),
                 origin=str(item.get("origin") or ""),
             )
+            if saved:
+                with self._lock:
+                    self._cache_record_fields_unlocked(data)
+            return saved
         return False
 
     def upsert_record(self, data_dict: dict | None = None) -> bool:
@@ -313,6 +360,8 @@ class ActiveCacheStore:
                     section=target_section,
                     origin="portal" if bool(normalized.get("lan_created_from_portal")) else "qt",
                 )
+                if saved:
+                    self._cache_record_fields_unlocked(normalized)
                 return saved
             except Exception:
                 return False
@@ -328,6 +377,17 @@ class ActiveCacheStore:
                     active_item_id=active_item_id,
                     record_id=record_id,
                 )
+                if deleted:
+                    identities = {record_id, active_item_id} - {""}
+                    self._field_snapshot = {
+                        key: data
+                        for key, data in self._field_snapshot.items()
+                        if key not in identities
+                        and self._normalize_key(canonical_target_record_id(data))
+                        not in identities
+                        and self._normalize_key(data.get("active_item_id"))
+                        not in identities
+                    }
                 return deleted
             except Exception:
                 return False
@@ -356,8 +416,10 @@ class ActiveCacheStore:
                         sort_order=int(item.get("sort_order") or 0),
                         origin=str(item.get("origin") or ""),
                     )
+                    self._cache_record_fields_unlocked(data)
                     changed = True
                 if changed:
+                    self._field_snapshot.pop(old_id, None)
                     return True
             except Exception:
                 pass

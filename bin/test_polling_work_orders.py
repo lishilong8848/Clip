@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 import zipfile
 import copy
 from pathlib import Path
@@ -95,7 +96,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         service.list_sops("A")
         return service, cloud, sop
 
-    def test_manual_refresh_updates_initialized_cache_without_cloud_writes(self):
+    def test_manual_refresh_uploads_local_only_sops_then_updates_cache(self):
         with tempfile.TemporaryDirectory() as temp:
             service, cloud, sop = self._refresh_fixture(Path(temp))
             store = service.state_store
@@ -107,13 +108,18 @@ class PollingWorkOrderTests(unittest.TestCase):
             cloud.sops["new_sop_123456"] = {**copy.deepcopy(sop), "sop_id": "new_sop_123456", "name": "新增 SOP"}
             self.assertEqual(len(service.get_sop(sop["sop_id"])["steps"]), 1)
             result = service.refresh_sops("A")
-            self.assertEqual(result["synced_count"], 2)
+            self.assertEqual(result["synced_count"], 3)
+            self.assertEqual((result["uploaded_count"], result["pending_upload_count"]), (3, 0))
             self.assertEqual(len(result["items"]), 3)
             self.assertEqual(len(service.get_sop(sop["sop_id"])["steps"]), 2)
             count = cloud.list_calls
             service.list_sops("A")
             self.assertEqual(cloud.list_calls, count)
-            self.assertEqual((cloud.saved, cloud.uploaded), ([], []))
+            self.assertEqual(
+                {item[0]["sop_id"] for item in cloud.saved},
+                {"local_only_1234", "other_scope_1234", "other_type_1234"},
+            )
+            self.assertEqual(cloud.uploaded, [])
             self.assertEqual(store.get_document("polling_sop", "other_scope_1234")["scope"], "B")
             self.assertEqual(store.get_document("polling_sop", "other_type_1234")["work_type"], "maintenance")
 
@@ -132,6 +138,19 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(service.get_sop(sop["sop_id"]), before)
             self.assertEqual(service.refresh_sops("A")["items"][0]["name"], "尚未提交的更新")
 
+    def test_manual_refresh_keeps_local_sop_when_upload_is_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            local = {**sop, "sop_id": "pending_sop_1234", "name": "等待补传"}
+            service.state_store.put_document("polling_sop", local["sop_id"], local)
+            with patch.object(cloud, "save_sop", side_effect=TimeoutError("write timeout")):
+                result = service.refresh_sops("A")
+            self.assertEqual(result["pending_upload_count"], 1)
+            self.assertIn(local["sop_id"], {item["sop_id"] for item in result["items"]})
+            self.assertIsNotNone(
+                service.state_store.get_document("polling_sop", local["sop_id"])
+            )
+
     def test_manual_refresh_changed_attachment_does_not_reuse_old_content(self):
         with tempfile.TemporaryDirectory() as temp:
             service, cloud, sop = self._refresh_fixture(Path(temp))
@@ -147,7 +166,7 @@ class PollingWorkOrderTests(unittest.TestCase):
     def test_manual_refresh_scope_marker_keeps_future_reads_local(self):
         with tempfile.TemporaryDirectory() as temp:
             service, cloud, sop = self._refresh_fixture(Path(temp))
-            service.state_store.delete_document("polling_sop_meta", "cloud_initialized_v1")
+            service.state_store.delete_document("polling_sop_meta", "cloud_initialized_v2")
             service.refresh_sops("A")
             count = cloud.list_calls
             service.list_sops("A")
@@ -197,6 +216,19 @@ class PollingWorkOrderTests(unittest.TestCase):
                     response = client.post("/api/polling-sops/refresh", json={"scope": "A", "work_type": "maintenance"})
                 self.assertEqual(response.status_code, 200, response.text)
                 manager.refresh_sops.assert_called_once_with("A", "maintenance")
+                manager.get_sop.return_value = {
+                    "sop_id": "convert_sop_1234", "scope": "A", "work_type": "polling"
+                }
+                manager.save_sop.return_value = {
+                    "sop_id": "convert_sop_1234", "scope": "A", "work_type": "maintenance"
+                }
+                with patch.object(controller, "_authorized_scope_or_error", return_value="A"):
+                    response = client.put("/api/polling-sops/convert_sop_1234", json={
+                        "scope": "A", "work_type": "maintenance", "name": "转换测试",
+                        "expected_version": 1, "steps": [{"content": "检查设备"}],
+                    })
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(manager.save_sop.call_args.args[0]["work_type"], "maintenance")
 
     def test_legacy_local_sop_is_uploaded_to_cloud_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -205,6 +237,9 @@ class PollingWorkOrderTests(unittest.TestCase):
             cloud = _FakePollingSopCloud()
             service = PollingWorkOrderService(store, cloud)
             service.sop_root = root / "sops"
+            store.put_document(
+                "polling_sop_meta", "cloud_initialized_v1", {"initialized": True}
+            )
             sop_id = "legacy_sop_1234"
             attachment_id = "legacy_attachment_1234"
             directory = service.sop_root / sop_id
@@ -303,7 +338,33 @@ class PollingWorkOrderTests(unittest.TestCase):
         cloud.save_sop(sop, expected_version=0, allow_create=True)
         second_token = cloud._request.call_args.kwargs["params"]["client_token"]
         self.assertEqual(first_token, second_token)
+        self.assertEqual(uuid.UUID(first_token).version, 4)
         self.assertEqual(cloud.ensure_schema.call_count, 2)
+
+    def test_saved_sop_can_move_between_work_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = PollingWorkOrderService(
+                LanPortalStateStore(Path(temp) / "state.sqlite3")
+            )
+            sop = service.save_sop({
+                "scope": "A", "work_type": "polling", "name": "可转换SOP",
+                "steps": [{"content": "检查设备", "operator_required": True}],
+            })
+            converted = sop
+            for work_type in ("maintenance", "adjust", "polling"):
+                converted = service.save_sop({
+                    **converted,
+                    "work_type": work_type,
+                    "expected_version": converted["version"],
+                })
+                self.assertEqual(converted["work_type"], work_type)
+            self.assertEqual(converted["sop_id"], sop["sop_id"])
+            self.assertEqual(
+                [item["sop_id"] for item in service.list_sops("A", "polling")],
+                [sop["sop_id"]],
+            )
+            self.assertEqual(service.list_sops("A", "maintenance"), [])
+            self.assertEqual(service.list_sops("A", "adjust"), [])
 
     def test_cloud_sop_read_does_not_check_schema(self) -> None:
         cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
@@ -1105,9 +1166,15 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("SOP 必须至少包含一个附件", html)
         self.assertIn("非制冷单元/二次泵轮巡", html)
         self.assertIn(".polling-cooling-mode[hidden] { display:none; }", html)
-        self.assertIn("workTypeText.textContent='适用类型'", html)
-        self.assertIn("[['adjust','调整'],['polling','轮巡'],['maintenance','维保']]", html)
-        self.assertIn("workType.disabled=Boolean(sop.sop_id)", html)
+        self.assertIn("workTypeLegend.textContent='查看 SOP 列表'", html)
+        self.assertIn("[['maintenance','维保'],['polling','轮巡'],['adjust','调整']]", html)
+        self.assertNotIn("workType.disabled=Boolean(sop.sop_id)", html)
+        self.assertIn('id="lite-polling-sop-type-confirm"', html)
+        self.assertIn("option.onclick=()=>browsePollingSopType(value)", html)
+        self.assertIn("target.setAttribute('aria-label','转换目标类型')", html)
+        self.assertIn("convert.textContent='转换适用类型'", html)
+        self.assertIn("confirmPollingSopTypeChange", html)
+        self.assertIn("const requestedWorkType=pollingCurrentSopWorkType()", html)
         self.assertIn('name="polling_work_order_exempt"', html)
         self.assertIn("function pollingWorkOrderExempt(form)", html)
         self.assertIn("patch.polling_work_order_exempt = pollingWorkOrderExempt(form)", html)

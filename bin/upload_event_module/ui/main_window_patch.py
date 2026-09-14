@@ -88,7 +88,7 @@ class PatchUpdateMixin:
             60, int(getattr(config, "remote_update_interval_seconds", 3600))
         )
         self.remote_update_timer.start(interval_seconds * 1000)
-        QTimer.singleShot(20000, self._schedule_remote_update_check)
+        QTimer.singleShot(120000, self._schedule_remote_update_check)
 
     def _ensure_remote_patch_updater(self):
         if getattr(self, "_closing", False):
@@ -199,8 +199,10 @@ class PatchUpdateMixin:
     def _remote_update_check_worker(self, manual: bool = False):
         if getattr(self, "_closing", False):
             return
+        from ..services.process_lifetime import lower_current_thread_priority
         from ..services.remote_patch_updater import RemotePatchUpdater
 
+        lower_current_thread_priority()
         status_text = "远程更新: 已是最新"
         ui_manifest = None
         non_ui_manifest = None

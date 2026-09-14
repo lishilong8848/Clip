@@ -628,7 +628,6 @@ REPAIR_FOLLOWUP_CUSTOM_SINGLE_SELECT_FIELDS = {
     "所属专业",
 }
 REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY = "repair_followup_parent_backfill_v1"
-REPAIR_FOLLOWUP_BACKFILL_INTERVAL_SECONDS = 24 * 60 * 60
 REPAIR_INTEGRITY_REPAIR_RUNTIME_KEY = "repair_management_integrity_repair_v1"
 REPAIR_FOLLOWUP_SCHEMA_INITIALIZATION_RUNTIME_KEY = (
     "repair_followup_schema_initialization_v1"
@@ -10027,15 +10026,12 @@ class MaintenancePortalService:
         *,
         force: bool = False,
     ) -> dict[str, Any]:
-        now = time.time()
         runtime = self._state_store.get_backend_runtime(
             REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY
         ) or {}
-        last_finished = float(runtime.get("finished_ts") or 0)
         if (
             not force
-            and last_finished > 0
-            and now - last_finished < REPAIR_FOLLOWUP_BACKFILL_INTERVAL_SECONDS
+            and str(runtime.get("status") or "").strip() == "complete"
         ):
             return {**runtime, "skipped": True}
 
@@ -11939,7 +11935,6 @@ class MaintenancePortalService:
                 backfill = {"status": "failed", "error": str(exc)}
                 logging.warning("维修跟进旧记录自动补绑失败: %s", exc)
         resumed = self.resume_repair_sync_tasks_async()
-        self.start_repair_snapshot_warmup_async()
         now = time.time()
         cleanup = {
             "operations": self._state_store.cleanup_repair_management_operations(
@@ -32281,9 +32276,8 @@ class MaintenancePortalService:
         status_finished = self._target_status_is_finished(status)
         status_active = self._target_status_is_active(status)
         if work_type == WORK_TYPE_CHANGE:
-            # `变更结束时间` is the planned end written on the start action, not
-            # proof that the notice has ended. Change lifecycle is authoritative
-            # only from `变更状态`.
+            # Legacy rows may contain a planned value here. Status remains the
+            # lifecycle authority; new writes set this field only on end.
             finished = status_finished
             active = bool(not finished and status_active)
             if not finished:

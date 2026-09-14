@@ -10,6 +10,22 @@ _job_handle = None
 _job_closed = False
 
 
+def lower_current_thread_priority() -> None:
+    """Keep background maintenance from competing with desktop input."""
+    if os.name != "nt":
+        return
+    try:
+        import win32api
+        import win32process
+
+        win32process.SetThreadPriority(
+            win32api.GetCurrentThread(),
+            win32process.THREAD_PRIORITY_BELOW_NORMAL,
+        )
+    except Exception:
+        pass
+
+
 def _query_windows_processes(query: str, fields: tuple[str, ...]) -> list[dict]:
     import pythoncom
     import win32com.client

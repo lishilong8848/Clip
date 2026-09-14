@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import parse_qs, quote, urlencode
 
-import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
@@ -203,12 +202,6 @@ from upload_event_module.services.process_lifetime import start_parent_exit_watc
 INLINE_IMAGE_B64_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
 from upload_event_module.services.service_registry import query_record_by_id
 from upload_event_module.logger import log_error, log_info, log_warning
-
-try:
-    from apscheduler.schedulers.background import BackgroundScheduler
-except Exception:
-    BackgroundScheduler = None
-
 
 MAX_SITE_PHOTO_BYTES = 8 * 1024 * 1024
 BACKEND_INSTANCE_ID = uuid.uuid4().hex
@@ -5987,9 +5980,6 @@ class FastAPIPortalController:
                     session, existing_sop.get("scope") or ""
                 )
                 payload["sop_id"] = sop_id
-                payload["work_type"] = str(
-                    existing_sop.get("work_type") or "polling"
-                ).strip()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().save_sop,
@@ -9331,12 +9321,19 @@ class FastAPIPortalController:
                     or PortalRuntime.message_running_job_ids
                     or PortalRuntime.message_scope_inflight
                 )
-                if has_running_jobs:
-                    if (
-                        str(getattr(previous_service, "app_token", "") or "") != str(self.app_token or "")
-                        or str(getattr(previous_service, "table_id", "") or "") != str(self.table_id or "")
-                    ):
-                        raise RuntimeError("后台仍有通告任务执行中，不能切换飞书应用或数据表。")
+                same_target = (
+                    isinstance(previous_service, MaintenancePortalService)
+                    and bool(
+                        getattr(previous_service, "_repair_snapshots_enabled", False)
+                    )
+                    and str(getattr(previous_service, "app_token", "") or "")
+                    == str(self.app_token or "")
+                    and str(getattr(previous_service, "table_id", "") or "")
+                    == str(self.table_id or "")
+                )
+                if has_running_jobs and not same_target:
+                    raise RuntimeError("后台仍有通告任务执行中，不能切换飞书应用或数据表。")
+                if same_target:
                     PortalRuntime.service = previous_service
                 else:
                     PortalRuntime.service = MaintenancePortalService(
@@ -13086,7 +13083,9 @@ class FastAPIPortalController:
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
             return
-        if BackgroundScheduler is None:
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+        except Exception:
             log_warning("APScheduler 不可用，后端定时任务降级为旧线程。")
             return
         scheduler = BackgroundScheduler(
@@ -13244,55 +13243,6 @@ class FastAPIPortalController:
             replace_existing=True,
             max_instances=1,
         )
-        if not _mock_external_enabled():
-            scheduler.add_job(
-                self._run_scheduled_token_refresh,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=5),
-                id="feishu_token_refresh_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
-            scheduler.add_job(
-                self._run_scheduled_water_consumption_refresh,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=20),
-                id="water_consumption_refresh_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
-            scheduler.add_job(
-                self._run_scheduled_critical_guard_weather,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=35),
-                id="critical_guard_weather_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
-            scheduler.add_job(
-                self._run_scheduled_deletion_audit_flush,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=15),
-                id="deletion_audit_flush_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
-            scheduler.add_job(
-                self._run_scheduled_change_confirmations,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=20),
-                id="change_confirmations_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
-            scheduler.add_job(
-                self._run_scheduled_polling_work_orders,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=25),
-                id="polling_work_orders_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
         scheduler.start()
         self._scheduler = scheduler
         self._write_runtime_heartbeat()

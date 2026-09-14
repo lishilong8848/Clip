@@ -213,17 +213,21 @@ def _execute_bitable_write(request_fn: Callable[[str], object], notice_type: str
         raise RuntimeError("飞书写入请求超时或连接中断，远端结果暂不能确认。请刷新核验该条通告，不要重复新增；重试会先核验上次结果。") from exc
 
 
-def _notice_create_client_token(payload: NoticePayload, notice_type: str, table_id: str) -> str:
-    operation_id = str(payload.operation_id or "").strip()
-    if not operation_id:
-        return ""
-    seed = hashlib.sha256(
-        f"clipflow-notice:{config.app_token}:{table_id}:{notice_type}:{operation_id}".encode()
-    ).digest()
+def _stable_uuid4_client_token(value: str) -> str:
+    seed = hashlib.sha256(str(value or "").encode()).digest()
     raw = bytearray(seed[:16])
     raw[6] = (raw[6] & 0x0F) | 0x40
     raw[8] = (raw[8] & 0x3F) | 0x80
     return str(uuid.UUID(bytes=bytes(raw)))
+
+
+def _notice_create_client_token(payload: NoticePayload, notice_type: str, table_id: str) -> str:
+    operation_id = str(payload.operation_id or "").strip()
+    if not operation_id:
+        return ""
+    return _stable_uuid4_client_token(
+        f"clipflow-notice:{config.app_token}:{table_id}:{notice_type}:{operation_id}"
+    )
 
 
 def _query_with_transport_retry(request_fn: Callable[[str], object]):

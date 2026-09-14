@@ -385,7 +385,12 @@ class MainWindowRuntimeMixin:
         item = projection.get("item") if isinstance(projection.get("item"), dict) else None
         if not item:
             return {"ok": True, "skipped": True}
-        payload = {"item": item, "source": "clipboard_direct"}
+        payload = {
+            "item": item,
+            "source": "clipboard_direct",
+            "_qt_canonical_checked": True,
+            "_qt_canonical_row": item,
+        }
         enqueue = getattr(self, "_enqueue_ui_mutation", None)
         if callable(enqueue):
             accepted = enqueue(
@@ -567,6 +572,89 @@ class MainWindowRuntimeMixin:
             log_warning(f"Qt 活动通告权威投影失败，保留当前更新: {exc}")
             return dict(data)
 
+    def _prepare_backend_active_upsert(self, payload: dict | None) -> dict:
+        """Resolve SQLite authority before the mutation reaches the Qt thread."""
+        prepared = dict(payload or {})
+        if prepared.get("_qt_canonical_checked") is True:
+            return prepared
+        item = prepared.get("item") if isinstance(prepared.get("item"), dict) else prepared
+        data = item.get("payload") if isinstance(item.get("payload"), dict) else None
+        if data is None:
+            data = item.get("data") if isinstance(item.get("data"), dict) else item
+        if not isinstance(data, dict) or not data.get("text"):
+            return prepared
+        state_store = getattr(getattr(self, "cache_store", None), "_state_store", None)
+        if state_store is None:
+            return prepared
+        active_item_id = str(
+            data.get("active_item_id") or item.get("active_item_id") or ""
+        ).strip()
+        record_id = str(
+            data.get("target_record_id")
+            or item.get("target_record_id")
+            or data.get("record_id")
+            or item.get("record_id")
+            or ""
+        ).strip()
+        try:
+            find_rows = (
+                getattr(state_store, "find_qt_active_items", None)
+                if str(data.get("notice_type") or "").strip() == "事件通告"
+                else None
+            )
+            candidates = (
+                find_rows(active_item_id=active_item_id, record_id=record_id)
+                if callable(find_rows)
+                else []
+            )
+            rows = (
+                state_store.project_visible_qt_active_items(candidates)
+                if candidates
+                else state_store.list_visible_qt_active_items()
+            )
+            prepared["_qt_canonical_row"] = next(
+                (
+                    row
+                    for row in rows
+                    if self._backend_active_identity_matches(
+                        data, self._backend_active_row_payload(row)
+                    )
+                ),
+                None,
+            )
+            prepared["_qt_canonical_checked"] = True
+        except Exception as exc:
+            prepared["_qt_canonical_error"] = str(exc)
+            log_warning(f"Qt 活动通告后台权威状态核对失败，等待后端重试: {exc}")
+        return prepared
+
+    def _prepare_backend_active_delete(self, payload: dict | None) -> dict:
+        prepared = dict(payload or {})
+        state_store = getattr(getattr(self, "cache_store", None), "_state_store", None)
+        if state_store is None:
+            return prepared
+        active_item_id = str(prepared.get("active_item_id") or "").strip()
+        incoming_target_id = canonical_target_record_id(prepared)
+        try:
+            canonical_row = None
+            for row in state_store.list_visible_qt_active_items():
+                data = self._backend_active_row_payload(row)
+                if (
+                    active_item_id
+                    and str(data.get("active_item_id") or "").strip()
+                    == active_item_id
+                    and incoming_target_id
+                    and incoming_target_id != canonical_target_record_id(data)
+                ) or self._backend_active_identity_matches(prepared, data):
+                    canonical_row = row
+                    break
+            prepared["_qt_canonical_checked"] = True
+            prepared["_qt_canonical_row"] = canonical_row
+        except Exception as exc:
+            prepared["_qt_canonical_error"] = str(exc)
+            log_warning(f"Qt 删除事件后台权威状态核对失败，等待后端重试: {exc}")
+        return prepared
+
     def _apply_backend_active_upsert(self, payload: dict | None) -> dict:
         payload = payload if isinstance(payload, dict) else {}
         item_payload = payload.get("item") if isinstance(payload.get("item"), dict) else payload
@@ -603,7 +691,18 @@ class MainWindowRuntimeMixin:
         canonical_supersedes = False
         cache_store = getattr(self, "cache_store", None)
         state_store = getattr(cache_store, "_state_store", None)
-        if state_store is not None:
+        canonical_checked = payload.get("_qt_canonical_checked") is True
+        if canonical_checked:
+            canonical_row = payload.get("_qt_canonical_row")
+            if not isinstance(canonical_row, dict):
+                return {"ok": True, "stale": True, "created": False}
+            data = (
+                dict(canonical_row.get("payload"))
+                if isinstance(canonical_row.get("payload"), dict)
+                else data
+            )
+            canonical_supersedes = True
+        elif state_store is not None:
             try:
                 find_rows = (
                     getattr(state_store, "find_qt_active_items", None)
@@ -783,7 +882,19 @@ class MainWindowRuntimeMixin:
         zhihang_record_id = str(payload.get("zhihang_record_id") or "").strip()
         cache_store = getattr(self, "cache_store", None)
         state_store = getattr(cache_store, "_state_store", None)
-        if state_store is not None:
+        canonical_checked = payload.get("_qt_canonical_checked") is True
+        if canonical_checked:
+            canonical_row = payload.get("_qt_canonical_row")
+            if isinstance(canonical_row, dict):
+                self._apply_backend_active_upsert(
+                    {
+                        "item": canonical_row,
+                        "_qt_canonical_checked": True,
+                        "_qt_canonical_row": canonical_row,
+                    }
+                )
+                return {"ok": True, "stale": True, "deleted": False}
+        elif state_store is not None:
             try:
                 incoming_target_id = canonical_target_record_id(payload)
                 for canonical_row in state_store.list_visible_qt_active_items():
@@ -906,6 +1017,7 @@ class MainWindowRuntimeMixin:
             else []
         )
         controller = getattr(self, "lan_template_portal_controller", None)
+        candidate_ids = []
         for candidate in clipboard_candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -915,6 +1027,10 @@ class MainWindowRuntimeMixin:
                 and controller is not None
                 and hasattr(controller, "acknowledge_clipboard_candidate")
             ):
+                candidate_ids.append(candidate_id)
+
+        def acknowledge_candidates():
+            for candidate_id in candidate_ids:
                 try:
                     controller.acknowledge_clipboard_candidate(
                         candidate_id,
@@ -923,6 +1039,16 @@ class MainWindowRuntimeMixin:
                     )
                 except Exception:
                     pass
+
+        if candidate_ids:
+            executor = getattr(self, "_qt_backend_command_executor", None)
+            if executor is not None:
+                try:
+                    executor.submit(acknowledge_candidates)
+                except RuntimeError:
+                    pass
+            else:
+                acknowledge_candidates()
         for session in dialog_sessions:
             if not isinstance(session, dict):
                 continue
@@ -945,6 +1071,9 @@ class MainWindowRuntimeMixin:
                     pass
             return {"ok": True}
         if kind == "active_upsert":
+            payload = self._prepare_backend_active_upsert(payload)
+            if payload.get("_qt_canonical_error"):
+                return {"ok": False, "error": payload["_qt_canonical_error"]}
             source = str((payload or {}).get("source") or "").strip()
             tag = "backend_active_sync" if source == "backend_active_sync" else "active_upsert"
             if source == "backend_active_sync":
@@ -962,6 +1091,9 @@ class MainWindowRuntimeMixin:
                 lambda: self._apply_backend_active_upsert(payload),
             )
         if kind == "active_delete":
+            payload = self._prepare_backend_active_delete(payload)
+            if payload.get("_qt_canonical_error"):
+                return {"ok": False, "error": payload["_qt_canonical_error"]}
             return self._enqueue_confirmed_active_mutation(
                 "active_delete",
                 lambda p=dict(payload or {}): self._apply_backend_active_delete(p),
@@ -1289,8 +1421,11 @@ class MainWindowRuntimeMixin:
         if lock is None:
             return copied
         with lock:
+            changed = copied != getattr(self, "_lan_ongoing_snapshot_all", [])
             self._lan_ongoing_snapshot_all = copied
             self._lan_ongoing_snapshot_at = time.time()
+        if not changed:
+            return copied
 
         def persist():
             try:
@@ -1371,6 +1506,8 @@ class MainWindowRuntimeMixin:
 
         def _run():
             try:
+                if hasattr(self, "_set_last_ui_op"):
+                    self._set_last_ui_op("lan_ongoing_snapshot_refresh")
                 self._refresh_lan_ongoing_snapshot_now()
             finally:
                 lock_inner = getattr(self, "_lan_ongoing_snapshot_lock", None)
@@ -1677,28 +1814,33 @@ class MainWindowRuntimeMixin:
             sections = self._lan_notice_sections(text)
             cache_fields = {}
             cache_store = getattr(self, "cache_store", None)
-            if cache_store is not None:
-                cache_record_id = (
-                    str(data.get("target_record_id") or "").strip()
-                    or str(data.get("record_id") or "").strip()
-                )
-                if cache_record_id:
-                    try:
-                        cache_fields = cache_store.get_record_fields(
-                            record_id=cache_record_id,
-                            fields=[
-                                "buildings",
-                                "specialty",
-                                "maintenance_cycle",
-                                "level",
-                                "event_source",
-                                "device",
-                                "cabinet",
-                                "quantity",
-                            ],
-                        )
-                    except Exception:
-                        cache_fields = {}
+            cache_record_id = (
+                str(data.get("target_record_id") or "").strip()
+                or str(data.get("record_id") or "").strip()
+            )
+            get_cached_fields = getattr(
+                cache_store, "get_cached_record_fields", None
+            )
+            if callable(get_cached_fields) and (
+                cache_record_id or str(data.get("active_item_id") or "").strip()
+            ):
+                try:
+                    cache_fields = get_cached_fields(
+                        record_id=cache_record_id,
+                        active_item_id=str(data.get("active_item_id") or "").strip(),
+                        fields=[
+                            "buildings",
+                            "specialty",
+                            "maintenance_cycle",
+                            "level",
+                            "event_source",
+                            "device",
+                            "cabinet",
+                            "quantity",
+                        ],
+                    )
+                except Exception:
+                    cache_fields = {}
             payload_fields = {}
             try:
                 payload = self._ensure_payload_for_data(data)

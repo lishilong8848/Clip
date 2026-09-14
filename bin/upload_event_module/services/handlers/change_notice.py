@@ -99,8 +99,6 @@ class ChangeNoticeHandler(BaseNoticeHandler):
 
         if start_dt:
             fields[CHANGE_NOTICE_FIELDS["start_time"]] = self._to_timestamp_ms(start_dt)
-        if end_dt:
-            fields[CHANGE_NOTICE_FIELDS["end_time"]] = self._to_timestamp_ms(end_dt)
 
         if payload.buildings:
             fields[CHANGE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
@@ -188,8 +186,6 @@ class ChangeNoticeHandler(BaseNoticeHandler):
 
         if start_dt:
             fields[CHANGE_NOTICE_FIELDS["start_time"]] = self._to_timestamp_ms(start_dt)
-        if end_dt and not is_end:
-            fields[CHANGE_NOTICE_FIELDS["end_time"]] = self._to_timestamp_ms(end_dt)
 
         if payload.buildings:
             fields[CHANGE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
@@ -228,11 +224,10 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             )
             response_dt = self._parse_response_datetime(
                 payload.response_time, end_dt or start_dt
+            ) or datetime.now()
+            fields[CHANGE_NOTICE_FIELDS["end_time"]] = self._to_timestamp_ms(
+                response_dt
             )
-            if response_dt:
-                fields[CHANGE_NOTICE_FIELDS["end_time"]] = self._to_timestamp_ms(
-                    response_dt
-                )
             if payload.file_tokens:
                 fields[CHANGE_NOTICE_FIELDS["end_snapshot"]] = [
                     {"file_token": token} for token in payload.file_tokens

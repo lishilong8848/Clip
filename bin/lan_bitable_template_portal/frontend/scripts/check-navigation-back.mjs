@@ -15,7 +15,7 @@ try {
   browser=await chromium.launch({headless:true});
   const page=await browser.newPage({viewport:{width:1440,height:900}});
   const targets=[
-    ['/cabinet-power?scope=D','/cabinet-power'], ['/daily-tasks?scope=D','/'], ['/water-management?scope=D','/'],
+    ['/cabinet-power?scope=D','/cabinet-power'], ['/daily-tasks?scope=D','/'], ['/water-management?scope=D','/?entry=water'],
     ['/critical-guard?scope=D','/critical-guard'], ['/drill-management?scope=D','/drill-management'], ['/repair-management?scope=D','/'],
     ['/repair-status?scope=D','/repair-management?scope=D'], ['/engineer/mop?scope=D','/'], ['/?scope=D&mode=events','/'],
     ['/admin/history-memory','/'], ['/signature-management','/'],
@@ -45,6 +45,16 @@ try {
   await page.getByRole('heading',{name:'选择楼栋进入维护管理',exact:true}).waitFor();
   await page.locator('.vnet-back-button').click();
   await page.waitForURL(base+'/');
+  await page.getByRole('button',{name:'进入容量管理',exact:true}).click();
+  await page.getByRole('heading',{name:'选择容量管理模板',exact:true}).waitFor();
+  await page.getByRole('button',{name:'选择水耗管理',exact:true}).click();
+  await page.getByRole('heading',{name:'选择楼栋进入水耗管理',exact:true}).waitFor();
+  await page.locator('.vnet-back-button').click();
+  await page.waitForURL(base+'/?entry=capacity');
+  await page.getByRole('button',{name:'选择机柜管理',exact:true}).click();
+  await page.getByRole('heading',{name:'机柜上下电',exact:true}).waitFor();
+  await page.locator('.vnet-back-button').click();
+  await page.waitForURL(base+'/?entry=capacity');
   await page.goto(base+'/workbench-lite?scope=D&work_type=maintenance');
   await page.goto(base+'/workbench-lite?scope=D&work_type=change');
   await page.locator('#lite-back-link').click();
@@ -52,7 +62,7 @@ try {
   const entryPages={
     maintenance:'选择楼栋进入维护管理', maintenance_mop:'选择楼栋进入 MOP 填写',
     change:'选择楼栋进入变更管理', repair:'选择楼栋进入检修通告管理',
-    repair_management:'选择楼栋进入检修单管理', water:'选择楼栋进入水耗管理',
+    repair_management:'选择楼栋进入检修单管理', capacity:'选择容量管理模板', water:'选择楼栋进入水耗管理',
     tools:'选择辅助工具', daily:'选择楼栋查看每日任务',
     power:'选择楼栋进入上/下电通告', polling:'选择楼栋进入设备轮巡',
     adjust:'选择楼栋进入设备调整', handover:'选择楼栋打开交接班审核页',

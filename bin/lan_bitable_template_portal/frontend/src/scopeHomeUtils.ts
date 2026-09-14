@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "critical_guard" | "drill" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "critical_guard" | "drill" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -104,8 +104,8 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "capacity",
     badge: "数据洞察",
     title: "容量管理",
-    tags: ["水耗台账", "趋势统计"],
-    primaryAction: { key: "water", label: "进入水耗管理", primary: true },
+    tags: ["水耗管理", "机柜管理"],
+    primaryAction: { key: "capacity", label: "进入容量管理", primary: true },
   },
   {
     key: "tools",
@@ -128,15 +128,11 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     tags: ["演练计划", "评估改进"],
     primaryAction: { key: "drill", label: "进入演练管理", primary: true },
   },
-  {
-    key: "cabinet_power", tone: "blue", icon: "capacity", badge: "机柜台账",
-    title: "机柜上下电", tags: ["五楼平面图", "操作历史", "表格导出"],
-    primaryAction: { key: "cabinet_power", label: "进入机柜上下电", primary: true },
-  },
 ];
 
 export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, ScopeHomeEntryConfig> = {
   cabinet_power: { kicker: "机柜台账", title: "选择楼栋", description: "上下电记录与机柜平面图", actionLabel: "进入机柜上下电" },
+  capacity: { kicker: "容量管理", title: "选择容量管理模板", description: "", actionLabel: "选择模板" },
   event: {
     kicker: "事件管理",
     title: "选择楼栋进入事件管理",
@@ -241,6 +237,11 @@ export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
   { key: "handover", title: "交接班审核页", description: "按楼栋跳转审核链接", badge: "链接", icon: "link", tone: "slate" },
+];
+
+export const SCOPE_HOME_CAPACITY_ENTRIES: ScopeHomeToolEntry[] = [
+  { key: "water", title: "水耗管理", description: "水耗台账与趋势统计", badge: "水耗", icon: "adjust", tone: "emerald" },
+  { key: "cabinet_power", title: "机柜管理", description: "机柜上下电、平面图与台账导出", badge: "机柜", icon: "power", tone: "blue" },
 ];
 
 export function normalizeScopeValue(value: string, fallback = "ALL"): string {

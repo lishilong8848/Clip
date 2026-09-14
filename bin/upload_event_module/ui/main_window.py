@@ -13,6 +13,7 @@ from ..logger import log_info
 from ..hot_reload.state_store import get_user_data_dir
 from ..hot_reload.connection_registry import ConnectionRegistry
 from ..services.service_registry import check_token_status
+from ..services.process_lifetime import lower_current_thread_priority
 from .main_window_patch import PatchUpdateMixin
 from .main_window_cache import ActiveCacheMixin
 from .main_window_clipboard import MainWindowClipboardMixin
@@ -339,16 +340,36 @@ class ClipboardTool(
             Qt.ConnectionType.QueuedConnection,
         )
 
-        QTimer.singleShot(150, self._restore_cache_after_first_paint)
-        QTimer.singleShot(400, self._init_clipboard_ipc)
-        QTimer.singleShot(1500, self._ensure_remote_patch_updater)
-        QTimer.singleShot(2500, self._init_hot_reload)
-        QTimer.singleShot(800, self._request_lan_ongoing_snapshot_refresh)
-        QTimer.singleShot(0, self._restore_update_overlay_state)
-        QTimer.singleShot(600, self._close_restart_overlay_window)
+        for delay_ms, label, callback in (
+            (150, "cache_restore", self._restore_cache_after_first_paint),
+            (400, "clipboard_ipc", self._init_clipboard_ipc),
+            (1500, "remote_updater", self._ensure_remote_patch_updater),
+            (2500, "hot_reload", self._init_hot_reload),
+            (800, "ongoing_snapshot", self._request_lan_ongoing_snapshot_refresh),
+            (0, "update_overlay", self._restore_update_overlay_state),
+            (600, "restart_overlay", self._close_restart_overlay_window),
+        ):
+            QTimer.singleShot(
+                delay_ms,
+                lambda name=label, fn=callback: self._run_deferred_startup_step(
+                    name, fn
+                ),
+            )
         log_info(
             f"Startup[qt]: constructor_ms={(time.perf_counter() - startup_started_at) * 1000:.1f}"
         )
+
+    def _run_deferred_startup_step(self, name, callback):
+        if self._closing:
+            return
+        self._set_last_ui_op(f"startup:{name}")
+        started_at = time.perf_counter()
+        try:
+            callback()
+        finally:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+            if elapsed_ms >= self._ui_slow_threshold_ms:
+                self._record_slow_ui_operation(f"startup:{name}", elapsed_ms)
 
     def _restore_cache_after_first_paint(self):
         if self._closing or getattr(self, "_startup_cache_restored", False):
@@ -357,6 +378,7 @@ class ClipboardTool(
         started_at = time.perf_counter()
 
         def load_cache():
+            lower_current_thread_priority()
             repair = self._validate_cache_record_ids_on_startup()
             return repair, self.cache_store.load_payload(), self.cache_store.get_locked_level_map()
 

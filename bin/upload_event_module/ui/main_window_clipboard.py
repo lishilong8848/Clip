@@ -657,9 +657,13 @@ class MainWindowClipboardMixin:
                 timer.start(self._clipboard_file_poll_interval_ms())
             except Exception:
                 pass
-        self._stop_clipboard_process(wait_ms=800)
+        process = getattr(self, "_clipboard_process", None)
+        if process and process.state() != QProcess.ProcessState.NotRunning:
+            self._clipboard_resume_after_stop = True
+            self._stop_clipboard_process(wait_ms=0)
+        else:
+            QTimer.singleShot(150, self._start_clipboard_listener)
         QTimer.singleShot(0, self._poll_clipboard_event_file)
-        QTimer.singleShot(150, self._start_clipboard_listener)
 
     def _clipboard_file_poll_interval_ms(self) -> int:
         raw = os.environ.get("CLIPFLOW_CLIPBOARD_POLL_MS", "").strip()
@@ -997,6 +1001,97 @@ class MainWindowClipboardMixin:
                 pass
         self._stop_clipboard_process(wait_ms=wait_ms)
 
+    def _submit_clipboard_sqlite_fallback(self, event, remaining) -> bool:
+        data = event.get("payload") if isinstance(event, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        event_id = int(event.get("id") or 0)
+        content = str(data.get("content") or "").strip()
+        controller = getattr(self, "lan_template_portal_controller", None)
+        executor = getattr(self, "_qt_backend_command_executor", None)
+        if (
+            not content
+            or controller is None
+            or not hasattr(controller, "post_local_clipboard_event")
+            or executor is None
+        ):
+            return False
+        upload_context = self._clipboard_event_upload_context(content)
+        self._clipboard_sqlite_poll_inflight = True
+
+        def submit():
+            result = controller.post_local_clipboard_event(
+                content,
+                ts=int(data.get("ts") or time.time() * 1000),
+                source="clipboard_sqlite_fallback",
+                **upload_context,
+            )
+            if not isinstance(result, dict) or not result.get("ok", True):
+                raise RuntimeError(
+                    str(result.get("error") or "后端未接受剪贴板事件")
+                    if isinstance(result, dict)
+                    else "后端未接受剪贴板事件"
+                )
+            return result
+
+        def completed(future):
+            try:
+                result, error = future.result(), ""
+            except Exception as exc:
+                result, error = None, str(exc)
+
+            def finish():
+                self._clipboard_sqlite_poll_inflight = False
+                failures = getattr(self, "_clipboard_sqlite_event_failures", None)
+                if not isinstance(failures, dict):
+                    failures = {}
+                    self._clipboard_sqlite_event_failures = failures
+                if error:
+                    attempts = int(failures.get(event_id) or 0) + 1
+                    failures[event_id] = attempts
+                    max_failures = max(
+                        1,
+                        int(
+                            getattr(
+                                self, "_clipboard_sqlite_event_max_failures", 3
+                            )
+                            or 3
+                        ),
+                    )
+                    if attempts < max_failures:
+                        log_warning(
+                            "SQLite 剪贴板事件提交后端失败，稍后重试: "
+                            f"event_id={event_id}, attempt={attempts}/{max_failures}, error={error}"
+                        )
+                        return
+                    failures.pop(event_id, None)
+                    reason = (
+                        f"SQLite 剪贴板事件连续失败 {attempts} 次，"
+                        f"已跳过 event_id={event_id}: {error}"
+                    )
+                    log_warning(reason)
+                    self._remember_clipboard_failure(reason)
+                else:
+                    failures.pop(event_id, None)
+                    if hasattr(self, "_apply_clipboard_projection_result"):
+                        self._apply_clipboard_projection_result(result)
+                self._clipboard_sqlite_last_event_id = max(
+                    int(getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0),
+                    event_id,
+                )
+                if remaining:
+                    self._poll_clipboard_event_file(list(remaining))
+
+            enqueue = getattr(self, "_enqueue_ui_mutation", None)
+            if not callable(enqueue) or enqueue("clipboard_projection", finish) is False:
+                self._clipboard_sqlite_poll_inflight = False
+
+        try:
+            executor.submit(submit).add_done_callback(completed)
+        except RuntimeError:
+            self._clipboard_sqlite_poll_inflight = False
+            return False
+        return True
+
     def _poll_clipboard_event_file(self, events=None):
         if self._closing:
             return
@@ -1054,7 +1149,8 @@ class MainWindowClipboardMixin:
             last_processed_event_id = int(
                 getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0
             )
-            for event in events:
+            latest_snapshot = None
+            for event_index, event in enumerate(events):
                 event_id = int(event.get("id") or 0)
                 data = event.get("payload") if isinstance(event, dict) else {}
                 if not isinstance(data, dict):
@@ -1082,7 +1178,7 @@ class MainWindowClipboardMixin:
                     )
                 except Exception:
                     max_failures = 3
-                self._update_last_clipboard_snapshot(content, data.get("ts"))
+                latest_snapshot = (content, data.get("ts"))
                 # Events produced by the backend already have a source marker and
                 # are already projected. Events written directly by the clipboard
                 # listener fallback do not, so submit them to the backend once.
@@ -1093,6 +1189,13 @@ class MainWindowClipboardMixin:
                 controller = getattr(self, "lan_template_portal_controller", None)
                 if controller is None or not hasattr(controller, "post_local_clipboard_event"):
                     break
+                if self._submit_clipboard_sqlite_fallback(
+                    event, events[event_index + 1 :]
+                ):
+                    if latest_snapshot is not None:
+                        self._update_last_clipboard_snapshot(*latest_snapshot)
+                    self._clipboard_sqlite_last_event_id = last_processed_event_id
+                    return
                 try:
                     upload_context = self._clipboard_event_upload_context(content)
                     result = controller.post_local_clipboard_event(
@@ -1128,6 +1231,8 @@ class MainWindowClipboardMixin:
                         f"event_id={event_id}, attempt={attempts}/{max_failures}, error={exc}"
                     )
                     break
+            if latest_snapshot is not None:
+                self._update_last_clipboard_snapshot(*latest_snapshot)
             self._clipboard_sqlite_last_event_id = last_processed_event_id
             return
         path = self.clipboard_event_file

@@ -123,11 +123,14 @@ class CabinetFeishu:
 
     def create(self,fields,operation_id):
         self.require_write()
-        from upload_event_module.services.feishu_service import _build_client
+        from upload_event_module.services.feishu_service import (
+            _build_client,
+            _stable_uuid4_client_token,
+        )
         import lark_oapi as lark
         from lark_oapi.api.bitable.v1 import CreateAppTableRecordRequest, AppTableRecord
         request=(CreateAppTableRecordRequest.builder().app_token(APP_TOKEN).table_id(self.table_id)
-                 .client_token(str(uuid.uuid5(uuid.NAMESPACE_URL,"cabinet:"+operation_id)))
+                 .client_token(_stable_uuid4_client_token("cabinet:"+operation_id))
                  .request_body(AppTableRecord.builder().fields(fields).build()).build())
         response=_build_client().bitable.v1.app_table_record.create(request,lark.RequestOption.builder().tenant_access_token(self.token()).build())
         if not response.success(): raise CabinetError(f"机柜记录创建失败：code={response.code}，{response.msg}")

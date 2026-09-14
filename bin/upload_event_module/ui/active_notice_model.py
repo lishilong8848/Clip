@@ -307,18 +307,26 @@ class ActiveNoticeModel(QAbstractListModel):
         current_row = self._identity_to_row.get(identity)
         normalized = dict(record)
         if current_row is not None and 0 <= current_row < len(self._records):
+            index_changed = self._record_index_keys(
+                self._records[current_row]
+            ) != self._record_index_keys(normalized)
             self._records[current_row] = normalized
-            self._rebuild_index()
+            if index_changed:
+                self._rebuild_index()
             model_index = self.index(current_row, 0)
             self.dataChanged.emit(model_index, model_index, [])
             if row is not None and row != current_row:
                 self.move_record(identity, row)
             return True
         insert_row = len(self._records) if row is None else max(0, min(int(row), len(self._records)))
+        appended = insert_row == len(self._records)
         self.beginInsertRows(QModelIndex(), insert_row, insert_row)
         self._records.insert(insert_row, normalized)
+        if appended:
+            self._index_record(insert_row, normalized)
         self.endInsertRows()
-        self._rebuild_index()
+        if not appended:
+            self._rebuild_index()
         return True
 
     def replace_record(self, identity: str, record: dict[str, Any] | None) -> bool:
@@ -376,24 +384,32 @@ class ActiveNoticeModel(QAbstractListModel):
         self._rebuild_index()
         return True
 
+    def _record_index_keys(self, record: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            self.identity_for_record(record),
+            canonical_target_record_id(record),
+            canonical_source_record_id(record),
+            str(record.get("active_item_id") or "").strip(),
+        )
+
+    def _index_record(self, row: int, record: dict[str, Any]) -> None:
+        identity, target_id, source_record_id, active_item_id = self._record_index_keys(record)
+        if identity:
+            self._identity_to_row[identity] = row
+        if target_id:
+            self._record_id_to_row.setdefault(target_id, row)
+        if source_record_id:
+            self._source_record_id_to_row.setdefault(source_record_id, row)
+        if active_item_id:
+            self._active_item_id_to_row.setdefault(active_item_id, row)
+
     def _rebuild_index(self) -> None:
         self._identity_to_row = {}
         self._record_id_to_row = {}
         self._source_record_id_to_row = {}
         self._active_item_id_to_row = {}
         for row, record in enumerate(self._records):
-            identity = self.identity_for_record(record)
-            if identity:
-                self._identity_to_row[identity] = row
-            target_id = canonical_target_record_id(record)
-            if target_id:
-                self._record_id_to_row.setdefault(target_id, row)
-            source_record_id = canonical_source_record_id(record)
-            if source_record_id:
-                self._source_record_id_to_row.setdefault(source_record_id, row)
-            active_item_id = str(record.get("active_item_id") or "").strip()
-            if active_item_id:
-                self._active_item_id_to_row.setdefault(active_item_id, row)
+            self._index_record(row, record)
 
 
 class ActiveNoticeListRoute:

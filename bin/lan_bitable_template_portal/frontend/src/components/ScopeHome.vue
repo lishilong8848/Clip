@@ -13,17 +13,17 @@
       @request-permission="$emit('request-permission')"
     />
 
-    <section v-else class="feature-section" :class="{ 'scope-selection': activeMode !== 'tools' }">
+    <section v-else class="feature-section" :class="{ 'scope-selection': !isEntryMenu }">
       <div class="page-back-row">
         <VnetBackButton @click="returnFromFeature" />
       </div>
-      <header class="feature-section__head" :class="{ 'scope-section-head': activeMode !== 'tools' }">
+      <header class="feature-section__head" :class="{ 'scope-section-head': !isEntryMenu }">
         <div class="feature-title-block">
           <span class="section-kicker">{{ activeConfig.kicker }}</span>
           <h2>{{ activeConfig.title }}</h2>
         </div>
         <div
-          v-if="activeMode !== 'tools'"
+          v-if="!isEntryMenu"
           class="scope-summary-strip"
           :class="{ 'repair-metrics': activeMode === 'repair_management' }"
           aria-label="当前模块楼栋统计"
@@ -105,9 +105,9 @@
         </div>
       </header>
 
-      <div v-if="activeMode === 'tools'" class="tool-grid">
+      <div v-if="isEntryMenu" class="tool-grid" :class="{ 'capacity-grid': activeMode === 'capacity' }">
         <button type="button"
-          v-for="tool in toolEntries"
+          v-for="tool in activeMenuEntries"
           :key="tool.key"
           class="tool-card"
           :class="tool.tone"
@@ -117,6 +117,7 @@
           <span class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
           <span>
             <strong>{{ tool.title }}</strong>
+            <small v-if="activeMode === 'capacity'">{{ tool.description }}</small>
           </span>
           <b>{{ tool.badge }}</b>
         </button>
@@ -139,7 +140,7 @@
         正在读取水耗楼栋数据
       </div>
 
-      <div v-else-if="activeMode !== 'tools'" class="scope-grid scope-overview-grid">
+      <div v-else-if="!isEntryMenu" class="scope-grid scope-overview-grid">
         <article
           v-for="scope in displayScopeOptions"
           :key="scope.value"
@@ -248,6 +249,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { requestJson } from "../api/client";
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
+  SCOPE_HOME_CAPACITY_ENTRIES as capacityEntries,
   SCOPE_HOME_MODULE_CARDS as moduleCards,
   SCOPE_HOME_TOOL_ENTRIES as toolEntries,
   normalizeScopeValue,
@@ -306,6 +308,8 @@ let waterBuildingsPollTimer: number | null = null;
 
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
+const isEntryMenu = computed(() => ["tools", "capacity"].includes(activeMode.value));
+const activeMenuEntries = computed(() => activeMode.value === "capacity" ? capacityEntries : toolEntries);
 const isToolScopeMode = computed(() => ["daily", "power", "polling", "adjust", "handover"].includes(activeMode.value));
 const activeMetricWorkType = computed(() => {
   if (activeMode.value === "maintenance_mop") return "maintenance";
@@ -695,7 +699,7 @@ function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
 
 function returnFromFeature(): void {
   if (activeMode.value === "water") clearWaterBuildingsPoll();
-  activeMode.value = isToolScopeMode.value ? "tools" : "";
+  activeMode.value = isToolScopeMode.value ? "tools" : activeMode.value === "water" ? "capacity" : "";
   syncEntryUrl(activeMode.value);
   emit("dashboard-visible", !activeMode.value);
 }
@@ -1344,6 +1348,10 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.tool-grid.capacity-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .tool-card {
   width: 100%;
   min-height: 112px;
@@ -1483,7 +1491,8 @@ a.secondary {
   }
 
   .scope-grid,
-  .tool-grid {
+  .tool-grid,
+  .tool-grid.capacity-grid {
     grid-template-columns: 1fr;
   }
 

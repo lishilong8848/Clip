@@ -3,7 +3,9 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -322,6 +324,28 @@ class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_clipboard_backend_restart_never_waits_in_ui_thread(self):
+        harness = MainWindowClipboardMixin()
+        harness._closing = False
+        harness._clipboard_process = type("Process", (), {"state": lambda self: "running"})()
+        harness._clipboard_resume_after_stop = False
+        harness.clipboard_file_timer = type("Timer", (), {"start": lambda self, _ms: None})()
+        harness._is_clipboard_listener_disabled = lambda: False
+        harness._clipboard_file_poll_interval_ms = lambda: 5000
+        harness._poll_clipboard_event_file = lambda: None
+        harness._start_clipboard_listener = lambda: None
+        waits = []
+        harness._stop_clipboard_process = lambda wait_ms=0: waits.append(wait_ms)
+
+        with patch(
+            "upload_event_module.ui.main_window_clipboard.QTimer.singleShot"
+        ) as single_shot:
+            harness.refresh_clipboard_backend_url()
+
+        self.assertEqual(waits, [0])
+        self.assertTrue(harness._clipboard_resume_after_stop)
+        self.assertEqual(single_shot.call_count, 1)
+
     def test_stopping_controller_invalidates_active_sse_connections(self):
         controller = object.__new__(FastAPIPortalController)
         controller._stopping_event = threading.Event()
@@ -2733,6 +2757,53 @@ class QtShellBackendEventTests(unittest.TestCase):
                 harness.lan_template_portal_controller.clipboard_events[0]["source"],
                 "clipboard_sqlite_fallback",
             )
+            self.assertEqual(len(harness.projections), 1)
+
+    def test_sqlite_clipboard_batch_refreshes_preview_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            harness = _ClipboardHarness(
+                LanPortalStateStore(Path(tmp) / "state.sqlite3"),
+                Path(tmp) / "clipboard.jsonl",
+            )
+            harness._poll_clipboard_event_file(
+                [
+                    {"id": 1, "payload": {"content": "第一条", "ts": 1, "source": "backend"}},
+                    {"id": 2, "payload": {"content": "第二条", "ts": 2, "source": "backend"}},
+                ]
+            )
+
+            self.assertEqual(harness.snapshots, [{"content": "第二条", "ts": 2}])
+
+    def test_sqlite_clipboard_fallback_http_does_not_block_ui_callback(self):
+        with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(max_workers=1) as executor:
+            harness = _ClipboardHarness(
+                LanPortalStateStore(Path(tmp) / "state.sqlite3"),
+                Path(tmp) / "clipboard.jsonl",
+            )
+            completed = threading.Event()
+            original = harness.lan_template_portal_controller.post_local_clipboard_event
+
+            def slow_post(*args, **kwargs):
+                time.sleep(0.2)
+                return original(*args, **kwargs)
+
+            harness.lan_template_portal_controller.post_local_clipboard_event = slow_post
+            harness._qt_backend_command_executor = executor
+
+            def enqueue(_tag, callback):
+                callback()
+                completed.set()
+                return True
+
+            harness._enqueue_ui_mutation = enqueue
+            started = time.perf_counter()
+            harness._poll_clipboard_event_file(
+                [{"id": 1, "payload": {"content": "异步兜底", "ts": 1}}]
+            )
+
+            self.assertLess(time.perf_counter() - started, 0.1)
+            self.assertTrue(completed.wait(2.0))
+            self.assertEqual(harness._clipboard_sqlite_last_event_id, 1)
             self.assertEqual(len(harness.projections), 1)
 
     def test_sqlite_clipboard_bad_event_does_not_block_later_events(self):

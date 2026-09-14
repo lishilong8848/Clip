@@ -1,14 +1,14 @@
 <template>
   <main class="cabinet-page">
     <header class="heading">
-      <VnetBackButton :to="scope ? '/cabinet-power' : '/'" />
+      <VnetBackButton :to="scope ? '/cabinet-power' : '/?entry=capacity'" />
       <div class="heading-title"><h1>{{ scope ? scope + '楼机柜上下电' : '机柜上下电' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>
       <div class="actions">
         <button :disabled="loading || busy || bootstrapActive" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
         <template v-if="scope">
           <a v-if="overview.table_url" :href="overview.table_url" target="_blank" rel="noopener"><ExternalLink :size="16" />多维表</a>
           <button :disabled="!overview.rooms || racksLoading || busy || saving" @click="['D','E'].includes(scope) ? changeTab('records') : openEditor()"><Plus :size="16" />{{ ['D','E'].includes(scope) ? '登记机柜操作' : '新增记录' }}</button>
-          <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />按原模板生成</button>
+          <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />导出</button>
       <button @click="showExports"><History :size="16" />导出历史</button>
         </template>
       </div>
@@ -104,10 +104,10 @@
 
     <div v-if="historyOpen" class="scrim" :inert="discardDialogOpen || restoreDialogOpen || editorOpen" @click.self="historyOpen = false">
       <section class="drawer modal" role="dialog" aria-modal="true" aria-label="机柜完整历史" tabindex="-1">
-        <header><div><h2>{{ historyRoom }} / {{ historyRack }}</h2><p v-if="selectedRack">{{ stateLabels[selectedRack.state] }} · {{ selectedRack.rack_type }}</p></div><button @click="historyOpen = false" aria-label="关闭历史"><X :size="20" /></button></header>
+        <header><div><h2>{{ historyRoom }} / {{ historyRack }}</h2><p v-if="selectedRack">当前状态：{{ stateLabels[selectedRack.state] }} · {{ selectedRack.rack_type }}</p></div><button @click="historyOpen = false" aria-label="关闭历史"><X :size="20" /></button></header>
         <div class="drawer-body">
           <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual }}</dd></div></dl>
-          <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ target === 'off' ? '登记下电' : target === 'formal' ? '登记正式电' : '登记测试电' }}</button></div>
+          <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading">正在读取完整历史…</p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
             <div class="section-title"><strong>{{ op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="openEditor(op)">编辑</button></div>
@@ -136,7 +136,7 @@
             </div>
             <div class="section-title"><h3>{{ form.source || '操作明细' }}</h3><button type="button" @click="form.groups.push(newGroup())"><Plus :size="16" />添加一组</button></div>
             <div v-for="(group, i) in editableGroups" :key="group.id || i" class="group-editor" :class="{ 'current-operation': ['D','E'].includes(scope) && i === 0, 'history-operation': ['D','E'].includes(scope) && i > 0 }">
-              <b>{{ groupLabel(i, editorFormat) }}</b><label>操作类型<select v-if="!group.action || actionOptions.includes(group.action)" v-model="group.action"><option value="">未填写</option><option v-for="action in actionOptions" :key="action">{{ action }}</option></select><textarea v-else v-model="group.action" rows="2" /></label><label>期望完成时间<input v-if="singleDate(group.expected)" v-model="group.expected" type="datetime-local" step="1" /><textarea v-else v-model="group.expected" rows="2" /></label><label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label><label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label><button type="button" title="移除此组" aria-label="移除此组" @click="removeGroup(group)"><Trash2 :size="16" /></button>
+              <b>{{ editorGroupLabel(group, i) }}</b><label>操作类型<select v-if="!group.action || actionOptions.includes(group.action)" v-model="group.action" :disabled="!!form.target_state && group._editing"><option value="">未填写</option><option v-for="action in actionOptions" :key="action">{{ action }}</option></select><textarea v-else v-model="group.action" rows="2" :disabled="!!form.target_state && group._editing" /></label><label>期望完成时间<input v-if="singleDate(group.expected)" v-model="group.expected" type="datetime-local" step="1" /><textarea v-else v-model="group.expected" rows="2" /></label><label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label><label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label><button type="button" title="移除此组" aria-label="移除此组" :disabled="!!form.target_state && group._editing" @click="removeGroup(group)"><Trash2 :size="16" /></button>
             </div>
             <label v-if="form.original_scope && form.original_scope !== (form.scope || scope)" class="checkbox"><input v-model="form.confirm_scope_move" type="checkbox" required />将原 {{ form.original_scope }} 楼记录调整到 {{ form.scope }} 楼</label>
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
@@ -295,6 +295,16 @@ function groupLabel(index: number, format?: Dict): string {
   if (index === (format?.groups?.length || 2) - 1) return props.scope === 'C' ? '转换 / 下电信息' : '下电信息';
   return '转换记录';
 }
+function stateAction(target: string): string {
+  const current = String(selectedRack.value?.state || '');
+  if (current === target) return '当前为' + (stateLabels[target] || '该状态');
+  const action: Dict = { 'off:formal': '上正式电', 'off:test': '上测试电', 'formal:test': '正式电转测试电', 'test:formal': '测试电转正式电', 'formal:off': '下正式电', 'test:off': '下测试电' };
+  return action[current + ':' + target] ? '登记' + action[current + ':' + target] : '暂不可登记';
+}
+function editorGroupLabel(group: Dict, index: number): string {
+  if (group?._editing) return group.action ? '本次操作 · ' + group.action : '本次操作';
+  return group.action ? `操作记录 ${index + 1} · ${group.action}` : groupLabel(form.groups.indexOf(group), editorFormat.value);
+}
 async function loadRecords(page = 1): Promise<void> {
   recordAbort?.abort(); recordAbort = new AbortController(); const seq = ++recordSequence; recordsLoading.value = true;
   try { const data = await read('operations', { ...query, issues: String(onlyIssues.value), page, page_size: 50 },90000,recordAbort.signal); if (seq === recordSequence) records.value = data; } catch (exc) { if (!cancelled(exc)) fail(exc); } finally { if (seq === recordSequence) recordsLoading.value = false; }
@@ -345,7 +355,7 @@ const saveStepLabel = computed(() => {
   return label + (s.elapsed_ms ? ' · ' + Math.floor(s.elapsed_ms/1000) + '秒' : '…');
 });
 const restoreDialogOpen = ref(false), discardMessage = ref('继续后，当前机柜记录中的修改会丢失。');
-const newGroup = () => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', _editing: true });
+const newGroup = (editing = true) => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', _editing: editing });
 const groupHasBusinessData = (group: Dict) => Boolean(group?.action || group?.expected || group?.actual);
 const editableGroups = computed(() => {
   const populated = (form.groups || []).filter((group: Dict) => groupHasBusinessData(group) || group?._editing);
@@ -379,7 +389,7 @@ function openEditor(op?: Dict): void {
 }
 function changeEditorSheet(): void {
   const format = overview.value.sheet_formats?.find((f: Dict) => f.sheet === form.source);
-  form.groups = (format?.groups || [{}]).map(() => newGroup());
+  form.groups = (format?.groups || [{}]).map(() => newGroup(false));
   form.category = form.source.includes('上下电') ? 'mixed' : form.source.includes('下电') ? 'down' : 'up';
 }
 function requestSheetChange(event: Event): void { const select = event.target as HTMLSelectElement, selected = select.value; select.value = form.source; const change = () => { form.source = selected; changeEditorSheet(); }; if (form.groups.some((g: Dict) => g.action || g.actual || g.expected)) askDiscard(change, '切换工作表会清空当前操作明细。'); else change(); }

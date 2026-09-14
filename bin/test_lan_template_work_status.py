@@ -3097,6 +3097,61 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service
 
+    def test_change_confirmation_seed_does_not_repeat_same_stopped_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            service = _TestMaintenancePortalService()
+            PortalRuntime.state_store = store
+            PortalRuntime.service = service
+            candidate = {
+                "record_id": "ended-change",
+                "display_fields": {
+                    "名称": "已结束变更",
+                    "楼栋": "A楼",
+                    "变更状态": "开始",
+                },
+            }
+            ended_record = {
+                "record_id": "ended-change",
+                "fields": {
+                    "名称": "已结束变更",
+                    "楼栋": "A楼",
+                    "变更状态": "结束",
+                },
+            }
+            PortalRuntime._put_change_confirmation_task(
+                {
+                    "target_record_id": "ended-change",
+                    "state": "stopped",
+                    "created_at": time.time() - 600,
+                    "stop_reason": "target_terminal",
+                }
+            )
+            try:
+                with patch.object(
+                    service,
+                    "_target_records_for_notice_type",
+                    return_value=[candidate],
+                ), patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, ended_record),
+                ) as point_read:
+                    PortalRuntime._seed_change_confirmation_tasks()
+                    PortalRuntime._seed_change_confirmation_tasks()
+                persisted = store.get_document(
+                    portal_server_module.CHANGE_CONFIRMATION_NAMESPACE,
+                    "ended-change",
+                )
+                self.assertEqual(persisted["state"], "stopped")
+                self.assertTrue(persisted["stopped_seed_fingerprint"])
+                point_read.assert_called_once_with("ended-change", "变更通告")
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
     def test_change_confirmation_seed_failure_keeps_persisted_tasks_running(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
@@ -3896,7 +3951,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     [{"file_token": "old-token"}, {"file_token": "new-token"}],
                 )
 
-    def test_change_handler_writes_planned_end_before_end_state(self):
+    def test_change_handler_does_not_write_planned_end_before_end_state(self):
         handler = ChangeNoticeHandler("变更通告")
         payload = NoticePayload(
             text=(
@@ -3908,8 +3963,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ),
             response_time="2026-06-12 09:35",
         )
-        expected_plan_end = int(dt.datetime(2026, 6, 12, 18, 30).timestamp() * 1000)
-
         create_fields = handler.build_create_fields(payload)
         update_fields = handler.build_update_fields(
             NoticePayload(
@@ -3918,14 +3971,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            create_fields[CHANGE_NOTICE_FIELDS["end_time"]],
-            expected_plan_end,
-        )
-        self.assertEqual(
-            update_fields[CHANGE_NOTICE_FIELDS["end_time"]],
-            expected_plan_end,
-        )
+        self.assertNotIn(CHANGE_NOTICE_FIELDS["end_time"], create_fields)
+        self.assertNotIn(CHANGE_NOTICE_FIELDS["end_time"], update_fields)
 
     def test_change_handler_end_state_overwrites_end_time_with_response_time(self):
         handler = ChangeNoticeHandler("变更通告")
@@ -3944,6 +3991,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         fields = handler.build_update_fields(payload)
 
         self.assertEqual(fields[CHANGE_NOTICE_FIELDS["end_time"]], expected_actual_end)
+
+    def test_change_handler_end_state_falls_back_to_send_time(self):
+        handler = ChangeNoticeHandler("变更通告")
+        payload = NoticePayload(
+            text=(
+                "【变更通告】状态：结束\n"
+                "【名称】测试变更\n"
+                "【时间】2026-06-12 09:30~2026-06-12 18:30\n"
+                "【进度】执行完成"
+            )
+        )
+        send_time = dt.datetime(2026, 6, 12, 18, 42)
+        with patch(
+            "upload_event_module.services.handlers.change_notice.datetime"
+        ) as clock:
+            clock.now.return_value = send_time
+            fields = handler.build_update_fields(payload)
+        self.assertEqual(
+            fields[CHANGE_NOTICE_FIELDS["end_time"]],
+            int(send_time.timestamp() * 1000),
+        )
 
     def test_feishu_http_client_returns_business_json_on_http_error(self):
         transport = httpx.MockTransport(
@@ -22245,6 +22313,50 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         finally:
             PortalRuntime.source_refresh_run_lock.release()
 
+    def test_source_refresh_loop_respects_existing_snapshot_ttl(self):
+        class _ImmediateEvent:
+            @staticmethod
+            def wait(timeout=None):
+                return False
+
+            @staticmethod
+            def clear():
+                return None
+
+        original_event = PortalRuntime.source_refresh_event
+        original_stop = PortalRuntime.source_refresh_stop
+        original_service = PortalRuntime.service
+        PortalRuntime.source_refresh_event = _ImmediateEvent()
+        PortalRuntime.source_refresh_stop = False
+        PortalRuntime.service = SimpleNamespace(
+            _source_cache_ttl_seconds=lambda: 1800,
+        )
+
+        def stop_after_refresh(**_kwargs):
+            PortalRuntime.source_refresh_stop = True
+            return {"refreshed": False}
+
+        try:
+            with patch.object(
+                PortalRuntime,
+                "source_snapshot_ready",
+                return_value=True,
+            ), patch.object(
+                PortalRuntime,
+                "refresh_sources_once",
+                side_effect=stop_after_refresh,
+            ) as refresh:
+                PortalRuntime._source_refresh_loop()
+            refresh.assert_called_once_with(
+                force=False,
+                min_interval_seconds=1800,
+                defer_if_busy=True,
+            )
+        finally:
+            PortalRuntime.source_refresh_event = original_event
+            PortalRuntime.source_refresh_stop = original_stop
+            PortalRuntime.service = original_service
+
     def test_source_refresh_failure_records_failed_snapshot_manifest(self):
         class _FailingSourceRefreshService:
             _load_warnings: list[str] = []
@@ -36264,6 +36376,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["updated"], 1)
         self.assertEqual(result["backlink_updates"], 2)
         self.assertEqual(persisted[0][0], REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY)
+
+    def test_repair_followup_backfill_does_not_repeat_completed_migration(self):
+        service = _TestMaintenancePortalService()
+        service._state_store.get_backend_runtime = lambda _key: {  # type: ignore[method-assign]
+            "status": "complete",
+            "finished_ts": time.time() - 7 * 24 * 60 * 60,
+        }
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail("completed backfill must not read Feishu")
+        )
+
+        result = service.backfill_repair_followup_records()
+
+        self.assertTrue(result["skipped"])
 
     def test_repair_integrity_marks_blank_orphan_as_manual_review_only(self):
         service = _TestMaintenancePortalService()

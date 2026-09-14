@@ -111,6 +111,11 @@ class BackendProcessPortalController:
         self.preferred_port = int(port or DEFAULT_PORT)
         self.app_token = str(app_token or "").strip()
         self.table_id = str(table_id or "").strip()
+        # All requests target the local child process. Bypassing the machine's
+        # HTTP proxy makes a not-yet-listening health check fail immediately.
+        self._local_opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        )
         self.bound_port = self.preferred_port
         self._process: subprocess.Popen | None = None
         self._process_log_file = None
@@ -137,7 +142,9 @@ class BackendProcessPortalController:
         self._event_stream_last_event_at = 0.0
         self._event_stream_last_error = ""
         self._event_poll_fallback_count = 0
-        self._last_backend_active_sync_at = 0.0
+        # Local cache restores the same SQLite snapshot at startup; keep the
+        # full backend projection as a periodic repair instead of duplicating it.
+        self._last_backend_active_sync_at = time.monotonic()
         self._active_delta_lock = threading.Lock()
         self._active_delta_upserts: list[dict[str, Any]] = []
         self._active_delta_deletes: list[dict[str, Any]] = []
@@ -243,7 +250,7 @@ class BackendProcessPortalController:
             headers["Content-Type"] = "application/json; charset=utf-8"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._local_opener.open(request, timeout=timeout) as response:
                 body = response.read()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(self._http_error_message(exc)) from exc
@@ -273,7 +280,7 @@ class BackendProcessPortalController:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._local_opener.open(request, timeout=timeout) as response:
                 body = response.read()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(self._http_error_message(exc)) from exc
@@ -617,7 +624,10 @@ class BackendProcessPortalController:
                 f"已改用 {DEFAULT_HOST} 监听。签名链接仍按签名链接局域网地址生成。"
             )
             self.host = DEFAULT_HOST
-        existing_health = self._health_payload()
+        port_available, _ = self._port_is_available(
+            self.host, self.preferred_port
+        )
+        existing_health = None if port_available else self._health_payload()
         if existing_health and not self._health_matches_runtime(existing_health):
             if self._is_clipflow_backend(existing_health):
                 if self._shutdown_existing_backend():
@@ -649,13 +659,6 @@ class BackendProcessPortalController:
                     f"固定端口 {self.preferred_port} 上的旧后端无法安全关闭，"
                     "请关闭旧实例后重试。"
                 )
-        if self._health_ok():
-            if not self._shutdown_existing_backend():
-                raise RuntimeError(
-                    f"固定端口 {self.preferred_port} 上的并发后端无法安全关闭，"
-                    "请关闭旧实例后重试。"
-                )
-            time.sleep(0.2)
         args, env, cwd = self._build_backend_command()
         startupinfo = None
         creationflags = 0
@@ -663,7 +666,10 @@ class BackendProcessPortalController:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+            )
         errors: list[str] = []
         original_host = self.host
         host_candidates = [original_host]
@@ -678,14 +684,19 @@ class BackendProcessPortalController:
                 )
             for port in self._candidate_ports():
                 self.bound_port = int(port)
-                if self._health_ok():
+                available, bind_error = self._port_is_available(
+                    self.host, self.bound_port
+                )
+                if not available and self._health_ok():
                     if not self._shutdown_existing_backend():
                         errors.append(
                             f"固定端口 {self.bound_port} 上的并发后端无法安全关闭"
                         )
                         continue
                     time.sleep(0.2)
-                available, bind_error = self._port_is_available(self.host, self.bound_port)
+                    available, bind_error = self._port_is_available(
+                        self.host, self.bound_port
+                    )
                 if not available:
                     owner = self._port_owner_summary(self.bound_port)
                     message = (
@@ -871,7 +882,7 @@ class BackendProcessPortalController:
         )
         lines: list[str] = []
         try:
-            with urllib.request.urlopen(
+            with self._local_opener.open(
                 request,
                 timeout=float(self._event_stream_timeout_s),
             ) as response:

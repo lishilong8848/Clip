@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -129,6 +130,15 @@ class BackendProcessControllerTests(unittest.TestCase):
             )
         )
 
+    def test_local_backend_requests_bypass_system_proxy(self):
+        controller = BackendProcessPortalController(port=18766)
+        proxy_handlers = [
+            handler
+            for handler in controller._local_opener.handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        self.assertEqual(proxy_handlers, [])
+
     def test_legacy_probe_falls_back_to_detailed_health(self):
         controller = BackendProcessPortalController(port=18766)
         probe = {"ok": True, "service": "clipflow_backend", "instance_id": "old"}
@@ -155,7 +165,7 @@ class BackendProcessControllerTests(unittest.TestCase):
             "runtime_root_hash": controller._runtime_root_hash,
             "build_version": "older-build",
         }
-        with patch.object(controller, "_health_payload", return_value=older), patch.object(
+        with patch.object(controller, "_port_is_available", return_value=(False, "in use")), patch.object(controller, "_health_payload", return_value=older), patch.object(
             controller, "_shutdown_existing_backend", return_value=False
         ) as shutdown:
             with self.assertRaisesRegex(RuntimeError, "旧版后端无法安全关闭"):
@@ -170,7 +180,7 @@ class BackendProcessControllerTests(unittest.TestCase):
             "runtime_root_hash": "other-runtime",
             "build_version": "older-build",
         }
-        with patch.object(controller, "_health_payload", return_value=older), patch.object(
+        with patch.object(controller, "_port_is_available", return_value=(False, "in use")), patch.object(controller, "_health_payload", return_value=older), patch.object(
             controller, "_shutdown_existing_backend", return_value=False
         ) as shutdown:
             with self.assertRaisesRegex(RuntimeError, "旧版后端无法安全关闭"):
@@ -185,7 +195,7 @@ class BackendProcessControllerTests(unittest.TestCase):
             "runtime_root_hash": "other-runtime",
             "build_version": "1",
         }
-        with patch.object(controller, "_health_payload", return_value=unrelated), patch.object(
+        with patch.object(controller, "_port_is_available", return_value=(False, "in use")), patch.object(controller, "_health_payload", return_value=unrelated), patch.object(
             controller, "_shutdown_existing_backend"
         ) as shutdown, patch.object(
             controller, "_port_owner_summary", return_value="PID=4321，进程=python.exe"
@@ -209,6 +219,8 @@ class BackendProcessControllerTests(unittest.TestCase):
             "build_version": controller._build_version,
         }
         with patch.dict(os.environ, {"CLIPFLOW_REUSE_EXISTING_BACKEND": "1"}), patch.object(
+            controller, "_port_is_available", return_value=(False, "in use")
+        ), patch.object(
             controller, "_health_payload", return_value=current
         ), patch.object(
             controller, "_shutdown_existing_backend", return_value=False

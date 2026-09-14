@@ -47,6 +47,7 @@ class _AddItemHarness(MainWindowRecordsMixin):
             self.list_active_event = QListWidget()
             self.list_active_other = QListWidget()
         self._delete_interaction_enabled = True
+        self.scheduled = []
 
     def _active_model_view_visible(self):
         return self._model_view_visible
@@ -66,13 +67,17 @@ class _AddItemHarness(MainWindowRecordsMixin):
         return {"content": str(text or "")}
 
     def _schedule_today_in_progress_sync(self, data):
-        return None
+        self.scheduled.append("today")
 
     def _schedule_record_binding_validation(self, data):
-        return None
+        self.scheduled.append("binding")
 
     def _schedule_active_route_reconcile(self, data=None, **_kwargs):
-        return None
+        self.scheduled.append("route")
+
+
+class _ActiveCacheHarness(ActiveCacheMixin, _AddItemHarness):
+    pass
 
 
 class _TodayProgressController:
@@ -178,6 +183,9 @@ class _RuntimeCacheStore:
         self._fields_by_record_id = fields_by_record_id
 
     def get_record_fields(self, record_id="", active_item_id="", fields=None):
+        raise AssertionError("进行中快照不得在 Qt 线程读取 SQLite")
+
+    def get_cached_record_fields(self, record_id="", active_item_id="", fields=None):
         values = dict(self._fields_by_record_id.get(record_id, {}) or {})
         if not fields:
             return values
@@ -544,6 +552,23 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertTrue(model.remove_record(second))
         self.assertEqual(model.rowCount(), 1)
         self.assertEqual(model.record_at(0)["active_item_id"], "aid-1")
+
+    def test_append_and_same_identity_update_do_not_rebuild_all_indexes(self):
+        model = ActiveNoticeModel()
+        rebuild = model._rebuild_index
+        rebuild_calls = []
+        model._rebuild_index = lambda: rebuild_calls.append(True) or rebuild()
+
+        for index in range(100):
+            self.assertTrue(
+                model.upsert_record({"active_item_id": f"aid-{index}", "text": "old"})
+            )
+        self.assertTrue(
+            model.upsert_record({"active_item_id": "aid-50", "text": "new"})
+        )
+
+        self.assertEqual(rebuild_calls, [])
+        self.assertEqual(model.record_by_active_item_id("aid-50")["text"], "new")
 
     def test_model_item_identity_repair_replaces_row_without_duplicate(self):
         model = ActiveNoticeModel()
@@ -1760,6 +1785,28 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertIs(list_widget, harness.list_active_other)
         self.assertTrue(harness._is_valid_list_item(found))
         self.assertEqual(found.data(Qt.ItemDataRole.UserRole)["active_item_id"], "aid-test")
+        self.assertEqual(harness.scheduled, [])
+
+    def test_active_cache_restore_replaces_model_in_one_batch(self):
+        harness = _ActiveCacheHarness(model_view_visible=True)
+        payload = {
+            "event": [
+                {
+                    "active_item_id": f"aid-{index}",
+                    "target_record_id": f"rid-{index}",
+                    "notice_type": "事件通告",
+                    "text": f"【事件通告】状态：更新\n【标题】事件 {index}",
+                }
+                for index in range(100)
+            ],
+            "other": [],
+        }
+
+        harness._restore_active_cache(payload)
+
+        model = harness._active_notice_model_for_list(harness.list_active_event)
+        self.assertEqual(model.rowCount(), 100)
+        self.assertEqual(harness.scheduled, [])
 
     def test_restore_button_state_matches_upload_aliases(self):
         harness = _AddItemHarness(model_view_visible=True)

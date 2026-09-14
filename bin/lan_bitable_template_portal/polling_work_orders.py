@@ -34,7 +34,7 @@ from .portal_service import (
 
 POLLING_SOP_NAMESPACE = "polling_sop"
 POLLING_SOP_META_NAMESPACE = "polling_sop_meta"
-POLLING_SOP_CLOUD_CACHE_KEY = "cloud_initialized_v1"
+POLLING_SOP_CLOUD_CACHE_KEY = "cloud_initialized_v2"
 POLLING_WORK_ORDER_NAMESPACE = "polling_work_order"
 POLLING_WORK_ORDER_SECRET_NAMESPACE = "polling_work_order_secret"
 POLLING_WORK_ORDER_SECRET_KEY = "hmac"
@@ -324,8 +324,10 @@ class PollingSopCloudStore:
         if existing:
             record = self._request("PUT", f"records/{existing['_cloud_record_id']}", body).get("record") or {}
         else:
-            client_token = str(
-                uuid.uuid5(uuid.NAMESPACE_URL, "clipflow:polling-sop:" + str(sop.get("sop_id") or ""))
+            from upload_event_module.services.feishu_service import _stable_uuid4_client_token
+
+            client_token = _stable_uuid4_client_token(
+                "clipflow:polling-sop:" + str(sop.get("sop_id") or "")
             )
             record = self._request(
                 "POST", "records", body, params={"client_token": client_token}
@@ -489,12 +491,14 @@ class PollingWorkOrderService:
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, cached)
         return cached
 
-    def _sync_legacy_local_sops(self, cloud_items: list[dict]) -> tuple[list[dict], list[dict]]:
-        if not self.cloud or self._legacy_cloud_sync_done:
-            return cloud_items, []
+    def _sync_legacy_local_sops(
+        self, cloud_items: list[dict], *, force: bool = False
+    ) -> tuple[list[dict], list[dict], int]:
+        if not self.cloud or (self._legacy_cloud_sync_done and not force):
+            return cloud_items, [], 0
         with self._legacy_cloud_sync_lock:
-            if self._legacy_cloud_sync_done:
-                return cloud_items, []
+            if self._legacy_cloud_sync_done and not force:
+                return cloud_items, [], 0
             known_ids = {str(item.get("sop_id") or "") for item in cloud_items}
             known_names = {
                 (
@@ -506,11 +510,14 @@ class PollingWorkOrderService:
             }
             pending: list[dict] = []
             changed = False
+            uploaded_count = 0
             documents = self.state_store.list_documents(POLLING_SOP_NAMESPACE)
             for document in documents:
                 local = copy.deepcopy(document.get("payload") or {})
                 sop_id = str(local.get("sop_id") or "").strip()
                 if not sop_id or sop_id in known_ids:
+                    continue
+                if str(local.get("_cloud_record_id") or "").strip():
                     continue
                 try:
                     scope = str(local.get("scope") or "").strip().upper()
@@ -574,6 +581,7 @@ class PollingWorkOrderService:
                     known_ids.add(sop_id)
                     known_names.add(name_key)
                     changed = True
+                    uploaded_count += 1
                 except PortalConflictError:
                     existing = self.cloud.get_sop(sop_id, force=True)
                     if existing:
@@ -587,13 +595,13 @@ class PollingWorkOrderService:
             if changed:
                 cloud_items = self.cloud.list_sops(force=True)
             self._legacy_cloud_sync_done = not pending
-            return cloud_items, pending
+            return cloud_items, pending, uploaded_count
 
     def _cloud_sops(self, *, force: bool = False) -> list[dict] | None:
         if not self.cloud:
             return None
         try:
-            cloud_items, pending = self._sync_legacy_local_sops(
+            cloud_items, pending, _uploaded_count = self._sync_legacy_local_sops(
                 self.cloud.list_sops(force=force)
             )
             return [self._cache_cloud_sop(item) for item in cloud_items] + pending
@@ -614,7 +622,10 @@ class PollingWorkOrderService:
         )
         if isinstance(marker, dict) and marker.get("initialized"):
             return True
-        scoped = self.state_store.get_document(POLLING_SOP_META_NAMESPACE, f"refresh:{scope}:{work_type}") if scope else None
+        scoped = self.state_store.get_document(
+            POLLING_SOP_META_NAMESPACE,
+            f"{POLLING_SOP_CLOUD_CACHE_KEY}:{scope}:{work_type}",
+        ) if scope else None
         return bool(scoped and scoped.get("initialized"))
 
     def refresh_sops(self, scope: str, work_type: str = "polling") -> dict:
@@ -628,10 +639,12 @@ class PollingWorkOrderService:
             raise PortalConflictError("SOP 正在同步，请稍后重试。")
         try:
             with self._lock:
-                # Manual refresh only downloads; it must not upload legacy drafts.
                 remote = self.cloud.list_sops(force=True)
                 if not isinstance(remote, list):
                     raise PortalError("SOP 多维数据格式无效，本地资料未修改。")
+                remote, pending, uploaded_count = self._sync_legacy_local_sops(
+                    remote, force=True
+                )
                 matching = [item for item in remote if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
                 prepared = [self._cache_cloud_sop(item, persist=False) for item in matching]
                 updates = {item["sop_id"]: item for item in prepared}
@@ -641,11 +654,40 @@ class PollingWorkOrderService:
                     local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id)
                     if local and (str(local.get("scope") or "").upper() != scope or _stored_work_order_type(local) != work_type or int(local.get("version") or 0) > int(item.get("version") or 0)):
                         raise PortalConflictError("本地 SOP 与云端存在范围或版本冲突，本地资料未修改。")
+                local_documents = self.state_store.list_documents(POLLING_SOP_NAMESPACE)
+                pending_ids = {str(item.get("sop_id") or "") for item in pending}
                 self.state_store.put_documents(POLLING_SOP_NAMESPACE, updates)
+                for document in local_documents:
+                    item = document.get("payload") or {}
+                    sop_id = str(document.get("key") or "")
+                    if (
+                        sop_id
+                        and sop_id not in updates
+                        and sop_id not in pending_ids
+                        and str(item.get("scope") or "").strip().upper() == scope
+                        and _stored_work_order_type(item) == work_type
+                    ):
+                        self.state_store.delete_document(POLLING_SOP_NAMESPACE, sop_id)
                 updated_at = self._now_text()
-                self.state_store.put_document(POLLING_SOP_META_NAMESPACE, f"refresh:{scope}:{work_type}", {"initialized": True, "updated_at": updated_at, "record_count": len(updates)})
+                pending_for_scope = [
+                    item for item in pending
+                    if str(item.get("scope") or "").strip().upper() == scope
+                    and _stored_work_order_type(item) == work_type
+                ]
+                if not pending_for_scope:
+                    self.state_store.put_document(
+                        POLLING_SOP_META_NAMESPACE,
+                        f"{POLLING_SOP_CLOUD_CACHE_KEY}:{scope}:{work_type}",
+                        {"initialized": True, "updated_at": updated_at, "record_count": len(updates)},
+                    )
                 items = [self._public_sop(item) for item in self._local_sops() if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
-                return {"items": sorted(items, key=lambda item: str(item.get("name") or "").casefold()), "synced_count": len(updates), "updated_at": updated_at}
+                return {
+                    "items": sorted(items, key=lambda item: str(item.get("name") or "").casefold()),
+                    "synced_count": len(updates),
+                    "uploaded_count": uploaded_count,
+                    "pending_upload_count": len(pending),
+                    "updated_at": updated_at,
+                }
         finally:
             self._manual_refresh_lock.release()
 
@@ -709,7 +751,12 @@ class PollingWorkOrderService:
             raise PortalError("请在明确的单楼页面读取 SOP。")
         source = self._local_sops()
         if self.cloud and not self._local_cache_initialized(scope, work_type):
-            if source:
+            matching_source = [
+                item for item in source
+                if str(item.get("scope") or "").strip().upper() == scope
+                and _stored_work_order_type(item) == work_type
+            ]
+            if matching_source:
                 self._start_local_cache_bootstrap()
             elif self._refresh_local_cache_from_cloud():
                 source = self._local_sops()
@@ -815,8 +862,6 @@ class PollingWorkOrderService:
                 raise PortalConflictError("SOP 版本已失效，请刷新后重试。")
             if existing and str(existing.get("scope") or "").strip().upper() not in {"", scope}:
                 raise PortalConflictError("SOP 不能跨楼栋修改。")
-            if existing and _stored_work_order_type(existing) != work_type:
-                raise PortalConflictError("SOP 不能跨通告类型修改。")
             for item in self.list_sops(scope, work_type):
                 if (
                     str(item.get("sop_id") or "") != sop_id

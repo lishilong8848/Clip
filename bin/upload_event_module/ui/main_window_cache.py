@@ -11,7 +11,7 @@ from lan_bitable_template_portal.identity_utils import (
 )
 from ..core.parser import extract_event_info
 from ..utils import ACTIVE_CACHE_FILE
-from .display_state import persistent_active_item_data
+from .display_state import normalize_active_item_data, persistent_active_item_data
 
 
 class ActiveCacheMixin:
@@ -362,9 +362,9 @@ class ActiveCacheMixin:
         self._active_cache_save_deferred = False
         self.schedule_active_cache_save(800)
 
-    def _restore_active_item(self, payload):
+    def _prepare_active_cache_item(self, payload):
         if not payload:
-            return False
+            return None, False
         if isinstance(payload, dict) and "data" in payload:
             data = payload.get("data") or {}
             meta = payload.get("meta") or {}
@@ -372,10 +372,10 @@ class ActiveCacheMixin:
             data = payload if isinstance(payload, dict) else {}
             meta = {}
         if not data:
-            return False
+            return None, False
         data = persistent_active_item_data(data)
         if self._is_ended_active_cache_record(data):
-            return True
+            return None, True
         if "_has_unuploaded_changes" not in data and "has_unuploaded_changes" in meta:
             data["_has_unuploaded_changes"] = bool(meta.get("has_unuploaded_changes"))
         if "_has_unuploaded_changes" not in data:
@@ -383,11 +383,39 @@ class ActiveCacheMixin:
         if "_has_unuploaded_changes" in data and not data["_has_unuploaded_changes"]:
             data["_pending_upload_hash"] = None
             data["_upload_in_progress"] = False
+        return data, False
+
+    def _restore_active_item(self, payload):
+        data, cache_changed = self._prepare_active_cache_item(payload)
+        if not data:
+            return cache_changed
         item, widget = self.add_active_item(data, insert_top=False, skip_cache=True)
         if widget:
             if not data.get("_has_unuploaded_changes", True):
                 widget.mark_as_uploaded()
-        return False
+        return cache_changed
+
+    def _restore_active_models(self, restore_items) -> bool:
+        event_model = self._active_notice_model_for_list(self.list_active_event)
+        other_model = self._active_notice_model_for_list(self.list_active_other)
+        records = {event_model: {}, other_model: {}}
+        cache_changed = False
+        for payload in restore_items:
+            data, item_changed = self._prepare_active_cache_item(payload)
+            cache_changed = item_changed or cache_changed
+            if not data:
+                continue
+            data = self._ensure_active_item_identity(normalize_active_item_data(data))
+            self._ensure_payload_for_data(data)
+            list_widget = self._get_active_list_for_notice(self._get_notice_type(data))
+            model = self._active_notice_model_for_list(list_widget)
+            identity = model.identity_for_record(data) if model is not None else ""
+            if model in records and identity:
+                records[model][identity] = data
+        for model, items in records.items():
+            if model is not None:
+                model.replace_records(list(items.values()))
+        return cache_changed
 
     @staticmethod
     def _active_cache_restore_batch_size():
@@ -446,7 +474,9 @@ class ActiveCacheMixin:
             other_items = payload.get("other", []) if isinstance(payload, dict) else []
             restore_items = list(event_items or []) + list(other_items or [])
             self._set_clipboard_cache_from_payload(payload)
-            if len(restore_items) > self._active_cache_restore_async_threshold():
+            if self._active_model_view_visible():
+                cache_changed = self._restore_active_models(restore_items)
+            elif len(restore_items) > self._active_cache_restore_async_threshold():
                 self._active_cache_restore_in_progress = True
                 self._active_cache_restore_queue = restore_items
                 self._active_cache_restore_cache_changed = False

@@ -3138,6 +3138,12 @@ def render_workbench_lite(
     .polling-sop-row strong,.polling-sop-row small {{ display:block; }}
     .polling-sop-row small {{ margin-top:3px; color:#64748b; }}
     .polling-sop-editor {{ display:grid; align-content:start; gap:10px; }}
+    .polling-sop-type-switch {{ min-width:0; margin:0; border:0; padding:0; }}
+    .polling-sop-type-switch legend {{ margin:0 0 4px; color:#51677f; font-size:11px; font-weight:900; }}
+    .polling-sop-type-options {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px; border:1px solid #d5e2f2; border-radius:10px; padding:3px; background:#f4f8ff; }}
+    .polling-sop-type-option {{ min-height:40px; border:0; border-radius:7px; color:#51677f; background:transparent; font-size:12px; font-weight:900; cursor:pointer; }}
+    .polling-sop-type-option[aria-pressed="true"] {{ color:#fff; background:#1f63ff; box-shadow:0 5px 12px rgba(31,99,255,.2); }}
+    .polling-sop-type-option:focus-visible {{ outline:2px solid rgba(31,99,255,.32); outline-offset:2px; }}
     .polling-sop-steps {{ display:grid; gap:8px; }}
     .polling-step-edit {{ border:1px solid #d8e5f7; border-radius:14px; padding:9px; background:#fbfdff; }}
     .polling-step-edit header {{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }}
@@ -3361,7 +3367,7 @@ def render_workbench_lite(
     <section class="end-check-dialog polling-sop-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-polling-sop-title">
       <header class="end-check-head"><span>工单 SOP</span><strong id="lite-polling-sop-title">SOP 管理</strong></header>
       <div class="polling-sop-body"><aside class="polling-sop-list" id="lite-polling-sop-list"></aside><section class="polling-sop-editor" id="lite-polling-sop-editor"></section></div>
-      <footer class="end-check-actions"><span class="job-status" id="lite-polling-sop-feedback" aria-live="polite" hidden></span><button class="btn ghost" type="button" id="lite-polling-sop-refresh" title="从多维表同步当前楼栋和类型的 SOP">从多维同步</button><button class="btn ghost" type="button" id="lite-polling-sop-new">新增 SOP</button><button class="btn primary" type="button" id="lite-polling-sop-close">关闭</button></footer>
+      <footer class="end-check-actions"><span class="job-status" id="lite-polling-sop-feedback" aria-live="polite" hidden></span><button class="btn ghost" type="button" id="lite-polling-sop-refresh" title="补传本地独有 SOP，并从多维表同步最新内容">同步多维</button><button class="btn ghost" type="button" id="lite-polling-sop-new">新增 SOP</button><button class="btn primary" type="button" id="lite-polling-sop-close">关闭</button></footer>
     </section>
   </div>
   <div class="end-check-backdrop" id="lite-polling-sop-delete-confirm" hidden>
@@ -3369,6 +3375,13 @@ def render_workbench_lite(
       <header class="end-check-head"><span>删除工单 SOP</span><strong id="lite-polling-sop-delete-title">确认删除这份 SOP</strong></header>
       <div class="undo-confirm-copy"><strong id="lite-polling-sop-delete-name"></strong><span>将同时删除本机保存的步骤和附件。已经生成的工单不受影响，此操作不可撤销。</span><span id="lite-polling-sop-delete-error" class="action-reason blocked" hidden></span></div>
       <footer class="end-check-actions"><button class="btn ghost" type="button" id="lite-polling-sop-delete-cancel">取消</button><button class="btn danger" type="button" id="lite-polling-sop-delete-apply">确认删除 SOP</button></footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-polling-sop-type-confirm" hidden inert>
+    <section class="end-check-dialog" role="alertdialog" aria-modal="true" aria-labelledby="lite-polling-sop-type-title" aria-describedby="lite-polling-sop-type-copy">
+      <header class="end-check-head"><span>转换工单 SOP</span><strong id="lite-polling-sop-type-title">确认转换适用类型</strong></header>
+      <div class="undo-confirm-copy" id="lite-polling-sop-type-copy"><strong id="lite-polling-sop-type-summary"></strong><span>当前步骤修改将一起保存，已上传附件保持不变；已经生成的工单继续使用原快照。</span><span id="lite-polling-sop-type-error" class="action-reason blocked" hidden></span></div>
+      <footer class="end-check-actions"><button class="btn ghost" type="button" id="lite-polling-sop-type-cancel">取消</button><button class="btn primary" type="button" id="lite-polling-sop-type-apply">转换并保存</button></footer>
     </section>
   </div>
   <div class="end-check-backdrop" id="lite-change-confirmations" hidden>
@@ -3494,8 +3507,11 @@ def render_workbench_lite(
     let litePollingPendingSopFiles = [];
     let litePollingSopDeleteTarget = null;
     let litePollingSopDeleteReturnFocus = null;
+    let litePollingSopTypeChange = null;
+    let litePollingSopTypeReturnFocus = null;
     const litePollingUnits = ['1#','2#','3#','4#','5#','6#'];
     const liteAdjustCoolingModes = Object.freeze([['1#','停机状态'],['2#','板换模式'],['3#','预冷模式'],['4#','制冷模式']]);
+    const litePollingSopTypeLabels = Object.freeze({{maintenance:'维保',polling:'轮巡',adjust:'调整'}});
     const litePollingSopScopes = new Set(['110','A','B','C','D','E','H']);
     function pollingSopScope() {{ const scope=String(getCurrentScope()||'').toUpperCase();return litePollingSopScopes.has(scope)?scope:''; }}
     function pollingCurrentSopWorkType() {{ return ['maintenance','adjust'].includes(currentViewWorkType())?currentViewWorkType():'polling'; }}
@@ -3522,7 +3538,7 @@ def render_workbench_lite(
       catch(error){{if(litePollingSopCache.get(key)?.promise===promise)litePollingSopCache.delete(key);throw error}}
     }}
     function pollingSopModal() {{ return document.getElementById('lite-polling-sop-modal'); }}
-    function closePollingSopModal() {{ litePollingSopOpenSequence+=1;const modal=pollingSopModal(); if(modal) modal.hidden=true; }}
+    function closePollingSopModal() {{ litePollingSopOpenSequence+=1;closePollingSopTypeConfirm();const modal=pollingSopModal(); if(modal) modal.hidden=true; }}
     function setPollingSopFeedback(message,failed=false) {{const node=document.getElementById('lite-polling-sop-feedback');if(!node)return;node.textContent=String(message||'');node.hidden=!node.textContent;node.classList.toggle('failed',Boolean(failed))}}
     async function refreshPollingSopsFromCloud() {{
       if(litePollingSopRefreshing)return;
@@ -3533,7 +3549,7 @@ def render_workbench_lite(
       const signature=sop=>JSON.stringify([sop?.name,sop?.work_type,sop?.steps,sop?.attachments]);
       const preserveDraft=Boolean(litePollingPendingSopFiles.length||!editing?.sop_id||!original||signature(editing)!==signature(original));
       litePollingSopRefreshing=true;setButtonBusy(button,true);button.textContent='同步中…';body.inert=true;newButton.disabled=true;
-      setPollingSopFeedback(`正在从多维同步 ${{scope}}楼${{pollingSopLabel()}} SOP…`);
+      setPollingSopFeedback(`正在同步本地与多维中的 ${{scope}}楼${{pollingSopLabel()}} SOP…`);
       const controller=new AbortController(),timer=window.setTimeout(()=>controller.abort(),120000);
       try{{
         const data=await pollingApi('/api/polling-sops/refresh',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{scope,work_type:workType}}),signal:controller.signal}});
@@ -3544,14 +3560,19 @@ def render_workbench_lite(
         if(litePollingSopMode==='manage'&&!preserveDraft){{litePollingEditingSop=structuredClone(data.items.find(item=>item.sop_id===editing.sop_id)||editing);renderPollingSopEditor()}}
         renderPollingSopList();
         const kept=litePollingSopMode==='manage'?preserveDraft:Boolean(litePollingSelectedSop);
-        setPollingSopFeedback(`已从多维同步 ${{data.synced_count||0}} 份 SOP。${{kept?'当前输入已保留，重新选择 SOP 可载入最新步骤。':''}}`);
+        const uploaded=Number(data.uploaded_count||0),pending=Number(data.pending_upload_count||0);setPollingSopFeedback(`已从多维同步 ${{data.synced_count||0}} 份 SOP。${{uploaded?`已补传本地 ${{uploaded}} 份。`:''}}${{pending?`另有 ${{pending}} 份补传待重试。`:''}}${{kept?'当前输入已保留，重新选择 SOP 可载入最新步骤。':''}}`,pending>0);
       }}catch(error){{
         if(sequence===litePollingSopOpenSequence&&!modal.hidden)setPollingSopFeedback(controller.signal.aborted?'同步等待超时，当前输入已保留，可稍后重试。':`同步失败：${{error.message}}。当前输入已保留。`,true);
-      }}finally{{window.clearTimeout(timer);litePollingSopRefreshing=false;setButtonBusy(button,false);button.textContent='从多维同步';body.inert=false;newButton.disabled=false}}
+      }}finally{{window.clearTimeout(timer);litePollingSopRefreshing=false;setButtonBusy(button,false);button.textContent='同步多维';body.inert=false;newButton.disabled=false}}
     }}
     function openPollingSopDeleteConfirm(sop,trigger) {{litePollingSopDeleteTarget={{sop_id:String(sop?.sop_id||''),version:Number(sop?.version||0),name:String(sop?.name||'未命名 SOP')}};litePollingSopDeleteReturnFocus=trigger instanceof HTMLElement?trigger:null;const modal=document.getElementById('lite-polling-sop-delete-confirm'),name=document.getElementById('lite-polling-sop-delete-name'),error=document.getElementById('lite-polling-sop-delete-error'),apply=document.getElementById('lite-polling-sop-delete-apply');if(name)name.textContent=litePollingSopDeleteTarget.name;if(error){{error.textContent='';error.hidden=true}}if(modal)modal.hidden=false;if(apply)apply.focus()}}
     function closePollingSopDeleteConfirm() {{const modal=document.getElementById('lite-polling-sop-delete-confirm'),returnFocus=litePollingSopDeleteReturnFocus;if(modal)modal.hidden=true;litePollingSopDeleteTarget=null;litePollingSopDeleteReturnFocus=null;if(returnFocus?.isConnected)requestAnimationFrame(()=>returnFocus.focus())}}
     async function confirmPollingSopDelete(button) {{const target=litePollingSopDeleteTarget;if(!target)return;const error=document.getElementById('lite-polling-sop-delete-error');setButtonBusy(button,true);try{{await pollingApi(`/api/polling-sops/${{encodeURIComponent(target.sop_id)}}?expected_version=${{target.version}}`,{{method:'DELETE'}})}}catch(exc){{if(error){{error.textContent=exc.message||'删除 SOP 失败';error.hidden=false}}showLiteError(exc.message);setButtonBusy(button,false);return}}closePollingSopDeleteConfirm();litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft();litePollingSelectedSop=null;try{{await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setPollingSopFeedback(`已删除：${{target.name}}`)}}catch(exc){{setPollingSopFeedback(`SOP 已删除，列表刷新失败：${{exc.message}}`,true)}}finally{{setButtonBusy(button,false)}}}}
+    function pollingSopTypeIssue(sop,target) {{const tokens=pollingSopPlaceholderTokens(sop);if(target==='maintenance'&&tokens.size)return '维保 SOP 不能使用设备指向占位符，请先修改相关步骤。';if(target==='adjust'&&tokens.size&&!(tokens.size===1&&tokens.has('{{{{from}}}}')))return '调整 SOP 只能是不含占位符的普通调整，或仅使用 {{{{from}}}} 的制冷单元调整。';return ''}}
+    async function browsePollingSopType(target) {{if(!Object.hasOwn(litePollingSopTypeLabels,target)||pollingSopWorkType()===target)return;const modal=pollingSopModal(),list=document.getElementById('lite-polling-sop-list'),sequence=++litePollingSopOpenSequence,loading=document.createElement('div');litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft(target);loading.className='empty';loading.textContent=`正在读取${{litePollingSopTypeLabels[target]}} SOP…`;list.replaceChildren(loading);setPollingSopFeedback('');document.getElementById('lite-polling-sop-title').textContent=`${{pollingSopLabel()}} SOP步骤填写`;renderPollingSopEditor();requestAnimationFrame(()=>document.querySelector('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]')?.focus());try{{await loadPollingSops();if(sequence!==litePollingSopOpenSequence||modal.hidden)return;renderPollingSopList()}}catch(error){{if(sequence!==litePollingSopOpenSequence||modal.hidden)return;setPollingSopFeedback(`SOP 列表加载失败：${{error.message}}`,true);const failed=document.createElement('div');failed.className='empty compact';failed.textContent='SOP 列表加载失败，请重试';list.replaceChildren(failed)}}}}
+    function openPollingSopTypeConfirm(sop,target,trigger) {{if(!sop?.sop_id)return;if(litePollingPendingSopFiles.length){{setPollingSopFeedback('请先保存或移除待上传附件，再转换适用类型。',true);return}}const from=String(sop.work_type||'polling');if(from===target||!Object.hasOwn(litePollingSopTypeLabels,target))return;litePollingSopTypeChange={{sop_id:String(sop.sop_id),version:Number(sop.version||0),from,to:target,name:String(sop.name||'未命名 SOP')}};litePollingSopTypeReturnFocus=trigger instanceof HTMLElement?trigger:null;const parent=pollingSopModal(),modal=document.getElementById('lite-polling-sop-type-confirm'),summary=document.getElementById('lite-polling-sop-type-summary'),error=document.getElementById('lite-polling-sop-type-error'),apply=document.getElementById('lite-polling-sop-type-apply'),issue=pollingSopTypeIssue(sop,target);if(summary)summary.textContent=`${{litePollingSopTypeChange.name}}：${{litePollingSopTypeLabels[from]}} → ${{litePollingSopTypeLabels[target]}}`;if(error){{error.textContent=issue;error.hidden=!issue}}if(apply)apply.disabled=Boolean(issue);if(parent)parent.inert=true;if(modal){{modal.inert=false;modal.hidden=false}};(issue?document.getElementById('lite-polling-sop-type-cancel'):apply)?.focus()}}
+    function closePollingSopTypeConfirm(restoreFocus=true) {{const parent=pollingSopModal(),modal=document.getElementById('lite-polling-sop-type-confirm'),returnFocus=litePollingSopTypeReturnFocus;if(modal?.contains(document.activeElement))document.activeElement.blur();if(modal){{modal.hidden=true;modal.inert=true}}if(parent)parent.inert=false;litePollingSopTypeChange=null;litePollingSopTypeReturnFocus=null;if(restoreFocus&&returnFocus?.isConnected)returnFocus.focus({{preventScroll:true}})}}
+    async function confirmPollingSopTypeChange(button) {{const change=litePollingSopTypeChange,sop=litePollingEditingSop,error=document.getElementById('lite-polling-sop-type-error');if(!change||!sop||String(sop.sop_id)!==change.sop_id||Number(sop.version||0)!==change.version){{if(error){{error.textContent='SOP 已变化，请关闭后重新选择。';error.hidden=false}}return}}const issue=pollingSopTypeIssue(sop,change.to);if(issue){{if(error){{error.textContent=issue;error.hidden=false}}button.disabled=true;return}}setButtonBusy(button,true);try{{const body={{sop_id:sop.sop_id,work_type:change.to,scope:pollingSopScope(),name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},saved=await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`,{{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});litePollingEditingSop=saved;document.getElementById('lite-polling-sop-title').textContent=`${{pollingSopLabel()}} SOP步骤填写`;closePollingSopTypeConfirm(false);let refreshError='';try{{await loadPollingSops()}}catch(exc){{refreshError=exc.message||'列表刷新失败';litePollingSops=[saved]}}renderPollingSopList();renderPollingSopEditor();requestAnimationFrame(()=>document.querySelector('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]')?.focus());setPollingSopFeedback(`已将 ${{saved.name}} 从${{litePollingSopTypeLabels[change.from]}}转换为${{litePollingSopTypeLabels[change.to]}}。${{refreshError?`列表刷新失败：${{refreshError}}`:''}}`,Boolean(refreshError));setLiteStatus('SOP 适用类型已转换')}}catch(exc){{if(error){{error.textContent=exc.message||'SOP 类型转换失败';error.hidden=false}}setPollingSopFeedback(`转换失败：${{exc.message}}`,true)}}finally{{if(button.isConnected)setButtonBusy(button,false)}}}}
     function pollingPersonDisplay(person) {{
       return [person?.name,person?.position,person?.building,person?.shift,person?.employee_no].map(value=>String(value||'').trim()).filter(Boolean).join(' · ');
     }}
@@ -3574,7 +3595,7 @@ def render_workbench_lite(
       litePollingPeopleLoadPromise=pollingApi('/api/signatures/people?limit=200').then(data=>{{const people=Array.isArray(data.people)?data.people:[];litePollingPeople=pollingSortedPeople([{{record_id:'h_duty_account',name:'H楼值班账号',employee_no:'',building:'H楼',position:'值班账号',shift:''}},...people.filter(person=>String(person.record_id||'')!=='h_duty_account')]);litePollingPeopleLoadedAt=Date.now();return litePollingPeople}});
       try{{return await litePollingPeopleLoadPromise}}finally{{litePollingPeopleLoadPromise=null}}
     }}
-    function pollingNewDraft(workType=pollingCurrentSopWorkType()) {{ return {{sop_id:'',work_type:workType,scope:pollingSopScope(),name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true,photo_required:true,time_limit_seconds:0}}],attachments:[]}}; }}
+    function pollingNewDraft(workType=pollingSopWorkType()) {{ return {{sop_id:'',work_type:workType,scope:pollingSopScope(),name:'',version:0,steps:[{{step_id:'',content:'',operator_required:true,reviewer_required:true,photo_required:true,time_limit_seconds:0}}],attachments:[]}}; }}
     function pollingSopPlaceholderTokens(sop) {{const content=(sop?.steps||[]).map(step=>String(step.content||'')).join('\\n');return new Set(['{{{{other}}}}','{{{{from}}}}','{{{{to}}}}'].filter(token=>content.includes(token)))}}
     function pollingSopIsAdjustCooling(sop) {{const tokens=pollingSopPlaceholderTokens(sop);return tokens.size===1&&tokens.has('{{{{from}}}}')}}
     function pollingAdjustSopType(sop) {{return sop?._ui_adjust_sop_type||(pollingSopIsAdjustCooling(sop)?'cooling':'normal')}}
@@ -3612,15 +3633,15 @@ def render_workbench_lite(
     async function handlePollingSopAttachmentFiles(files,sop) {{const selected=Array.from(files||[]).filter(Boolean);if(!selected.length)return;if(!sop.sop_id){{litePollingPendingSopFiles=litePollingPendingSopFiles.concat(selected);renderPollingSopEditor();return}}for(const file of selected){{const form=new FormData();form.append('file',file);form.append('expected_version',String(litePollingEditingSop.version||0));try{{const draft=litePollingEditingSop,remote=await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}/attachments`,{{method:'POST',body:form}});litePollingEditingSop=pollingMergeSopAttachmentResult(draft,remote)}}catch(error){{showLiteError(error.message);break}}}}await loadPollingSops();renderPollingSopList();renderPollingSopEditor()}}
     function renderPollingSopEditor() {{
       const editor=document.getElementById('lite-polling-sop-editor');if(!editor)return;const sop=litePollingEditingSop||pollingNewDraft();litePollingEditingSop=sop;editor.replaceChildren();
-      const workTypeLabel=document.createElement('label'),workTypeText=document.createElement('span'),workType=document.createElement('select');workTypeText.textContent='适用类型';for(const [value,text] of [['adjust','调整'],['polling','轮巡'],['maintenance','维保']]){{const option=document.createElement('option');option.value=value;option.textContent=text;workType.append(option)}}workType.value=pollingSopWorkType();workType.disabled=Boolean(sop.sop_id);workType.title=sop.sop_id?'已保存 SOP 不能跨类型修改':'';workType.onchange=async()=>{{sop.work_type=workType.value;sop._ui_adjust_sop_type='';document.getElementById('lite-polling-sop-title').textContent=`${{pollingSopLabel()}} SOP步骤填写`;try{{await loadPollingSops()}}catch(error){{setPollingSopFeedback(`SOP 列表加载失败：${{error.message}}`,true)}}renderPollingSopList();renderPollingSopEditor()}};workTypeLabel.append(workTypeText,workType);
+      const workTypeField=document.createElement('fieldset'),workTypeLegend=document.createElement('legend'),workTypeOptions=document.createElement('div');workTypeField.className='polling-sop-type-switch';workTypeLegend.textContent='查看 SOP 列表';workTypeOptions.className='polling-sop-type-options';for(const [value,text] of [['maintenance','维保'],['polling','轮巡'],['adjust','调整']]){{const option=document.createElement('button');option.type='button';option.className='polling-sop-type-option';option.textContent=text;option.setAttribute('aria-pressed',String(pollingSopWorkType()===value));option.title=`查看${{text}} SOP`;option.onclick=()=>browsePollingSopType(value);workTypeOptions.append(option)}}workTypeField.append(workTypeLegend,workTypeOptions);
       const label=document.createElement('label'),span=document.createElement('span'),name=document.createElement('input');span.textContent='SOP 名称';name.value=sop.name||'';name.oninput=()=>sop.name=name.value;label.append(span,name);
       let typeLabel=null,typeHint=null;if(pollingSopWorkType()==='adjust'){{const typeText=document.createElement('span'),type=document.createElement('select');typeLabel=document.createElement('label');typeHint=document.createElement('div');typeText.textContent='SOP 类型';for(const [value,text] of [['normal','普通设备调整 SOP'],['cooling','制冷单元模式切换 SOP']]){{const option=document.createElement('option');option.value=value;option.textContent=text;type.append(option)}}type.value=pollingAdjustSopType(sop);sop._ui_adjust_sop_type=type.value;type.onchange=()=>{{sop._ui_adjust_sop_type=type.value;renderPollingSopEditor()}};typeLabel.append(typeText,type);typeHint.className='job-status';typeHint.textContent=type.value==='cooling'?'步骤保持原填写方式；使用 {{{{from}}}} 的位置会在创建工单时替换为所选制冷单元。':'普通设备调整 SOP 不使用设备占位符。'}}
       const steps=document.createElement('div');steps.className='polling-sop-steps';steps.replaceChildren(...(sop.steps||[]).map(pollingStepEditor));
       const add=document.createElement('button');add.type='button';add.className='btn ghost';add.textContent='添加步骤';add.onclick=()=>{{sop.steps.push({{step_id:'',content:'',operator_required:true,reviewer_required:true,photo_required:true,time_limit_seconds:0}});renderPollingSopEditor()}};
       const save=document.createElement('button');save.type='button';save.className='btn primary';save.textContent='保存 SOP';save.onclick=async()=>{{let saved=null;const creating=!sop.sop_id,originalText=save.textContent;setButtonBusy(save,true);save.textContent='保存中…';setPollingSopFeedback('正在保存 SOP…');try{{if(pollingSopWorkType()==='adjust'){{const tokens=pollingSopPlaceholderTokens(sop),cooling=pollingAdjustSopType(sop)==='cooling';if(cooling&&!pollingSopIsAdjustCooling(sop))throw new Error('制冷单元模式切换 SOP 必须且只能使用 {{{{from}}}} 占位符');if(!cooling&&tokens.size)throw new Error('普通设备调整 SOP 不能使用设备占位符')}}if(!(sop.attachments?.length||litePollingPendingSopFiles.length))throw new Error('SOP 必须至少包含一个附件');const body={{sop_id:sop.sop_id||'',work_type:pollingSopWorkType(),scope:pollingSopScope(),name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},url=sop.sop_id?`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`:'/api/polling-sops';saved=await pollingApi(url,{{method:sop.sop_id?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});for(const file of litePollingPendingSopFiles){{const form=new FormData();form.append('file',file);form.append('expected_version',String(saved.version||0));saved=await pollingApi(`/api/polling-sops/${{encodeURIComponent(saved.sop_id)}}/attachments`,{{method:'POST',body:form}})}}litePollingPendingSopFiles=[];litePollingEditingSop=saved;await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setPollingSopFeedback(`已保存：${{saved.name}}`);setLiteStatus('SOP 已保存')}}catch(error){{if(creating&&saved?.sop_id)await pollingApi(`/api/polling-sops/${{encodeURIComponent(saved.sop_id)}}?expected_version=${{saved.version}}`,{{method:'DELETE'}}).catch(()=>null);setPollingSopFeedback(`保存失败：${{error.message}}`,true);showLiteError(error.message)}}finally{{if(save.isConnected){{setButtonBusy(save,false);save.textContent=originalText}}}}}};
       const actions=document.createElement('div');actions.className='polling-sop-inline';actions.append(add,save);
-      if(sop.sop_id){{const del=document.createElement('button');del.type='button';del.className='btn danger';del.textContent='删除 SOP';del.onclick=()=>openPollingSopDeleteConfirm(sop,del);actions.append(del)}}
-      editor.append(workTypeLabel,label);if(typeLabel)editor.append(typeLabel,typeHint);editor.append(steps,actions);
+      if(sop.sop_id){{const target=document.createElement('select'),convert=document.createElement('button'),del=document.createElement('button');target.setAttribute('aria-label','转换目标类型');for(const [value,text] of Object.entries(litePollingSopTypeLabels))if(value!==sop.work_type){{const option=document.createElement('option');option.value=value;option.textContent=`转为${{text}}`;target.append(option)}}convert.type='button';convert.className='btn ghost';convert.textContent='转换适用类型';convert.onclick=()=>openPollingSopTypeConfirm(sop,target.value,convert);del.type='button';del.className='btn danger';del.textContent='删除 SOP';del.onclick=()=>openPollingSopDeleteConfirm(sop,del);actions.append(target,convert,del)}}
+      editor.append(workTypeField,label);if(typeLabel)editor.append(typeLabel,typeHint);editor.append(steps,actions);
       const attachmentTitle=document.createElement('strong');attachmentTitle.textContent='本地附件（必填）';const files=pollingAttachmentRows(sop),pendingFiles=pollingPendingAttachmentRows(),input=document.createElement('input'),drop=document.createElement('div'),addFiles=chosen=>handlePollingSopAttachmentFiles(chosen,sop).catch(error=>showLiteError(error.message));input.type='file';input.multiple=true;input.hidden=true;input.onchange=()=>addFiles(input.files);drop.className='polling-sop-drop';drop.tabIndex=0;drop.textContent='点击选择或将附件拖到这里';drop.onclick=()=>input.click();drop.onkeydown=event=>{{if(event.key==='Enter'||event.key===' '){{event.preventDefault();input.click()}}}};drop.ondragover=event=>{{event.preventDefault();drop.classList.add('dragover')}};drop.ondragleave=()=>drop.classList.remove('dragover');drop.ondrop=event=>{{event.preventDefault();drop.classList.remove('dragover');addFiles(event.dataTransfer?.files)}};editor.append(attachmentTitle,files,pendingFiles,input,drop);
     }}
     function pollingUnitGroup(unit) {{return litePollingUnits.slice(Number.parseInt(unit,10)<=3?0:3,Number.parseInt(unit,10)<=3?3:6)}}
@@ -3665,13 +3686,14 @@ def render_workbench_lite(
     async function openPollingSopModal(mode='manage') {{
       litePollingSopMode=mode;const modal=pollingSopModal();if(!modal)return;
       if(!pollingSopScope()){{showLiteError('请先切换到具体楼栋，再填写或选择 SOP 步骤');return}}
+      const requestedWorkType=pollingCurrentSopWorkType();if(mode==='manage'&&(!litePollingEditingSop||litePollingEditingSop.scope!==pollingSopScope()||litePollingEditingSop.work_type!==requestedWorkType)){{litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft(requestedWorkType)}}
       const sequence=++litePollingSopOpenSequence;
       setPollingSopFeedback('');
       const list=document.getElementById('lite-polling-sop-list'),editor=document.getElementById('lite-polling-sop-editor'),loading=document.createElement('div');loading.className='empty';loading.textContent='正在读取 SOP…';list.replaceChildren(loading);const editorLoading=document.createElement('div');editorLoading.className='empty';editorLoading.textContent=mode==='select'?'正在读取 SOP 和人员…':'正在读取 SOP…';editor.replaceChildren(editorLoading);modal.hidden=false;requestAnimationFrame(()=>document.getElementById('lite-polling-sop-close')?.focus());
       document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':`${{pollingSopLabel()}} SOP步骤填写`;document.getElementById('lite-polling-sop-new').hidden=mode==='select';
       const peoplePromise=mode==='select'?loadPollingPeople().then(()=>null,error=>error):Promise.resolve(null);
       try{{
-        await loadPollingSops();if(sequence!==litePollingSopOpenSequence||modal.hidden)return;litePollingEditingSop=litePollingEditingSop&&litePollingEditingSop.scope===pollingSopScope()?litePollingEditingSop:pollingNewDraft();litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id)||null):litePollingSelectedSop;renderPollingSopList();
+        await loadPollingSops();if(sequence!==litePollingSopOpenSequence||modal.hidden)return;if(mode==='manage'&&!litePollingEditingSop)litePollingEditingSop=pollingNewDraft(requestedWorkType);litePollingSelectedSop=mode==='select'?(litePollingSops.find(item=>item.sop_id===litePollingSelection?.sop_id)||null):litePollingSelectedSop;renderPollingSopList();
         if(mode==='manage'){{renderPollingSopEditor();return}}
         const peopleError=await peoplePromise;if(sequence!==litePollingSopOpenSequence||modal.hidden)return;
         try{{if(peopleError)throw peopleError;renderPollingSelectionEditor()}}
@@ -7601,6 +7623,12 @@ def render_workbench_lite(
       if (pollingSopRefresh) {{ event.preventDefault(); await refreshPollingSopsFromCloud(); return; }}
       const pollingSopNew = target.closest('#lite-polling-sop-new');
       if (pollingSopNew) {{ event.preventDefault(); setPollingSopFeedback(''); litePollingPendingSopFiles=[]; litePollingEditingSop=pollingNewDraft(); renderPollingSopList(); renderPollingSopEditor(); return; }}
+      const pollingSopTypeCancel = target.closest('#lite-polling-sop-type-cancel');
+      if (pollingSopTypeCancel) {{ event.preventDefault(); closePollingSopTypeConfirm(); return; }}
+      const pollingSopTypeApply = target.closest('#lite-polling-sop-type-apply');
+      if (pollingSopTypeApply) {{ event.preventDefault(); await confirmPollingSopTypeChange(pollingSopTypeApply); return; }}
+      const pollingSopTypeBackdrop = target.closest('#lite-polling-sop-type-confirm');
+      if (pollingSopTypeBackdrop && target === pollingSopTypeBackdrop) {{ event.preventDefault(); closePollingSopTypeConfirm(); return; }}
       const pollingSopDeleteCancel = target.closest('#lite-polling-sop-delete-cancel');
       if (pollingSopDeleteCancel) {{ event.preventDefault(); closePollingSopDeleteConfirm(); return; }}
       const pollingSopDeleteApply = target.closest('#lite-polling-sop-delete-apply');
@@ -8141,6 +8169,8 @@ def render_workbench_lite(
       if (event.key === 'Escape') {{
         const changeScreenshotPreview=document.getElementById('lite-change-screenshot-preview');
         if(changeScreenshotPreview&&!changeScreenshotPreview.hidden){{closeChangeScreenshotPreview();return}}
+        const pollingTypeModal=document.getElementById('lite-polling-sop-type-confirm');
+        if(pollingTypeModal&&!pollingTypeModal.hidden){{closePollingSopTypeConfirm();return}}
         const pollingDeleteModal=document.getElementById('lite-polling-sop-delete-confirm');
         if(pollingDeleteModal&&!pollingDeleteModal.hidden){{closePollingSopDeleteConfirm();return}}
         const hadOpenDialog = Array.from(document.querySelectorAll('.end-check-backdrop')).some(node => !node.hidden);

@@ -2,7 +2,7 @@
   <section class="water-page">
     <header class="water-page__header">
       <div class="header-left">
-        <VnetBackButton to="/" />
+        <VnetBackButton to="/?entry=water" />
         <div>
           <span>容量管理</span>
           <h1>{{ buildingLabel }}水耗管理</h1>

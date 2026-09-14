@@ -64,7 +64,7 @@ class TransportSafetyTests(unittest.TestCase):
     def test_download_rejects_unsafe_names_before_network(self):
         with tempfile.TemporaryDirectory() as tmp:
             updater = RemotePatchUpdater(Path(tmp), Path(tmp) / "data", "")
-            with patch("upload_event_module.services.remote_patch_updater.requests.get") as get:
+            with patch("requests.get") as get:
                 for name in ["../a.zip", "a/b.zip", "a\\b.zip", "C:\\a.zip", "//server/a", "a:stream", "CON.zip", "LPT1.zip", "a.", "a ", ".."]:
                     with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "unsafe"):
                         updater._download_zip({"zip_url": "https://example.invalid/a", "zip_name": name})
@@ -80,7 +80,7 @@ class TransportSafetyTests(unittest.TestCase):
             manifest = {"zip_url": "https://example.invalid/patch.zip?version=2", "zip_sha256": hashlib.sha256(b"new").hexdigest(), "zip_size": 3}
             for chunks in [[b"bad"], [b"too long"], [b"n"]]:
                 response.iter_content.return_value = iter(chunks)
-                with patch("upload_event_module.services.remote_patch_updater.requests.get", return_value=response), self.assertRaises(RuntimeError):
+                with patch("requests.get", return_value=response), self.assertRaises(RuntimeError):
                     updater._download_zip(manifest)
                 self.assertEqual(target.read_bytes(), b"previous")
                 self.assertEqual(list(updater.data_dir.glob("*.part")), [])
@@ -88,11 +88,11 @@ class TransportSafetyTests(unittest.TestCase):
                 yield b"n"
                 raise OSError("disconnected")
             response.iter_content.return_value = interrupted()
-            with patch("upload_event_module.services.remote_patch_updater.requests.get", return_value=response), self.assertRaises(OSError):
+            with patch("requests.get", return_value=response), self.assertRaises(OSError):
                 updater._download_zip(manifest)
             self.assertEqual(target.read_bytes(), b"previous")
             response.iter_content.return_value = iter([b"n", b"ew"])
-            with patch("upload_event_module.services.remote_patch_updater.requests.get", return_value=response):
+            with patch("requests.get", return_value=response):
                 self.assertEqual(updater._download_zip(manifest), target.resolve())
             self.assertEqual(target.read_bytes(), b"new")
             self.assertEqual(list(updater.data_dir.glob("*.part")), [])

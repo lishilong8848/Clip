@@ -1995,7 +1995,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           for (const marker of forbidden) {{
             if (bodyText.includes(marker)) throw new Error(`legacy marker visible: ${{marker}}`);
           }}
-          const expectedModuleOrder = ['事件管理', '维护管理', '变更管理', '检修管理', '风险管理', '容量管理', '其他工具', '演练管理', '机柜上下电'];
+          const expectedModuleOrder = ['事件管理', '维护管理', '变更管理', '检修管理', '风险管理', '容量管理', '其他工具', '演练管理'];
           const moduleOrder = await page.locator('.module-card .module-card__main strong').allTextContents();
           if (JSON.stringify(moduleOrder) !== JSON.stringify(expectedModuleOrder)) {{
             throw new Error(`home module order mismatch: ${{JSON.stringify(moduleOrder)}}`);
@@ -2022,7 +2022,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`desktop home dashboard mismatch: ${{JSON.stringify(desktopDashboard)}}`);
           }}
           await page.emulateMedia({{ reducedMotion: 'reduce' }});
-          await page.locator('.module-cabinet_power .module-card__main').click();
+          await page.locator('.module-capacity .module-card__main').click();
+          await page.getByRole('heading', {{ name: '选择容量管理模板', exact: true }}).waitFor();
+          await page.getByRole('button', {{ name: '选择机柜管理', exact: true }}).click();
           await page.waitForSelector('button.building');
           if (await page.locator('button.building').count() !== 5) throw new Error('cabinet building entries missing');
           await page.locator('button.building').first().click();
@@ -2628,9 +2630,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (refreshClosedByEscape.open || refreshClosedByEscape.expanded !== 'false') {{
               throw new Error(`lite refresh menu did not close on Escape: ${{JSON.stringify(refreshClosedByEscape)}}`);
             }}
-            let sopRefreshCalls = 0, sopRefreshFail = false;
-            const sopItems = (scope, workType, fresh) => [{{sop_id:'manual_refresh_sop',scope,work_type:workType,name:'同步示例 SOP',version:fresh?2:1,ready:true,steps:[{{step_id:'step_manual_123',content:fresh?'多维最新步骤':'本地旧步骤',operator_required:true,reviewer_required:true,photo_required:false,time_limit_seconds:0}}],attachments:[{{attachment_id:'file_manual_123',name:'guide.txt',size:10,download_url:'#'}}]}},...(fresh?[{{sop_id:'manual_refresh_new',scope,work_type:workType,name:'多维新增 SOP',version:1,ready:true,steps:[{{content:'新增步骤',operator_required:true}}],attachments:[{{name:'guide.txt',size:10}}]}}]:[])];
+            let sopRefreshCalls = 0, sopRefreshFail = false, sopConversionPayload = null, convertedSop = null;
+            const sopItems = (scope, workType, fresh) => [convertedSop && convertedSop.scope===scope && convertedSop.work_type===workType?convertedSop:{{sop_id:'manual_refresh_sop',scope,work_type:workType,name:'同步示例 SOP',version:fresh?2:1,ready:true,steps:[{{step_id:'step_manual_123',content:fresh?'多维最新步骤':'本地旧步骤',operator_required:true,reviewer_required:true,photo_required:false,time_limit_seconds:0}}],attachments:[{{attachment_id:'file_manual_123',name:'guide.txt',size:10,download_url:'#'}}]}},...(fresh?[{{sop_id:'manual_refresh_new',scope,work_type:workType,name:'多维新增 SOP',version:1,ready:true,steps:[{{content:'新增步骤',operator_required:true}}],attachments:[{{name:'guide.txt',size:10}}]}}]:[])];
             await page.route('**/api/polling-sops?*', route => {{const url=new URL(route.request().url());return route.fulfill({{json:{{ok:true,data:{{items:sopItems(url.searchParams.get('scope'),url.searchParams.get('work_type'),false)}}}}}})}});
+            await page.route('**/api/polling-sops/manual_refresh_sop', route => {{
+              if(route.request().method()!=='PUT')return route.fallback();
+              sopConversionPayload=route.request().postDataJSON();convertedSop={{...sopConversionPayload,sop_id:'manual_refresh_sop',version:Number(sopConversionPayload.expected_version||0)+1,ready:true,attachments:[{{attachment_id:'file_manual_123',name:'guide.txt',size:10,download_url:'#'}}]}};
+              return route.fulfill({{json:{{ok:true,data:convertedSop}}}});
+            }});
             await page.route('**/api/polling-sops/refresh', async route => {{
               sopRefreshCalls+=1;const payload=route.request().postDataJSON();
               await new Promise(resolve=>setTimeout(resolve,350));
@@ -2640,7 +2647,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.waitForFunction(() => !document.querySelector('#lite-polling-sop-modal')?.hidden, null, {{ timeout: 10000 }});
             await page.locator('#lite-polling-sop-list button').filter({{hasText:'同步示例 SOP'}}).click();
             await page.locator('#lite-polling-sop-refresh').click();
-            await page.getByText(/正在从多维同步/).waitFor();
+            await page.getByText(/正在同步本地与多维/).waitFor();
             if(!(await page.locator('#lite-polling-sop-refresh').isDisabled()))throw new Error('SOP sync did not disable duplicate clicks');
             await page.getByText('已从多维同步 2 份 SOP。',{{exact:true}}).waitFor();
             if(await page.locator('.polling-step-edit textarea').first().inputValue()!=='多维最新步骤')throw new Error('SOP editor did not receive cloud changes');
@@ -2652,6 +2659,33 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.getByText(/同步失败：模拟多维读取失败/).waitFor();
             if(await page.getByLabel('SOP 名称',{{exact:true}}).inputValue()!=='尚未保存的 SOP 修改')throw new Error('failed SOP refresh discarded editor input');
             sopRefreshFail=false;
+            await page.locator('#lite-polling-sop-editor .polling-sop-type-option').filter({{hasText:'轮巡'}}).click();
+            await page.locator('#lite-polling-sop-list button').filter({{hasText:'同步示例 SOP'}}).waitFor();
+            if(!(await page.locator('#lite-polling-sop-type-confirm').isHidden())||sopConversionPayload)throw new Error('SOP list tab unexpectedly started a type conversion');
+            if(await page.locator('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]').textContent()!=='轮巡')throw new Error('SOP list did not switch to polling');
+            await page.locator('#lite-polling-sop-editor .polling-sop-type-option').filter({{hasText:'维保'}}).click();
+            await page.locator('#lite-polling-sop-list button').filter({{hasText:'同步示例 SOP'}}).click();
+            await page.getByLabel('转换目标类型').selectOption('polling');
+            await page.getByRole('button',{{name:'转换适用类型',exact:true}}).click();
+            await page.locator('#lite-polling-sop-type-confirm').waitFor();
+            await page.locator('#lite-polling-sop-type-cancel').click();
+            if(!(await page.locator('#lite-polling-sop-type-confirm').isHidden()))throw new Error('SOP conversion confirm stayed open after cancel');
+            const sopCancelState=await page.evaluate(()=>({{parentInert:document.querySelector('#lite-polling-sop-modal')?.inert,confirmInert:document.querySelector('#lite-polling-sop-type-confirm')?.inert,focusInside:document.querySelector('#lite-polling-sop-type-confirm')?.contains(document.activeElement)}}));
+            if(sopCancelState.parentInert||!sopCancelState.confirmInert||sopCancelState.focusInside)throw new Error(`SOP conversion cancel left stale modal state: ${{JSON.stringify(sopCancelState)}}`);
+            await page.getByLabel('转换目标类型').selectOption('adjust');
+            await page.getByRole('button',{{name:'转换适用类型',exact:true}}).click();
+            await page.locator('#lite-polling-sop-type-confirm').waitFor();
+            await page.getByText(/维保 → 调整/).waitFor();
+            await page.locator('#lite-polling-sop-type-cancel').click();
+            await page.getByLabel('转换目标类型').selectOption('polling');
+            await page.getByRole('button',{{name:'转换适用类型',exact:true}}).click();
+            await page.locator('#lite-polling-sop-type-confirm').waitFor();
+            await page.getByText(/维保 → 轮巡/).waitFor();
+            await page.locator('#lite-polling-sop-type-apply').click();
+            await page.getByText(/已将.*同步示例 SOP.*从维保转换为轮巡/).waitFor();
+            if(!sopConversionPayload||sopConversionPayload.sop_id!=='manual_refresh_sop'||sopConversionPayload.work_type!=='polling'||sopConversionPayload.expected_version!==2)throw new Error(`SOP conversion payload invalid: ${{JSON.stringify(sopConversionPayload)}}`);
+            if(!(await page.locator('#lite-polling-sop-type-confirm').isHidden()))throw new Error('SOP conversion confirm stayed open after success');
+            if(await page.locator('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]').textContent()!=='轮巡')throw new Error('SOP conversion did not activate polling type');
             await inspectMobileFloatingSurfaces(page, 'workbench-sop-manage');
             await page.locator('#lite-polling-sop-close').click();
             await page.setViewportSize({{ width: 1366, height: 768 }});
