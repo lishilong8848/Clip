@@ -11,13 +11,14 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
+import zipfile
 
 from starlette.requests import Request
 
 BIN = Path(__file__).resolve().parent
 sys.path.insert(0, str(BIN))
 from frontend_assets import FRONTEND_DIST, FRONTEND_INDEX, patch_deletions, referenced_assets
-from package_portable import _include_frontend_generation
+import package_portable as portable_packaging
 from upload_event_module.services.remote_patch_updater import RemotePatchUpdater
 
 
@@ -31,6 +32,18 @@ def isolated_class(path, class_name, methods, namespace):
 
 
 class TransportSafetyTests(unittest.TestCase):
+    def test_manifest_fetch_bypasses_mutable_url_cache(self):
+        updater = RemotePatchUpdater(
+            Path.cwd(), Path(tempfile.gettempdir()), "https://example.invalid/latest.json"
+        )
+        response = MagicMock()
+        response.json.return_value = {"version": "next"}
+        with patch("requests.get", return_value=response) as get:
+            self.assertEqual(updater.fetch_manifest(), {"version": "next"})
+        kwargs = get.call_args.kwargs
+        self.assertTrue(kwargs["params"]["_clipflow"])
+        self.assertEqual(kwargs["headers"]["Cache-Control"], "no-cache")
+
     def test_streamed_body_limit_and_json_validation(self):
         controller = isolated_class(BIN / "clipflow_backend/main.py", "FastAPIPortalController", {"_read_bounded_body", "_read_json_request"}, {"Request": Request, "json": json, "MAX_JSON_BODY_BYTES": 8})
 
@@ -172,6 +185,25 @@ class TransportSafetyTests(unittest.TestCase):
                 patch_deletions(root, overlay, [old.relative_to(root)])
             self.assertEqual(old.read_text(), "// old")
 
+    def test_invalid_patch_folder_is_removed_instead_of_retried_forever(self):
+        installer = isolated_class(
+            BIN / "upload_event_module/ui/main_window_patch.py",
+            "PatchUpdateMixin",
+            {"_delete_patch_dir", "_discard_invalid_patch"},
+            {"Path": Path, "shutil": shutil, "time": time, "log_error": lambda *_: None},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            patch_dir = Path(tmp) / "broken_patch_only"
+            patch_dir.mkdir()
+            instance = installer()
+            instance._patch_dir = patch_dir
+            results = []
+            instance.patch_update_finished = SimpleNamespace(emit=lambda *args: results.append(args))
+            instance._discard_invalid_patch(patch_dir, "Missing frontend asset: bad.css")
+            self.assertFalse(patch_dir.exists())
+            self.assertIsNone(instance._patch_dir)
+            self.assertEqual(results[-1][0], False)
+
     def test_patch_bundles_complete_frontend_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, patch_dir = Path(tmp) / "source", Path(tmp) / "patch"
@@ -193,8 +225,47 @@ class TransportSafetyTests(unittest.TestCase):
             (patch_dir / FRONTEND_INDEX).parent.mkdir(parents=True)
             shutil.copy2(root / FRONTEND_INDEX, patch_dir / FRONTEND_INDEX)
 
-            self.assertEqual(_include_frontend_generation(root, patch_dir), 5)
+            self.assertEqual(portable_packaging._include_frontend_generation(root, patch_dir), 5)
             self.assertEqual(referenced_assets(patch_dir), referenced_assets(root))
+
+    def test_distribution_filter_keeps_only_runtime_material(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            excluded = [
+                "bin/test_feature.py",
+                "bin/tests/test_feature.py",
+                "bin/tools/audit_cabinet.py",
+                "bin/lan_bitable_template_portal/frontend/src/App.vue",
+                "bin/lan_bitable_template_portal/frontend/package.json",
+                "docs/notes.md",
+                "bin/app.log",
+                "bin/config.json.legacy_conflict_1",
+            ]
+            kept = [
+                "bin/tools/mock_lan_portal_pressure.py",
+                "bin/lan_bitable_template_portal/frontend/data/runtime.json",
+                "bin/lan_bitable_template_portal/frontend/dist/index.html",
+                "bin/lan_bitable_template_portal/templates/cabinet_power/A.xlsm",
+                "bin/ca_bundle.pem",
+            ]
+            for rel in excluded:
+                self.assertTrue(portable_packaging._is_development_only_path(root / rel, root), rel)
+            for rel in kept:
+                self.assertFalse(portable_packaging._is_development_only_path(root / rel, root), rel)
+
+    def test_patch_zip_name_is_immutable_and_archive_is_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            patch_dir = build_dir / "ClipFlow_V2_20260914_230354_patch_only"
+            payload = patch_dir / "bin/runtime.py"
+            payload.parent.mkdir(parents=True)
+            payload.write_text("value = 1", encoding="utf-8")
+            with patch.object(portable_packaging, "BUILD_DIR", build_dir):
+                archive = portable_packaging._zip_patch_dir(patch_dir)
+            self.assertEqual(archive.name, f"{patch_dir.name}.zip")
+            with zipfile.ZipFile(archive, "r") as zf:
+                self.assertIsNone(zf.testzip())
+                self.assertIn(f"{patch_dir.name}/bin/runtime.py", zf.namelist())
 
 
 if __name__ == "__main__":

@@ -53,7 +53,9 @@ DEFAULT_GITEE_SUBDIR = "updates/patches"
 
 DEFAULT_GITEE_MANIFEST_PATH = "updates/latest_patch.json"
 
-DEFAULT_PATCH_ZIP_NAME = "ClipFlow_patch_only.zip"
+LEGACY_PATCH_ZIP_NAME = "ClipFlow_patch_only.zip"
+
+REMOTE_PATCH_HISTORY = 3
 
 AUTO_UPLOAD_GITEE = True  # 将zip补丁上传gitee
 
@@ -129,6 +131,8 @@ EXCLUDE_DIR_NAMES = {
 
     ".vite",
 
+    ".pytest_cache",
+
     "node_modules",
 
     "public_polling_relay",
@@ -162,6 +166,12 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin") / "upload_event_module" / "web" / "index.html",
 
     Path("bin") / "upload_event_module" / "services" / "process_lifetime.py",
+
+}
+
+RUNTIME_TOOL_FILES = {
+
+    Path("bin") / "tools" / "mock_lan_portal_pressure.py",
 
 }
 
@@ -1229,6 +1239,35 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
     log("运行时依赖安装完成。")
 
 
+def _is_development_only_path(path: Path, root: Path) -> bool:
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except Exception:
+        return False
+    parts = tuple(part.lower() for part in rel.parts)
+    if not parts:
+        return False
+    if parts[0] in {".codex-audit", ".pytest_cache", "docs"}:
+        return True
+    if parts[:2] == ("bin", "tests"):
+        return True
+    if len(parts) == 2 and parts[0] == "bin":
+        is_test_or_mock = parts[1].startswith("test_") or parts[1] == "mock_lan_notice_pressure.py"
+        if is_test_or_mock and path.suffix.lower() == ".py":
+            return True
+    if parts[:2] == ("bin", "tools") and len(parts) > 2:
+        return rel not in RUNTIME_TOOL_FILES
+    frontend = ("bin", "lan_bitable_template_portal", "frontend")
+    if parts[:3] == frontend and len(parts) > 3 and parts[3] not in {"data", "dist"}:
+        return True
+    name = path.name.lower()
+    return (
+        ".legacy_conflict_" in name
+        or name == ".gitignore"
+        or path.suffix.lower() in {".log", ".map", ".md"}
+    )
+
+
 
 
 
@@ -1239,6 +1278,12 @@ def _ignore_names(dirpath: str, names: list[str]) -> set[str]:
     base = Path(dirpath)
 
     for name in names:
+
+        if _is_development_only_path(base / name, PROJECT_ROOT):
+
+            ignore.add(name)
+
+            continue
 
         if name in EXCLUDE_DIR_NAMES or name in EXCLUDE_FILES:
 
@@ -1356,6 +1401,18 @@ def _assert_no_runtime_data_in_output(root: Path, label: str) -> None:
     log(f"{label}运行数据排除检查通过。")
 
 
+def _assert_no_development_files_in_output(root: Path, label: str) -> None:
+    found = [
+        path
+        for path in Path(root).rglob("*")
+        if path.is_file() and _is_development_only_path(path, Path(root))
+    ]
+    if found:
+        preview = ", ".join(str(path.relative_to(root)) for path in found[:10])
+        raise RuntimeError(f"{label}包含开发文件，已中止打包: {preview}")
+    log(f"{label}开发文件排除检查通过。")
+
+
 def _assert_project_iterator_excludes_runtime_data() -> None:
 
     leaked = [
@@ -1464,6 +1521,13 @@ def _run_packaging_preflight_tests() -> None:
     )
     log("重保管理专项测试通过。")
 
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_transport_safety"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    log("补丁传输与打包完整性测试通过。")
+
     log("打包前自动测试完成。")
 
 
@@ -1530,11 +1594,20 @@ def _is_under_bin_build_or_dist(path: Path) -> bool:
 
 
 
-def _is_excluded(path: Path, *, exclude_venv: bool = False) -> bool:
+def _is_excluded(
+    path: Path, *, root: Path = PROJECT_ROOT, exclude_venv: bool = False
+) -> bool:
 
-    parts = set(path.parts)
+    try:
+        parts = set(path.resolve().relative_to(root.resolve()).parts)
+    except Exception:
+        parts = set(path.parts)
 
-    if _is_runtime_data_path(path, PROJECT_ROOT):
+    if _is_development_only_path(path, root):
+
+        return True
+
+    if _is_runtime_data_path(path, root):
 
         return True
 
@@ -1563,47 +1636,6 @@ def _is_excluded(path: Path, *, exclude_venv: bool = False) -> bool:
         return True
 
     return False
-
-
-
-
-
-def _is_baseline_excluded(
-    path: Path, *, exclude_venv: bool = False, root: Path | None = None
-) -> bool:
-
-    parts = set(path.parts)
-
-    if _is_runtime_data_path(path, root):
-
-        return True
-
-    if parts & EXCLUDE_DIR_NAMES:
-
-        return True
-
-    if exclude_venv and ".venv" in parts:
-
-        return True
-
-    if path.name in EXCLUDE_FILES:
-
-        return True
-
-    if path.name.endswith((".pyc", ".pyo")):
-
-        return True
-
-    if _is_under_bin_build_or_dist(path):
-
-        return True
-
-    return False
-
-
-
-
-
 def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]:
     files: list[Path] = []
 
@@ -1615,6 +1647,8 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
         kept_dirnames: list[str] = []
         for dirname in dirnames:
             child = base / dirname
+            if _is_development_only_path(child, root):
+                continue
             if rel_base == Path(".") and dirname in EXCLUDE_TOP_LEVEL:
                 continue
             if dirname in EXCLUDE_DIR_NAMES:
@@ -1636,7 +1670,7 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
                 continue
             if path.suffix.lower() == ".zip" and base == root:
                 continue
-            if _is_excluded(path, exclude_venv=exclude_venv):
+            if _is_excluded(path, root=root, exclude_venv=exclude_venv):
                 continue
             files.append(path)
 
@@ -1680,19 +1714,9 @@ def _has_code_changes(baseline_dir: Path | None, *, exclude_venv: bool = True) -
 
     baseline_files: dict[Path, Path] = {}
 
-    for path in baseline_dir.rglob("*"):
+    for path in _iter_project_files(baseline_dir, exclude_venv=exclude_venv):
 
-        if path.is_dir():
-
-            continue
-
-        rel = path.relative_to(baseline_dir)
-
-        if exclude_venv and ".venv" in rel.parts:
-
-            continue
-
-        baseline_files[rel] = path
+        baseline_files[path.relative_to(baseline_dir)] = path
 
 
 
@@ -1848,33 +1872,21 @@ def _cleanup_old_patch_zips() -> int:
 
     removed = 0
 
-    patterns = ("*_patch_only.zip", DEFAULT_PATCH_ZIP_NAME)
+    for zip_path in BUILD_DIR.glob("*_patch_only.zip"):
 
-    visited: set[Path] = set()
+        if not zip_path.is_file():
 
-    for pattern in patterns:
+            continue
 
-        for zip_path in BUILD_DIR.glob(pattern):
+        try:
 
-            if zip_path in visited:
+            zip_path.unlink()
 
-                continue
+            removed += 1
 
-            visited.add(zip_path)
+        except Exception as exc:
 
-            if not zip_path.is_file():
-
-                continue
-
-            try:
-
-                zip_path.unlink()
-
-                removed += 1
-
-            except Exception as exc:
-
-                log(f"跳过删除旧补丁压缩包 {zip_path.name}: {exc}")
+            log(f"跳过删除旧补丁压缩包 {zip_path.name}: {exc}")
 
     return removed
 
@@ -1884,7 +1896,7 @@ def _cleanup_old_patch_zips() -> int:
 
 def _zip_patch_dir(patch_dir: Path) -> Path:
 
-    zip_path = BUILD_DIR / DEFAULT_PATCH_ZIP_NAME
+    zip_path = BUILD_DIR / f"{patch_dir.name}.zip"
 
     removed = _cleanup_old_patch_zips()
 
@@ -1908,6 +1920,16 @@ def _zip_patch_dir(patch_dir: Path) -> Path:
             arcname = f"{patch_dir.name}/{src.relative_to(patch_dir).as_posix()}"
 
             zf.write(src, arcname=arcname)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+
+        broken = zf.testzip()
+
+    if broken:
+
+        zip_path.unlink(missing_ok=True)
+
+        raise RuntimeError(f"补丁压缩包校验失败: {broken}")
 
     return zip_path
 
@@ -2095,29 +2117,26 @@ def _upload_patch_to_gitee(
 
         patch_subdir.mkdir(parents=True, exist_ok=True)
 
-        removed_old = 0
-
-        for old_zip in patch_subdir.glob("*_patch_only.zip"):
-
-            if old_zip.name == patch_zip.name:
-
-                continue
-
-            try:
-
-                old_zip.unlink()
-
-                removed_old += 1
-
-            except Exception as exc:
-
-                log(f"跳过删除远端旧补丁压缩包 {old_zip.name}: {exc}")
-
-        if removed_old:
-
-            log(f"Gitee 仓库中已删除旧补丁压缩包: {removed_old}")
-
         shutil.copy2(patch_zip, patch_subdir / patch_zip.name)
+
+        removed_old = 0
+        versioned_zips = sorted(
+            (
+                path
+                for path in patch_subdir.glob("*_patch_only.zip")
+                if path.name != LEGACY_PATCH_ZIP_NAME
+            ),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        for old_zip in versioned_zips[REMOTE_PATCH_HISTORY:]:
+            try:
+                old_zip.unlink()
+                removed_old += 1
+            except Exception as exc:
+                log(f"跳过删除远端旧补丁压缩包 {old_zip.name}: {exc}")
+        if removed_old:
+            log(f"Gitee 仓库中已删除过期补丁压缩包: {removed_old}")
 
 
 
@@ -2193,7 +2212,9 @@ def copy_project(dist_dir: Path) -> None:
 
     for item in PROJECT_ROOT.iterdir():
 
-        if item.name in EXCLUDE_TOP_LEVEL:
+        if item.name in EXCLUDE_TOP_LEVEL or _is_development_only_path(
+            item, PROJECT_ROOT
+        ):
 
             continue
 
@@ -2214,6 +2235,7 @@ def copy_project(dist_dir: Path) -> None:
             shutil.copy2(item, target)
 
     _assert_no_runtime_data_in_output(dist_dir, "完整构建产物")
+    _assert_no_development_files_in_output(dist_dir, "完整构建产物")
 
 
 
@@ -2375,21 +2397,9 @@ def build_patch(
 
     if baseline_dir and baseline_dir.exists():
 
-        for path in baseline_dir.rglob("*"):
+        for path in _iter_project_files(baseline_dir, exclude_venv=exclude_venv):
 
-            if path.is_dir():
-
-                continue
-
-            rel = path.relative_to(baseline_dir)
-
-            if _is_baseline_excluded(
-                path, exclude_venv=exclude_venv, root=baseline_dir
-            ):
-
-                continue
-
-            baseline_files[rel] = path
+            baseline_files[path.relative_to(baseline_dir)] = path
 
 
 
@@ -3184,6 +3194,7 @@ def main() -> None:
     patch_dir = BUILD_DIR / (dist_name + "_patch_only")
 
     _assert_no_runtime_data_in_output(patch_dir, "补丁产物")
+    _assert_no_development_files_in_output(patch_dir, "补丁产物")
 
     patch_zip = _zip_patch_dir(patch_dir)
 

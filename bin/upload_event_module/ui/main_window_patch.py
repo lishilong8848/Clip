@@ -993,6 +993,12 @@ class PatchUpdateMixin:
             log_error(f"补丁重命名失败: {exc}")
         return "删除补丁失败，请手动删除。"
 
+    def _discard_invalid_patch(self, patch_dir: Path, reason: str) -> None:
+        cleanup_note = self._delete_patch_dir(patch_dir)
+        self._patch_dir = None
+        cleanup = f"；{cleanup_note}" if cleanup_note else "；无效补丁已删除"
+        self.patch_update_finished.emit(False, f"补丁更新失败: {reason}{cleanup}")
+
     def _apply_patch_worker(self, patch_dir: Path):
         try:
             root_dir = self._get_app_root_dir()
@@ -1053,7 +1059,9 @@ class PatchUpdateMixin:
                     rel = src.relative_to(patch_dir).as_posix()
                     expected = str(expected_hashes.get(rel) or "").lower()
                     if not expected or self._sha256_file(src).lower() != expected:
-                        self.patch_update_finished.emit(False, f"补丁文件校验失败: {rel}")
+                        self._discard_invalid_patch(
+                            patch_dir, f"补丁文件校验失败: {rel}"
+                        )
                         return
             deleted_files = self._parse_deleted_files(patch_dir)
             for rel in deleted_files:
@@ -1125,6 +1133,8 @@ class PatchUpdateMixin:
             self.patch_update_finished.emit(
                 True, f"补丁更新完成: {patch_dir.name}{cleanup_msg}"
             )
+        except (ValueError, UnicodeError) as exc:
+            self._discard_invalid_patch(patch_dir, str(exc))
         except Exception as exc:
             self.patch_update_finished.emit(False, f"补丁更新失败: {exc}")
 

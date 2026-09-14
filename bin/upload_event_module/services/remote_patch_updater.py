@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import zipfile
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -43,7 +44,12 @@ class RemotePatchUpdater:
             return {}
         import requests
 
-        response = requests.get(self.manifest_url, timeout=timeout)
+        response = requests.get(
+            self.manifest_url,
+            params={"_clipflow": str(time.time_ns())},
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+            timeout=timeout,
+        )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
