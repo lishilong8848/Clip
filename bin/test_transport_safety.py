@@ -17,6 +17,7 @@ from starlette.requests import Request
 BIN = Path(__file__).resolve().parent
 sys.path.insert(0, str(BIN))
 from frontend_assets import FRONTEND_DIST, FRONTEND_INDEX, patch_deletions, referenced_assets
+from package_portable import _include_frontend_generation
 from upload_event_module.services.remote_patch_updater import RemotePatchUpdater
 
 
@@ -170,6 +171,30 @@ class TransportSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Missing frontend asset"):
                 patch_deletions(root, overlay, [old.relative_to(root)])
             self.assertEqual(old.read_text(), "// old")
+
+    def test_patch_bundles_complete_frontend_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, patch_dir = Path(tmp) / "source", Path(tmp) / "patch"
+            assets = root / FRONTEND_DIST / "assets"
+            assets.mkdir(parents=True)
+            (root / FRONTEND_INDEX).write_text(
+                '<script src="/assets/new.js"></script><link href="/assets/new.css">'
+                '<link rel="icon" href="/assets/favicon.svg">',
+                encoding="utf-8",
+            )
+            (assets / "new.js").write_text(
+                'import "./shared.js"; const logo = "/assets/logo.png"',
+                encoding="utf-8",
+            )
+            (assets / "shared.js").write_text("// shared", encoding="utf-8")
+            (assets / "new.css").write_text("/* current */", encoding="utf-8")
+            (assets / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+            (assets / "logo.png").write_bytes(b"png")
+            (patch_dir / FRONTEND_INDEX).parent.mkdir(parents=True)
+            shutil.copy2(root / FRONTEND_INDEX, patch_dir / FRONTEND_INDEX)
+
+            self.assertEqual(_include_frontend_generation(root, patch_dir), 5)
+            self.assertEqual(referenced_assets(patch_dir), referenced_assets(root))
 
 
 if __name__ == "__main__":

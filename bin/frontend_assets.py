@@ -26,7 +26,7 @@ def referenced_assets(root: Path, overlay: Path | None = None, *, strict: bool =
             relative = FRONTEND_DIST / "assets" / name
             if Path(name).is_absolute() or ".." in Path(name).parts or "\\" in name or ":" in name:
                 raise ValueError("Unsafe frontend asset reference")
-            if relative.suffix not in {".js", ".css"} or relative in found:
+            if relative in found:
                 continue
             found.add(relative)
             asset = source(relative)
@@ -34,7 +34,8 @@ def referenced_assets(root: Path, overlay: Path | None = None, *, strict: bool =
                 if strict:
                     raise ValueError(f"Missing frontend asset: {name}")
                 continue
-            pending.append(asset.read_text(encoding="utf-8"))
+            if relative.suffix in {".js", ".css"}:
+                pending.append(asset.read_text(encoding="utf-8"))
     return found
 
 

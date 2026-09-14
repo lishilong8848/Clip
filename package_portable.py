@@ -21,7 +21,7 @@ import time
 import zipfile
 
 from pathlib import Path
-from bin.frontend_assets import is_frontend_asset
+from bin.frontend_assets import FRONTEND_INDEX, is_frontend_asset, referenced_assets
 
 from urllib.parse import urlparse
 
@@ -1653,6 +1653,22 @@ def _should_force_include_in_patch(relative_path: Path) -> bool:
     return norm in FORCE_PATCH_INCLUDE_FILES
 
 
+def _include_frontend_generation(root: Path, patch_dir: Path) -> int:
+    """Make an entry-changing patch independent of older frontend generations."""
+    if not (patch_dir / FRONTEND_INDEX).is_file():
+        return 0
+    copied = 0
+    for rel in referenced_assets(root):
+        dest = patch_dir / rel
+        if dest.is_file():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / rel, dest)
+        copied += 1
+    referenced_assets(patch_dir)
+    return copied
+
+
 
 
 
@@ -2462,6 +2478,10 @@ def build_patch(
         shutil.copy2(src, dest)
 
 
+
+    bundled_frontend_assets = _include_frontend_generation(PROJECT_ROOT, patch_dir)
+    if bundled_frontend_assets:
+        log(f"已补齐当前前端资源: {bundled_frontend_assets} 个。")
 
     deleted = 0
 
