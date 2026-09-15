@@ -14207,6 +14207,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertFalse(
                 projection_service._is_ongoing_hidden(stale_hidden_payload)
             )
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-restored-binding",
+                    "source_record_id": "rec-source-binding",
+                    "target_record_id": "rec-deleted-before-undo",
+                    "record_id": "rec-deleted-before-undo",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼目标维保通告",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "text": "【维保通告】状态：更新\n【名称】A楼目标维保通告",
+                },
+                section="other",
+                origin="undo",
+                allow_revive=True,
+            )
             previous_store = PortalRuntime.state_store
             previous_service = PortalRuntime.service
             previous_sessions = dict(PortalRuntime.auth_manager._sessions)
@@ -14262,7 +14279,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(data["active_updated"])
                 self.assertEqual(
                     data["active_item_id"],
-                    "target-maintenance-rec-target-binding",
+                    "active-restored-binding",
                 )
                 self.assertGreater(binding_service.cache_touches, 0)
                 self.assertEqual(
@@ -14271,6 +14288,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
 
                 active_payload = store.list_visible_qt_active_items()[0]["payload"]
+                self.assertEqual(len(store.list_qt_active_items()), 1)
                 self.assertFalse(
                     projection_service._is_ongoing_hidden(active_payload)
                 )
@@ -15463,6 +15481,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         class _StateStore:
             def __init__(self):
                 self.identity_payloads = []
+                self.resolved_identity = None
+
+            def resolve_notice_identity(self, **_kwargs):
+                return self.resolved_identity
 
             def upsert_notice_identity(self, payload, *, origin=""):
                 self.identity_payloads.append((dict(payload), origin))
@@ -15517,6 +15539,53 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             identity_payload, origin = fake_state.identity_payloads[0]
             self.assertEqual(origin, "auto_rebind_target")
             self.assertEqual(identity_payload["target_record_id"], "fresh-change-target")
+
+            fake_state.resolved_identity = {
+                "active_item_id": "active-change",
+                "source_record_id": "source-change",
+                "target_record_id": "undo-restored-target",
+            }
+            fake_service.lookup_calls.clear()
+            stale_after_undo = {
+                **prepared,
+                "target_record_id": "deleted-target",
+                "record_id": "deleted-target",
+                "record_version": "deleted-version",
+                "expected_record_version": "deleted-version",
+            }
+            with patch(
+                "lan_bitable_template_portal.server.external_real_write_guard",
+                return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
+            ), patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                side_effect=[
+                    (False, "RecordIdNotFound"),
+                    (
+                        True,
+                        {
+                            "fields": {"名称": "A楼测试变更"},
+                            "record_version": "restored-version",
+                        },
+                    ),
+                    (
+                        True,
+                        {
+                            "fields": {"名称": "A楼测试变更"},
+                            "record_version": "updated-version",
+                        },
+                    ),
+                ],
+            ), patch(
+                "lan_bitable_template_portal.server.update_bitable_record_by_payload",
+                return_value=(True, "更新成功"),
+            ):
+                rebound = PortalRuntime._execute_backend_prepared_upload(stale_after_undo)
+
+            self.assertEqual(rebound, (True, "更新成功", "undo-restored-target"))
+            self.assertEqual(stale_after_undo["target_record_id"], "undo-restored-target")
+            self.assertEqual(stale_after_undo["record_id"], "undo-restored-target")
+            self.assertEqual(stale_after_undo["record_version"], "updated-version")
+            self.assertEqual(fake_service.lookup_calls, [])
         finally:
             PortalRuntime.service = previous_service
             PortalRuntime.state_store = previous_state_store
@@ -25977,6 +26046,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "source_record_id": "source-recreated-target",
                             "target_record_id": "target-deleted-old",
                             "record_id": "target-deleted-old",
+                            "record_version": "deleted-version",
+                            "expected_record_version": "deleted-version",
+                            "remote_last_modified_time": "deleted-time",
+                            "operation_id": "delete-operation",
+                            "job_id": "delete-job",
+                            "_delete_operation_id": "delete-operation",
                             "work_type": "maintenance",
                             "notice_type": "维保通告",
                             "title": "A楼回退重建记录",
@@ -25986,6 +26061,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     },
                 },
             }
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "source-live-recreated-target",
+                    "source_record_id": "source-recreated-target",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼回退重建记录",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "text": "【维保通告】状态：更新\n【名称】A楼回退重建记录",
+                },
+                section="other",
+                origin="source_snapshot_refresh",
+                allow_revive=True,
+            )
 
             restored = service.restore_notice_undo_local(
                 undo,
@@ -26003,11 +26093,31 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 restored["active_payload"]["record_id"],
                 "target-recreated-new",
             )
+            self.assertEqual(restored["active_payload"]["record_version"], "")
+            self.assertEqual(restored["active_payload"]["expected_record_version"], "")
+            self.assertEqual(restored["active_payload"]["remote_last_modified_time"], "")
+            self.assertEqual(
+                restored["active_payload"]["undo_restored_from_action"],
+                "delete",
+            )
+            self.assertNotIn("operation_id", restored["active_payload"])
+            self.assertNotIn("job_id", restored["active_payload"])
+            self.assertNotIn("_delete_operation_id", restored["active_payload"])
             active_items = service._state_store.list_qt_active_items()
+            self.assertEqual(len(active_items), 1)
+            self.assertEqual(
+                active_items[0]["active_item_id"],
+                "source-live-recreated-target",
+            )
             self.assertEqual(
                 active_items[0]["payload"]["target_record_id"],
                 "target-recreated-new",
             )
+            identity = service._state_store.resolve_notice_identity(
+                work_type="maintenance",
+                source_record_id="source-recreated-target",
+            )
+            self.assertEqual(identity["target_record_id"], "target-recreated-new")
 
     def test_undo_end_without_qt_snapshot_restores_all_notice_types_as_updateable(self):
         notice_types = {
@@ -27920,6 +28030,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("applyTargetRecordFormFields(form, targetFormFields)", handler)
         self.assertIn("setFormValue(form, 'target_record_id', targetRecordId)", handler)
         self.assertNotIn("setFormValue(form, 'record_id', targetRecordId)", handler)
+        self.assertIn(
+            "previewValue(form, 'active_item_id') || candidate.active_item_id",
+            handler,
+        )
         self.assertIn("const wasDirtyAtStart = liteFormDirty", handler)
         self.assertIn("let liteTargetBindInFlight = false", source)
         self.assertIn("formChangedWhileSaving ? true : wasDirtyAtStart", handler)

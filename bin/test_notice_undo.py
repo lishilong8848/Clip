@@ -34,6 +34,48 @@ class NoticeUndoTests(unittest.TestCase):
         service._hidden_ongoing_path = Path(tmpdir) / "hidden.json"
         return service
 
+    def test_checkpoint_snapshot_prefers_strong_identity_over_same_title(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(tmpdir)
+            try:
+                common = {
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": NOTICE_TYPE_MAINTENANCE,
+                    "title": "A楼同名维保",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                }
+                for sort_order, active_id, target_id in (
+                    (0, "stale-same-title", "stale-target"),
+                    (1, "current-same-title", "current-target"),
+                ):
+                    service._state_store.upsert_qt_active_item(
+                        {
+                            **common,
+                            "active_item_id": active_id,
+                            "target_record_id": target_id,
+                            "record_id": target_id,
+                        },
+                        section="other",
+                        sort_order=sort_order,
+                        origin="test",
+                    )
+
+                snapshot = service._find_qt_active_snapshot(
+                    service._undo_identity_from_context(
+                        {
+                            **common,
+                            "active_item_id": "current-same-title",
+                            "target_record_id": "current-target",
+                        },
+                        action_type="delete",
+                    )
+                )
+
+                self.assertEqual(snapshot["active_item_id"], "current-same-title")
+            finally:
+                service._state_store.shutdown_write_worker(timeout=1.0)
+
     def test_checkpoint_supersedes_prior_available(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LanPortalStateStore(Path(tmpdir) / "state.sqlite3")
@@ -153,8 +195,9 @@ class NoticeUndoTests(unittest.TestCase):
                 PortalRuntime.auth_manager,
             )
             try:
-                with patch(
-                    "clipflow_backend.main.MaintenancePortalService",
+                with patch.object(
+                    MaintenancePortalService,
+                    "__new__",
                     return_value=fake_service,
                 ), patch.object(PortalRuntime, "apply_runtime_settings"):
                     controller._initialize_portal_handler_state()
@@ -406,6 +449,7 @@ class NoticeUndoTests(unittest.TestCase):
                     side_effect=[
                         (False, "RecordIdNotFound"),
                         (True, {"fields": {"名称": "A楼重建幂等测试"}}),
+                        (True, {"fields": {"名称": "A楼重建幂等测试"}}),
                     ],
                 ), patch(
                     "lan_bitable_template_portal.server.create_bitable_record_fields",
@@ -427,6 +471,7 @@ class NoticeUndoTests(unittest.TestCase):
                     result = PortalRuntime.execute_notice_undo(undo_id)
                 self.assertTrue(result["ok"])
                 create_record.assert_called_once()
+                self.assertEqual(create_record.call_args.kwargs["client_token"], undo_id)
                 update_record.assert_called_once()
             finally:
                 PortalRuntime.service, PortalRuntime.state_store = previous

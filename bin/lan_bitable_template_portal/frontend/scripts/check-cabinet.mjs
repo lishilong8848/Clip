@@ -77,7 +77,7 @@ try {
   assert(await page.locator('.map-cell').count()>100);
   await page.screenshot({path:path.join(out,'desktop-map.png'),fullPage:true});
   await page.locator('.map-cell').filter({hasText:/^A01$/}).click();
-  await page.getByRole('button',{name:'登记正式电',exact:true}).click();
+  await page.getByRole('button',{name:'登记上正式电',exact:true}).click();
   await page.getByRole('dialog',{name:'编辑机柜记录'}).getByLabel('实际完成时间',{exact:true}).first().fill('2026-09-09T12:00');
   await page.getByLabel('功率（W）').fill('12347');
   let statusFailures=0;
@@ -190,6 +190,12 @@ try {
   await page.getByRole('button',{name:'放弃修改',exact:true}).click();
   await page.locator('.heading').getByRole('button',{name:/返回/}).click();
   await page.getByRole('heading',{name:'机柜上下电',exact:true}).waitFor();
+  await page.getByRole('button',{name:'一键导出/上传所有楼栋',exact:true}).click();
+  await page.getByText('5/5 栋完成',{exact:true}).waitFor({timeout:60000});
+  assert.equal(await page.locator('.all-export-items>div').count(),5);
+  assert.equal(await page.getByText('导出并上传完成',{exact:true}).count(),5);
+  assert.equal(await page.locator('.all-export-items a').filter({hasText:'下载'}).count(),5);
+  await page.screenshot({path:path.join(out,'desktop-all-exports.png'),fullPage:true});
   assert.equal(errors.length,0,errors.join('\n'));
   console.log(JSON.stringify({ok:true,views:'PC: five building maps, history filters, grouped editor, save/readback',screenshots:out}));
 } catch(error) {

@@ -1712,6 +1712,41 @@ class MainWindowRuntimeMixin:
         if not item or not self._is_valid_list_item(item):
             return {"ok": False, "error": "主界面未找到对应进行中条目。"}
         data = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        request_active_id = str((payload or {}).get("active_item_id") or "").strip()
+        request_source_id = str((payload or {}).get("source_record_id") or "").strip()
+        request_target_id = str((payload or {}).get("target_record_id") or "").strip()
+        identity_aligned = bool(
+            (
+                request_active_id
+                and request_active_id == str(data.get("active_item_id") or "").strip()
+            )
+            or (
+                request_source_id
+                and request_source_id == str(data.get("source_record_id") or "").strip()
+            )
+            or (
+                request_target_id
+                and request_target_id
+                in {
+                    str(data.get("target_record_id") or "").strip(),
+                    str(data.get("record_id") or "").strip(),
+                }
+            )
+        )
+        if request_target_id and not identity_aligned:
+            return {"ok": False, "error": "页面与主界面通告身份不一致，请刷新页面后重试。"}
+        for identity_field in (
+            "active_item_id",
+            "source_record_id",
+            "target_record_id",
+            "work_type",
+            "notice_type",
+        ):
+            resolved_value = str((payload or {}).get(identity_field) or "").strip()
+            if resolved_value:
+                data[identity_field] = resolved_value
+        if str(data.get("target_record_id") or "").strip():
+            data["record_id"] = str(data["target_record_id"]).strip()
         scope = str((payload or {}).get("scope") or "ALL").strip()
         text = str(data.get("text") or "")
         buildings = self._normalize_buildings_value(data.get("buildings"))
@@ -1762,7 +1797,7 @@ class MainWindowRuntimeMixin:
                 "ok": False,
                 "error": f"多维记录删除失败，Qt 条目已保留：{str((result or {}).get('message') or '')}",
             }
-        remote_deleted = True
+        remote_deleted = bool((result or {}).get("remote_deleted"))
         remote_message = str((result or {}).get("message") or "")
         self._clear_upload_queue(record_id)
         self._today_in_progress_pending_record_ids.discard(record_id)
@@ -1785,6 +1820,7 @@ class MainWindowRuntimeMixin:
             f"remote_deleted={remote_deleted}"
         )
         return {
+            **dict(result or {}),
             "ok": True,
             "remote_deleted": remote_deleted,
             "remote_message": remote_message,

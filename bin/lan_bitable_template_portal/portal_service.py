@@ -30675,23 +30675,49 @@ class MaintenancePortalService:
             if active_rows is not None
             else self._state_store.list_qt_active_items(include_deleted=True)
         )
-        for row in rows:
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            if active_item_id and (
-                str(row.get("active_item_id") or "") == active_item_id
-                or str(payload.get("active_item_id") or "") == active_item_id
-            ):
-                return copy.deepcopy(row)
-            if target_record_id and (
-                str(row.get("record_id") or "") == target_record_id
-                or str(payload.get("record_id") or "") == target_record_id
-                or str(payload.get("target_record_id") or "") == target_record_id
-            ):
-                return copy.deepcopy(row)
-            if source_record_id and str(payload.get("source_record_id") or "") == source_record_id:
-                return copy.deepcopy(row)
-            if title and title == str(payload.get("title") or "").strip():
-                return copy.deepcopy(row)
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                row.get("deleted_at") is not None,
+                -float(row.get("updated_at") or 0),
+            ),
+        )
+        work_type = str(identity.get("work_type") or "").strip()
+        matchers = [
+            ("active", active_item_id),
+            ("target", target_record_id),
+            ("source", source_record_id),
+        ]
+        if not any(value for _kind, value in matchers):
+            matchers.append(("title", title))
+        for kind, value in matchers:
+            if not value:
+                continue
+            for row in rows:
+                payload = (
+                    row.get("payload")
+                    if isinstance(row.get("payload"), dict)
+                    else {}
+                )
+                if work_type and self._item_work_type(payload) != work_type:
+                    continue
+                if kind == "active" and value in {
+                    str(row.get("active_item_id") or ""),
+                    str(payload.get("active_item_id") or ""),
+                }:
+                    return copy.deepcopy(row)
+                if kind == "target" and value in {
+                    str(row.get("record_id") or ""),
+                    str(payload.get("record_id") or ""),
+                    str(payload.get("target_record_id") or ""),
+                }:
+                    return copy.deepcopy(row)
+                if kind == "source" and value == str(
+                    payload.get("source_record_id") or ""
+                ):
+                    return copy.deepcopy(row)
+                if kind == "title" and value == str(payload.get("title") or "").strip():
+                    return copy.deepcopy(row)
         return None
 
     @staticmethod
@@ -31534,6 +31560,9 @@ class MaintenancePortalService:
         local = undo.get("local") if isinstance(undo.get("local"), dict) else {}
         action_type = str(undo.get("action_type") or "").strip().lower()
         identity_keys = set(str(key or "") for key in (undo.get("identity_keys") or []) if str(key or ""))
+        work_type = self._item_work_type(undo)
+        if target_record_id:
+            identity_keys.add(f"{work_type}:target:{target_record_id}")
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         restored_active = False
         removed_active = False
@@ -31562,6 +31591,7 @@ class MaintenancePortalService:
                 restored_daily = copy.deepcopy(daily_item)
                 if target_record_id:
                     restored_daily["target_record_id"] = target_record_id
+                    restored_daily["record_id"] = target_record_id
                 if action_type == "end":
                     restored_daily["status"] = "进行中"
                     restored_daily.pop("ended_at", None)
@@ -31603,6 +31633,7 @@ class MaintenancePortalService:
                 item = copy.deepcopy(saved.get("item") or {})
                 if target_record_id:
                     item["target_record_id"] = target_record_id
+                    item["record_id"] = target_record_id
                 if action_type == "end":
                     item["status"] = "进行中"
                     item.pop("ended_at", None)
@@ -31615,7 +31646,7 @@ class MaintenancePortalService:
         qt_snapshot = local.get("qt_active") if isinstance(local.get("qt_active"), dict) else None
         qt_payload: dict[str, Any] = {}
         context = undo.get("context") if isinstance(undo.get("context"), dict) else {}
-        if action_type in {"update", "end"}:
+        if action_type in {"update", "end", "delete"}:
             # The context is the last complete payload and is a safe fallback if
             # an old runtime failed to capture the Qt row. Earlier local snapshots
             # override it so undo still restores the pre-operation content.
@@ -31640,8 +31671,21 @@ class MaintenancePortalService:
                 or canonical_source_record_id(qt_payload)
                 or ""
             ).strip()
+            try:
+                live_snapshot = self._find_qt_active_snapshot(
+                    {
+                        "work_type": work_type,
+                        "active_item_id": str(undo.get("active_item_id") or ""),
+                        "source_record_id": resolved_source_record_id,
+                        "target_record_id": resolved_target_record_id,
+                    },
+                    active_rows=self._state_store.list_qt_active_items(),
+                )
+            except Exception:
+                live_snapshot = None
             resolved_active_item_id = str(
-                undo.get("active_item_id")
+                (live_snapshot or {}).get("active_item_id")
+                or undo.get("active_item_id")
                 or (qt_snapshot or {}).get("active_item_id")
                 or qt_payload.get("active_item_id")
                 or resolved_target_record_id
@@ -31658,11 +31702,20 @@ class MaintenancePortalService:
             qt_payload.setdefault("work_type", str(undo.get("work_type") or ""))
             qt_payload.setdefault("notice_type", str(undo.get("notice_type") or ""))
             qt_payload.setdefault("scope", str(undo.get("scope") or "ALL"))
+            if action_type != "start":
+                qt_payload["undo_restored_id"] = str(undo.get("undo_id") or "")
+                qt_payload["undo_restored_from_action"] = action_type
+                for transient_key in (
+                    "operation_id",
+                    "job_id",
+                    "remote_operation_id",
+                    "_delete_operation_id",
+                    "undo_checkpoint_id",
+                ):
+                    qt_payload.pop(transient_key, None)
             if action_type in {"update", "end"}:
                 qt_payload["action"] = "update"
                 qt_payload["status"] = "更新"
-                qt_payload["undo_restored_id"] = str(undo.get("undo_id") or "")
-                qt_payload["undo_restored_from_action"] = action_type
                 notice_text = str(qt_payload.get("text") or "")
                 if notice_text:
                     qt_payload["text"] = re.sub(
@@ -31671,8 +31724,9 @@ class MaintenancePortalService:
                         notice_text,
                         count=1,
                     )
-                # Undo itself changes the remote row version. Blank these values
-                # so the next update/end first rebases to the just-restored row.
+            if action_type in {"update", "end", "delete"}:
+                # Undo changes or recreates the remote row. The next action must
+                # rebase against that row instead of retaining the old version.
                 for version_key in (
                     "record_version",
                     "expected_record_version",

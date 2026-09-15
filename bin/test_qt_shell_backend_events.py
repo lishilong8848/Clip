@@ -206,6 +206,13 @@ class _OperationItem:
     def data(self, _role):
         return dict(self.payload)
 
+    def setData(self, _role, value):
+        self.payload = dict(value)
+
+    @staticmethod
+    def listWidget():
+        return "other-list"
+
 
 class _DuplicateEventDeleteHarness(_ImmediateDeleteHarness):
     def __init__(self):
@@ -324,6 +331,101 @@ class _CanonicalActiveDeleteHarness(MainWindowRuntimeMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_lan_delete_uses_validated_web_identity_over_stale_qt_identity(self):
+        class Harness(MainWindowRuntimeMixin):
+            def __init__(self):
+                self.item = _OperationItem(
+                    {
+                        "active_item_id": "source-change-rec-source",
+                        "source_record_id": "rec-source",
+                        "record_id": "rec-source",
+                        "notice_type": "变更通告",
+                        "work_type": "change",
+                        "building_codes": ["C"],
+                    }
+                )
+                self.lan_template_portal_controller = type(
+                    "Controller", (), {"submit_qt_command": lambda *_args, **_kwargs: None}
+                )()
+                self.pending_action_record_ids = set()
+                self.pending_action_types = {}
+                self.pending_new_by_record_id = {}
+                self.pending_replace_by_record_id = {}
+                self.pending_update_after_upload = {}
+                self._today_in_progress_pending_record_ids = set()
+                self._today_in_progress_synced_record_ids = set()
+                self.submitted = None
+
+            @staticmethod
+            def _is_screenshot_dialog_active():
+                return False
+
+            @staticmethod
+            def _recover_stale_upload_states():
+                return None
+
+            def _find_lan_ongoing_item_for_payload(self, _payload):
+                return "other-list", self.item
+
+            def _is_valid_list_item(self, item):
+                return item is self.item
+
+            @staticmethod
+            def _normalize_buildings_value(_value):
+                return ["C"]
+
+            @staticmethod
+            def _lan_scope_matches(_scope, _buildings):
+                return True
+
+            @staticmethod
+            def _upload_completion_record_id_candidates(record_id):
+                return [record_id]
+
+            @staticmethod
+            def _has_pending_upload(_record_id):
+                return False
+
+            def _submit_qt_command(self, command, payload, *, timeout):
+                self.submitted = (command, payload, timeout)
+                return {
+                    "ok": True,
+                    "remote_deleted": True,
+                    "local_cleanup_completed": True,
+                    "work_status_removed": 1,
+                }
+
+            @staticmethod
+            def _clear_upload_queue(_record_id):
+                return None
+
+            @staticmethod
+            def _remove_active_item_widget_only(_list_widget, _item):
+                return None
+
+            @staticmethod
+            def request_active_cache_save(*_args, **_kwargs):
+                return None
+
+        harness = Harness()
+        result = harness._execute_lan_ongoing_delete(
+            {
+                "scope": "CAMPUS",
+                "active_item_id": "target-change-rec-target",
+                "source_record_id": "rec-source",
+                "target_record_id": "rec-target",
+                "notice_type": "变更通告",
+                "work_type": "change",
+            }
+        )
+
+        submitted = harness.submitted[1]["data_dict"]
+        self.assertEqual(submitted["active_item_id"], "target-change-rec-target")
+        self.assertEqual(submitted["target_record_id"], "rec-target")
+        self.assertEqual(submitted["record_id"], "rec-target")
+        self.assertTrue(result["local_cleanup_completed"])
+        self.assertEqual(result["work_status_removed"], 1)
+
     def test_clipboard_backend_restart_never_waits_in_ui_thread(self):
         harness = MainWindowClipboardMixin()
         harness._closing = False

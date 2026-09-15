@@ -821,7 +821,12 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
     return True, record_id
 
 
-def create_bitable_record_fields(notice_type: str, fields: dict):
+def create_bitable_record_fields(
+    notice_type: str,
+    fields: dict,
+    *,
+    client_token: str = "",
+):
     """
     Directly create a bitable record from already-captured target-table fields.
     This is used for local undo restore and intentionally does not send robot messages.
@@ -842,13 +847,19 @@ def create_bitable_record_fields(notice_type: str, fields: dict):
         log_info(f"Creating record fields({notice_type}) with fields: {fields}")
 
     client = _build_client()
-    request = (
+    request_builder = (
         CreateAppTableRecordRequest.builder()
         .app_token(config.app_token)
         .table_id(table_id)
         .request_body(AppTableRecord.builder().fields(fields).build())
-        .build()
     )
+    if str(client_token or "").strip():
+        request_builder.client_token(
+            _stable_uuid4_client_token(
+                f"clipflow-undo:{config.app_token}:{table_id}:{notice_type}:{client_token}"
+            )
+        )
+    request = request_builder.build()
 
     def do_create(token: str):
         option = lark.RequestOption.builder().user_access_token(token).build()

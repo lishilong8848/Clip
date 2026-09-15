@@ -9596,16 +9596,30 @@ class PortalRuntime:
     ) -> tuple[str, str]:
         prepared = normalize_notice_identity_payload(dict(prepared or {}))
         stale_record_id = str(stale_record_id or "").strip()
+        work_type = str(prepared.get("work_type") or "").strip()
+        if not work_type:
+            notice_type = str(prepared.get("notice_type") or "").strip()
+            work_type = cls._notice_work_type_from_notice_type(notice_type)
+        try:
+            identity = cls.state_store.resolve_notice_identity(
+                work_type=work_type,
+                active_item_id=str(prepared.get("active_item_id") or "").strip(),
+                source_record_id=str(prepared.get("source_record_id") or "").strip(),
+                target_record_id="",
+            )
+        except Exception:
+            identity = None
+        rebound_record_id = str(
+            (identity or {}).get("target_record_id") or ""
+        ).strip()
+        if rebound_record_id and rebound_record_id != stale_record_id:
+            return rebound_record_id, ""
         title = str(prepared.get("title") or "").strip()
         if not title:
             prepared = cls._enrich_prepared_notice_lookup_fields(prepared)
             title = str(prepared.get("title") or "").strip()
         if not title:
             return "", "目标多维记录不存在，且通告缺少标题，无法自动重新关联。"
-        work_type = str(prepared.get("work_type") or "").strip()
-        if not work_type:
-            notice_type = str(prepared.get("notice_type") or "").strip()
-            work_type = cls._notice_work_type_from_notice_type(notice_type)
         scope = str(prepared.get("scope") or "ALL").strip() or "ALL"
         try:
             result = cls.service.lookup_notice_target_candidates(
@@ -9816,6 +9830,7 @@ class PortalRuntime:
                     ok_create, result = create_bitable_record_fields(
                         notice_type,
                         remote_fields,
+                        client_token=undo_id,
                     )
                     if not ok_create:
                         raise PortalError(str(result or "重建多维记录失败。"))
@@ -9829,6 +9844,27 @@ class PortalRuntime:
                             "restored_target_record_id": restored_record_id,
                         },
                     )
+                    restored_visible = False
+                    restored_query_result: Any = ""
+                    for delay in (0.0, 0.25, 0.75):
+                        if delay:
+                            time.sleep(delay)
+                        restored_visible, restored_query_result = query_record_by_id(
+                            restored_record_id,
+                            notice_type,
+                        )
+                        if restored_visible:
+                            break
+                        if not (
+                            cls._remote_record_not_found(restored_query_result)
+                            or cls._remote_record_data_not_ready(restored_query_result)
+                        ):
+                            break
+                    if not restored_visible:
+                        raise PortalError(
+                            "多维记录已重建但暂未完成回读，系统已保留新记录 ID；"
+                            "请稍后重试本次回退。"
+                        )
                     remote_message = "多维已重建"
         else:
             remote_message = "远端记录不可恢复，仅恢复本地状态。"
@@ -10827,11 +10863,9 @@ class PortalRuntime:
             )
             if rebound_record_id:
                 record_id = rebound_record_id
-                prepared = {
-                    **prepared,
-                    "target_record_id": record_id,
-                    "record_id": record_id,
-                }
+                prepared["target_record_id"] = record_id
+                prepared["record_id"] = record_id
+                cls._rebase_remote_record_version(prepared, "")
                 ok_query, query_result = query_record_by_id(record_id, notice_type)
             elif rebound_error:
                 return False, rebound_error, record_id

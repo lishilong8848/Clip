@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline
-from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService
+from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class MemoryStore:
@@ -32,6 +32,34 @@ class FakeFeishu:
         return self.get(rid)
     def update(self,rid,fields):
         self.records[rid]["fields"].update(copy.deepcopy(fields)); return self.get(rid)
+
+class FakeExportFeishu:
+    def __init__(self):
+        self.fields={"自动编号":{"field_name":"自动编号","type":1005}}
+        self.records={}; self.upload_calls=0; self.creates=0; self.fail_after_create=False; self.lock=threading.RLock()
+    def list_all(self,path="records"):
+        with self.lock: return copy.deepcopy(list(self.fields.values()) if path=="fields" else list(self.records.values()))
+    def request(self,method,path,body=None,params=None):
+        if method=="POST" and path=="fields":
+            with self.lock:
+                self.fields[body["field_name"]]={"field_name":body["field_name"],"type":body["type"],"field_id":"fld"+str(len(self.fields))}
+                return {"field":copy.deepcopy(self.fields[body["field_name"]])}
+        raise AssertionError((method,path,body,params))
+    def upload_attachment(self,path,file_name):
+        with self.lock: self.upload_calls+=1
+        self.uploaded_path=Path(path); self.uploaded_name=file_name
+        return "file-export-token"
+    def create(self,fields,operation_id):
+        with self.lock:
+            self.creates+=1; rid="recExport"+str(self.creates)
+            self.records[rid]={"record_id":rid,"fields":copy.deepcopy(fields),"operation_id":operation_id}
+        if self.fail_after_create: raise TimeoutError("response lost")
+        return self.get(rid)
+    def update(self,rid,fields):
+        with self.lock:
+            self.records[rid]["fields"].update(copy.deepcopy(fields)); return self.get(rid)
+    def get(self,rid):
+        with self.lock: return copy.deepcopy(self.records[rid])
 
 def fixtures(with_power_baseline=False):
     models={}; records=[]; directory=[]; configs={}
@@ -82,12 +110,28 @@ class CabinetPowerTests(unittest.TestCase):
         token=captured["params"]["client_token"]
         self.assertEqual((captured["method"],captured["path"],uuid.UUID(token).version),("POST","records",4))
 
+    def test_export_attachment_uses_archive_base_parent(self):
+        path=Path(self.tmp.name)/"sample.xlsm"; path.write_bytes(b"export")
+        remote=CabinetFeishu(EXPORT_ARCHIVE_TABLE_ID,EXPORT_ARCHIVE_APP_TOKEN); captured={}
+        remote.require_write=lambda:None; remote.token=lambda:"tenant-token"
+        remote._http=SimpleNamespace(request_file_json=lambda *args,**kwargs:(captured.update(kwargs) or {"code":0,"data":{"file_token":"file-token"}}))
+        self.assertEqual(remote.upload_attachment(path,path.name),"file-token")
+        self.assertEqual(captured["data"]["parent_node"],EXPORT_ARCHIVE_APP_TOKEN)
+        self.assertEqual(captured["data"]["parent_type"],"bitable_file")
+
     def test_editor_hides_blank_template_groups_and_names_real_transition(self):
         source=(Path(__file__).parent/"lan_bitable_template_portal/frontend/src/components/CabinetPowerPage.vue").read_text(encoding="utf-8")
         self.assertIn("map(() => newGroup(false))",source)
         self.assertIn("editorGroupLabel(group, i)",source)
         self.assertIn("stateAction(target)",source)
         self.assertIn("!!form.target_state && group._editing",source)
+
+    def test_export_ui_supports_cloud_retry_and_parallel_all_buildings(self):
+        source=(Path(__file__).parent/"lan_bitable_template_portal/frontend/src/components/CabinetPowerPage.vue").read_text(encoding="utf-8")
+        self.assertIn("一键导出/上传所有楼栋",source)
+        self.assertIn("await Promise.all(allExportItems.value.map",source)
+        self.assertIn("retryExportUpload",source)
+        self.assertIn("exports/' + record.export_id + '/upload",source)
 
     def test_all_source_rows_and_idle_cabinets_are_retained(self):
         counts={s:sum(r["fields"]["楼栋"]==s+"楼" for r in self.source_records) for s in "ABCDE"}
@@ -350,6 +394,22 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         states=[self.service.job_status(job["job_id"])["status"] for job in jobs]
         self.assertEqual(states,["succeeded"]*5,[self.service.job_status(job['job_id']) for job in jobs])
 
+    def test_export_archive_schema_and_response_loss_retry_are_idempotent(self):
+        archive=FakeExportFeishu(); archive.fail_after_create=True
+        self.service.export_remote=archive; self.service._export_schema_ready=False
+        result=self.service.do_export("D",{"batch_id":"all_12345678"},{"owner":"owner-open-id"})
+        self.assertEqual(result["cloud_upload_status"],"failed")
+        self.assertTrue(Path(self.service.read("export:"+result["export_id"])["path"]).is_file())
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(1,1,1))
+        self.assertTrue(set(EXPORT_ARCHIVE_FIELDS)<=set(archive.fields))
+        archive.fail_after_create=False
+        retried=self.service.upload_export("D",result["export_id"],"owner-open-id")
+        self.assertEqual(retried["cloud_upload_status"],"succeeded")
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(1,1,1))
+        fields=next(iter(archive.records.values()))["fields"]
+        self.assertEqual((fields["楼栋"],fields["批次标识"],fields["导出人"]),("D楼","all_12345678","owner-open-id"))
+        self.assertEqual(fields["导出文件"],[{"file_token":"file-export-token"}])
+
     def test_export_remote_edit_overrides_original_cells_and_keeps_conversion(self):
         original=(TEMPLATES/"E.xlsm").read_bytes()
         rows=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]=="E楼"]
@@ -378,6 +438,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         app=FastAPI(); controller=Controller()
         runtime=SimpleNamespace(state_store=self.store,auth_manager=SimpleNamespace(is_admin=lambda s:False,scope_allowed=lambda s,scope:scope=="A"))
         install_cabinet_power_routes(app,controller,runtime)
+        self.assertIn("/api/cabinet-power/exports/{export_id}/upload",{route.path for route in app.routes})
         controller._cabinet_power.remote=self.remote; controller._cabinet_power._directory=self.service._directory
         controller._cabinet_power.root=Path(self.tmp.name)
         controller._cabinet_power.local=self.service.local

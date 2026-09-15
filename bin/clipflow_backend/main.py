@@ -7692,6 +7692,9 @@ class FastAPIPortalController:
                         identity_payload,
                         origin="manual_notice_binding",
                     )
+                    bound_active_item_id = str(
+                        (identity or {}).get("active_item_id") or active_item_id
+                    ).strip()
                     if target_finished:
                         finished_payload = dict(identity_payload)
                         removed = False
@@ -7730,54 +7733,41 @@ class FastAPIPortalController:
                             "active_updated": removed,
                             "qt_event_id": 0,
                         }
-                    binding_row = next(
-                        (
-                            row
-                            for row in state_store.list_visible_qt_active_items()
-                            if canonical_target_record_id(
-                                row.get("payload")
-                                if isinstance(row.get("payload"), dict)
-                                else {}
+                    binding_row = None
+                    for row in state_store.list_visible_qt_active_items():
+                        row_payload = (
+                            row.get("payload")
+                            if isinstance(row.get("payload"), dict)
+                            else {}
+                        )
+                        if str(row_payload.get("work_type") or "").strip() != work_type:
+                            continue
+                        if (
+                            canonical_target_record_id(row_payload) == target_record_id
+                            or (
+                                bound_active_item_id
+                                and str(row.get("active_item_id") or "").strip()
+                                == bound_active_item_id
                             )
-                            == target_record_id
-                            and str(
-                                (
-                                    row.get("payload")
-                                    if isinstance(row.get("payload"), dict)
-                                    else {}
-                                ).get("source_record_id")
-                                or ""
-                            ).strip()
-                            == source_record_id
-                        ),
-                        None,
-                    )
+                            or (
+                                source_record_id
+                                and str(
+                                    row_payload.get("source_record_id") or ""
+                                ).strip()
+                                == source_record_id
+                            )
+                        ):
+                            binding_row = row
+                            break
                     active_updated = bool(binding_row)
                     qt_event_id = (
                         repair_projection_qt_event_ids[0]
                         if repair_projection_qt_event_ids
                         else 0
                     )
+                    resolved_active_item_id = bound_active_item_id
                     if target_record_id:
                         matched_row: dict[str, Any] = binding_row or {}
-                        if not matched_row:
-                            for row in state_store.list_qt_active_items(
-                                include_deleted=False
-                            ):
-                                row_payload = (
-                                    row.get("payload")
-                                    if isinstance(row.get("payload"), dict)
-                                    else {}
-                                )
-                                if (
-                                    active_item_id
-                                    and str(row.get("active_item_id") or "")
-                                    == active_item_id
-                                ) or canonical_target_record_id(
-                                    row_payload
-                                ) == target_record_id:
-                                    matched_row = row
-                                    break
                         row_payload = (
                             matched_row.get("payload")
                             if isinstance(matched_row.get("payload"), dict)
@@ -7790,8 +7780,9 @@ class FastAPIPortalController:
                                 "目标未结束通告投影为空，请重新查找后绑定。"
                             )
                         resolved_active_item_id = str(
-                            merged.get("active_item_id")
-                            or active_item_id
+                            matched_row.get("active_item_id")
+                            or bound_active_item_id
+                            or merged.get("active_item_id")
                             or f"target-{work_type}-{target_record_id}"
                         ).strip()
                         merged.update(
@@ -7882,6 +7873,7 @@ class FastAPIPortalController:
                         active_updated = True
                     return {
                         "identity": identity or {},
+                        "active_item_id": resolved_active_item_id,
                         "active_updated": active_updated,
                         "qt_event_id": qt_event_id,
                     }

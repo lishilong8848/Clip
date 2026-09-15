@@ -21,6 +21,10 @@ from .cabinet_power_store import CabinetStore
 
 APP_TOKEN="ASLxbfESPahdTKs0A9NccgbrnXc"
 TABLE_ID="tblPuXz8ONJQVrDe"
+EXPORT_ARCHIVE_APP_TOKEN="MliKbC3fXa8PXrsndKscmxjdn1g"
+EXPORT_ARCHIVE_TABLE_ID="tblghte5RCmMy24n"
+EXPORT_ARCHIVE_URL=f"https://vnet.feishu.cn/base/{EXPORT_ARCHIVE_APP_TOKEN}?table={EXPORT_ARCHIVE_TABLE_ID}&view=vewtV2DWdh"
+EXPORT_ARCHIVE_FIELDS={"导出标识":1,"批次标识":1,"楼栋":1,"文件名称":1,"数据版本":2,"导出时间":1,"文件SHA256":1,"导出人":1,"导出文件":17}
 NAMESPACE="cabinet_power"
 DIRECTORY_NAME="机柜基础资料"
 INITIAL_TEMPLATES=Path(__file__).with_name("templates")/"cabinet_power"
@@ -71,8 +75,8 @@ def equivalent(fields,actual):
 
 class CabinetFeishu:
     """Reuse the app's HTTP pool and token manager."""
-    def __init__(self,table_id=TABLE_ID):
-        self.table_id=table_id
+    def __init__(self,table_id=TABLE_ID,app_token=APP_TOKEN):
+        self.table_id=table_id; self.app_token=app_token
         self._token=""; self._expires=0
         self._schema_ready=False
         self._lock=threading.RLock()
@@ -101,7 +105,7 @@ class CabinetFeishu:
         from upload_event_module.services.http_client import FeishuHttpClient
         if self._http is None:
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
-        root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}"
+        root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
         for attempt in range(3 if method=="GET" else 1):
             data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if method=="GET" else 0)
@@ -133,6 +137,30 @@ class CabinetFeishu:
     def update(self,record_id,fields):
         return self.request("PUT",f"records/{record_id}",{"fields":fields})["record"]
 
+    def upload_attachment(self,path,file_name):
+        self.require_write(); path=Path(path).resolve()
+        if not path.is_file() or path.stat().st_size<=0: raise CabinetError("机柜导出文件不存在或为空")
+        if self._http is None:
+            import httpx
+            from upload_event_module.services.http_client import FeishuHttpClient
+            self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
+        payload={}
+        for attempt in range(2):
+            try:
+                payload=self._http.request_file_json(
+                    "POST","https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+                    headers={"Authorization":"Bearer "+self.token()},
+                    data={"file_name":file_name,"parent_type":"bitable_file","parent_node":self.app_token,"size":str(path.stat().st_size)},
+                    file_path=str(path),file_name=file_name,retries=1,
+                )
+            except Exception as exc: raise CabinetError(f"机柜导出附件上传失败：{exc}") from exc
+            code=int(payload.get("code") or 0)
+            if code not in (99991663,99991664,99991665) or attempt: break
+            self._expires=0
+        token=str((payload.get("data") or {}).get("file_token") or "").strip()
+        if int(payload.get("code") or 0) or not token: raise CabinetError(f"机柜导出附件上传失败：{payload.get('msg') or '未返回文件标识'}")
+        return token
+
     def ensure_fields(self):
         if self._schema_ready: return True
         fields={f["field_name"]:f for f in self.list_all("fields")}
@@ -154,14 +182,18 @@ class CabinetFeishu:
 
 
 class CabinetPowerService:
-    def __init__(self,store,remote=None,root=None):
+    def __init__(self,store,remote=None,root=None,export_remote=None):
         self.store=store; self.remote=remote or CabinetFeishu()
+        self.export_remote=export_remote if export_remote is not None else (CabinetFeishu(EXPORT_ARCHIVE_TABLE_ID,EXPORT_ARCHIVE_APP_TOKEN) if isinstance(self.remote,CabinetFeishu) else None)
         self.root=(Path(root) if root else Path(store.db_path).parent/"cabinet_power").resolve()
         self.local=CabinetStore(self.root/"buildings")
         self._lock=threading.RLock()
         self._bootstrap_lock=threading.Lock()
+        self._export_schema_lock=threading.Lock()
+        self._export_schema_ready=False
         self._refresh_slots=threading.BoundedSemaphore(2)
         self._scope_locks={scope:threading.RLock() for scope in TOTALS}
+        self._export_upload_locks={scope:threading.Lock() for scope in TOTALS}
         self._cache={}; self._directory=None; self._layouts={}; self._remotes={}; self._directories={}
         self._pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-"+s) for s in TOTALS}
         self._upload_pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix='cabinet-upload-'+s) for s in TOTALS}
@@ -776,13 +808,92 @@ class CabinetPowerService:
                 self.local.commit_operation(journal["old_scope"],journal,record=current if current_scope==journal["old_scope"] else None,remove_id=current["record_id"] if current and current_scope!=journal["old_scope"] else "")
             return {"status":"cancelled","operation_id":oid}
 
+    @staticmethod
+    def _public_export(record):
+        return {k:v for k,v in record.items() if k!="path"}
+
+    def ensure_export_archive_fields(self):
+        if self.export_remote is None or self._export_schema_ready: return bool(self.export_remote)
+        with self._export_schema_lock:
+            if self._export_schema_ready: return True
+            fields={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
+            for name,kind in EXPORT_ARCHIVE_FIELDS.items():
+                current=fields.get(name)
+                if current and int(current.get("type") or 0)!=kind: raise CabinetError(f"导出归档表字段类型错误：{name}")
+                if current: continue
+                try: self.export_remote.request("POST","fields",{"field_name":name,"type":kind})
+                except Exception:
+                    current={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}.get(name)
+                    if not current or int(current.get("type") or 0)!=kind: raise
+                fields[name]={"field_name":name,"type":kind}
+            verified={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
+            for name,kind in EXPORT_ARCHIVE_FIELDS.items():
+                if name not in verified or int(verified[name].get("type") or 0)!=kind: raise CabinetError(f"导出归档表字段回读未通过：{name}")
+            self._export_schema_ready=True
+            return True
+
+    def _find_export_archive_record(self,eid):
+        for record in self.export_remote.list_all():
+            if text_value((record.get("fields") or {}).get("导出标识"))==eid: return record
+        return None
+
+    @staticmethod
+    def _verify_export_archive(record,eid,file_token):
+        fields=record.get("fields") or {}
+        tokens={str(item.get("file_token") or "") for item in fields.get("导出文件") or [] if isinstance(item,dict)}
+        if text_value(fields.get("导出标识"))!=eid or file_token not in tokens: raise CabinetError("导出归档回读核验失败")
+
+    def upload_export(self,scope,eid,owner=""):
+        if scope not in TOTALS: raise CabinetError("楼栋无效")
+        with self._export_upload_locks[scope]:
+            record=self.local.document(scope,"export:"+eid)
+            if not record: raise CabinetError("导出文件不存在",404)
+            path=Path(record.get("path") or "")
+            if record.get("deleted") or not path.is_file(): raise CabinetError("导出文件已清理或不可用",410)
+            record["archive_url"]=EXPORT_ARCHIVE_URL
+            if self.export_remote is None:
+                record.update(cloud_upload_status="skipped",cloud_upload_error="")
+                self.write("export:"+eid,record)
+                return self._public_export(record)
+            if record.get("cloud_upload_status")=="succeeded": return self._public_export(record)
+            record.update(cloud_upload_status="uploading",cloud_upload_error="",cloud_updated_at=stamp())
+            self.write("export:"+eid,record)
+            try:
+                self.ensure_export_archive_fields()
+                file_token=str(record.get("cloud_file_token") or "")
+                if not file_token:
+                    file_token=self.export_remote.upload_attachment(path,record["filename"])
+                    record["cloud_file_token"]=file_token; record["cloud_updated_at"]=stamp()
+                    self.write("export:"+eid,record)
+                fields={
+                    "导出标识":eid,"批次标识":str(record.get("batch_id") or ""),"楼栋":scope+"楼",
+                    "文件名称":record["filename"],"数据版本":int(record.get("version") or 0),
+                    "导出时间":str(record.get("created_at") or ""),"文件SHA256":str(record.get("sha256") or ""),
+                    "导出人":str(record.get("owner") or owner or ""),"导出文件":[{"file_token":file_token}],
+                }
+                cloud=self.export_remote.get(record["cloud_record_id"]) if record.get("cloud_record_id") else self._find_export_archive_record(eid)
+                if cloud: cloud=self.export_remote.update(cloud["record_id"],fields)
+                else: cloud=self.export_remote.create(fields,"export:"+eid)
+                record["cloud_record_id"]=str(cloud.get("record_id") or "")
+                record["cloud_updated_at"]=stamp(); self.write("export:"+eid,record)
+                if not record["cloud_record_id"]: raise CabinetError("导出归档未返回记录ID")
+                self._verify_export_archive(self.export_remote.get(record["cloud_record_id"]),eid,file_token)
+                record.update(cloud_upload_status="succeeded",cloud_upload_error="",cloud_updated_at=stamp())
+            except Exception as exc:
+                record=self.local.document(scope,"export:"+eid) or record
+                self._export_schema_ready=False
+                record.update(cloud_upload_status="failed",cloud_upload_error=str(exc),cloud_updated_at=stamp(),archive_url=EXPORT_ARCHIVE_URL)
+            self.write("export:"+eid,record)
+            return self._public_export(record)
+
     def job(self,scope,kind,owner,payload):
         if scope not in TOTALS or kind not in ("refresh","export"): raise CabinetError("任务类型无效")
         if kind=="export": self.ensure_loaded(scope)
         version=self.local.version(scope)
         with self.local.locked([scope]):
             for existing in self.local.documents(scope,"job:"):
-                if existing.get("kind")==kind and existing.get("status") in ("pending","running") and process_alive(existing.get("pid")) and (kind=="refresh" or existing.get("version")==version): return existing
+                same_batch=not payload.get("batch_id") or (existing.get("payload") or {}).get("batch_id")==payload.get("batch_id")
+                if existing.get("kind")==kind and existing.get("status") in ("pending","running") and process_alive(existing.get("pid")) and (kind=="refresh" or existing.get("version")==version and same_batch): return existing
             if kind=="export":
                 snapshot=self.snapshot(scope); version=snapshot["version"]; payload={**payload,"snapshot":snapshot}
             jid=uuid.uuid4().hex; job={"job_id":jid,"scope":scope,"kind":kind,"owner":owner,"payload":payload,"status":"pending","created_at":stamp(),"pid":os.getpid(),"version":version}
@@ -816,11 +927,13 @@ class CabinetPowerService:
         with self._lock:
             if self._exports is None: self._exports=ProcessPoolExecutor(max_workers=5,mp_context=multiprocessing.get_context("spawn"))
         content=self._exports.submit(export_snapshot,config,snap["operations"]).result()
+        batch_id=str(payload.get("batch_id") or "").strip()
+        if batch_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}",batch_id): raise CabinetError("一键导出批次标识无效")
         eid=uuid.uuid4().hex; filename=f"南通{scope}栋机柜平面图及上下电数量汇总表_{dt.datetime.now():%Y%m%d_%H%M%S}.xlsm"
         path=self.atomic_file(Path("exports")/eid/filename,content)
-        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest()}
+        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
         self.write("export:"+eid,result)
-        return {k:v for k,v in result.items() if k!="path"}
+        return self.upload_export(scope,eid,result["owner"])
 
     def cleanup_export(self,scope,eid):
         record=self.local.document(scope,"export:"+eid)

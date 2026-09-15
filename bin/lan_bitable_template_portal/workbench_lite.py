@@ -6961,7 +6961,7 @@ def render_workbench_lite(
           work_type: previewValue(form, 'work_type') || form.dataset.workType || 'maintenance',
           notice_type: previewValue(form, 'notice_type'),
           active_item_id: String(
-            candidate.active_item_id || previewValue(form, 'active_item_id') || ''
+            previewValue(form, 'active_item_id') || candidate.active_item_id || ''
           ).trim(),
           source_record_id: previewValue(form, 'source_record_id'),
           target_record_id: targetRecordId,

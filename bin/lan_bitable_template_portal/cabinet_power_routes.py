@@ -104,7 +104,9 @@ def install_cabinet_power_routes(app,controller,runtime):
             if path.startswith("exports/") and path.endswith("/download"):
                 if resource.get("deleted") or not Path(resource["path"]).is_file(): raise CabinetError("导出文件已清理或不可用",410)
                 return FileResponse(resource["path"],filename=resource["filename"],media_type="application/vnd.ms-excel.sheet.macroEnabled.12",headers={"Cache-Control":"no-store"})
-            if path.startswith("exports/") and path.endswith("/cleanup"):
+            if path.startswith("exports/") and path.endswith("/upload"):
+                data=await asyncio.to_thread(service.upload_export,scope,path.split("/")[1],owner)
+            elif path.startswith("exports/") and path.endswith("/cleanup"):
                 data=await asyncio.to_thread(service.cleanup_export,scope,path.split("/")[1])
             elif path=="writes":
                 data=await asyncio.to_thread(service.pending_status,scope,owner,admin)
@@ -141,7 +143,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],
         "writes/{operation_id}/reconcile":["POST"],
-        "export-history":["GET"],"exports/{export_id}/cleanup":["POST"],
+        "export-history":["GET"],"exports/{export_id}/upload":["POST"],"exports/{export_id}/cleanup":["POST"],
         "bootstrap":["GET","POST"],
     }.items():
         app.add_api_route("/api/cabinet-power/"+path,endpoint,methods=methods,name="cabinet_"+path.replace("/","_"))

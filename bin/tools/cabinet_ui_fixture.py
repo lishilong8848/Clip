@@ -2,6 +2,7 @@
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from fastapi import FastAPI,Request
@@ -12,7 +13,7 @@ import uvicorn
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(ROOT/'bin'))
-from bin.test_cabinet_power import fixtures,MemoryStore,FakeFeishu
+from bin.test_cabinet_power import fixtures,MemoryStore,FakeExportFeishu,FakeFeishu
 from bin.lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
 
 class Controller:
@@ -36,6 +37,9 @@ class SlowFakeFeishu(FakeFeishu):
 
 controller._cabinet_power.remote=SlowFakeFeishu(records)
 controller._cabinet_power._directory=FakeFeishu(directory)
+controller._cabinet_power.export_remote=FakeExportFeishu()
+controller._cabinet_power._export_schema_ready=False
+controller._cabinet_power._exports=ThreadPoolExecutor(max_workers=5,thread_name_prefix="cabinet-export-fixture")
 controller._cabinet_power.do_refresh('',{}, {})
 
 @app.get('/api/auth/status')
