@@ -52,6 +52,11 @@ def process_alive(pid):
 def stamp():
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def _stable_uuid4_client_token(value):
+    raw=bytearray(hashlib.sha256(str(value or "").encode()).digest()[:16])
+    raw[6]=(raw[6]&0x0F)|0x40; raw[8]=(raw[8]&0x3F)|0x80
+    return str(uuid.UUID(bytes=bytes(raw)))
+
 def equivalent(fields,actual):
     for key,value in fields.items():
         got=actual.get(key)
@@ -65,7 +70,7 @@ def equivalent(fields,actual):
     return True
 
 class CabinetFeishu:
-    """Reuse the app's HTTP pool/token manager and SDK client_token support."""
+    """Reuse the app's HTTP pool and token manager."""
     def __init__(self,table_id=TABLE_ID):
         self.table_id=table_id
         self._token=""; self._expires=0
@@ -122,19 +127,8 @@ class CabinetFeishu:
         return self.request("GET",f"records/{record_id}")["record"]
 
     def create(self,fields,operation_id):
-        self.require_write()
-        from upload_event_module.services.feishu_service import (
-            _build_client,
-            _stable_uuid4_client_token,
-        )
-        import lark_oapi as lark
-        from lark_oapi.api.bitable.v1 import CreateAppTableRecordRequest, AppTableRecord
-        request=(CreateAppTableRecordRequest.builder().app_token(APP_TOKEN).table_id(self.table_id)
-                 .client_token(_stable_uuid4_client_token("cabinet:"+operation_id))
-                 .request_body(AppTableRecord.builder().fields(fields).build()).build())
-        response=_build_client().bitable.v1.app_table_record.create(request,lark.RequestOption.builder().tenant_access_token(self.token()).build())
-        if not response.success(): raise CabinetError(f"机柜记录创建失败：code={response.code}，{response.msg}")
-        return json.loads(lark.JSON.marshal(response.data))["record"]
+        client_token=_stable_uuid4_client_token("cabinet:"+operation_id)
+        return self.request("POST","records",{"fields":fields},params={"client_token":client_token})["record"]
 
     def update(self,record_id,fields):
         return self.request("PUT",f"records/{record_id}",{"fields":fields})["record"]
@@ -176,8 +170,10 @@ class CabinetPowerService:
         self._writing=set()
         self._exports=None
         self._running={}
+        self._batches=None
 
     def shutdown(self,wait=True,**_kwargs):
+        if self._batches: self._batches.shutdown(wait=wait)
         for pool in self._upload_pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
         for pool in self._pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
         self._bootstrap_download_pool.shutdown(wait=wait,cancel_futures=not wait)
@@ -185,6 +181,14 @@ class CabinetPowerService:
 
     @property
     def pool(self): return self
+
+    @property
+    def batches(self):
+        with self._lock:
+            if self._batches is None:
+                from .cabinet_power_batches import CabinetBatchService
+                self._batches=CabinetBatchService(self,self.root)
+            return self._batches
 
     def remote_for(self,scope):
         if not isinstance(self.remote,CabinetFeishu): return self.remote
@@ -425,6 +429,8 @@ class CabinetPowerService:
         config=self.config(scope); room=next((r for r in config["rooms"] if r["id"]==room_id),None)
         if not room: raise CabinetError("房间不存在",404)
         overview=self.overview(scope); racks=[r for r in overview["racks"] if r["room"]==room_id]
+        room_overview=next(r for r in overview["rooms"] if r["id"]==room_id); counts=room_overview["counts"]
+        summary={"total":room_overview["total"],"formal":counts["formal"],"test":counts["test"],"off":counts["off"],"powered":counts["formal"]+counts["test"],"unknown":counts["unknown"]}
         model=self.local_layout(scope,room_id) if room.get("sheet") else None
         if model:
             values=config.get("map_values",{}).get(room["sheet"],{})
@@ -432,7 +438,7 @@ class CabinetPowerService:
                 value=values.get(cell["ref"],"")
                 cell["text"]=format(value,"g") if isinstance(value,(int,float)) else str(value)
             model=project_layout(model,racks,overview['racks'])
-        return {"room":room,"layout":model,"racks":racks,"version":overview["version"]}
+        return {"room":room,"layout":model,"racks":racks,"summary":summary,"version":overview["version"]}
 
     def operations(self,scope,query):
         snap=self._snapshot(scope); ops=list(snap["operations"])
@@ -532,6 +538,15 @@ class CabinetPowerService:
             if not math.isfinite(op["power"]) or op["power"]<0: raise CabinetError("功率必须为非负有限数字")
         if op.get("result") not in ("","成功","失败"): raise CabinetError("操作结果无效")
         if not old: op["meta"]={"category":payload.get("category","mixed")}
+        if "batch_meta" in payload:
+            batch_meta=payload["batch_meta"]
+            if not isinstance(batch_meta,dict): raise CabinetError("批次来源信息格式无效")
+            history=op.setdefault("meta",{}).setdefault("batch_rows",[])
+            if not isinstance(history,list): raise CabinetError("原批次来源信息格式无效")
+            key=(str(batch_meta.get("batch_id") or ""),str(batch_meta.get("row_id") or ""))
+            if not all(key): raise CabinetError("批次来源信息不完整")
+            if not any((str(item.get("batch_id") or ""),str(item.get("row_id") or ""))==key for item in history if isinstance(item,dict)):
+                history.append(copy.deepcopy(batch_meta))
         if payload.get("source"):
             config_formats=self.config(scope).get("template_data",{}).get("formats",[])
             fmt=next((f for f in config_formats if f["sheet"]==payload["source"]),None)

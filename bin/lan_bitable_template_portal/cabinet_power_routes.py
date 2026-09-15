@@ -19,6 +19,59 @@ def install_cabinet_power_routes(app,controller,runtime):
             owner=str(session.get("open_id") or session.get("user",{}).get("open_id") or "")
             if not owner: raise CabinetError("登录身份不完整",401)
             allowed=[s for s in TOTALS if admin or runtime.auth_manager.scope_allowed(session,s)]
+            query=dict(request.query_params)
+            if path.startswith("batches"):
+                if path=="batches/recognize" and request.method=="POST":
+                    try:
+                        form=await request.form(max_files=10,max_fields=20,max_part_size=10*1024*1024)
+                    except TypeError:
+                        form=await request.form(max_files=10,max_fields=20)
+                    uploads=form.getlist("files")
+                    files=[]; total=0
+                    for upload in uploads:
+                        if not getattr(upload,"filename","") or not hasattr(upload,"read"): continue
+                        try: content=await upload.read(10*1024*1024+1)
+                        finally: await upload.close()
+                        total+=len(content)
+                        if len(content)>10*1024*1024: raise CabinetError(f"{upload.filename} 超过10MiB",413)
+                        if total>30*1024*1024: raise CabinetError("单批PDF总大小不能超过30MiB",413)
+                        files.append((upload.filename,content))
+                    data=await asyncio.to_thread(service.batches.recognize,files,owner)
+                    data=service.batches.visible(data,owner,allowed,admin)
+                    response=controller._json_ok(request,session,data); response.status_code=202
+                    return response
+                payload=await controller._read_json_request(request,max_bytes=4*1024*1024) if request.method in ("POST","PATCH") else {}
+                if path=="batches":
+                    if request.method=="POST":
+                        rows=payload.get("rows",[])
+                        requested={str(row.get("scope") or "").upper().replace("楼","") for row in rows if isinstance(row,dict)}
+                        if not admin and not requested<=set(allowed): raise CabinetError("批量内容包含无权操作的楼栋",403)
+                        data=await asyncio.to_thread(service.batches.create_manual,rows,owner)
+                        data=service.batches.visible(data,owner,allowed,admin)
+                    else:
+                        data=await asyncio.to_thread(service.batches.list,owner,allowed,admin,str(query.get("scope") or ""),str(query.get("status") or ""),str(query.get("from") or ""),str(query.get("to") or ""),query.get("page",1),query.get("page_size",20))
+                    return controller._json_ok(request,session,data)
+                parts=path.split("/")
+                if len(parts)<2: raise CabinetError("接口不存在",404)
+                batch_id=parts[1]
+                if len(parts)==4 and parts[2]=="files" and request.method=="GET":
+                    file_path,filename=await asyncio.to_thread(service.batches.file_path,batch_id,parts[3],owner,admin)
+                    return FileResponse(file_path,filename=filename,media_type="application/pdf",headers={"Cache-Control":"no-store"})
+                if len(parts)==5 and parts[2]=="files" and parts[4]=="cleanup":
+                    data=await asyncio.to_thread(service.batches.cleanup_file,batch_id,parts[3],owner,admin)
+                    return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
+                if len(parts)==2:
+                    if request.method=="PATCH":
+                        data=await asyncio.to_thread(service.batches.update,batch_id,payload,owner,allowed,admin)
+                    else: data=await asyncio.to_thread(service.batches.get,batch_id)
+                elif len(parts)==3 and parts[2]=="clear-overlaps":
+                    data=await asyncio.to_thread(service.batches.clear_overlaps,batch_id,payload.get("version"),owner,allowed,admin)
+                elif len(parts)==3 and parts[2]=="confirm":
+                    data=await asyncio.to_thread(service.batches.confirm,batch_id,payload,owner,allowed,admin)
+                elif len(parts)==3 and parts[2]=="cancel":
+                    data=await asyncio.to_thread(service.batches.cancel,batch_id,owner,admin)
+                else: raise CabinetError("接口不存在",404)
+                return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
             if path=="buildings":
                 def buildings():
                     status={item["scope"]:item for item in service.bootstrap(owner).get("buildings",[])}
@@ -35,7 +88,6 @@ def install_cabinet_power_routes(app,controller,runtime):
                         items.append({"scope":scope_code,"counts":{"total":0,"formal":0,"test":0,"off":0,"unknown":0},"updated_at":"","record_count":0,"inventory_only":0,"source":"local","bootstrap_status":current["status"],"bootstrap_error":current.get("error","")})
                     return {"buildings":items}
                 return controller._json_ok(request,session,await asyncio.to_thread(buildings))
-            query=dict(request.query_params)
             payload=await controller._read_json_request(request,max_bytes=512*1024) if request.method in ("POST","PATCH") else {}
             scope=str(payload.get("scope") or query.get("scope") or "")
             if path=="bootstrap":
@@ -80,6 +132,10 @@ def install_cabinet_power_routes(app,controller,runtime):
         except Exception as exc: return controller._portal_error_response(exc,default_status=400)
 
     for path,methods in {
+        "batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
+        "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],
+        "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
+        "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],
         "operations":["GET","POST"],"operations/{record_id}":["PATCH"],"refresh":["POST"],
         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],

@@ -30,6 +30,7 @@ STATES = dict(zip(OPS, ("formal", "test", "formal", "test", "off", "off")))
 COLORS = {"formal": "#FF0000", "test": "#FFC000", "off": "#00B050", "unknown": "#94A3B8"}
 TOTALS = dict(zip("ABCDE", (988, 1076, 998, 988, 1272)))
 RACK_TYPES = ("网络机柜", "服务器机柜")
+POWER_SUMMARY_LABELS = (("包间机柜总数：","total"),("测试电机柜总数：","test"),("正式电机柜总数：","formal"),("未上电机柜总数：","off"),("已上电机柜总数：","powered"))
 OP_PATTERN = re.compile("|".join(sorted(OPS, key=len, reverse=True)))
 DATE_PATTERN = re.compile(r"(20\d{2})[年/.-](\d{1,2})[月/.-](\d{1,2})日?(?:[ T\s]+(\d{1,2})[:：](\d{1,2})(?:[:：](\d{1,2}))?)?")
 
@@ -264,7 +265,7 @@ def parse_template(content, scope):
         if not match: continue
         room = match[0]
         info = rooms.setdefault(room, {"id":room,"name":system_name(scope,room),"total":0})
-        region = "B1:AP46" if scope == "D" and room == "202" else "B1:AX46"
+        region = "A1:AX46" if scope == "B" and room in ("203","403") else "B1:AP46" if scope == "D" and room == "202" else "B1:AX46"
         if scope=='C' and room=='202': region='B1:AX49'
         layout = book.layout(name, region)
         info.update(sheet=name, region=region, layout=layout)
@@ -460,8 +461,27 @@ def project_layout(model, racks, building_racks=None):
     """Replace workbook colour counters/hand totals in the browser projection too."""
     model=copy.deepcopy(model)
     cells=model["cells"]; by_ref={c["ref"]:c for c in cells}
+    labelled={metric:cell for cell in cells for label,metric in POWER_SUMMARY_LABELS if label.rstrip("：") in cell.get("text","")}
+    missing=[item for item in POWER_SUMMARY_LABELS if item[1] not in labelled]
+    if missing and "total" in labelled:
+        anchor=labelled["total"]; x1,_y1,x2,_y2=bounds(anchor["range"]); value_col=x2+1
+        value_sample=by_ref.get(f"{col_name(value_col)}{coord(anchor['ref'])[1]}")
+        swatch_sample=next((by_ref.get(f"{col_name(value_col+1)}{coord(labelled[key]['ref'])[1]}") for key in ("powered","off") if key in labelled),None)
+        if value_sample is not None and swatch_sample is not None:
+            last=max(labelled.values(),key=lambda cell:coord(cell["ref"])[1]); row=coord(last["ref"])[1]; top=last["y"]+last["height"]
+            counts=Counter(r["state"] for r in racks)
+            values={"total":len(racks),"test":counts["test"],"formal":counts["formal"],"off":counts["off"],"powered":counts["formal"]+counts["test"]}
+            def clone_row(sample,target_row,y,text,fill=None):
+                cell=copy.deepcopy(sample); sx1,_sy1,sx2,_sy2=bounds(cell["range"])
+                cell.update(ref=f"{col_name(sx1)}{target_row}",range=f"{col_name(sx1)}{target_row}:{col_name(sx2)}{target_row}",text=str(text),formula="",y=y,height=anchor["height"])
+                if fill: cell.setdefault("style",{})["fill"]=fill
+                return cell
+            for label,metric in missing:
+                row+=1
+                additions=(clone_row(anchor,row,top,label),clone_row(value_sample,row,top,values[metric]),clone_row(swatch_sample,row,top,"",COLORS.get(metric)))
+                cells.extend(additions); labelled[metric]=additions[0]; top+=anchor["height"]
+            model["height"]=max(model["height"],top); cells.sort(key=lambda cell:(cell["y"],cell["x"])); by_ref={c["ref"]:c for c in cells}
     states={r["rack"]:r for r in racks}
-    unresolved=any(r["state"]=="unknown" for r in racks)
     for cell in cells:
         if cell["text"] in states:
             rack=states[cell["text"]]; cell.update(rack=rack["rack"],state=rack["state"],color=rack["color"])
@@ -469,7 +489,7 @@ def project_layout(model, racks, building_racks=None):
             # No stale Excel formula cache is presented as current data.
             cell["text"]="—"
             match=re.search(r"getcolorcount\(\s*([A-Z0-9$]+:[A-Z0-9$]+)\s*[,;]\s*([A-Z0-9$]+)",cell["formula"],re.I)
-            if match and not unresolved:
+            if match:
                 x,y,x2,y2=bounds(match[1].replace("$",""))
                 sample=by_ref.get(match[2].replace("$",""),{})
                 color=sample.get("style",{}).get("fill","").upper()
@@ -489,7 +509,6 @@ def project_layout(model, racks, building_racks=None):
         target["metric_type"]="网络机柜" if "网络" in label else "服务器机柜" if "服务器" in label else ""
         target['metric_building']='楼' in label
         members=building_racks if target['metric_building'] and building_racks is not None else racks
-        if any(r['state']=='unknown' for r in members) and metric!="total": target["text"]="—"; continue
         chosen=[r for r in members if ("网络" not in label or r["rack_type"]=="网络机柜") and ("服务器" not in label or r["rack_type"]=="服务器机柜")]
         value=len(chosen) if metric=="total" else sum(r["state"] in ("formal","test") for r in chosen) if metric=="powered" else sum(r["state"]==metric for r in chosen)
         target["text"]=str(value)
@@ -627,6 +646,15 @@ def export_workbook(content, config, operations):
     expanded_shared={(name,ref):original_formulas[(name,ref)].text for (name,_),members in shared_groups.items() for ref,_ in members}
     styles=ET.fromstring(book.archive.read("xl/styles.xml"))
     fills=styles.find(T("fills")); xfs=styles.find(T("cellXfs")); painted={}
+    def colored_style(style_id,state):
+        key=(str(style_id or "0"),state)
+        if key not in painted:
+            fill=ET.SubElement(fills,T("fill")); pattern=ET.SubElement(fill,T("patternFill"),patternType="solid")
+            ET.SubElement(pattern,T("fgColor"),rgb="FF"+COLORS[state].lstrip("#")); ET.SubElement(pattern,T("bgColor"),indexed="64")
+            xf=copy.deepcopy(xfs[int(key[0])]); xf.set("fillId",str(len(fills)-1)); xf.set("applyFill","1")
+            painted[key]=len(xfs); xfs.append(xf)
+            book.styles.append({**book.styles[int(key[0])],"fill":COLORS[state]})
+        return painted[key]
     def write(name,ref,value,preserve_formula=False):
         cells=cell_maps[name]; prior=cells.get(ref)
         formula=original_formulas.get((name,ref)) if preserve_formula else None
@@ -752,6 +780,44 @@ def export_workbook(content, config, operations):
             if filt is not None: filt.set("ref",f"A{fmt['header']}:{col_name(max_col)}{next_rows[name]-1}")
     derived=derive_records(config,operations)
     by_room={room["id"]:[r for r in derived["racks"] if r["room"]==room["id"]] for room in config["rooms"]}
+    summary_regions={}
+    for room in config["rooms"]:
+        name=room.get("sheet")
+        if not name or name not in roots: continue
+        cells=cell_maps[name]
+        labelled={metric:(ref,cell) for ref,cell in cells.items() for label,metric in POWER_SUMMARY_LABELS if label.rstrip("：") in text_value(book.value(cell))}
+        summary_regions[name]=room["region"]
+        missing=[item for item in POWER_SUMMARY_LABELS if item[1] not in labelled]
+        if not missing: continue
+        anchor=labelled.get("total",(None,None))[1]
+        if anchor is None: raise CabinetError("平面图缺少机柜汇总区域："+name)
+        x,y=coord(anchor.get("r")); merge_refs=[item.get("ref") for item in roots[name].iter(T("mergeCell"))]
+        label_range=next((ref for ref in merge_refs if (lambda box:box[0]<=x<=box[2] and box[1]<=y<=box[3])(bounds(ref))),anchor.get("r"))
+        x1,_y1,x2,_y2=bounds(label_range); value_col=x2+1
+        label_style=anchor.get("s","0"); value_sample=cells.get(f"{col_name(value_col)}{y}"); value_style=value_sample.get("s","0") if value_sample is not None else label_style
+        swatch_sample=next((cells.get(f"{col_name(value_col+1)}{coord(labelled[key][0])[1]}") for key in ("powered","off") if key in labelled),None)
+        swatch_style=swatch_sample.get("s","0") if swatch_sample is not None else value_style
+        rr=by_room[room["id"]]; counts=Counter(r["state"] for r in rr)
+        values={"total":room["total"],"test":counts["test"],"formal":counts["formal"],"off":counts["off"],"powered":counts["formal"]+counts["test"]}
+        merges=roots[name].find(T("mergeCells"))
+        if merges is None:
+            merges=ET.Element(T("mergeCells")); data=roots[name].find(T("sheetData")); roots[name].insert(list(roots[name]).index(data)+1,merges)
+        rows=roots[name].find(T("sheetData")); source_row=next(item for item in rows if item.get("r")==str(y))
+        target_row=max(coord(ref)[1] for ref,_cell in labelled.values())
+        for label,metric in missing:
+            target_row+=1; label_ref=f"{col_name(x1)}{target_row}"; value_ref=f"{col_name(value_col)}{target_row}"
+            write(name,label_ref,label).set("s",label_style); write(name,value_ref,values[metric]).set("s",value_style)
+            if metric in ("test","formal"): write(name,f"{col_name(value_col+1)}{target_row}","").set("s",str(colored_style(swatch_style,metric)))
+            target=next(item for item in rows if item.get("r")==str(target_row))
+            for key in ("ht","customHeight","s","customFormat"):
+                if key in source_row.attrib: target.set(key,source_row.get(key))
+            desired=f"{col_name(x1)}{target_row}:{col_name(x2)}{target_row}"
+            overlapping=[ref for ref in merge_refs if (lambda box:box[1]<=target_row<=box[3] and not (box[2]<x1 or box[0]>x2))(bounds(ref))]
+            if desired not in overlapping:
+                if overlapping: raise CabinetError("平面图汇总区域存在合并单元格冲突："+name)
+                ET.SubElement(merges,T("mergeCell"),ref=desired); merge_refs.append(desired)
+        merges.set("count",str(len(merges)))
+        rx,ry,rx2,ry2=bounds(room["region"]); summary_regions[name]=f"{col_name(rx)}{ry}:{col_name(rx2)}{max(ry2,target_row)}"
     for rack in derived["racks"]:
         for pos in rack.get("positions",[]):
             if pos["sheet"] not in roots: continue
@@ -761,14 +827,7 @@ def export_workbook(content, config, operations):
                 for y in range(y1,y2+1):
                     cell=cells.get(f"{col_name(x)}{y}")
                     if cell is None: continue
-                    key=(cell.get("s","0"),rack["state"])
-                    if key not in painted:
-                        fill=ET.SubElement(fills,T("fill")); pat=ET.SubElement(fill,T("patternFill"),patternType="solid")
-                        ET.SubElement(pat,T("fgColor"),rgb="FF"+COLORS[rack["state"]].lstrip("#")); ET.SubElement(pat,T("bgColor"),indexed="64")
-                        xf=copy.deepcopy(xfs[int(key[0])]); xf.set("fillId",str(len(fills)-1)); xf.set("applyFill","1")
-                        painted[key]=len(xfs); xfs.append(xf)
-                        book.styles.append({**book.styles[int(key[0])],"fill":COLORS[rack["state"]]})
-                    cell.set("s",str(painted[key]))
+                    cell.set("s",str(colored_style(cell.get("s","0"),rack["state"])))
     # Preserve all original summary sections; refresh the labelled room metrics.
     for name,values in template.get("summary_cells",{}).items():
         if name not in roots: continue
@@ -826,7 +885,7 @@ def export_workbook(content, config, operations):
         name=room.get("sheet")
         if not name: continue
         cells=cell_maps[name]
-        for cell in cells.values():
+        for ref,cell in cells.items():
             formula=cell.findtext(T("f"),"")
             match=re.search(r"getcolorcount\(\s*([A-Z0-9$]+:[A-Z0-9$]+)\s*[,;]\s*([A-Z0-9$]+)\s*\)",formula,re.I)
             if not match: continue
@@ -848,7 +907,9 @@ def export_workbook(content, config, operations):
             cache=cell.find(T("v"))
             if cache is None: cache=ET.SubElement(cell,T("v"))
             cache.text=str(count)
-        projected=project_layout(book.layout(name,room["region"]),by_room[room["id"]],derived['racks'])
+            cell.remove(cell.find(T("f")))
+            original_formulas.pop((name,ref),None)
+        projected=project_layout(book.layout(name,summary_regions.get(name,room["region"])),by_room[room["id"]],derived['racks'])
         whole_building=any(c.get('metric_building') for c in projected['cells'])
         members=derived['racks'] if whole_building else by_room[room["id"]]; helper=max(coord(ref)[0] for ref in cells)+2
         cols=roots[name].find(T("cols"))

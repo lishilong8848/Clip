@@ -195,6 +195,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "openpyxl": "openpyxl",
 
+    "pypdf": "pypdf",
+
     "anyio": "anyio",
 
     "apscheduler": "APScheduler",
@@ -255,6 +257,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
 
     "openpyxl",
 
+    "pypdf",
+
     "anyio",
 
     "apscheduler",
@@ -301,6 +305,8 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.server",
     "clipflow_backend.main",
     "clipflow_backend.process_controller",
+    "lan_bitable_template_portal.cabinet_power_batches",
+    "pypdf",
     "lark_oapi",
 ]
 
@@ -314,6 +320,7 @@ PACKAGING_PREFLIGHT_MODULES = [
     "fastapi",
     "uvicorn",
     "lark_oapi",
+    "pypdf",
 ]
 
 

@@ -136,6 +136,15 @@
       @switch-scope="enterCriticalGuard"
     />
 
+    <CabinetPowerBatchPage
+      v-else-if="isCabinetPowerBatchPage"
+      :key="`cabinet-batch:${windowLocationSearch}`"
+      :scope="routeParams.get('scope') || ''"
+      :scope-options="visibleScopeOptions"
+      :is-admin="isAdmin"
+      :user-id="String(auth.user?.open_id || '')"
+    />
+
     <CabinetPowerPage
       v-else-if="isCabinetPowerPage"
       :key="`cabinet:${routeParams.get('scope') || ''}`"
@@ -215,6 +224,7 @@ const WaterManagementPage = asyncPage(() => import("./components/WaterManagement
 const CriticalGuardPage = asyncPage(() => import("./components/CriticalGuardPage.vue"));
 const DrillManagementPage = asyncPage(() => import("./components/DrillManagementPage.vue"));
 const CabinetPowerPage = asyncPage(() => import("./components/CabinetPowerPage.vue"));
+const CabinetPowerBatchPage = asyncPage(() => import("./components/CabinetPowerBatchPage.vue"));
 
 type Dict = LooseDict;
 
@@ -235,6 +245,7 @@ const requestableScopes: ScopeOption[] = [
 
 const routePath = ref(normalizedPath());
 const routeParams = ref(new URLSearchParams(window.location.search));
+const windowLocationSearch = computed(() => routeParams.value.toString());
 const currentScope = ref(normalizeScopeValue(routeParams.value.get("scope") || ""));
 const authChecking = ref(true);
 const loading = ref(false);
@@ -292,6 +303,7 @@ const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks" || rou
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCabinetPowerPage = computed(() => routePath.value === "/cabinet-power");
+const isCabinetPowerBatchPage = computed(() => routePath.value === "/cabinet-power/batches");
 const isCriticalGuardPage = computed(() => routePath.value === "/critical-guard");
 const isDrillManagementPage = computed(() => routePath.value === "/drill-management" || routePath.value === "/drill-management/print");
 const isDrillPrintPage = computed(() => routePath.value === "/drill-management/print");
@@ -357,7 +369,7 @@ const headerSubtitle = computed(() => {
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
-  if (isCabinetPowerPage.value) return "机柜上下电";
+  if (isCabinetPowerPage.value || isCabinetPowerBatchPage.value) return "机柜上下电";
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";
   if (isDrillManagementPage.value) return routeParams.value.get("mode") === "admin" ? "演练管理 · 管理员" : drillScope.value ? `${scopeLabel(drillScope.value)} · 演练管理` : "演练管理 · 选择入口";
   if (authChecking.value) return "功能选择 · 正在检查登录";

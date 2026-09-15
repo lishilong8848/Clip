@@ -10,7 +10,7 @@ from . import test_cabinet_power as base
 from .test_cabinet_power import FakeFeishu, MemoryStore, fixtures
 from .lan_bitable_template_portal.cabinet_power import CabinetPowerService,SNAPSHOT_KEY
 from .lan_bitable_template_portal.cabinet_power_data import from_feishu,to_fields,source_evidence,complete_source_record
-from .lan_bitable_template_portal.cabinet_power_excel import CabinetError,Workbook,T,export_workbook,map_state_baseline,derive_records,project_layout,calculate
+from .lan_bitable_template_portal.cabinet_power_excel import CabinetError,Workbook,T,export_workbook,map_state_baseline,derive_records,project_layout,calculate,POWER_SUMMARY_LABELS,COLORS,bounds,col_name,coord,text_value
 
 
 class CabinetReliabilityTests(unittest.TestCase):
@@ -65,6 +65,40 @@ class CabinetReliabilityTests(unittest.TestCase):
         out=Workbook(export_workbook((base.TEMPLATES/'C.xlsm').read_bytes(),snap['config'],snap['operations']))
         exported=out.cells('202-M1机柜平面图')
         for ref,count in expected.items(): self.assertEqual(out.value(exported[ref]),count,ref)
+
+    def test_every_floorplan_shows_and_exports_all_power_totals(self):
+        def visual_summary(model):
+            cells={cell["ref"]:cell for cell in model["cells"]}; result={}
+            for ref,label in sorted(cells.items(),key=lambda item:coord(item[0])[1]):
+                metric=next((key for required,key in POWER_SUMMARY_LABELS if required.rstrip("：") in label.get("text","")),None)
+                if not metric or metric in result: continue
+                _x,y,x2,_y2=bounds(label["range"]); value=cells[f"{col_name(x2+1)}{y}"]; swatch=cells.get(f"{col_name(x2+2)}{y}")
+                result[metric]={"label":(label["range"],label["x"],label["y"],label["width"],label["height"]),"value":(value["ref"],value["x"],value["y"],value["width"],value["height"],value["text"]),"swatch":None if swatch is None else (swatch["ref"],swatch["x"],swatch["y"],swatch["width"],swatch["height"],swatch.get("style",{}).get("fill"))}
+            return result
+        for scope in "ABCDE":
+            snap=self.service.snapshot(scope); overview=self.service.overview(scope)
+            exported=Workbook(export_workbook((base.TEMPLATES/(scope+".xlsm")).read_bytes(),snap["config"],snap["operations"]))
+            for room in overview["rooms"]:
+                if not room.get("sheet"): continue
+                expected={"total":room["total"],"formal":room["counts"]["formal"],"test":room["counts"]["test"],"off":room["counts"]["off"],"powered":room["counts"]["formal"]+room["counts"]["test"]}
+                page=self.service.layout(scope,room["id"])
+                self.assertEqual(page["summary"]|{"unknown":room["counts"]["unknown"]},expected|{"unknown":room["counts"]["unknown"]})
+                page_visual=visual_summary(page["layout"]); rx,ry,rx2,ry2=bounds(room["region"])
+                expanded=f"{col_name(rx)}{ry}:{col_name(rx2)}{max(ry2,max(coord(item['label'][0].split(':')[0])[1] for item in page_visual.values()))}"
+                self.assertEqual(page_visual,visual_summary(exported.layout(room["sheet"],expanded)),(scope,room["id"]))
+                cells=exported.cells(room["sheet"]); merges=[item.get("ref") for item in exported.sheet(room["sheet"]).iter(T("mergeCell"))]; actual={}
+                for ref,cell in sorted(cells.items(),key=lambda item:coord(item[0])[1]):
+                    label=text_value(exported.value(cell)); metric=next((key for required,key in POWER_SUMMARY_LABELS if required.rstrip("：") in label),None)
+                    if not metric or metric in actual: continue
+                    x,y=coord(ref); merged=next((value for value in merges if (lambda box:box[0]<=x<=box[2] and box[1]<=y<=box[3])(bounds(value))),ref)
+                    target=cells[f"{col_name(bounds(merged)[2]+1)}{y}"]
+                    actual[metric]=exported.value(target)
+                    self.assertNotIn("getcolorcount",target.findtext(T("f"),"").lower())
+                    if metric in ("test","formal"):
+                        swatch=cells[f"{col_name(bounds(merged)[2]+2)}{y}"]
+                        self.assertEqual(exported.styles[int(swatch.get("s","0"))].get("fill"),COLORS[metric],(scope,room["id"],metric))
+                self.assertEqual(actual,expected,(scope,room["id"]))
+                self.assertFalse(any("#NAME?" in text_value(exported.value(cell)) or "getcolorcount" in cell.findtext(T("f"),"").lower() for cell in cells.values()),(scope,room["id"]))
 
     def test_c_merged_history_preserves_ids_continuations_and_original_cells(self):
         content=(base.TEMPLATES/'C.xlsm').read_bytes(); evidence=source_evidence(content,self.models['C'])

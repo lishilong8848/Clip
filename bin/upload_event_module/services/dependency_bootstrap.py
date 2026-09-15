@@ -17,6 +17,7 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "cryptography": "cryptography",
     "PIL": "Pillow",
     "openpyxl": "openpyxl",
+    "pypdf": "pypdf",
     "anyio": "anyio",
     "pydantic": "pydantic",
     "starlette": "starlette",

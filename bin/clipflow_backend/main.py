@@ -1170,6 +1170,8 @@ class FastAPIPortalController:
         @app.get("/water-management/")
         @app.get("/cabinet-power")
         @app.get("/cabinet-power/")
+        @app.get("/cabinet-power/batches")
+        @app.get("/cabinet-power/batches/")
         async def water_management_page(request: Request):
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 

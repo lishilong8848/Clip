@@ -2032,6 +2032,18 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '原始平面图', exact: true }}).click();
           await page.getByRole('button', {{ name: /302[ ]*包间/ }}).click();
           await page.waitForSelector('button.map-cell');
+          const mapSummary = await page.evaluate(() => {{
+            const cells = [...document.querySelectorAll('.map-cell')];
+            const row = label => cells.find(cell => cell.textContent?.trim() === label);
+            const value = label => {{ const target = row(label); return target && cells.filter(cell => cell.offsetTop === target.offsetTop && cell.offsetLeft >= target.offsetLeft + target.clientWidth).sort((a,b) => a.offsetLeft-b.offsetLeft)[0]; }};
+            const swatch = label => {{
+              const target = row(label); if (!target) return [];
+              return cells.filter(cell => cell.offsetTop === target.offsetTop && cell.offsetLeft >= target.offsetLeft + target.clientWidth).map(cell => getComputedStyle(cell).backgroundColor);
+            }};
+            const labels=['包间机柜总数：','已上电机柜总数：','未上电机柜总数：','测试电机柜总数：','正式电机柜总数：'];
+            return {{ labels: labels.filter(label => row(label)), clickable: labels.every(label => value(label)?.tagName === 'BUTTON'), test: swatch('测试电机柜总数：'), formal: swatch('正式电机柜总数：') }};
+          }});
+          if (mapSummary.labels.length !== 5 || !mapSummary.clickable || !mapSummary.test.includes('rgb(255, 192, 0)') || !mapSummary.formal.includes('rgb(255, 0, 0)')) throw new Error(`cabinet workbook-format summary mismatch: ${{JSON.stringify(mapSummary)}}`);
           await page.locator('button.map-cell').filter({{ hasText: /^B03$/ }}).click();
           await page.waitForSelector('.timeline li');
           if (!(await page.locator('.timeline li').innerText()).includes('上正式电')) throw new Error('cabinet history is not scoped to room/rack');
@@ -2068,6 +2080,25 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.setViewportSize({{ width: 1366, height: 768 }});
           require('fs').mkdirSync('output/playwright', {{ recursive: true }});
           await page.screenshot({{ path: 'output/playwright/cabinet-desktop.png', fullPage: true }});
+          const batchCreated = await page.evaluate(async () => {{
+            const response = await fetch('/api/cabinet-power/batches', {{
+              method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+              body: JSON.stringify({{ rows: [{{ scope:'A', room:'302', rack:'B03', rack_type:'网络机柜', action:'上测试电', expected:'2026-09-14 12:00:00', actual:'2026-09-14 12:00:00', result:'成功' }}] }}),
+            }});
+            return response.json();
+          }});
+          if (!batchCreated.ok || !batchCreated.data?.batch_id) throw new Error(`cabinet batch fixture failed: ${{JSON.stringify(batchCreated)}}`);
+          await page.goto(new URL(`/cabinet-power/batches?scope=A&batch_id=${{batchCreated.data.batch_id}}`, cfg.url).toString());
+          await page.waitForSelector('.batch-summary');
+          if (!(await page.locator('.batch-summary').innerText()).includes('待新增')) throw new Error('cabinet batch summary missing');
+          const batchDesktopOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+          if (batchDesktopOverflow) throw new Error('cabinet batch desktop page overflows horizontally');
+          await page.screenshot({{ path: 'output/playwright/cabinet-batch-desktop.png', fullPage: true }});
+          await page.setViewportSize({{ width: 390, height: 844 }});
+          const batchNarrowOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+          if (batchNarrowOverflow) throw new Error('cabinet batch narrow page overflows horizontally');
+          await page.screenshot({{ path: 'output/playwright/cabinet-batch-narrow.png', fullPage: true }});
+          await page.setViewportSize({{ width: 1366, height: 768 }});
           await page.goto(cfg.url, {{ waitUntil: 'domcontentloaded' }});
           await page.waitForSelector('.module-card');
           const visibleBroadcastDuplicates = await page.locator('.broadcast-item[aria-hidden="true"]').evaluateAll(nodes =>
@@ -3353,7 +3384,7 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
-                timeout=120,
+                timeout=180,
             )
         if completed.returncode != 0:
             raise RuntimeError(

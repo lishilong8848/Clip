@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
@@ -64,6 +65,7 @@ class CabinetPowerTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.store=MemoryStore()
+        self.store.db_path=Path(self.tmp.name)/"state.sqlite"
         self.remote=FakeFeishu(self.source_records); self.service=CabinetPowerService(self.store,self.remote,self.tmp.name)
         self.service._directory=FakeFeishu(self.directory_records)
         self.service.do_refresh("",{}, {})
@@ -73,6 +75,12 @@ class CabinetPowerTests(unittest.TestCase):
 
     def test_create_uses_stable_uuid4_client_token_helper(self):
         self.assertIn("_stable_uuid4_client_token",CabinetFeishu.create.__code__.co_names)
+        remote=CabinetFeishu(); captured={}
+        def request(method,path,body=None,params=None): captured.update(method=method,path=path,body=body,params=params); return {"record":{"record_id":"recToken","fields":body["fields"]}}
+        remote.request=request
+        remote.create({"机架":"A01"},"manual_operation_123456")
+        token=captured["params"]["client_token"]
+        self.assertEqual((captured["method"],captured["path"],uuid.UUID(token).version),("POST","records",4))
 
     def test_editor_hides_blank_template_groups_and_names_real_transition(self):
         source=(Path(__file__).parent/"lan_bitable_template_portal/frontend/src/components/CabinetPowerPage.vue").read_text(encoding="utf-8")
@@ -240,6 +248,66 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code,409)
         self.assertEqual(self.remote.creates,0)
 
+    def test_batch_pdf_overlap_is_local_until_confirmed(self):
+        operation=next(
+            op for record in self.source_records
+            if record["fields"]["楼栋"]=="A楼"
+            for op in [from_feishu(record)]
+            if any(event["result"]=="成功" and event["actual"]<="2026-09-15 00:00:00" for event in op["events"])
+        )
+        event=next(event for event in operation["events"] if event["result"]=="成功" and event["actual"]<="2026-09-15 00:00:00")
+        rack_type=next(item["rack_type"] for item in self.configs["A"]["inventory"] if (item["room"],item["rack"])==(operation["room"],operation["rack"]))
+        text=f"""机柜{event['action']}确认单
+申请时间： 2026-09-14 10:00:00
+申请单号： [Z260914001234567890] 操作类型： {event['action']}
+EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['rack']}  {operation['rack']}  {rack_type}  2UR  {event['actual']}  成功  {event['actual']}
+"""
+        class Page:
+            def extract_text(self,**_kwargs): return text
+        class Reader:
+            is_encrypted=False; pages=[Page()]
+        self.service.batches._pdf_reader=lambda _path:Reader()
+        before=self.service.overview("A")["record_count"]
+        batch=self.service.batches.recognize([("sample.pdf",b"%PDF-test")],"owner")
+        deadline=time.time()+5
+        while time.time()<deadline and (batch:=self.service.batches.get(batch["batch_id"]))["status"]=="recognizing": time.sleep(.01)
+        self.assertEqual(batch["stats"]["duplicate"],1)
+        repeated=self.service.batches.recognize([("renamed.pdf",b"%PDF-test")],"owner")
+        self.assertEqual(repeated["batch_id"],batch["batch_id"])
+        cleared=self.service.batches.clear_overlaps(batch["batch_id"],batch["version"],"owner",["A"])
+        self.assertEqual(cleared["rows"][0]["status"],"excluded_duplicate")
+        self.assertEqual(self.service.overview("A")["record_count"],before)
+        cancelled=self.service.batches.cancel(batch["batch_id"],"owner")
+        self.assertEqual(cancelled["status"],"cancelled")
+        cleaned=self.service.batches.cleanup_file(batch["batch_id"],cancelled["files"][0]["file_id"],"owner")
+        self.assertTrue(cleaned["files"][0]["cleaned_at"])
+
+    def test_batch_confirm_creates_abc_and_appends_de(self):
+        rows=[]
+        for scope in ("A","D"):
+            rack=self.configs[scope]["inventory"][0]
+            rows.append({"scope":scope,"room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
+                         "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"})
+        before={scope:self.service.overview(scope)["record_count"] for scope in ("A","D")}
+        batch=self.service.batches.create_manual(rows,"owner")
+        with self.assertRaises(CabinetError) as denied:
+            self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        self.assertEqual(denied.exception.status_code,403)
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A","D"])
+        deadline=time.time()+10
+        while time.time()<deadline:
+            batch=self.service.batches.get(batch["batch_id"])
+            if batch["status"]!="running": break
+            time.sleep(.01)
+        self.assertEqual(batch["stats"]["completed"],2)
+        self.assertEqual(self.service.overview("A")["record_count"],before["A"]+1)
+        self.assertEqual(self.service.overview("D")["record_count"],before["D"])
+        self.assertTrue(any(event["actual"]=="2026-09-14 01:02:03" for op in self.service._snapshot("D")["operations"] for event in op["events"]))
+        for scope in ("A","D"):
+            record_id=next(row["record_id"] for row in batch["rows"] if row["scope"]==scope)
+            saved=next(op for op in self.service._snapshot(scope)["operations"] if op["record_id"]==record_id)
+            self.assertTrue(any(item["batch_id"]==batch["batch_id"] for item in saved["meta"]["batch_rows"]))
+
     def test_de_newest_group_stays_in_current_operation_columns(self):
         old=from_feishu(next(r for r in self.source_records if r["fields"]["楼栋"]=="E楼" and r["fields"]["来源行号"]==2))
         groups=old["groups"]+[{"action":"下正式电","actual":"2026-09-09 10:00:00","expected":""}]
@@ -256,7 +324,10 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual(list(before.sheets),list(after.sheets))
             self.assertEqual(before.archive.read("xl/vbaProject.bin"),after.archive.read("xl/vbaProject.bin"))
             for name in before.sheets:
-                self.assertEqual([x.get("ref") for x in before.sheet(name).iter(T("mergeCell"))],[x.get("ref") for x in after.sheet(name).iter(T("mergeCell"))])
+                original_merges=[x.get("ref") for x in before.sheet(name).iter(T("mergeCell"))]
+                exported_merges=[x.get("ref") for x in after.sheet(name).iter(T("mergeCell"))]
+                self.assertTrue(set(original_merges)<=set(exported_merges),name)
+                if "平面图" not in name: self.assertEqual(original_merges,exported_merges)
             for fmt in self.models[scope]["formats"]:
                 name=fmt["sheet"]; raw=dict(before.rows(name)); actual=dict(after.rows(name))
                 for rn,row in raw.items():
@@ -318,5 +389,23 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual((bootstrap["status"],bootstrap["ready"]),("succeeded",5))
             data=client.get("/api/cabinet-power/overview?scope=A",headers={"x-test-login":"1"}).json()["data"]
             self.assertEqual(data["record_count"],1031)
+            self.assertEqual(client.get("/api/cabinet-power/batches",headers={"x-test-login":"1"}).status_code,200)
+            rack=self.configs["A"]["inventory"][0]
+            created=client.post("/api/cabinet-power/batches",headers={"x-test-login":"1"},json={"rows":[{"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],"action":"上正式电","expected":"2026-09-14 12:00:00","actual":"2026-09-14 12:00:00","result":"成功"}]}).json()["data"]
+            self.assertEqual(created["stats"]["total"],1)
+            self.assertEqual(client.get("/api/cabinet-power/batches/"+created["batch_id"],headers={"x-test-login":"1"}).status_code,200)
+            text=f"机柜上测试电确认单\n申请时间： 2026-09-14 10:00:00\n申请单号：[Z260914001234567890] 操作类型： 上测试电\nEA118  A{rack['room'][0]}-{int(rack['room'][1:])}.EA118  {rack['rack']}  {rack['rack']}  {rack['rack_type']}  2UR  2026-09-14 10:00:00  成功  2026-09-14 09:59:00"
+            class Page:
+                def extract_text(self,**_kwargs): return text
+            controller._cabinet_power.batches._pdf_reader=lambda _path:SimpleNamespace(is_encrypted=False,pages=[Page()])
+            recognized=client.post("/api/cabinet-power/batches/recognize",headers={"x-test-login":"1"},files=[("files",("sample.pdf",b"%PDF-route","application/pdf"))])
+            self.assertEqual(recognized.status_code,202)
+            recognized_id=recognized.json()["data"]["batch_id"]
+            deadline=time.time()+5
+            while time.time()<deadline:
+                detail=client.get("/api/cabinet-power/batches/"+recognized_id,headers={"x-test-login":"1"}).json()["data"]
+                if detail["status"]!="recognizing": break
+                time.sleep(.01)
+            self.assertEqual(detail["stats"]["total"],1)
 
 if __name__=="__main__": unittest.main()
