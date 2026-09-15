@@ -28214,6 +28214,34 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("form.replaceWith(empty);", html)
         self.assertIn("url.searchParams.delete(key);", html)
 
+    def test_workbench_lite_all_floating_dialogs_have_header_close_buttons(self):
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+
+        html = render_workbench_lite(
+            payload={"records": [], "ongoing": [], "daily_summary": {"stats": {}}},
+            session={"name": "测试用户", "is_admin": False},
+            scope="E",
+            work_type="maintenance",
+        )
+
+        dismiss_targets = (
+            "#lite-polling-sop-close",
+            "#lite-polling-sop-delete-cancel",
+            "#lite-polling-sop-type-cancel",
+            "#lite-change-confirmation-close",
+            "#lite-change-screenshot-preview-close",
+            "#lite-end-check-cancel",
+            "#lite-target-candidates-cancel",
+            "#lite-manual-source-cancel",
+            "#lite-repair-event-cancel",
+            "#lite-undo-confirm-cancel",
+        )
+        self.assertEqual(html.count('class="end-check-close"'), len(dismiss_targets))
+        for target in dismiss_targets:
+            self.assertIn(f'data-dialog-dismiss="{target}"', html)
+            self.assertIn(f'id="{target.removeprefix("#")}"', html)
+        self.assertIn("const dialogDismiss = target.closest('[data-dialog-dismiss]')", html)
+
     def test_workbench_lite_undo_requires_confirmation_and_waits_for_job_success(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite
 

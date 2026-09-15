@@ -3136,10 +3136,13 @@ def render_workbench_lite(
     .end-check-backdrop {{ position:fixed; inset:0; z-index:240; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
     .end-check-backdrop[hidden] {{ display:none; }}
     .end-check-dialog {{ width:min(560px,100%); border:1px solid #d8e5f7; border-radius:24px; background:#fff; box-shadow:0 28px 70px rgba(8,32,74,.24); overflow:hidden; }}
-    .end-check-head {{ padding:15px 18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
+    .end-check-head {{ position:relative; padding:15px 62px 15px 18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
     .end-check-head span {{ display:inline-flex; width:max-content; border-radius:999px; padding:5px 10px; color:#0a57d8; background:#eaf3ff; font-weight:900; font-size:12px; }}
     .end-check-head strong {{ display:block; margin-top:7px; color:#0c244d; font-size:18px; line-height:1.25; }}
     .end-check-head p {{ display:none; }}
+    .end-check-close {{ position:absolute; top:9px; right:12px; width:40px; height:40px; display:grid; place-items:center; border:1px solid #cfe0f5; border-radius:10px; padding:0; color:#0a57d8; background:#fff; font-size:23px; line-height:1; cursor:pointer; }}
+    .end-check-close:hover {{ border-color:#1f63ff; background:#eef6ff; }}
+    .end-check-close:focus-visible {{ outline:3px solid rgba(31,99,255,.22); outline-offset:2px; }}
     .end-check-list {{ display:grid; gap:7px; margin:0; padding:14px 18px; list-style:none; }}
     .end-check-list li {{ display:grid; grid-template-columns:20px minmax(0,1fr); gap:9px; align-items:start; border:1px solid #dce8f8; border-radius:15px; padding:9px 10px; background:#fbfdff; }}
     .end-check-list li::before {{ content:""; width:14px; height:14px; margin-top:2px; border-radius:999px; background:#94a3b8; box-shadow:0 0 0 4px #f1f5f9; }}
@@ -3418,21 +3421,21 @@ def render_workbench_lite(
   </main>
   <div class="end-check-backdrop" id="lite-polling-sop-modal" hidden>
     <section class="end-check-dialog polling-sop-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-polling-sop-title">
-      <header class="end-check-head"><span>工单 SOP</span><strong id="lite-polling-sop-title">SOP 管理</strong></header>
+      <header class="end-check-head"><span>工单 SOP</span><strong id="lite-polling-sop-title">SOP 管理</strong><button class="end-check-close" type="button" data-dialog-dismiss="#lite-polling-sop-close" aria-label="关闭 SOP 管理" title="关闭">×</button></header>
       <div class="polling-sop-body"><aside class="polling-sop-list" id="lite-polling-sop-list"></aside><section class="polling-sop-editor" id="lite-polling-sop-editor"></section></div>
       <footer class="end-check-actions"><span class="job-status" id="lite-polling-sop-feedback" aria-live="polite" hidden></span><button class="btn ghost" type="button" id="lite-polling-sop-refresh" title="补传本地独有 SOP，并从多维表同步最新内容">同步多维</button><button class="btn ghost" type="button" id="lite-polling-sop-new">新增 SOP</button><button class="btn primary" type="button" id="lite-polling-sop-close">关闭</button></footer>
     </section>
   </div>
   <div class="end-check-backdrop" id="lite-polling-sop-delete-confirm" hidden>
     <section class="end-check-dialog" role="alertdialog" aria-modal="true" aria-labelledby="lite-polling-sop-delete-title">
-      <header class="end-check-head"><span>删除工单 SOP</span><strong id="lite-polling-sop-delete-title">确认删除这份 SOP</strong></header>
+      <header class="end-check-head"><span>删除工单 SOP</span><strong id="lite-polling-sop-delete-title">确认删除这份 SOP</strong><button class="end-check-close" type="button" data-dialog-dismiss="#lite-polling-sop-delete-cancel" aria-label="关闭删除确认" title="关闭">×</button></header>
       <div class="undo-confirm-copy"><strong id="lite-polling-sop-delete-name"></strong><span>将同时删除本机保存的步骤和附件。已经生成的工单不受影响，此操作不可撤销。</span><span id="lite-polling-sop-delete-error" class="action-reason blocked" hidden></span></div>
       <footer class="end-check-actions"><button class="btn ghost" type="button" id="lite-polling-sop-delete-cancel">取消</button><button class="btn danger" type="button" id="lite-polling-sop-delete-apply">确认删除 SOP</button></footer>
     </section>
   </div>
   <div class="end-check-backdrop" id="lite-polling-sop-type-confirm" hidden inert>
     <section class="end-check-dialog" role="alertdialog" aria-modal="true" aria-labelledby="lite-polling-sop-type-title" aria-describedby="lite-polling-sop-type-copy">
-      <header class="end-check-head"><span>转换工单 SOP</span><strong id="lite-polling-sop-type-title">确认转换适用类型</strong></header>
+      <header class="end-check-head"><span>转换工单 SOP</span><strong id="lite-polling-sop-type-title">确认转换适用类型</strong><button class="end-check-close" type="button" data-dialog-dismiss="#lite-polling-sop-type-cancel" aria-label="关闭转换确认" title="关闭">×</button></header>
       <div class="undo-confirm-copy" id="lite-polling-sop-type-copy"><strong id="lite-polling-sop-type-summary"></strong><span>当前步骤修改将一起保存，已上传附件保持不变；已经生成的工单继续使用原快照。</span><span id="lite-polling-sop-type-error" class="action-reason blocked" hidden></span></div>
       <footer class="end-check-actions"><button class="btn ghost" type="button" id="lite-polling-sop-type-cancel">取消</button><button class="btn primary" type="button" id="lite-polling-sop-type-apply">转换并保存</button></footer>
     </section>
@@ -3442,6 +3445,7 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>变更确认</span>
         <strong id="lite-change-confirmation-title">阿里截图与H楼确认</strong>
+        <button class="end-check-close" type="button" data-dialog-dismiss="#lite-change-confirmation-close" aria-label="关闭变更确认" title="关闭">×</button>
       </header>
       <div class="change-confirmation-summary">
         <button type="button" data-change-confirmation-filter="missing_screenshot"><span>待上传截图</span><b id="lite-change-missing-count">-</b></button>
@@ -3457,7 +3461,7 @@ def render_workbench_lite(
   </div>
   <div class="end-check-backdrop" id="lite-change-screenshot-preview" hidden>
     <section class="end-check-dialog change-confirmation-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-change-screenshot-preview-title">
-      <header class="end-check-head"><span>图片预览</span><strong id="lite-change-screenshot-preview-title">查看原图</strong></header>
+      <header class="end-check-head"><span>图片预览</span><strong id="lite-change-screenshot-preview-title">查看原图</strong><button class="end-check-close" type="button" data-dialog-dismiss="#lite-change-screenshot-preview-close" aria-label="关闭图片预览" title="关闭">×</button></header>
       <div class="change-confirmation-preview-body"><img id="lite-change-screenshot-preview-image" alt="阿里确认截图原图"></div>
       <footer class="end-check-actions"><button class="btn primary" type="button" id="lite-change-screenshot-preview-close">关闭</button></footer>
     </section>
@@ -3467,6 +3471,7 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>结束前检查</span>
         <strong id="lite-end-check-title">确认发送结束通告</strong>
+        <button class="end-check-close" type="button" data-dialog-dismiss="#lite-end-check-cancel" aria-label="关闭结束确认" title="关闭">×</button>
       </header>
       <ul class="end-check-list" id="lite-end-check-list"></ul>
       <footer class="end-check-actions">
@@ -3480,6 +3485,7 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>目标多维关系</span>
         <strong id="lite-target-candidates-title">选择对应目标记录</strong>
+        <button class="end-check-close" type="button" data-dialog-dismiss="#lite-target-candidates-cancel" aria-label="关闭目标记录选择" title="关闭">×</button>
       </header>
       <div class="target-candidate-list" id="lite-target-candidate-list"></div>
       <footer class="end-check-actions">
@@ -3493,6 +3499,7 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>计划通告关联</span>
         <strong id="lite-manual-source-title">选择要绑定的计划通告</strong>
+        <button class="end-check-close" type="button" data-dialog-dismiss="#lite-manual-source-cancel" aria-label="关闭计划通告关联" title="关闭">×</button>
       </header>
       <div class="manual-source-tools">
         <input id="lite-manual-source-search" type="search" placeholder="搜索名称、楼栋或专业" autocomplete="off">
@@ -3511,6 +3518,7 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>事件转检修</span>
         <strong id="lite-repair-event-title">选择对应事件</strong>
+        <button class="end-check-close" type="button" data-dialog-dismiss="#lite-repair-event-cancel" aria-label="关闭事件选择" title="关闭">×</button>
       </header>
       <div class="manual-source-tools">
         <input id="lite-repair-event-search" type="search" placeholder="搜索事件、维修项目、楼栋或专业" autocomplete="off">
@@ -3527,6 +3535,7 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>回退确认</span>
         <strong id="lite-undo-confirm-title">确认回退这条通告</strong>
+        <button class="end-check-close" type="button" data-dialog-dismiss="#lite-undo-confirm-cancel" aria-label="关闭回退确认" title="关闭">×</button>
       </header>
       <div class="undo-confirm-copy">
         <strong id="lite-undo-confirm-name"></strong>
@@ -7744,6 +7753,13 @@ def render_workbench_lite(
     document.addEventListener('click', async (event) => {{
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      const dialogDismiss = target.closest('[data-dialog-dismiss]');
+      if (dialogDismiss) {{
+        event.preventDefault();
+        const dismissSelector = dialogDismiss.getAttribute('data-dialog-dismiss');
+        if (dismissSelector) document.querySelector(dismissSelector)?.click();
+        return;
+      }}
       const backLink = target.closest('#lite-back-link');
       if (backLink) {{
         event.preventDefault();

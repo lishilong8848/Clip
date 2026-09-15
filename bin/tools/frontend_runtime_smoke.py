@@ -2991,7 +2991,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }});
             await bindingPage.locator('#lite-manual-source-candidates:not([hidden])').waitFor();
             if (!(await bindingPage.locator('#lite-manual-source-unbound-confirm').isDisabled())) throw new Error('manual unbound confirmation enabled while candidates were loading');
-            await bindingPage.getByRole('button', {{ name: '取消', exact: true }}).last().click();
+            await bindingPage.getByRole('button', {{ name: '关闭计划通告关联', exact: true }}).click();
             await bindingPage.waitForTimeout(650);
             if (manualSourceRequests !== 1 || manualActionRequests !== 0) throw new Error(`cancelled or duplicate manual binding preflight submitted unexpectedly: source=${{manualSourceRequests}}, action=${{manualActionRequests}}`);
             await bindingPage.unroute('**/api/workbench/source-options?*');
@@ -3059,7 +3059,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           const insertCoolingUnit = page.getByRole('button', {{ name: '插入制冷单元' }}).first();
           await insertCoolingUnit.click();
           if (!(await page.locator('.polling-step-edit textarea').first().inputValue()).includes('{{{{from}}}}')) throw new Error('adjust cooling unit placeholder was not inserted');
-          await page.locator('#lite-polling-sop-close').click();
+          await page.getByRole('button', {{ name: '关闭 SOP 管理', exact: true }}).click();
           await page.setViewportSize({{ width: 1366, height: 768 }});
           await page.getByRole('button', {{ name: '解析粘贴' }}).click();
           await page.waitForSelector('text=解析到待发起通告', {{ timeout: 10000 }});
