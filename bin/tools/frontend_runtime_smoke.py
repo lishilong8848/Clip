@@ -592,6 +592,31 @@ class _SmokePortalService:
             "source_snapshot_ready": True,
         }
 
+    def list_bindable_source_items(
+        self,
+        *,
+        scope: str = "ALL",
+        work_type: str = "maintenance",
+        search: str = "",
+        limit: int = 200,
+        **_ignored: object,
+    ) -> list[dict]:
+        if self._normalize_scope(scope) not in {"ALL", "A"} or work_type not in {"maintenance", "change"}:
+            return []
+        changing = work_type == "change"
+        items = [{
+            "source_record_id": "src-change-a-001" if changing else "src-maint-a-001",
+            "work_type": work_type,
+            "title": "A楼网络设备变更测试" if changing else "EA118机房A楼冷机月度巡检",
+            "building": "A楼",
+            "specialty": "网络" if changing else "暖通",
+            "progress": "未开始",
+        }]
+        query = str(search or "").strip().lower()
+        if query:
+            items = [item for item in items if query in " ".join(str(value) for value in item.values()).lower()]
+        return items[: max(1, min(int(limit or 200), 500))]
+
     def create_action_job(self, request_payload: dict) -> tuple[str, bool]:
         job_id = uuid.uuid4().hex
         now = time.time()
@@ -2922,6 +2947,62 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             const mobileIssues = await auditAllMobileRoutes(page);
             if (mobileIssues.length) throw new Error(`mobile layout issues: ${{JSON.stringify(mobileIssues)}}`);
             await assertConnectionGuard();
+            const bindingPage = await context.newPage();
+            await bindingPage.goto(new URL('/workbench-lite?scope=A&work_type=maintenance&manual=1', cfg.url).toString());
+            await bindingPage.waitForSelector('#lite-notice-detail-overlay.open');
+            await bindingPage.getByText('计划通告关联（必须选择一种）', {{ exact: true }}).waitFor();
+            if (await bindingPage.locator('[data-manual-quick-source]').count() < 1) throw new Error('manual notice inline source recommendations missing');
+            const leftBind = bindingPage.locator('[data-bind-current-manual]:visible').first();
+            await leftBind.waitFor();
+            await leftBind.click();
+            await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'bind' && Boolean(document.querySelector('[name="source_record_id"]')?.value));
+            await bindingPage.locator('[data-manual-binding-mode="unbound"]').first().click();
+            await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'unbound');
+            await bindingPage.locator('#lite-notice-drawer-close').click();
+            await bindingPage.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'));
+            if (await bindingPage.locator('[data-bind-current-manual]:visible').count()) throw new Error('manual source bind actions remained visible after closing drawer');
+            await bindingPage.goto(new URL('/workbench-lite?scope=A&work_type=change&manual=1', cfg.url).toString());
+            await bindingPage.waitForSelector('#lite-notice-detail-overlay.open');
+            let manualActionRequests = 0;
+            let manualSourceRequests = 0;
+            bindingPage.on('request', request => {{ if (new URL(request.url()).pathname === '/api/workbench-actions') manualActionRequests += 1; }});
+            await bindingPage.evaluate(() => {{
+              const form=document.getElementById('lite-notice-form');
+              form?.querySelectorAll('[required]').forEach(field => {{
+                if (field instanceof HTMLInputElement && field.type === 'datetime-local') field.value = field.name === 'end_time' ? '2026-09-15T18:00' : '2026-09-15T09:00';
+                else if (field instanceof HTMLSelectElement) field.value = Array.from(field.options).find(option => option.value)?.value || '';
+                else if ('value' in field && !field.value) field.value = field.name === 'title' ? 'A楼纯手填变更绑定检查' : '测试内容';
+                field.dispatchEvent(new Event('input', {{bubbles:true}}));
+                field.dispatchEvent(new Event('change', {{bubbles:true}}));
+              }});
+            }});
+            await bindingPage.locator('[data-manual-binding-mode="unbound"]').first().click();
+            const manualSend = bindingPage.getByRole('button', {{ name: '发送开始', exact: true }});
+            await bindingPage.waitForFunction(() => !document.querySelector('#lite-notice-form button[name="submit_action"]')?.disabled);
+            await bindingPage.route('**/api/workbench/source-options?*', async route => {{
+              manualSourceRequests += 1;
+              await new Promise(resolve => setTimeout(resolve, 500));
+              await route.fulfill({{ status: 200, contentType: 'application/json', body: JSON.stringify({{ ok: true, data: {{ items: [] }} }}) }});
+            }});
+            await bindingPage.evaluate(() => {{
+              const button = document.querySelector('#lite-notice-form button[name="submit_action"]');
+              button?.click();
+              button?.click();
+            }});
+            await bindingPage.locator('#lite-manual-source-candidates:not([hidden])').waitFor();
+            if (!(await bindingPage.locator('#lite-manual-source-unbound-confirm').isDisabled())) throw new Error('manual unbound confirmation enabled while candidates were loading');
+            await bindingPage.getByRole('button', {{ name: '取消', exact: true }}).last().click();
+            await bindingPage.waitForTimeout(650);
+            if (manualSourceRequests !== 1 || manualActionRequests !== 0) throw new Error(`cancelled or duplicate manual binding preflight submitted unexpectedly: source=${{manualSourceRequests}}, action=${{manualActionRequests}}`);
+            await bindingPage.unroute('**/api/workbench/source-options?*');
+            await manualSend.click();
+            await bindingPage.getByText(/发现 \\d+ 条同楼栋、同类型的可绑定计划通告/).waitFor();
+            if (manualActionRequests !== 0) throw new Error('manual notice submitted before unbound warning approval');
+            const submitted = bindingPage.waitForRequest(request => new URL(request.url()).pathname === '/api/workbench-actions');
+            await bindingPage.getByRole('button', {{ name: '确认不绑定并发送', exact: true }}).click();
+            await submitted;
+            if (manualActionRequests !== 1) throw new Error(`manual unbound approval submitted ${{manualActionRequests}} requests`);
+            await bindingPage.close();
             const recoveryPage = await context.newPage();
             await recoveryPage.route('**/CabinetPowerPage-*.js', route => route.abort());
             await recoveryPage.goto(new URL('/cabinet-power?scope=A', cfg.url).toString());

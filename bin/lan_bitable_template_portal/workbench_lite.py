@@ -1704,8 +1704,21 @@ def _record_rows(
         )
         disabled_class = " is-disabled" if disabled_reason else ""
         aria_disabled = "true" if disabled_reason else "false"
+        bind_action = ""
+        if source_record_id and not linked_ongoing and not disabled_reason:
+            candidate = {
+                "source_record_id": source_record_id,
+                "title": title,
+                "building": _record_building(row_source),
+                "specialty": _record_specialty(row_source),
+                "progress": progress,
+            }
+            bind_action = (
+                '<button class="notice-bind-action" type="button" data-bind-current-manual hidden '
+                f'data-candidate="{_e(_json_dumps(candidate))}" aria-label="绑定{_e(title)}到当前手填">绑定当前手填</button>'
+            )
         rows.append(
-        f"<a class=\"notice-row{active}{disabled_class}\" href=\"{_e(url)}\" title=\"{_e(disabled_reason or title)}\""
+        f"<div class=\"notice-row-wrap\"><a class=\"notice-row{active}{disabled_class}\" href=\"{_e(url)}\" title=\"{_e(disabled_reason or title)}\""
         f" aria-current=\"{'true' if active else 'false'}\""
         f" aria-disabled=\"{aria_disabled}\""
         f" data-row-kind=\"source\""
@@ -1730,7 +1743,7 @@ def _record_rows(
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(progress)}</span>"
             f"{_row_meta(_record_building(row_source), _record_specialty(row_source), progress=progress, extra_chips=extra_chips)}"
-            "</a>"
+            f"</a>{bind_action}</div>"
         )
     return "\n".join(rows)
 
@@ -1994,20 +2007,43 @@ def _source_link_options(
     return options
 
 
-def _manual_source_binding_panel() -> str:
-    return """
+def _manual_source_binding_panel(options: list[dict[str, str]] | None = None) -> str:
+    recommendations: list[str] = []
+    for item in (options or [])[:3]:
+        candidate = {
+            key: str(item.get(key) or "")
+            for key in ("source_record_id", "title", "building", "specialty", "progress")
+        }
+        meta = " · ".join(
+            value for value in (candidate["progress"], candidate["building"], candidate["specialty"]) if value
+        )
+        recommendations.append(
+            '<button class="manual-source-recommendation" type="button" data-manual-quick-source '
+            f'data-candidate="{_e(_json_dumps(candidate))}">'
+            f'<strong>{_e(candidate["title"] or "未命名计划通告")}</strong>'
+            f'<small>{_e(meta or "可绑定")}</small></button>'
+        )
+    recommendation_html = (
+        '<div class="manual-source-recommendation-list">'
+        + "".join(recommendations)
+        + '</div><button class="btn ghost" type="button" data-manual-binding-mode="bind">查看全部计划通告</button>'
+        if recommendations
+        else '<p class="manual-source-empty">当前筛选范围没有可绑定记录，可选择不绑定。</p>'
+    )
+    return f"""
         <section class="manual-source-binding" data-manual-source-binding>
           <input type="hidden" name="manual_binding_required" value="1">
           <input type="hidden" name="manual_binding_choice" value="">
           <input type="hidden" name="source_record_id" value="">
           <div class="manual-source-binding-head">
-            <strong>计划通告关联</strong>
+            <strong>计划通告关联（必须选择一种）</strong>
             <span id="lite-manual-binding-status">请选择绑定方式</span>
           </div>
           <div class="manual-source-binding-actions">
-            <button class="btn ghost" type="button" data-manual-binding-mode="bind">绑定计划通告</button>
-            <button class="btn ghost" type="button" data-manual-binding-mode="unbound">不绑定</button>
+            <button class="btn ghost" type="button" data-manual-binding-mode="bind" aria-pressed="false">绑定已有计划通告（推荐）</button>
+            <button class="btn ghost" type="button" data-manual-binding-mode="unbound" aria-pressed="false">不绑定，作为独立通告</button>
           </div>
+          <div class="manual-source-recommendations"><span>同楼栋、同类型的可绑定记录</span>{recommendation_html}</div>
         </section>
     """
 
@@ -2339,7 +2375,7 @@ def _detail_form(
         )
     )
     source_link_html = (
-        _manual_source_binding_panel()
+        _manual_source_binding_panel(source_link_options)
         if require_manual_binding
         else _source_link_select(
             ongoing_item=ongoing_item,
@@ -2883,6 +2919,10 @@ def render_workbench_lite(
     body.notice-drawer-open {{ overflow:hidden; }}
     .notice-detail-overlay {{ position:fixed; z-index:180; inset:0; display:none; justify-content:flex-end; background:rgba(8,25,52,.5); backdrop-filter:blur(3px); }}
     .notice-detail-overlay.open {{ display:flex; }}
+    @media (min-width:1181px) {{
+      .notice-detail-overlay.manual-binding-mode {{ pointer-events:none; background:transparent; backdrop-filter:none; }}
+      .notice-detail-overlay.manual-binding-mode .notice-detail-drawer {{ width:min(860px,52vw); pointer-events:auto; }}
+    }}
     .panel.notice-detail-drawer {{ width:min(1180px,calc(100vw - 72px)); height:100%; min-width:0; overflow:hidden; display:grid; grid-template-rows:auto minmax(0,1fr); border-radius:16px 0 0 16px; border-right:0; padding:0; background:#fff; box-shadow:-18px 0 56px rgba(8,37,82,.22); isolation:isolate; }}
     .panel.notice-detail-drawer::before {{ display:none; }}
     .notice-detail-drawer.loading::after {{ top:82px; right:22px; }}
@@ -2932,7 +2972,11 @@ def render_workbench_lite(
     .attention-row span {{ display:block; margin-top:4px; color:#9a3412; font-size:12px; line-height:1.45; overflow-wrap:anywhere; }}
     .attention-actions {{ display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }}
     .attention-actions .btn {{ min-height:30px; padding:5px 10px; border-radius:10px; font-size:12px; }}
+    .notice-row-wrap {{ position:relative; min-width:0; }}
     .notice-row,.ongoing-row {{ position:relative; min-width:0; display:grid; gap:5px; border:1px solid #dce8f8; border-radius:13px; padding:8px 10px 8px 13px; color:#0c244d; text-decoration:none; background:#fff; transition:border-color .12s ease, box-shadow .12s ease, transform .12s ease, background .12s ease; overflow:hidden; }}
+    .notice-row-wrap.can-bind-manual .notice-row {{ padding-bottom:38px; }}
+    .notice-bind-action {{ position:absolute; right:8px; bottom:7px; min-height:25px; border:1px solid #a8cdfa; border-radius:8px; padding:3px 8px; color:#0a57d8; background:#eef6ff; font-size:10px; font-weight:900; cursor:pointer; }}
+    .notice-bind-action:disabled {{ color:#087443; border-color:#b7e2cc; background:#eaf9f2; }}
     .notice-row::before,.ongoing-row::before {{ content:""; position:absolute; left:0; top:10px; bottom:10px; width:4px; border-radius:999px; background:#cfe0f5; }}
     .notice-row.active::before,.ongoing-row.active::before {{ background:#1f63ff; }}
     .notice-row:hover,.ongoing-row:hover {{ border-color:#9cc7ff; box-shadow:0 8px 18px rgba(31,99,255,.08); transform:translateY(-1px); }}
@@ -3044,6 +3088,13 @@ def render_workbench_lite(
     .manual-source-binding-actions {{ display:flex; flex-wrap:wrap; gap:7px; }}
     .manual-source-binding-actions .btn {{ min-height:30px; padding:5px 10px; border-radius:999px; }}
     .manual-source-binding-actions .btn.active {{ color:#fff; border-color:#1f63ff; background:#1f63ff; box-shadow:0 8px 18px rgba(31,99,255,.18); }}
+    .manual-source-recommendations {{ display:grid; gap:7px; border-top:1px solid #d7e6f8; padding-top:8px; }}
+    .manual-source-recommendations > span {{ color:#536a82; font-size:11px; font-weight:900; }}
+    .manual-source-recommendation-list {{ display:grid; gap:6px; }}
+    .manual-source-recommendation {{ display:grid; gap:3px; width:100%; border:1px solid #d7e6f8; border-radius:10px; padding:8px 10px; color:#0c244d; background:#fff; text-align:left; cursor:pointer; }}
+    .manual-source-recommendation:hover,.manual-source-recommendation.active {{ border-color:#1f63ff; background:#f2f7ff; }}
+    .manual-source-recommendation strong {{ overflow-wrap:anywhere; font-size:12px; }}
+    .manual-source-recommendation small,.manual-source-empty {{ margin:0; color:#64748b; font-size:11px; }}
     .mop-action-panel {{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; width:max-content; max-width:100%; margin:0 0 5px; border:1px solid #bfdbfe; border-radius:999px; padding:4px 6px 4px 9px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
     .mop-action-panel.warn {{ border-color:#fbd38d; background:linear-gradient(135deg,#fff8ed,#ffffff); }}
     .mop-action-panel.ok {{ border-color:#bbf7d0; background:linear-gradient(135deg,#f0fdf4,#ffffff); }}
@@ -3177,6 +3228,7 @@ def render_workbench_lite(
     @media (max-width:760px) {{ .change-confirmation-summary {{ grid-template-columns:1fr; }} .change-confirmation-row {{ grid-template-columns:1fr; }} .change-confirmation-actions {{ justify-content:flex-start; }} }}
     @media (max-width:760px) {{ .polling-sop-body {{ grid-template-columns:1fr; overflow:auto; }} .polling-sop-list,.polling-sop-editor {{ overflow:visible; }} .polling-people-grid {{ grid-template-columns:1fr; }} }}
     .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
+    #lite-manual-source-candidates .target-candidate-dialog {{ grid-template-rows:auto auto auto minmax(0,1fr) auto; }}
     .repair-event-candidate-dialog {{ width:min(980px,100%); }}
     .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
     .target-candidate-row {{ border:1px solid #dce8f8; border-radius:16px; padding:12px; background:#fff; text-align:left; cursor:pointer; display:grid; gap:7px; color:#0c244d; }}
@@ -3187,6 +3239,7 @@ def render_workbench_lite(
     .target-candidate-empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     .manual-source-tools {{ display:flex; gap:8px; padding:12px 20px 0; }}
     .manual-source-tools input {{ flex:1 1 auto; min-width:0; }}
+    .manual-source-warning {{ margin:10px 20px 0; border:1px solid #f3cf8f; border-radius:12px; padding:10px 12px; color:#8a4b00; background:#fff8e8; font-size:12px; line-height:1.5; }}
     .undo-confirm-copy {{ display:grid; gap:8px; padding:16px 18px; }}
     .undo-confirm-copy strong {{ color:#0c244d; font-size:15px; line-height:1.45; overflow-wrap:anywhere; }}
     .undo-confirm-copy span {{ color:#64748b; font-size:12px; line-height:1.5; }}
@@ -3196,7 +3249,7 @@ def render_workbench_lite(
     .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
     @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} }}
-    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .task-inbox {{ position:relative; top:auto; max-height:none; grid-template-columns:1fr; overflow:visible; }} .inbox-head {{ grid-column:auto; grid-template-columns:1fr; }} .inbox-section .list {{ max-height:42vh; }} .toolbar {{ flex-wrap:wrap; }} .notice-detail-drawer {{ width:min(1000px,calc(100vw - 28px)); }} }}
+    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .task-inbox {{ position:relative; top:auto; max-height:none; grid-template-columns:1fr; overflow:visible; }} .inbox-head {{ grid-column:auto; grid-template-columns:1fr; }} .inbox-section .list {{ max-height:42vh; }} .toolbar {{ flex-wrap:wrap; }} .notice-detail-drawer {{ width:min(1000px,calc(100vw - 28px)); }} .notice-bind-action {{ display:none !important; }} .notice-row-wrap.can-bind-manual .notice-row {{ padding-bottom:8px; }} }}
     @media (max-width: 900px) {{
       .topbar {{ min-height:auto; padding:18px 20px; flex-direction:column; align-items:stretch; gap:16px; }}
       .brand {{ gap:14px; align-items:flex-start; }}
@@ -3444,9 +3497,11 @@ def render_workbench_lite(
       <div class="manual-source-tools">
         <input id="lite-manual-source-search" type="search" placeholder="搜索名称、楼栋或专业" autocomplete="off">
       </div>
+      <p class="manual-source-warning" id="lite-manual-source-warning" hidden></p>
       <div class="target-candidate-list" id="lite-manual-source-list"></div>
       <footer class="end-check-actions">
         <button class="btn ghost" type="button" id="lite-manual-source-cancel">取消</button>
+        <button class="btn danger-ghost" type="button" id="lite-manual-source-unbound-confirm" hidden>确认不绑定并发送</button>
         <button class="btn primary" type="button" id="lite-manual-source-confirm" disabled>确认绑定</button>
       </footer>
     </section>
@@ -3957,6 +4012,7 @@ def render_workbench_lite(
           if (actualTime && Object.prototype.hasOwnProperty.call(fields, 'actual_action_time')) {{
             actualTime.dataset.autoActualTime = '0';
           }}
+          syncManualSourceBindingControls(form);
           updateNoticePreview(form);
           updateActionAvailability(form);
         }} finally {{
@@ -4096,6 +4152,7 @@ def render_workbench_lite(
       overlay.classList.remove('open');
       overlay.setAttribute('aria-hidden', 'true');
       document.body.classList.remove('notice-drawer-open');
+      syncManualSourceBindingControls(null);
       if (liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
       document.querySelectorAll('.notice-row.active,.ongoing-row.active').forEach(row => {{
         row.classList.remove('active');
@@ -5915,14 +5972,65 @@ def render_workbench_lite(
     let liteManualSourceCandidates = [];
     let liteSelectedManualSourceIndex = -1;
     let liteManualSourceSearchTimer = 0;
+    let liteManualSourceMode = 'bind';
+    let litePendingManualSubmitAction = '';
+    let liteManualSourceDialogSequence = 0;
+    let liteManualSourceRequestSequence = 0;
     function manualSourceModal() {{
       return document.getElementById('lite-manual-source-candidates');
+    }}
+    function syncManualSourceBindingControls(form, boundTitle = '') {{
+      const activeForm = form || document.getElementById('lite-notice-form');
+      const drawerOpen = document.getElementById('lite-notice-detail-overlay')?.classList.contains('open');
+      const panel = drawerOpen ? activeForm?.querySelector('[data-manual-source-binding]') : null;
+      const overlay = document.getElementById('lite-notice-detail-overlay');
+      overlay?.classList.toggle('manual-binding-mode', Boolean(panel));
+      overlay?.querySelector('.notice-detail-drawer')?.setAttribute('aria-modal', panel ? 'false' : 'true');
+      const workType = previewValue(activeForm, 'work_type') || activeForm?.dataset.workType || '';
+      const selectedSourceId = previewValue(activeForm, 'source_record_id');
+      const choice = previewValue(activeForm, 'manual_binding_choice');
+      panel?.querySelectorAll('.manual-source-binding-actions [data-manual-binding-mode]').forEach(button => {{
+        const active = button.getAttribute('data-manual-binding-mode') === choice;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }});
+      const status = panel?.querySelector('#lite-manual-binding-status');
+      if (status) {{
+        const bindingReady = choice === 'unbound' || (choice === 'bind' && Boolean(selectedSourceId));
+        status.textContent = choice === 'bind'
+          ? (selectedSourceId ? (boundTitle || '已绑定计划通告') : '请选择要绑定的计划通告')
+          : (choice === 'unbound' ? '不绑定计划通告' : '请选择绑定方式');
+        status.classList.toggle('ready', bindingReady);
+      }}
+      document.querySelectorAll('[data-bind-current-manual]').forEach(button => {{
+        const wrapper = button.closest('.notice-row-wrap');
+        const row = wrapper?.querySelector('.notice-row');
+        const sourceId = String(parseJsonAttr(button, 'data-candidate').source_record_id || '').trim();
+        const available = Boolean(panel && row && row.dataset.workType === workType && !row.classList.contains('is-disabled'));
+        wrapper?.classList.toggle('can-bind-manual', available);
+        button.hidden = !available;
+        if (available) {{
+          const bound = Boolean(selectedSourceId && selectedSourceId === sourceId);
+          button.disabled = bound;
+          button.textContent = bound ? '已绑定当前手填' : '绑定当前手填';
+        }}
+      }});
+      panel?.querySelectorAll('[data-manual-quick-source]').forEach(button => {{
+        const sourceId = String(parseJsonAttr(button, 'data-candidate').source_record_id || '').trim();
+        button.classList.toggle('active', Boolean(selectedSourceId && selectedSourceId === sourceId));
+      }});
     }}
     function closeManualSourceCandidates() {{
       const modal = manualSourceModal();
       if (modal) modal.hidden = true;
+      window.clearTimeout(liteManualSourceSearchTimer);
+      liteManualSourceSearchTimer = 0;
+      liteManualSourceDialogSequence += 1;
+      liteManualSourceRequestSequence += 1;
       liteManualSourceCandidates = [];
       liteSelectedManualSourceIndex = -1;
+      liteManualSourceMode = 'bind';
+      litePendingManualSubmitAction = '';
     }}
     function setManualBindingChoice(form, choice, candidate) {{
       if (!form) return;
@@ -5947,17 +6055,8 @@ def render_workbench_lite(
           sourceId
         );
       }}
-      const panel = form.querySelector('[data-manual-source-binding]');
-      panel?.querySelectorAll('[data-manual-binding-mode]').forEach(button => {{
-        button.classList.toggle('active', button.getAttribute('data-manual-binding-mode') === normalized);
-      }});
-      const status = document.getElementById('lite-manual-binding-status');
-      if (status) {{
-        status.textContent = normalized === 'bind'
-          ? (candidate?.title || '已绑定计划通告')
-          : (normalized === 'unbound' ? '不绑定计划通告' : '请选择绑定方式');
-        status.classList.toggle('ready', Boolean(normalized));
-      }}
+      delete form.dataset.unboundSubmitApproved;
+      syncManualSourceBindingControls(form, candidate?.title || '');
       setLiteFormDirty(true);
       updateNoticePreview(form);
     }}
@@ -5968,6 +6067,12 @@ def render_workbench_lite(
       liteManualSourceCandidates = Array.isArray(items) ? items : [];
       liteSelectedManualSourceIndex = -1;
       confirmButton.disabled = true;
+      const warning = document.getElementById('lite-manual-source-warning');
+      if (warning && liteManualSourceMode === 'unbound-warning') {{
+        warning.textContent = `发现 ${{liteManualSourceCandidates.length}} 条同楼栋、同类型的可绑定计划通告。请先核对，或明确确认不绑定。`;
+        const unboundConfirm = document.getElementById('lite-manual-source-unbound-confirm');
+        if (unboundConfirm) unboundConfirm.disabled = false;
+      }}
       if (!liteManualSourceCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
@@ -5993,10 +6098,13 @@ def render_workbench_lite(
       }});
       list.replaceChildren(...rows);
     }}
-    async function loadManualSourceCandidates(search) {{
+    async function loadManualSourceCandidates(search, dialogSequence = liteManualSourceDialogSequence) {{
       const form = document.getElementById('lite-notice-form');
       const list = document.getElementById('lite-manual-source-list');
-      if (!form || !list) return;
+      if (!form || !list) return null;
+      const requestSequence = ++liteManualSourceRequestSequence;
+      const unboundConfirm = document.getElementById('lite-manual-source-unbound-confirm');
+      if (liteManualSourceMode === 'unbound-warning' && unboundConfirm) unboundConfirm.disabled = true;
       const loading = document.createElement('div');
       loading.className = 'target-candidate-empty';
       loading.textContent = '正在读取计划通告...';
@@ -6009,22 +6117,45 @@ def render_workbench_lite(
       if (String(search || '').trim()) url.searchParams.set('q', String(search || '').trim());
       const response = await fetch(url.pathname + url.search, {{ credentials: 'same-origin', cache: 'no-store' }});
       const data = await response.json().catch(() => ({{}}));
-      if (handleLiteAuthRequired(response, data)) return;
+      if (handleLiteAuthRequired(response, data)) return null;
+      if (dialogSequence !== liteManualSourceDialogSequence || requestSequence !== liteManualSourceRequestSequence) return null;
       if (!response.ok || data.ok === false) throw new Error(data.error || '读取计划通告失败');
       renderManualSourceCandidates((data.data && data.data.items) || data.items || []);
+      return liteManualSourceCandidates;
     }}
-    async function openManualSourceCandidates() {{
+    async function openManualSourceCandidates(mode = 'bind', pendingAction = '') {{
       const modal = manualSourceModal();
       const search = document.getElementById('lite-manual-source-search');
-      if (!modal) return;
+      if (!modal) return mode === 'unbound-warning';
+      if (mode === 'unbound-warning' && !modal.hidden && liteManualSourceMode === mode) return true;
+      const dialogSequence = ++liteManualSourceDialogSequence;
+      liteManualSourceMode = mode;
+      litePendingManualSubmitAction = pendingAction;
+      liteManualSourceCandidates = [];
+      liteSelectedManualSourceIndex = -1;
+      const warning = document.getElementById('lite-manual-source-warning');
+      const unboundConfirm = document.getElementById('lite-manual-source-unbound-confirm');
+      const title = document.getElementById('lite-manual-source-title');
+      if (warning) warning.hidden = mode !== 'unbound-warning';
+      if (unboundConfirm) unboundConfirm.hidden = mode !== 'unbound-warning';
+      if (unboundConfirm) unboundConfirm.disabled = mode === 'unbound-warning';
+      if (title) title.textContent = mode === 'unbound-warning' ? '发现可能对应的计划通告' : '选择要绑定的计划通告';
       modal.hidden = false;
       if (search) search.value = '';
       try {{
-        await loadManualSourceCandidates('');
+        const items = await loadManualSourceCandidates('', dialogSequence);
+        if (dialogSequence !== liteManualSourceDialogSequence || !Array.isArray(items)) return true;
+        if (mode === 'unbound-warning' && !liteManualSourceCandidates.length) {{
+          closeManualSourceCandidates();
+          return false;
+        }}
         search?.focus();
+        return true;
       }} catch (error) {{
+        if (dialogSequence !== liteManualSourceDialogSequence) return true;
         closeManualSourceCandidates();
         showLiteError(error && error.message ? error.message : '读取计划通告失败');
+        return mode === 'unbound-warning';
       }}
     }}
     function selectManualSourceCandidate(index) {{
@@ -6178,6 +6309,18 @@ def render_workbench_lite(
         showLiteError(error && error.message ? error.message : '绑定维修单失败');
       }} finally {{
         setButtonBusy(confirmButton, false);
+      }}
+    }}
+    async function bindManualSourceCandidate(candidate, trigger) {{
+      if (!candidate || !String(candidate.source_record_id || '').trim()) return;
+      liteManualSourceCandidates = [candidate];
+      liteSelectedManualSourceIndex = 0;
+      setButtonBusy(trigger, true);
+      try {{
+        await confirmManualSourceCandidate();
+      }} finally {{
+        setButtonBusy(trigger, false);
+        syncManualSourceBindingControls(document.getElementById('lite-notice-form'));
       }}
     }}
     let liteRepairEventCandidates = [];
@@ -6926,6 +7069,7 @@ def render_workbench_lite(
       resetActualActionTime(form);
       updateNoticePreview(form);
       syncNoticeDrawerState();
+      syncManualSourceBindingControls(form);
       resetLiteDraftTracking(form);
       restoreLiteDraft(form).catch(() => null);
     }}
@@ -7791,6 +7935,23 @@ def render_workbench_lite(
         await confirmRepairEventCandidate();
         return;
       }}
+      const directManualSource = target.closest('[data-manual-quick-source],[data-bind-current-manual]');
+      if (directManualSource) {{
+        event.preventDefault();
+        const form = document.getElementById('lite-notice-form');
+        const candidate = parseJsonAttr(directManualSource, 'data-candidate');
+        const sourceRow = directManualSource.closest('.notice-row-wrap')?.querySelector('.notice-row');
+        if (!form?.querySelector('[data-manual-source-binding]')) {{
+          showLiteError('当前不是纯手填绑定状态。');
+          return;
+        }}
+        if (sourceRow && sourceRow.dataset.workType !== (previewValue(form, 'work_type') || form.dataset.workType || '')) {{
+          showLiteError('该计划通告类型与当前纯手填通告不一致。');
+          return;
+        }}
+        await bindManualSourceCandidate(candidate, directManualSource);
+        return;
+      }}
       const manualBindingButton = target.closest('[data-manual-binding-mode]');
       if (manualBindingButton) {{
         event.preventDefault();
@@ -7813,6 +7974,19 @@ def render_workbench_lite(
       if (manualSourceCancel) {{
         event.preventDefault();
         closeManualSourceCandidates();
+        return;
+      }}
+      const manualSourceUnboundConfirm = target.closest('#lite-manual-source-unbound-confirm');
+      if (manualSourceUnboundConfirm) {{
+        event.preventDefault();
+        const form = document.getElementById('lite-notice-form');
+        const pendingAction = litePendingManualSubmitAction || 'start';
+        closeManualSourceCandidates();
+        if (form) {{
+          form.dataset.unboundSubmitApproved = '1';
+          form.dataset.pendingSubmitAction = pendingAction;
+          form.requestSubmit();
+        }}
         return;
       }}
       const manualSourceConfirm = target.closest('#lite-manual-source-confirm');
@@ -8946,6 +9120,23 @@ def render_workbench_lite(
         updateActionAvailability(form);
         return;
       }}
+      if (
+        submitAction === 'start'
+        && previewValue(form, 'manual_binding_required') === '1'
+        && previewValue(form, 'manual_binding_choice') === 'unbound'
+        && form.dataset.unboundSubmitApproved !== '1'
+      ) {{
+        if (form.dataset.manualBindingPreflightBusy === '1') return;
+        form.dataset.manualBindingPreflightBusy = '1';
+        let shouldBlock = true;
+        try {{
+          shouldBlock = await openManualSourceCandidates('unbound-warning', submitAction);
+        }} finally {{
+          delete form.dataset.manualBindingPreflightBusy;
+        }}
+        if (shouldBlock) return;
+      }}
+      delete form.dataset.unboundSubmitApproved;
       let payload = null;
       try {{
         if (liteDraftContext(form) && liteFormDirty && !(await saveLiteDraftNow(form))) {{
@@ -8986,8 +9177,10 @@ def render_workbench_lite(
     document.addEventListener('input', (event) => {{
       if (event.target && event.target.id === 'lite-manual-source-search') {{
         window.clearTimeout(liteManualSourceSearchTimer);
+        const dialogSequence = liteManualSourceDialogSequence;
         liteManualSourceSearchTimer = window.setTimeout(() => {{
-          loadManualSourceCandidates(event.target.value).catch(error => {{
+          loadManualSourceCandidates(event.target.value, dialogSequence).catch(error => {{
+            if (dialogSequence !== liteManualSourceDialogSequence) return;
             showLiteError(error && error.message ? error.message : '搜索计划通告失败');
           }});
         }}, 260);

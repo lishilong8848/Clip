@@ -27737,6 +27737,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             scope="E",
             work_type="polling",
             manual=False,
+            source_link_options=[{
+                "source_record_id": "rec-plan-polling-1",
+                "title": "E楼冷站轮巡计划",
+                "building": "E楼",
+                "specialty": "暖通",
+                "progress": "未开始",
+            }],
         )
 
         self.assertIn('name="manual" value="1"', html)
@@ -27749,8 +27756,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("发送创建", html)
         self.assertIn('name="manual_binding_required" value="1"', html)
         self.assertIn('name="manual_binding_choice" value=""', html)
-        self.assertIn("绑定计划通告", html)
+        self.assertIn("绑定已有计划通告", html)
         self.assertIn("不绑定", html)
+        self.assertIn("必须选择一种", html)
+        self.assertIn("E楼冷站轮巡计划", html)
+        self.assertIn("data-manual-quick-source", html)
 
     def test_workbench_ongoing_without_source_requires_choice_before_start(self):
         from lan_bitable_template_portal.workbench_lite import _detail_form
@@ -27773,7 +27783,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertIn('data-detail-mode="ongoing"', html)
         self.assertIn('name="manual_binding_required" value="1"', html)
-        self.assertIn("绑定计划通告", html)
+        self.assertIn("绑定已有计划通告", html)
         self.assertIn("不绑定", html)
         self.assertIn('name="submit_action" value="start"', html)
 
@@ -27847,6 +27857,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(html.count('aria-disabled="true"'), 1)
         self.assertIn('data-action="start"', html)
         self.assertIn('data-source-record-id="repair-ongoing-source"', html)
+        self.assertEqual(html.count("data-bind-current-manual"), 1)
+        self.assertEqual(html.count('class="notice-row-wrap"'), 2)
         self.assertIn("该事项已结束，只保留查看状态，不可再次发起。", html)
         self.assertNotIn("该事项已在“未结束通告”中", html)
 
