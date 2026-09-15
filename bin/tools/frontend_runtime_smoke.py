@@ -2080,6 +2080,19 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.setViewportSize({{ width: 1366, height: 768 }});
           require('fs').mkdirSync('output/playwright', {{ recursive: true }});
           await page.screenshot({{ path: 'output/playwright/cabinet-desktop.png', fullPage: true }});
+          await page.goto(new URL('/cabinet-power/batches?scope=A&mode=new', cfg.url).toString());
+          await page.waitForSelector('.file-drop');
+          await page.evaluate(() => {{
+            const transfer=new DataTransfer(); transfer.items.add(new File(['%PDF-1.4 pasted'],'clipboard-confirm.pdf',{{type:'application/pdf',lastModified:1}}));
+            const event=new Event('paste',{{bubbles:true,cancelable:true}}); Object.defineProperty(event,'clipboardData',{{value:transfer}}); window.dispatchEvent(event);
+          }});
+          await page.getByText('clipboard-confirm.pdf', {{ exact: true }}).waitFor();
+          await page.evaluate(() => {{
+            const transfer=new DataTransfer(); transfer.items.add(new File(['%PDF-1.4 dropped'],'dropped-confirm.pdf',{{type:'application/pdf',lastModified:2}}));
+            const event=new Event('drop',{{bubbles:true,cancelable:true}}); Object.defineProperty(event,'dataTransfer',{{value:transfer}}); document.querySelector('.file-drop')?.dispatchEvent(event);
+          }});
+          await page.getByText('dropped-confirm.pdf', {{ exact: true }}).waitFor();
+          if (await page.locator('.file-list li').count() !== 2 || await page.getByRole('button', {{ name: '识别并创建待办', exact: true }}).isDisabled()) throw new Error('cabinet PDF paste/drop selection failed');
           const batchCreated = await page.evaluate(async () => {{
             const response = await fetch('/api/cabinet-power/batches', {{
               method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
