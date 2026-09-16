@@ -6954,6 +6954,7 @@ def render_workbench_lite(
       liteTargetBindInFlight = true;
       const confirmButton = document.getElementById('lite-target-candidates-confirm');
       setButtonBusy(confirmButton, true);
+      setLiteStatus('正在绑定并核验目标多维关系...');
       try {{
         const payload = {{
           scope: previewValue(form, 'scope') || getCurrentScope(),

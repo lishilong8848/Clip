@@ -28036,6 +28036,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertIn("const wasDirtyAtStart = liteFormDirty", handler)
         self.assertIn("let liteTargetBindInFlight = false", source)
+        self.assertIn("正在绑定并核验目标多维关系", handler)
         self.assertIn("formChangedWhileSaving ? true : wasDirtyAtStart", handler)
         self.assertIn("目标关系已保存；当前通告已切换，未改写当前表单", handler)
         self.assertIn("目标关系已保存；检测到你继续编辑，未覆盖当前输入", handler)
@@ -33929,6 +33930,38 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(duplicate_groups, [])
 
+    def test_repair_project_cache_keeps_distinct_repairs_for_same_event(self):
+        records, duplicate_groups = (
+            MaintenancePortalService._canonical_repair_management_projects(
+                [
+                    {
+                        "record_id": "rec_repair_one",
+                        "raw_fields": {"关联事件单-L": "rec_shared_event"},
+                        "display_fields": {
+                            "故障维修原因": "排污阀执行器故障",
+                            "故障发生时间": "2026-09-15 17:02",
+                            "所属数据中心/楼栋-使用": "南通B楼",
+                        },
+                    },
+                    {
+                        "record_id": "rec_repair_two",
+                        "raw_fields": {"关联事件单-L": "rec_shared_event"},
+                        "display_fields": {
+                            "故障维修原因": "排污阀线路故障",
+                            "故障发生时间": "2026-09-15 17:02",
+                            "所属数据中心/楼栋-使用": "南通B楼",
+                        },
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(
+            [item["record_id"] for item in records],
+            ["rec_repair_one", "rec_repair_two"],
+        )
+        self.assertEqual(duplicate_groups, [])
+
     def test_repair_project_cache_projection_never_exposes_local_placeholder(self):
         shared_fields = {
             "维修名称": "D楼柴发排烟管维修",
@@ -37482,6 +37515,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])
         )
+        deleted_source = _build_repair_record(
+            "rec_repair_delete", building="B楼"
+        )
+        retained_source = _build_repair_record(
+            "rec_repair_keep", building="B楼", title="保留的维修单"
+        )
+        service._repair_records = []
+        service._repair_loaded_once = False
+        service._state_store.replace_source_table_snapshot(
+            "repair",
+            {
+                "ALL": [deleted_source, retained_source],
+                "B": [deleted_source, retained_source],
+            },
+        )
 
         result = service.delete_repair_management_record("rec_repair_delete")
 
@@ -37490,6 +37538,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(captured["record_id"], "rec_repair_delete")
         self.assertTrue(result["deleted"])
         self.assertEqual(result["deleted_followup_count"], 0)
+        self.assertTrue(result["source_projection_removed"])
+        source_snapshot = service._state_store.get_source_table_scope_snapshot(
+            "repair", "B"
+        )
+        self.assertEqual(
+            [item["record_id"] for item in source_snapshot["records"]],
+            ["rec_repair_keep"],
+        )
 
     def test_event_transfer_to_repair_updates_only_transfer_field(self):
         service = _TestMaintenancePortalService()

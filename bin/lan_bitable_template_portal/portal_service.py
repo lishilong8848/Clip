@@ -16040,6 +16040,33 @@ class MaintenancePortalService:
         sync_event_transfer_status: bool = True,
         retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
+        # Repair creation is low-volume; one lock closes the read-then-create race.
+        with self._repair_management_record_lock("repair-project-create"):
+            return self._create_repair_management_record_unlocked(
+                fields,
+                operation_id=operation_id,
+                source_event_id=source_event_id,
+                source_repair_ids=source_repair_ids,
+                source_month=source_month,
+                scope=scope,
+                source_event_record=source_event_record,
+                sync_event_transfer_status=sync_event_transfer_status,
+                retry_failed_operation=retry_failed_operation,
+            )
+
+    def _create_repair_management_record_unlocked(
+        self,
+        fields: dict[str, Any],
+        *,
+        operation_id: str = "",
+        source_event_id: str = "",
+        source_repair_ids: list[str] | tuple[str, ...] | None = None,
+        source_month: str | None = None,
+        scope: str = "ALL",
+        source_event_record: dict[str, Any] | None = None,
+        sync_event_transfer_status: bool = True,
+        retry_failed_operation: bool = False,
+    ) -> dict[str, Any]:
         source_repair_ids = list(
             dict.fromkeys(
                 str(record_id or "").strip()
@@ -16845,6 +16872,28 @@ class MaintenancePortalService:
             "relation_sync": relation_sync,
         }
 
+    def _remove_repair_source_projection(self, record_id: str) -> int:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            return 0
+        with self._refresh_lock:
+            if not self._repair_loaded_once:
+                self._hydrate_source_records_from_sqlite()
+            before = len(self._repair_records)
+            self._repair_records = [
+                item
+                for item in self._repair_records
+                if str(item.get("record_id") or "").strip() != record_id
+            ]
+            removed = before - len(self._repair_records)
+            if self._repair_loaded_once:
+                repair_status = self._source_refresh_status.get("repair")
+                if isinstance(repair_status, dict):
+                    repair_status["count"] = len(self._repair_records)
+                self._save_source_scope_snapshots(["repair"])
+            self._touch_state_cache_version()
+            return removed
+
     def delete_repair_management_record(
         self,
         record_id: str,
@@ -17113,6 +17162,7 @@ class MaintenancePortalService:
             REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             summary_id,
         )
+        source_projection_removed = self._remove_repair_source_projection(summary_id)
         self._invalidate_repair_management_status_cache()
         response = {
             **result,
@@ -17121,6 +17171,7 @@ class MaintenancePortalService:
             "deleted": True,
             "deleted_followup_count": len(deleted_followup_ids),
             "deleted_followup_ids": list(deleted_followup_ids),
+            "source_projection_removed": bool(source_projection_removed),
         }
         self._state_store.update_repair_management_operation(
             operation_id,

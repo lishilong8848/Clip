@@ -5618,6 +5618,7 @@ class FastAPIPortalController:
                     scope=request.query_params.get("scope") or "ALL",
                 )
                 if bool((data or {}).get("deleted")):
+                    PortalRuntime.clear_payload_cache()
                     self._record_deletion_audit(
                         source="网页",
                         deletion_type="删除维修项目",

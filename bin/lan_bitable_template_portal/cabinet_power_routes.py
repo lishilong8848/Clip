@@ -9,6 +9,9 @@ from pathlib import Path
 def install_cabinet_power_routes(app,controller,runtime):
     service=CabinetPowerService(runtime.state_store)
     controller._cabinet_power=service
+    runtime.cabinet_power_service=service
+    ensure_notice_worker=getattr(runtime,"ensure_cabinet_notice_worker",None)
+    if callable(ensure_notice_worker): app.add_event_handler("startup",ensure_notice_worker)
 
     async def endpoint(request: Request):
         session=controller._current_session(request)
@@ -147,4 +150,8 @@ def install_cabinet_power_routes(app,controller,runtime):
         "bootstrap":["GET","POST"],
     }.items():
         app.add_api_route("/api/cabinet-power/"+path,endpoint,methods=methods,name="cabinet_"+path.replace("/","_"))
-    app.add_event_handler("shutdown",lambda:service.pool.shutdown(wait=False,cancel_futures=True))
+    def shutdown():
+        stop_notice_worker=getattr(runtime,"stop_cabinet_notice_worker",None)
+        if callable(stop_notice_worker): stop_notice_worker()
+        service.pool.shutdown(wait=False,cancel_futures=True)
+    app.add_event_handler("shutdown",shutdown)

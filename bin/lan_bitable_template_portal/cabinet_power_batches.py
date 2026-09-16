@@ -15,7 +15,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
-from .cabinet_power_excel import CabinetError, OPS, RACK_TYPES, digest
+from .cabinet_power_excel import (
+    CabinetError,
+    OPS,
+    RACK_TYPES,
+    STATES,
+    completed_state_event,
+    digest,
+)
 
 
 MAX_FILES = 10
@@ -29,6 +36,14 @@ ROW_RE = re.compile(
     r"^\s*EA118\s+([A-E])([1-4])-(\d{1,2})\.EA118\s+([A-Z]\d{2})\s+(\S+)\s+"
     r"(网络机柜|服务器机柜)\s+(\S+)\s+(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+"
     r"(成功|失败)\s+(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*$"
+)
+NOTICE_ROOM_RE = re.compile(
+    r"(?<![A-Z0-9])([A-E])\s*[-_－—]?\s*([1-4]\d{2})\s*(?:包间|运营商机房|机房)?",
+    re.IGNORECASE,
+)
+NOTICE_RACK_RE = re.compile(
+    r"(?<![A-Z0-9])([A-Z])\s*[-_－—]?\s*(\d{1,2})(?!\d)",
+    re.IGNORECASE,
 )
 EDITABLE_FIELDS = {
     "scope", "room", "rack", "supplier_rack", "rack_type", "type_detail",
@@ -202,6 +217,176 @@ class CabinetBatchService:
             batch["status"] = "partial"
         elif rows:
             batch["status"] = "pending"
+
+    @staticmethod
+    def _notice_datetime(value):
+        text = str(value or "").strip().replace("T", " ").replace("：", ":")
+        try:
+            return dt.datetime.fromisoformat(text).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return ""
+
+    @staticmethod
+    def _notice_quantity(value):
+        match = re.search(r"\d+", str(value or "").replace(",", ""))
+        return int(match.group()) if match else None
+
+    @staticmethod
+    def _parse_notice_cabinets(value):
+        text = str(value or "").strip().upper()
+        anchors = list(NOTICE_ROOM_RE.finditer(text))
+        if not anchors:
+            return [], {
+                "duplicate_count": 0,
+                "unparsed_fragments": [text] if text else ["柜号未填写"],
+            }
+        rows = []
+        duplicates = 0
+        unparsed = []
+        seen = set()
+        prefix = text[: anchors[0].start()]
+        if re.sub(r"[\s,，、;；:：/\\]+", "", prefix):
+            unparsed.append(prefix.strip())
+        for index, anchor in enumerate(anchors):
+            end = anchors[index + 1].start() if index + 1 < len(anchors) else len(text)
+            segment = text[anchor.end() : end]
+            matched_spans = []
+            for rack_match in NOTICE_RACK_RE.finditer(segment):
+                rack = f"{rack_match.group(1).upper()}{int(rack_match.group(2)):02d}"
+                key = (anchor.group(1).upper(), anchor.group(2), rack)
+                matched_spans.append(rack_match.span())
+                if key in seen:
+                    duplicates += 1
+                    continue
+                seen.add(key)
+                rows.append({"scope": key[0], "room": key[1], "rack": key[2]})
+            remainder = segment
+            for start, stop in reversed(matched_spans):
+                remainder = remainder[:start] + remainder[stop:]
+            remainder = re.sub(
+                r"(?:柜号|机柜|机架|柜)|[\s,，、;；。:：/\\]+",
+                "",
+                remainder,
+            )
+            if remainder:
+                unparsed.append(segment.strip())
+        return rows, {
+            "duplicate_count": duplicates,
+            "unparsed_fragments": [item[:200] for item in unparsed if item],
+        }
+
+    @staticmethod
+    def _infer_notice_action(snapshot, room, rack, direction, cutoff):
+        history = []
+        for operation in snapshot.get("operations", []):
+            if (operation.get("room"), operation.get("rack")) != (room, rack):
+                continue
+            for event in operation.get("events", []):
+                item = {**operation, **event}
+                actual = str(item.get("actual") or "")
+                if (
+                    completed_state_event(item)
+                    and (not cutoff or actual <= cutoff)
+                ):
+                    history.append(item)
+        latest = max(history, key=lambda item: str(item.get("actual") or ""), default=None)
+        if latest is None:
+            return "", "无可用的成功历史，请人工选择正式电或测试电"
+        latest_action = str(latest.get("action") or "")
+        state = STATES.get(latest_action, "unknown")
+        if direction == "down":
+            if state == "formal":
+                return "下正式电", f"根据最近成功操作 {latest_action} 推断"
+            if state == "test":
+                return "下测试电", f"根据最近成功操作 {latest_action} 推断"
+            return "", "当前已下电或状态不明，请人工核对"
+        if state == "off" and latest_action == "下正式电":
+            return "上正式电", "根据最近成功下正式电记录推断"
+        if state == "off" and latest_action == "下测试电":
+            return "上测试电", "根据最近成功下测试电记录推断"
+        if state in {"formal", "test"}:
+            return "", "当前已上电，不自动猜测转换操作"
+        return "", "历史无法确定上电类型，请人工选择"
+
+    def _refresh_notice_warnings(self, batch):
+        if batch.get("source") != "notice":
+            return
+        rows = [
+            row
+            for row in batch.get("rows", [])
+            if not str(row.get("status") or "").startswith("excluded_")
+        ]
+        source = batch.get("source_notice") or {}
+        diagnostics = batch.get("parse_diagnostics") or {}
+        warnings = []
+        declared = source.get("declared_quantity")
+        if declared is None:
+            warnings.append({"code": "quantity_missing", "message": "通告数量未填写或无法识别"})
+        elif int(declared) != len(rows):
+            warnings.append(
+                {
+                    "code": "quantity_mismatch",
+                    "message": f"通告声明 {declared} 柜，当前待办为 {len(rows)} 柜",
+                }
+            )
+        duplicate_count = int(diagnostics.get("duplicate_count") or 0)
+        if duplicate_count:
+            warnings.append(
+                {
+                    "code": "duplicate_tokens",
+                    "message": f"柜号中有 {duplicate_count} 个重复机柜，待办已按唯一机柜保留",
+                }
+            )
+        fragments = list(diagnostics.get("unparsed_fragments") or [])
+        if fragments:
+            warnings.append(
+                {
+                    "code": "unparsed_fragments",
+                    "message": "柜号中存在未识别内容：" + "；".join(fragments[:3]),
+                }
+            )
+        invalid_codes = {"scope", "room", "rack", "inventory", "notice_scope"}
+        unmatched = sum(
+            bool(invalid_codes & {str(issue.get("code") or "") for issue in row.get("issues", [])})
+            for row in rows
+        )
+        batch["notice_counts"] = {
+            "declared": declared,
+            "unique": len(rows),
+            "directory_matched": max(0, len(rows) - unmatched),
+        }
+        if unmatched:
+            warnings.append(
+                {
+                    "code": "directory_mismatch",
+                    "message": f"{unmatched} 个机柜未通过当前楼栋目录校验",
+                }
+            )
+        fingerprint = digest(
+            [
+                source.get("target_record_id"),
+                declared,
+                [(row.get("scope"), row.get("room"), row.get("rack")) for row in rows],
+                warnings,
+            ]
+        )
+        acknowledgement = batch.get("warning_acknowledgement") or {}
+        if not warnings or acknowledgement.get("fingerprint") != fingerprint:
+            batch.pop("warning_acknowledgement", None)
+        requested_by = str(batch.pop("_warning_acknowledger", "") or "")
+        if requested_by and warnings:
+            batch["warning_acknowledgement"] = {
+                "fingerprint": fingerprint,
+                "owner": requested_by,
+                "at": now(),
+            }
+        batch["blocking_warnings"] = warnings
+        batch["warning_fingerprint"] = fingerprint if warnings else ""
+        batch["warnings_acknowledged"] = bool(
+            warnings
+            and (batch.get("warning_acknowledgement") or {}).get("fingerprint")
+            == fingerprint
+        )
 
     def _change(self, batch_id, callback, *, expected_version=None, validate=False):
         for _attempt in range(3):
@@ -437,6 +622,7 @@ class CabinetBatchService:
 
     def _validate_rows(self, batch):
         rows = batch.get("rows", [])
+        notice_scope = str((batch.get("source_notice") or {}).get("scope") or "").upper()
         scopes = {str(row.get("scope") or "").upper().replace("楼", "") for row in rows}
         valid_scopes = {scope for scope in scopes if scope in SCOPES}
         inventories, existing_exact, existing_slots = self._validation_context(valid_scopes) if valid_scopes else ({}, set(), {})
@@ -457,6 +643,8 @@ class CabinetBatchService:
             scope, room, rack, action, actual = key
             if scope not in SCOPES:
                 issues.append({"code": "scope", "message": "楼栋无效"})
+            if notice_scope in SCOPES and scope != notice_scope:
+                issues.append({"code": "notice_scope", "message": f"柜号楼栋与通告{notice_scope}楼不一致"})
             if not re.fullmatch(r"[1-4]\d{2}", room):
                 issues.append({"code": "room", "message": "包间格式无效"})
             if not re.fullmatch(r"[A-Z]\d{2}", rack):
@@ -496,6 +684,7 @@ class CabinetBatchService:
             row["error"] = row.get("error", "") if row["status"] == "failed" else ""
             if all(key):
                 seen.add(key)
+        self._refresh_notice_warnings(batch)
 
     def create_manual(self, rows, owner):
         if not isinstance(rows, list) or not rows or len(rows) > MAX_ROWS:
@@ -521,6 +710,128 @@ class CabinetBatchService:
             "progress": {"files_done": 0, "files_total": 0, "pages_done": 0, "pages_total": 0},
         })
         return self._change(batch_id, lambda _batch: None, validate=True)
+
+    def create_from_notice(self, source):
+        if not isinstance(source, dict):
+            raise CabinetError("上下电通告待办来源无效")
+        notice_type = str(source.get("notice_type") or "").strip()
+        if notice_type not in ("上电通告", "下电通告"):
+            raise CabinetError("仅支持上电通告或下电通告")
+        target_record_id = str(source.get("target_record_id") or "").strip()
+        if not target_record_id:
+            raise CabinetError("上下电通告缺少目标记录ID")
+        source_hash = hashlib.sha256(
+            f"notice:v1:{notice_type}:{target_record_id}".encode("utf-8")
+        ).hexdigest()
+        existing = self.store.by_hash(source_hash)
+        if existing:
+            existing["duplicate_source"] = True
+            return existing
+        parsed, diagnostics = self._parse_notice_cabinets(source.get("cabinet"))
+        if not parsed:
+            raise CabinetError("通告柜号未识别到包间和机柜")
+        direction = "up" if notice_type == "上电通告" else "down"
+        expected = self._notice_datetime(source.get("end_time"))
+        cutoff = self._notice_datetime(source.get("sent_at")) or self._notice_datetime(source.get("start_time"))
+        snapshots = {scope: self.cabinet._snapshot(scope) for scope in {item["scope"] for item in parsed}}
+        inventories = {
+            scope: {
+                (item["room"], item["rack"]): item
+                for item in snapshot["config"]["inventory"]
+            }
+            for scope, snapshot in snapshots.items()
+        }
+        batch_id = uuid.uuid4().hex
+        rows = []
+        for index, item in enumerate(parsed, 1):
+            inventory = inventories[item["scope"]].get((item["room"], item["rack"]))
+            action, inference = self._infer_notice_action(
+                snapshots[item["scope"]],
+                item["room"],
+                item["rack"],
+                direction,
+                cutoff,
+            )
+            current = {
+                **item,
+                "supplier_rack": "",
+                "rack_type": str((inventory or {}).get("rack_type") or ""),
+                "type_detail": "",
+                "action": action,
+                "expected": expected,
+                "actual": "",
+                "result": "",
+                "order_time": "",
+                "type_resolution": "",
+            }
+            row_id = "row_" + digest([source_hash, item])[:24]
+            rows.append(
+                {
+                    **current,
+                    "row_id": row_id,
+                    "source_index": index,
+                    "file_id": "",
+                    "file_name": "上下电通告",
+                    "file_sha256": "",
+                    "page": 0,
+                    "source_row": index,
+                    "application_ids": [],
+                    "application_time": "",
+                    "applicant": str(source.get("sender_name") or ""),
+                    "inference": inference,
+                    "original": copy.deepcopy(current),
+                    "edits": [],
+                    "status": "ready",
+                    "issues": [],
+                    "error": "",
+                    "operation_id": "batch_" + digest([source_hash, row_id])[:32],
+                }
+            )
+        scope = str(source.get("scope") or "").upper().replace("楼", "")
+        source_notice = {
+            "job_id": str(source.get("job_id") or ""),
+            "target_record_id": target_record_id,
+            "notice_type": notice_type,
+            "title": str(source.get("title") or ""),
+            "scope": scope,
+            "start_time": self._notice_datetime(source.get("start_time")),
+            "end_time": expected,
+            "cabinet": str(source.get("cabinet") or ""),
+            "quantity": str(source.get("quantity") or ""),
+            "declared_quantity": self._notice_quantity(source.get("quantity")),
+            "sender_open_id": str(source.get("sender_open_id") or ""),
+            "sender_name": str(source.get("sender_name") or ""),
+            "sent_at": self._notice_datetime(source.get("sent_at")) or now(),
+        }
+        try:
+            batch = self.store.create(
+                {
+                    "batch_id": batch_id,
+                    "owner_id": str(source.get("owner_id") or source.get("sender_open_id") or "system"),
+                    "status": "pending",
+                    "source_hash": source_hash,
+                    "scopes": [],
+                    "source": "notice",
+                    "source_notice": source_notice,
+                    "parse_diagnostics": diagnostics,
+                    "files": [],
+                    "rows": rows,
+                    "error": "",
+                    "progress": {
+                        "files_done": 0,
+                        "files_total": 0,
+                        "pages_done": 0,
+                        "pages_total": 0,
+                    },
+                }
+            )
+        except sqlite3.IntegrityError:
+            existing = self.store.by_hash(source_hash)
+            if existing:
+                existing["duplicate_source"] = True
+                return existing
+            raise
+        return self._change(batch["batch_id"], lambda _batch: None, validate=True)
 
     def get(self, batch_id):
         batch = self.store.get(batch_id)
@@ -575,11 +886,16 @@ class CabinetBatchService:
         patches = payload.get("rows", [])
         common = payload.get("common") or {}
         selected = set(str(value) for value in payload.get("row_ids", []))
+        acknowledge_warnings = payload.get("acknowledge_warnings") is True
         if not isinstance(patches, list) or not isinstance(common, dict):
             raise CabinetError("批次修改格式无效")
+        if acknowledge_warnings and not admin and not set(current.get("scopes", [])) <= set(allowed):
+            raise CabinetError("核对整批异常需要拥有批次内全部楼栋权限", 403)
 
         def apply(batch):
             if batch.pop("validation_error",False): batch["error"]=""
+            if acknowledge_warnings:
+                batch["_warning_acknowledger"] = owner
             rows = {row["row_id"]: row for row in batch.get("rows", [])}
             requested = [(rows.get(str(patch.get("row_id"))), patch) for patch in patches if isinstance(patch, dict)]
             if common:
@@ -636,7 +952,9 @@ class CabinetBatchService:
             "file_sha256": row.get("file_sha256", ""), "application_ids": row.get("application_ids", []),
             "application_time": row.get("application_time", ""), "order_time": row.get("order_time", ""),
             "source_page": row.get("page", 0), "source_row": row.get("source_row", 0),
-            "original": row.get("original", {}), "edits": row.get("edits", []),
+            "source": batch.get("source", ""), "source_notice": batch.get("source_notice", {}),
+            "inference": row.get("inference", ""), "original": row.get("original", {}),
+            "edits": row.get("edits", []),
         }
         group = {"id": "event_" + digest([batch["batch_id"], row["row_id"]])[:24], "action": row["action"],
                  "expected": row["expected"], "actual": row["actual"], "result": row["result"]}
@@ -705,6 +1023,8 @@ class CabinetBatchService:
             raise CabinetError("无权查看该批次", 403)
         if expected is not None and int(expected) != int(batch["version"]):
             raise CabinetError("批次已更新，请重新载入", 409)
+        if batch.get("blocking_warnings") and not batch.get("warnings_acknowledged"):
+            raise CabinetError("请先核对并确认通告数量或目录异常", 409)
         row_ids = set(str(value) for value in payload.get("row_ids", []))
         scope = str(payload.get("scope") or "").upper().replace("楼", "")
         whole = bool(payload.get("all"))

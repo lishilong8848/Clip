@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -291,6 +292,105 @@ class CabinetPowerTests(unittest.TestCase):
         with self.assertRaises(CabinetError) as caught: self.service.save_operation("D",payload,"owner")
         self.assertEqual(caught.exception.status_code,409)
         self.assertEqual(self.remote.creates,0)
+
+    def test_power_notice_batches_parse_samples_and_infer_only_from_prior_history(self):
+        samples=[
+            {
+                "job_id":"job-notice-d","target_record_id":"rec-notice-d","notice_type":"上电通告","scope":"D",
+                "title":"EA118机房D楼机柜上电通告","start_time":"2026-09-01 09:55","end_time":"2026-09-01 23:59","quantity":"40",
+                "cabinet":"D-201包间B02、B04、B05、B07、B08、B10、B11、B13、B14、B16、C11、C13、C14、C16、D12、D14、D15、D17、E11、E13、E14、E16、F11、F13、F14、F16、G11、G13、G14、G16、H11、H13、H14、H16、I11、I13、I14、I16、J14、J16",
+            },
+            {
+                "job_id":"job-notice-b-up","target_record_id":"rec-notice-b-up","notice_type":"上电通告","scope":"B",
+                "title":"EA118机房B楼机柜上电通告","start_time":"2026-09-03 11:05","end_time":"2026-09-03 23:59","quantity":"4",
+                "cabinet":"B-216运营商机房B04、B05，B-247运营商机房B04、B05",
+            },
+            {
+                "job_id":"job-notice-b-down","target_record_id":"rec-notice-b-down","notice_type":"下电通告","scope":"B",
+                "title":"EA118机房B楼机柜下电通告","start_time":"2026-09-03 14:55","end_time":"2026-09-03 19:00","quantity":"12",
+                "cabinet":"B-402包间B15、B16、B17、B18，C13、C14、C15、C16，D15、D16、D17、D18",
+            },
+        ]
+        batches=[self.service.batches.create_from_notice({**item,"owner_id":"owner"}) for item in samples]
+        self.assertEqual([batch["stats"]["total"] for batch in batches],[40,4,12])
+        self.assertEqual({(row["scope"],row["room"]) for row in batches[0]["rows"]},{("D","201")})
+        self.assertEqual({(row["room"],row["rack_type"]) for row in batches[1]["rows"]},{("216","网络机柜"),("247","网络机柜")})
+        self.assertEqual({row["action"] for row in batches[0]["rows"]},{""})
+        self.assertEqual({row["action"] for row in batches[1]["rows"]},{""})
+        self.assertEqual({row["action"] for row in batches[2]["rows"]},{"下测试电"})
+        self.assertEqual({row["expected"] for row in batches[2]["rows"]},{"2026-09-03 19:00:00"})
+        self.assertTrue(all(not row["actual"] and not row["result"] for batch in batches for row in batch["rows"]))
+        repeated=self.service.batches.create_from_notice({**samples[0],"owner_id":"owner"})
+        self.assertEqual(repeated["batch_id"],batches[0]["batch_id"])
+
+    def test_power_notice_count_warning_requires_fresh_acknowledgement(self):
+        batch=self.service.batches.create_from_notice({
+            "job_id":"job-notice-warning","target_record_id":"rec-notice-warning","notice_type":"上电通告","scope":"B",
+            "title":"EA118机房B楼机柜上电通告","start_time":"2026-09-03 11:05","end_time":"2026-09-03 23:59","quantity":"3",
+            "cabinet":"B-216运营商机房B04、B05","owner_id":"owner",
+        })
+        self.assertIn("quantity_mismatch",{item["code"] for item in batch["blocking_warnings"]})
+        acknowledged=self.service.batches.update(batch["batch_id"],{
+            "version":batch["version"],"rows":[],"acknowledge_warnings":True,
+        },"owner",["B"])
+        self.assertTrue(acknowledged["warnings_acknowledged"])
+        row=acknowledged["rows"][0]
+        changed=self.service.batches.update(batch["batch_id"],{
+            "version":acknowledged["version"],"rows":[{"row_id":row["row_id"],"rack":"B06"}],
+        },"owner",["B"])
+        self.assertFalse(changed["warnings_acknowledged"])
+
+    def test_power_notice_outbox_handoff_never_raises_into_notice_flow(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        original=PortalRuntime.state_store
+        class BrokenStore:
+            def enqueue_outbox_event(self,*_args,**_kwargs): raise TimeoutError("locked")
+        PortalRuntime.state_store=BrokenStore()
+        try:
+            event_id=PortalRuntime.enqueue_cabinet_notice_batch({
+                "work_type":"power","action":"start","notice_type":"上电通告","scope":"B",
+                "title":"test","start_time":"2026-09-03 11:05","end_time":"2026-09-03 23:59",
+                "cabinet":"B-216运营商机房B04","quantity":"1",
+            },job_id="job-safe",target_record_id="rec-safe",request_payload={"_auth_open_id":"owner"})
+            self.assertEqual(event_id,0)
+        finally:
+            PortalRuntime.state_store=original
+            if added_path: sys.path.remove(bin_path)
+
+    def test_power_notice_outbox_creates_one_idempotent_batch(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        from .lan_bitable_template_portal.state_store import LanPortalStateStore
+        original_store=PortalRuntime.state_store
+        original_service=PortalRuntime.cabinet_power_service
+        state=LanPortalStateStore(Path(self.tmp.name)/"notice-outbox.sqlite3")
+        PortalRuntime.state_store=state
+        PortalRuntime.cabinet_power_service=None
+        try:
+            prepared={
+                "work_type":"power","action":"start","notice_type":"下电通告","scope":"B",
+                "title":"EA118机房B楼机柜下电通告","start_time":"2026-09-03 14:55","end_time":"2026-09-03 19:00",
+                "cabinet":"B-402包间B15、B16","quantity":"2",
+            }
+            first=PortalRuntime.enqueue_cabinet_notice_batch(prepared,job_id="job-outbox",target_record_id="rec-outbox",request_payload={"_auth_open_id":"owner"})
+            second=PortalRuntime.enqueue_cabinet_notice_batch(prepared,job_id="job-outbox",target_record_id="rec-outbox",request_payload={"_auth_open_id":"owner"})
+            self.assertEqual(first,second)
+            PortalRuntime.cabinet_power_service=self.service
+            result=PortalRuntime._process_cabinet_notice_queue_once()
+            self.assertEqual(result["status"],"success")
+            self.assertEqual(self.service.batches.get(result["batch_id"])["stats"]["total"],2)
+            self.assertFalse(PortalRuntime._process_cabinet_notice_queue_once()["processed"])
+        finally:
+            PortalRuntime.stop_cabinet_notice_worker()
+            PortalRuntime.state_store=original_store
+            PortalRuntime.cabinet_power_service=original_service
+            state.shutdown_write_worker(timeout=1)
+            if added_path: sys.path.remove(bin_path)
 
     def test_batch_pdf_overlap_is_local_until_confirmed(self):
         operation=next(
