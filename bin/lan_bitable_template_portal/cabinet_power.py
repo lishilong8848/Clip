@@ -100,16 +100,17 @@ class CabinetFeishu:
         if not guard["real_write_allowed"]: raise CabinetError(guard["reason"],403)
 
     def request(self,method,path,body=None,params=None):
-        if method != "GET": self.require_write()
+        read_request=method=="GET" or method=="POST" and path=="records/batch_get"
+        if not read_request: self.require_write()
         import httpx
         from upload_event_module.services.http_client import FeishuHttpClient
         if self._http is None:
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
-        for attempt in range(3 if method=="GET" else 1):
-            data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if method=="GET" else 0)
-            if method!="GET" or data.get("code") not in (1255002,1254290,1254291,1254607) or attempt==2: break
+        for attempt in range(3 if read_request else 1):
+            data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if read_request else 0)
+            if not read_request or data.get("code") not in (1255002,1254290,1254291,1254607) or attempt==2: break
             time.sleep(0.5*(2**attempt))
         if data.get("code"):
             if data["code"] in (99991663,99991664,99991665): self._expires=0
@@ -136,6 +137,20 @@ class CabinetFeishu:
 
     def update(self,record_id,fields):
         return self.request("PUT",f"records/{record_id}",{"fields":fields})["record"]
+
+    def batch_create(self,rows):
+        token=_stable_uuid4_client_token("cabinet:batch:"+digest(rows))
+        return self.request("POST","records/batch_create",{"records":[{"fields":fields} for fields in rows]},params={"client_token":token})["records"]
+
+    def batch_update(self,rows):
+        return self.request("POST","records/batch_update",{"records":rows})["records"]
+
+    def batch_get(self,record_ids):
+        return self.request("POST","records/batch_get",{"record_ids":record_ids})["records"]
+
+    def delete(self,record_id):
+        if not re.fullmatch(r"rec[A-Za-z0-9]+",record_id): raise CabinetError("无效记录ID")
+        self.request("DELETE",f"records/{record_id}")
 
     def upload_attachment(self,path,file_name):
         self.require_write(); path=Path(path).resolve()
@@ -370,7 +385,7 @@ class CabinetPowerService:
             results=[self.do_refresh(s,{**payload,"_bootstrap_source":source},job) for s in TOTALS]
             return {"updated_at":stamp(),"count":sum(r["count"] for r in results)}
         with self._refresh_slots, self.local.locked([scope]):
-            if self.pending_writes(scope): raise CabinetError("该楼有尚未完成的上传，请先继续处理",409)
+            if self.pending_writes(scope) or self.pending_rollbacks(scope): raise CabinetError("该楼有尚未完成的上传或回退，请先继续处理",409)
             source=payload.get("_bootstrap_source")
             if not source and payload.get("bootstrap_batch_id"): source=self._bootstrap_source(payload["bootstrap_batch_id"])
             if source:
@@ -617,7 +632,7 @@ class CabinetPowerService:
         fingerprint=digest([owner,scope,record_id,payload])
         if prior and (prior.get('owner')!=owner or prior.get('request_hash')!=fingerprint): raise CabinetError('操作标识已用于其他内容或用户',409)
         if defer and prior and (self._write_active(prior) or self._write_finished(prior)): return self._write_receipt(prior)
-        if not prior and (self.pending_writes(scope) or old_scope!=scope and self.pending_writes(old_scope)): raise CabinetError('该楼有待完成的上传，请先继续处理',409)
+        if not prior and (self.pending_writes(scope) or self.pending_rollbacks(scope) or old_scope!=scope and (self.pending_writes(old_scope) or self.pending_rollbacks(old_scope))): raise CabinetError('该楼有待完成的上传或回退，请先继续处理',409)
         with self.local.locked([scope,old_scope]):
             prior=self.local.document(scope,"write:"+oid)
             fingerprint=digest([owner,scope,record_id,payload])
@@ -626,7 +641,7 @@ class CabinetPowerService:
                 if defer: return self._queue_write(prior)
                 if prior.get("status")=="completed" and old_scope==scope: return from_feishu(prior["record"])
                 return self._resume_write(prior)
-            if self.pending_writes(scope) or old_scope!=scope and self.pending_writes(old_scope): raise CabinetError("该楼有待完成的上传，请先继续处理",409)
+            if self.pending_writes(scope) or self.pending_rollbacks(scope) or old_scope!=scope and (self.pending_writes(old_scope) or self.pending_rollbacks(old_scope)): raise CabinetError("该楼有待完成的上传或回退，请先继续处理",409)
             old=next((o for o in self._snapshot(old_scope)["operations"] if o["record_id"]==record_id),None) if record_id else None
             if record_id and not old: raise CabinetError("本地记录不存在，请刷新对应楼栋",404)
             if old and old["version"]!=payload.get("expected_version"): raise CabinetError("记录已被修改，请重新打开后保存",409)
@@ -664,6 +679,95 @@ class CabinetPowerService:
             self.write("write:"+oid,journal)
             if old_scope!=scope: self.local.document(old_scope,"write:"+oid,journal)
             return self._queue_write(journal) if defer else self._resume_write(journal)
+
+    def save_batch_operations(self,scope,entries,owner):
+        """Commit independent cabinet rows in one Feishu write and one readback."""
+        self.ensure_loaded(scope)
+        with self.local.locked([scope]):
+            if self.pending_writes(scope) or self.pending_rollbacks(scope):
+                raise CabinetError("该楼存在待完成操作，需逐条核验后继续",409)
+            snap=self._snapshot(scope)
+            inventory={(item["room"],item["rack"]):item for item in snap["config"]["inventory"]}
+            journals=[]; seen_racks=set()
+            for row_id,payload,record_id in entries:
+                oid=str(payload.get("operation_id") or "")
+                if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}",oid) or self.local.document(scope,"write:"+oid):
+                    raise CabinetError("批次中已有待核验操作，改为逐条继续",409)
+                old=next((op for op in snap["operations"] if op["record_id"]==record_id),None) if record_id else None
+                if record_id and (not old or old["version"]!=payload.get("expected_version")):
+                    raise CabinetError("机柜记录已变化，需逐条核验",409)
+                op=self.validate_op(scope,payload,old)
+                rack_key=(op["room"],op["rack"])
+                current=inventory.get(rack_key)
+                if rack_key in seen_racks or current is None or current["rack_type"]!=op.get("rack_type"):
+                    raise CabinetError("同柜多次操作或机柜类型变更需逐条处理",409)
+                seen_racks.add(rack_key)
+                if scope in ("D","E") and any(
+                    item["record_id"]!=record_id and (item["room"],item["rack"])==rack_key
+                    for item in snap["operations"]
+                ):
+                    raise CabinetError("该机柜已有台账，需逐条核验",409)
+                fields=to_fields(op); fields["来源工作表"]=op["source"]
+                if not old: fields["数据标识"]="manual_"+oid
+                journal={"operation_id":oid,"scope":scope,"old_scope":scope,"owner":owner,
+                         "request_hash":digest([owner,scope,record_id,payload]),"request":copy.deepcopy(payload),
+                         "record_id":record_id,"stages":[{"kind":"main","record_id":record_id,"fields":fields,
+                         "before":old["raw_fields"] if old else None}],"inventory":None,"baseline_transfer":[],
+                         "status":"intent","created_at":time.time(),"error":""}
+                journals.append((row_id,journal))
+            if len(journals)<2: raise CabinetError("不足两条可合并的机柜记录",409)
+            remote=self.remote_for(scope)
+            remote.ensure_fields()
+            updates=[journal for _,journal in journals if journal["record_id"]]
+            if updates:
+                current={item["record_id"]:item for item in remote.batch_get([j["record_id"] for j in updates])}
+                for journal in updates:
+                    stage=journal["stages"][0]
+                    found=current.get(journal["record_id"])
+                    if not found or digest(found["fields"])!=digest(stage["before"]):
+                        raise CabinetError("云端记录已变化，需逐条核验",409)
+            for _,journal in journals: self.write("write:"+journal["operation_id"],journal)
+            try:
+                creates=[j for _,j in journals if not j["record_id"]]
+                for _,journal in journals:
+                    journal["stages"][0]["attempted"]=True
+                    journal.update(status="writing",error_stage="main")
+                    self.write("write:"+journal["operation_id"],journal)
+                created_records={}
+                if creates:
+                    created=remote.batch_create([{k:v for k,v in j["stages"][0]["fields"].items() if v is not None} for j in creates])
+                    if len(created)!=len(creates): raise CabinetError("批量新增返回数量不一致，需逐条核验",409)
+                    created_ids=[record["record_id"] for record in created]
+                    created_records={record["fields"].get("数据标识"):record for record in remote.batch_get(created_ids)}
+                    for journal in creates:
+                        record=created_records.get(journal["stages"][0]["fields"]["数据标识"])
+                        if not record: raise CabinetError("批量新增返回记录无法匹配，需逐条核验",409)
+                        journal["stages"][0]["record_id"]=record["record_id"]
+                        journal["record_id"]=record["record_id"]
+                        self.write("write:"+journal["operation_id"],journal)
+                if updates:
+                    remote.batch_update([{"record_id":j["record_id"],"fields":j["stages"][0]["fields"]} for j in updates])
+                records=(
+                    {item["record_id"]:item for item in remote.batch_get([j["record_id"] for _,j in journals])}
+                    if updates else {item["record_id"]:item for item in created_records.values()}
+                )
+                result={}
+                for row_id,journal in journals:
+                    stage=journal["stages"][0]; record=records.get(journal["record_id"])
+                    if not record or not equivalent(stage["fields"],record["fields"]):
+                        raise CabinetError("批量写入回读尚未一致，需逐条核验",409)
+                    stage["verified"]=True; journal["record"]=record
+                    journal.update(status="local_pending",error_stage="local_commit")
+                    self.write("write:"+journal["operation_id"],journal)
+                    self.local.commit_operation(scope,journal,record=record,complete=True)
+                    result[row_id]=record["record_id"]
+                return result
+            except Exception:
+                for _,journal in journals:
+                    if (self.local.document(scope,"write:"+journal["operation_id"]) or {}).get("status")!="completed":
+                        journal.update(status="pending",error_stage="batch_reconcile")
+                        self.write("write:"+journal["operation_id"],journal)
+                raise
 
     def _write_active(self,journal):
         pid=journal.get('worker_pid')
@@ -711,6 +815,100 @@ class CabinetPowerService:
     def pending_writes(self,scope):
         return self.local.documents(scope,"write:",pending_only=True)
 
+    def pending_rollbacks(self,scope):
+        return self.local.documents(scope,"rollback:",pending_only=True)
+
+    def rollback_batch_operation(self,scope,operation_id,batch_id,record_id):
+        self.ensure_loaded(scope)
+        with self.local.locked([scope]):
+            key="rollback:"+operation_id
+            rollback=self.local.document(scope,key)
+            if rollback and rollback.get("status")=="completed": return rollback
+            forward=self.local.document(scope,"write:"+operation_id)
+            if not forward or forward.get("status")!="completed" or forward.get("record_id")!=record_id:
+                raise CabinetError("本行没有可回退的已完成上传记录",409)
+            if (forward.get("request",{}).get("batch_meta") or {}).get("batch_id")!=batch_id:
+                raise CabinetError("上传记录不属于当前批次",409)
+            for pending in self.pending_rollbacks(scope):
+                if pending["operation_id"]==operation_id: continue
+                previous=self.local.document(scope,"write:"+pending["operation_id"])
+                if not previous or (
+                    previous["request"].get("room"),previous["request"].get("rack")
+                )==(forward["request"].get("room"),forward["request"].get("rack")):
+                    raise CabinetError("该机柜还有待完成的回退，请先处理",409)
+            if self.pending_writes(scope): raise CabinetError("该楼仍有待完成上传，请先处理",409)
+            main=next(stage for stage in forward["stages"] if stage["kind"]=="main")
+            directory=next((stage for stage in forward["stages"] if stage["kind"]=="directory"),None)
+            if directory and directory.get("before") is None and not directory.get("before_subset"):
+                raise CabinetError("本批新建机柜目录需人工回退",409)
+            after=(forward.get("record") or {}).get("fields") or main["fields"]
+            restored={field:(main["before"] or {}).get(field) for field in (set(main["before"] or {})|set(main["fields"]))-{"序号"}}
+            for field in ("机柜功率（W）","来源行号"):
+                value=restored.get(field)
+                if value in (None,""): restored[field]=None
+                elif isinstance(value,str):
+                    try: restored[field]=float(value) if field=="机柜功率（W）" else int(value)
+                    except ValueError: raise CabinetError(f"原始{field}不是数字，请人工核对",409)
+            if rollback is None:
+                current=next((op for op in self._snapshot(scope)["operations"] if op["record_id"]==record_id),None)
+                if current is None or digest(current["raw_fields"])!=digest(after):
+                    raise CabinetError("机柜记录在本批后已被修改，不能自动回退",409)
+                rollback={"operation_id":operation_id,"batch_id":batch_id,"record_id":record_id,"status":"intent","main_done":False,"directory_done":False,"error":"","created_at":time.time()}
+                self.local.document(scope,key,rollback)
+            remote=self.remote_for(scope)
+            try:
+                if directory and directory.get("before_subset"):
+                    directory_fields=self.directory(scope).get(directory["record_id"])["fields"]
+                    if not (equivalent(directory["before_subset"],directory_fields) or equivalent(directory["fields"],directory_fields)):
+                        raise CabinetError("机柜基础资料在本批后已被修改",409)
+                if rollback["main_done"]:
+                    if main["before"] is None:
+                        if any(item["record_id"]==record_id for item in self.list_remote(remote,data_id=main["fields"]["数据标识"])):
+                            raise CabinetError("云端机柜记录在回退期间重新出现",409)
+                    else:
+                        restored_record=remote.get(record_id)
+                        if not equivalent(restored,restored_record["fields"]):
+                            raise CabinetError("云端机柜记录在回退期间已修改",409)
+                if not rollback["main_done"]:
+                    if main["before"] is None:
+                        matches=self.list_remote(remote,data_id=main["fields"]["数据标识"])
+                        target=next((item for item in matches if item["record_id"]==record_id),None)
+                        if target is not None:
+                            if digest(target["fields"])!=digest(after): raise CabinetError("云端机柜记录已被修改，不能自动回退",409)
+                            rollback["status"]="deleting"; self.local.document(scope,key,rollback)
+                            remote.delete(record_id)
+                        if any(item["record_id"]==record_id for item in self.list_remote(remote,data_id=main["fields"]["数据标识"])):
+                            raise CabinetError("云端删除尚未核验成功，请重试",409)
+                    else:
+                        current=remote.get(record_id)
+                        if not equivalent(restored,current["fields"]):
+                            if digest(current["fields"])!=digest(after): raise CabinetError("云端机柜记录已被修改，不能自动回退",409)
+                            rollback["status"]="restoring"; self.local.document(scope,key,rollback)
+                            remote.update(record_id,restored)
+                        restored_record=remote.get(record_id)
+                        if not equivalent(restored,restored_record["fields"]):
+                            raise CabinetError("云端恢复尚未核验成功，请重试",409)
+                    rollback.update(main_done=True,status="main_verified"); self.local.document(scope,key,rollback)
+                inventory=None
+                if directory:
+                    if directory.get("before_subset"):
+                        original_type=directory["before_subset"]["机柜类型"]
+                        current=self.directory(scope).get(directory["record_id"])
+                        if not equivalent({"机柜类型":original_type},current["fields"]):
+                            if not equivalent(directory["fields"],current["fields"]): raise CabinetError("机柜基础资料在本批后已被修改",409)
+                            rollback["status"]="restoring_directory"; self.local.document(scope,key,rollback)
+                            self.directory(scope).update(directory["record_id"],{"机柜类型":original_type})
+                        if not equivalent({"机柜类型":original_type},self.directory(scope).get(directory["record_id"])["fields"]):
+                            raise CabinetError("机柜基础资料回读失败，请重试",409)
+                        inventory=next((copy.deepcopy(item) for item in self._snapshot(scope)["config"]["inventory"] if (item["room"],item["rack"])==(forward["request"]["room"],forward["request"]["rack"])),None)
+                        if inventory: inventory["rack_type"]=original_type
+                rollback.update(directory_done=True,status="local_pending"); self.local.document(scope,key,rollback)
+                return self.local.commit_rollback(scope,rollback,record=restored_record if main["before"] is not None else None,inventory=inventory,remove_id=record_id if main["before"] is None else "")
+            except Exception as exc:
+                rollback.update(error=str(exc),status="pending")
+                self.local.document(scope,key,rollback)
+                raise
+
     def _resume_write(self,journal):
         scope=journal["scope"]; key="write:"+journal["operation_id"]; stage_name="prepare"
         try:
@@ -726,7 +924,7 @@ class CabinetPowerService:
                     if stage_name=="main": journal["record"]=current
                     continue
                 current=remote.get(stage["record_id"]) if stage["record_id"] else None
-                if current is None:
+                if current is None and stage.get("attempted"):
                     found=self.list_remote(remote,data_id=stage["fields"]["数据标识"])
                     if len(found)>1: raise CabinetError("云端操作标识重复，请核对",409)
                     current=found[0] if found else None
@@ -738,7 +936,7 @@ class CabinetPowerService:
                         if stage.get("before_subset") and not equivalent(stage["before_subset"],current["fields"]): raise CabinetError("云端机柜基础资料已变化，请核对",409)
                         if stage.get("before") is None and not stage.get("before_subset"): raise CabinetError("已有同标识记录内容冲突",409)
                     elif stage.get("before") is not None: raise CabinetError("云端记录已删除",409)
-                    journal.update(status="writing",error="",error_stage=stage_name); self.write(key,journal)
+                    journal.update(status="writing",error="",error_stage=stage_name); stage["attempted"]=True; self.write(key,journal)
                     current=remote.update(current["record_id"],stage["fields"]) if current else remote.create({k:v for k,v in stage["fields"].items() if v is not None},journal["operation_id"]+"_"+stage_name)
                 stage["record_id"]=current["record_id"]; journal["status"]="readback"; self.write(key,journal)
                 if not already_verified: current=remote.get(stage["record_id"])

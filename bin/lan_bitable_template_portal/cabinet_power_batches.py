@@ -34,9 +34,14 @@ SCOPES = frozenset("ABCDE")
 DATE_RE = re.compile(r"20\d{2}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?")
 ROW_RE = re.compile(
     r"^\s*EA118\s+([A-E])([1-4])-(\d{1,2})\.EA118\s+([A-Z]\d{2})\s+(\S+)\s+"
-    r"(网络机柜|服务器机柜)\s+(\S+)\s+(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+"
-    r"(成功|失败)\s+(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*$"
+    r"(网络机柜|服务器机柜)\s+(\S+)(.*)$"
 )
+POWER_ACTIONS_BY_STATE = {
+    "off": frozenset(("上测试电", "上正式电")),
+    "test": frozenset(("测试电转正式电", "下测试电")),
+    "formal": frozenset(("正式电转测试电", "下正式电")),
+}
+POWER_STATE_LABELS = {"off": "未上电/已下电", "test": "测试电", "formal": "正式电"}
 NOTICE_ROOM_RE = re.compile(
     r"(?<![A-Z0-9])([A-E])\s*[-_－—]?\s*([1-4]\d{2})\s*(?:包间|运营商机房|机房)?",
     re.IGNORECASE,
@@ -47,10 +52,10 @@ NOTICE_RACK_RE = re.compile(
 )
 EDITABLE_FIELDS = {
     "scope", "room", "rack", "supplier_rack", "rack_type", "type_detail",
-    "action", "expected", "actual", "result", "order_time", "type_resolution",
+    "action", "expected", "actual", "result", "type_resolution",
 }
 ACTIVE_ROW_STATUSES = {"ready", "failed"}
-LOCKED_ROW_STATUSES = {"queued", "writing", "completed"}
+LOCKED_ROW_STATUSES = {"queued", "writing", "completed", "rollback_queued", "rolling_back", "rollback_failed", "rollback_blocked", "rolled_back"}
 
 
 def now():
@@ -150,6 +155,18 @@ class CabinetBatchStore:
                 "SELECT * FROM batches ORDER BY updated_at DESC LIMIT ?", (max(1, min(int(limit), 1000)),)
             )]
 
+    def later_completed(self, batch_id, scope, room, rack):
+        with self._connect() as conn:
+            rows=conn.execute(
+                "SELECT payload_json FROM batches WHERE rowid>(SELECT rowid FROM batches WHERE batch_id=?)",
+                (batch_id,),
+            )
+            for item in rows:
+                for row in json.loads(item[0]).get("rows", []):
+                    if (row.get("scope"), row.get("room"), row.get("rack")) == (scope,room,rack) and row.get("wrote_record") is not False and row.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}:
+                        return True
+        return False
+
 
 class CabinetBatchService:
     def __init__(self, cabinet_service, root):
@@ -178,6 +195,9 @@ class CabinetBatchService:
                     if row.get("status") in ("queued", "writing"):
                         row.update(status="failed", error="提交因服务退出而中断，可继续重试")
                         changed = True
+                    elif row.get("status") in ("rollback_queued", "rolling_back"):
+                        row.update(status="rollback_failed",error="回退因服务退出中断，可继续重试")
+                        changed = True
                 if changed:
                     self._refresh_summary(batch)
                 else:
@@ -191,7 +211,7 @@ class CabinetBatchService:
 
     @staticmethod
     def _stats(rows):
-        stats = {key: 0 for key in ("total", "ready", "duplicate", "conflict", "invalid", "completed", "failed", "excluded")}
+        stats = {key: 0 for key in ("total", "ready", "duplicate", "conflict", "invalid", "completed", "failed", "excluded", "rolled_back", "rollback_failed", "rollback_blocked")}
         stats["total"] = len(rows)
         for row in rows:
             status = str(row.get("status") or "invalid")
@@ -200,21 +220,27 @@ class CabinetBatchService:
             elif status in stats:
                 stats[status] += 1
         stats["confirmable"] = stats["ready"] + stats["failed"]
-        stats["new"] = sum(row.get("status") not in ("duplicate", "completed") and not str(row.get("status", "")).startswith("excluded_") for row in rows)
+        stats["new"] = sum(row.get("status") not in ("duplicate", "completed", "rolled_back") and not str(row.get("status", "")).startswith("excluded_") for row in rows)
         return stats
 
     def _refresh_summary(self, batch):
         rows = batch.get("rows", [])
         batch["stats"] = self._stats(rows)
         batch["scopes"] = sorted({row.get("scope") for row in rows if row.get("scope") in SCOPES})
-        if batch.get("status") in ("cancelled", "recognizing") or batch.get("status") == "failed" and not rows:
+        if batch.get("status") == "cancelled" and not any(row.get("status") in ("rollback_queued", "rolling_back") for row in rows):
             return
-        if any(row.get("status") in ("queued", "writing") for row in rows):
+        if batch.get("status") == "recognizing" or batch.get("status") == "failed" and not rows:
+            return
+        if any(row.get("status") in ("queued", "writing", "rollback_queued", "rolling_back") for row in rows):
             batch["status"] = "running"
+        elif rows and all(row.get("status") == "rolled_back" or str(row.get("status", "")).startswith("excluded_") for row in rows):
+            batch["status"] = "rolled_back"
         elif rows and all(row.get("status") == "completed" or str(row.get("status", "")).startswith("excluded_") for row in rows):
             batch["status"] = "completed"
-        elif any(row.get("status") == "completed" for row in rows):
+        elif any(row.get("status") in ("completed", "rolled_back") for row in rows):
             batch["status"] = "partial"
+        elif any(row.get("status") in ("rollback_failed", "rollback_blocked") for row in rows):
+            batch["status"] = "failed"
         elif rows:
             batch["status"] = "pending"
 
@@ -277,6 +303,11 @@ class CabinetBatchService:
 
     @staticmethod
     def _infer_notice_action(snapshot, room, rack, direction, cutoff):
+        if not any(
+            (item.get("room"), item.get("rack")) == (room, rack)
+            for item in (snapshot.get("config") or {}).get("inventory", [])
+        ):
+            return "", "机柜未匹配当前目录，无法自动识别操作类型", "unknown"
         history = []
         for operation in snapshot.get("operations", []):
             if (operation.get("room"), operation.get("rack")) != (room, rack):
@@ -291,22 +322,22 @@ class CabinetBatchService:
                     history.append(item)
         latest = max(history, key=lambda item: str(item.get("actual") or ""), default=None)
         if latest is None:
-            return "", "无可用的成功历史，请人工选择正式电或测试电"
+            if direction == "up":
+                return "上正式电", "当前机柜未上电，默认上正式电，可人工改为上测试电", "off"
+            return "", "当前机柜未上电，下电操作需人工核对", "off"
         latest_action = str(latest.get("action") or "")
         state = STATES.get(latest_action, "unknown")
         if direction == "down":
             if state == "formal":
-                return "下正式电", f"根据最近成功操作 {latest_action} 推断"
+                return "下正式电", f"根据最近成功操作 {latest_action} 推断", state
             if state == "test":
-                return "下测试电", f"根据最近成功操作 {latest_action} 推断"
-            return "", "当前已下电或状态不明，请人工核对"
-        if state == "off" and latest_action == "下正式电":
-            return "上正式电", "根据最近成功下正式电记录推断"
-        if state == "off" and latest_action == "下测试电":
-            return "上测试电", "根据最近成功下测试电记录推断"
+                return "下测试电", f"根据最近成功操作 {latest_action} 推断", state
+            return "", "当前已下电或状态不明，请人工核对", state
+        if state == "off":
+            return "上正式电", "当前机柜未上电，默认上正式电，可人工改为上测试电", state
         if state in {"formal", "test"}:
-            return "", "当前已上电，不自动猜测转换操作"
-        return "", "历史无法确定上电类型，请人工选择"
+            return "", "当前已上电，不自动猜测转换操作", state
+        return "", "历史无法确定上电类型，请人工选择", state
 
     def _refresh_notice_warnings(self, batch):
         if batch.get("source") != "notice":
@@ -482,9 +513,18 @@ class CabinetBatchService:
     @staticmethod
     def _extract_page(page):
         try:
-            return page.extract_text(extraction_mode="layout") or ""
-        except TypeError:
             return page.extract_text() or ""
+        except TypeError:
+            return page.extract_text(extraction_mode="layout") or ""
+
+    @staticmethod
+    def _current_state(snapshot, room, rack):
+        latest = max(
+            (event for operation in snapshot["operations"] if (operation["room"], operation["rack"]) == (room, rack)
+             for event in operation["events"] if completed_state_event(event)),
+            key=lambda event: str(event.get("actual") or ""), default=None,
+        )
+        return STATES.get(latest["action"], "unknown") if latest else "off"
 
     def _set_file_progress(self, batch_id, file_id, **values):
         def update(batch):
@@ -527,7 +567,16 @@ class CabinetBatchService:
                 match = ROW_RE.match(line)
                 if not match:
                     raise CabinetError(f"第{page_number}页存在无法识别的机柜行，请改用手工批量填写")
-                scope, floor, room_number, rack, supplier, rack_type, detail, actual, result, order_time = match.groups()
+                scope, floor, room_number, rack, supplier, rack_type, detail, tail = match.groups()
+                dates = DATE_RE.findall(tail)
+                result_match = re.search(r"成功|失败", tail)
+                result = result_match.group() if result_match else ""
+                remainder = DATE_RE.sub("", tail)
+                remainder = re.sub(r"成功|失败", "", remainder).strip()
+                if remainder or len(dates) > 2:
+                    raise CabinetError(f"第{page_number}页存在无法识别的机柜行，请改用手工批量填写")
+                actual = dates[0] if len(dates) == 2 or len(dates) == 1 and result else ""
+                order_time = dates[-1] if len(dates) == 2 or len(dates) == 1 and not result else ""
                 source_row += 1
                 room = f"{floor}{int(room_number):02d}"
                 current = {
@@ -595,6 +644,8 @@ class CabinetBatchService:
             row[key] = str(row.get(key) or "").strip()
         row["scope"] = row["scope"].upper().replace("楼", "")
         row["rack"] = row["rack"].upper()
+        if row["supplier_rack"].lower() in {"-", "/", "null", "[null]", "none"}:
+            row["supplier_rack"] = ""
         for key in ("expected", "actual", "order_time"):
             row[key] = row[key].replace("T", " ")
     @staticmethod
@@ -607,10 +658,11 @@ class CabinetBatchService:
             return False
 
     def _validation_context(self, scopes):
-        inventories, exact, slots = {}, set(), {}
+        inventories, exact, slots, states = {}, set(), {}, {}
         for scope in scopes:
             snap = self.cabinet._snapshot(scope)
             inventories[scope] = {(item["room"], item["rack"]): item for item in snap["config"]["inventory"]}
+            latest = {}
             for operation in snap["operations"]:
                 for event in operation["events"]:
                     if not event.get("action") or not event.get("actual"):
@@ -618,14 +670,18 @@ class CabinetBatchService:
                     key = (scope, operation["room"], operation["rack"], event["action"], event["actual"])
                     exact.add(key)
                     slots.setdefault(key[:3] + (key[4],), set()).add(key[3])
-        return inventories, exact, slots
+                    cabinet_key = (operation["room"], operation["rack"])
+                    if completed_state_event(event) and (cabinet_key not in latest or event["actual"] > latest[cabinet_key]["actual"]):
+                        latest[cabinet_key] = event
+            states[scope] = {cabinet_key: STATES.get(event["action"], "unknown") for cabinet_key,event in latest.items()}
+        return inventories, exact, slots, states
 
     def _validate_rows(self, batch):
         rows = batch.get("rows", [])
         notice_scope = str((batch.get("source_notice") or {}).get("scope") or "").upper()
         scopes = {str(row.get("scope") or "").upper().replace("楼", "") for row in rows}
         valid_scopes = {scope for scope in scopes if scope in SCOPES}
-        inventories, existing_exact, existing_slots = self._validation_context(valid_scopes) if valid_scopes else ({}, set(), {})
+        inventories, existing_exact, existing_slots, current_states = self._validation_context(valid_scopes) if valid_scopes else ({}, set(), {}, {})
         normalized = []
         batch_slots = {}
         for row in rows:
@@ -658,6 +714,11 @@ class CabinetBatchService:
             if row["result"] not in ("成功", "失败"):
                 issues.append({"code": "result", "message": "操作结果须选择成功或失败"})
             inventory = inventories.get(scope, {}).get((room, rack))
+            if batch.get("source") == "pdf" and inventory is not None:
+                state = current_states.get(scope, {}).get((room, rack), "off")
+                row["current_power_state"] = state
+                if action and action not in POWER_ACTIONS_BY_STATE.get(state, ()):
+                    issues.append({"code": "state_action", "message": f"当前为{POWER_STATE_LABELS.get(state, '状态待核实')}，只能选择{'或'.join(sorted(POWER_ACTIONS_BY_STATE.get(state, ()))) or '核实状态后操作'}"})
             if inventory is None and scope in SCOPES and re.fullmatch(r"[1-4]\d{2}", room) and re.fullmatch(r"[A-Z]\d{2}", rack):
                 issues.append({"code": "inventory", "message": "机柜不在当前楼栋目录中"})
             elif inventory:
@@ -745,7 +806,7 @@ class CabinetBatchService:
         rows = []
         for index, item in enumerate(parsed, 1):
             inventory = inventories[item["scope"]].get((item["room"], item["rack"]))
-            action, inference = self._infer_notice_action(
+            action, inference, current_power_state = self._infer_notice_action(
                 snapshots[item["scope"]],
                 item["room"],
                 item["rack"],
@@ -760,9 +821,10 @@ class CabinetBatchService:
                 "action": action,
                 "expected": expected,
                 "actual": "",
-                "result": "",
+                "result": "成功",
                 "order_time": "",
                 "type_resolution": "",
+                "current_power_state": current_power_state,
             }
             row_id = "row_" + digest([source_hash, item])[:24]
             rows.append(
@@ -837,6 +899,49 @@ class CabinetBatchService:
         batch = self.store.get(batch_id)
         if batch is None:
             raise CabinetError("批次不存在", 404)
+        if batch.get("status")=="partial" and not any(
+            row.get("status") in ("completed","rolled_back") for row in batch.get("rows",[])
+        ):
+            self._refresh_summary(batch)
+        if batch.get("source") == "notice":
+            source = batch.get("source_notice") or {}
+            direction = "up" if source.get("notice_type") == "上电通告" else "down"
+            cutoff = self._notice_datetime(source.get("sent_at")) or self._notice_datetime(source.get("start_time"))
+            snapshots = {}
+            updates = {}
+            for row in batch.get("rows", []):
+                if row.get("status") in LOCKED_ROW_STATUSES:
+                    continue
+                patch = {}
+                if not row.get("result"):
+                    patch["result"] = "成功"
+                if not row.get("current_power_state") and row.get("scope") in SCOPES:
+                    scope = str(row.get("scope") or "")
+                    snapshot = snapshots.get(scope)
+                    if snapshot is None:
+                        snapshot = self.cabinet._snapshot(scope)
+                        snapshots[scope] = snapshot
+                    action, inference, state = self._infer_notice_action(
+                        snapshot, row.get("room"), row.get("rack"), direction, cutoff
+                    )
+                    patch["current_power_state"] = state
+                    action_was_edited = any(
+                        edit.get("field") == "action" for edit in row.get("edits", [])
+                    )
+                    if not row.get("action") and not action_was_edited:
+                        patch.update(action=action, inference=inference)
+                if patch:
+                    updates[row["row_id"]] = patch
+            if updates:
+                def apply_defaults(current):
+                    for row in current.get("rows", []):
+                        row.update(updates.get(row.get("row_id"), {}))
+                batch = self._change(
+                    batch_id,
+                    apply_defaults,
+                    expected_version=batch["version"],
+                    validate=True,
+                )
         return batch
 
     def visible(self, batch, owner, allowed, admin=False):
@@ -849,6 +954,7 @@ class CabinetBatchService:
         for row in result.get("rows", []):
             row["editable"] = bool(admin or row.get("scope") in allowed) and row.get("status") not in LOCKED_ROW_STATUSES and not row.get("operation_started")
             row["confirmable"] = bool(admin or row.get("scope") in allowed) and row.get("status") in ACTIVE_ROW_STATUSES
+            row["rollbackable"] = bool(admin or row.get("scope") in allowed) and row.get("wrote_record") is not False and row.get("status") in {"completed", "rollback_failed", "rollback_blocked"}
         result["can_download_files"] = bool(admin or batch["owner_id"] == owner)
         result["allowed_scopes"] = [scope for scope in batch.get("scopes", []) if admin or scope in allowed]
         result["can_confirm_all"] = bool(admin or set(batch.get("scopes", [])) <= set(allowed))
@@ -857,6 +963,10 @@ class CabinetBatchService:
     def list(self, owner, allowed, admin=False, scope="", status="", date_from="", date_to="", page=1, page_size=20):
         items = []
         for batch in self.store.list(1000):
+            if batch.get("status")=="partial" and not any(
+                row.get("status") in ("completed","rolled_back") for row in batch.get("rows",[])
+            ):
+                self._refresh_summary(batch)
             if not admin and batch["owner_id"] != owner and not set(batch.get("scopes", [])) & set(allowed):
                 continue
             if scope and scope not in batch.get("scopes", []):
@@ -891,6 +1001,7 @@ class CabinetBatchService:
             raise CabinetError("批次修改格式无效")
         if acknowledge_warnings and not admin and not set(current.get("scopes", [])) <= set(allowed):
             raise CabinetError("核对整批异常需要拥有批次内全部楼栋权限", 403)
+        notice_snapshots = {}
 
         def apply(batch):
             if batch.pop("validation_error",False): batch["error"]=""
@@ -908,6 +1019,10 @@ class CabinetBatchService:
                 if row.get("status") in LOCKED_ROW_STATUSES or row.get("operation_started"):
                     raise CabinetError("该行已开始正式提交，不能再修改内容", 409)
                 before_scope = row.get("scope")
+                action_was_edited = any(
+                    edit.get("field") == "action" for edit in row.get("edits", [])
+                )
+                changed_fields = set()
                 for field in EDITABLE_FIELDS:
                     if field not in patch:
                         continue
@@ -915,9 +1030,25 @@ class CabinetBatchService:
                     if value != str(row.get(field) or ""):
                         row.setdefault("edits", []).append({"field": field, "before": row.get(field, ""), "after": value, "owner": owner, "at": now()})
                         row[field] = value
+                        changed_fields.add(field)
                 if not admin and row.get("scope", "").upper().replace("楼", "") not in allowed:
                     row["scope"] = before_scope
                     raise CabinetError("无权将记录调整到该楼栋", 403)
+                if batch.get("source") == "notice" and changed_fields & {"scope", "room", "rack"} and row.get("scope") in SCOPES:
+                    scope = row["scope"]
+                    snapshot = notice_snapshots.get(scope)
+                    if snapshot is None:
+                        snapshot = self.cabinet._snapshot(scope)
+                        notice_snapshots[scope] = snapshot
+                    notice = batch.get("source_notice") or {}
+                    direction = "up" if notice.get("notice_type") == "上电通告" else "down"
+                    cutoff = self._notice_datetime(notice.get("sent_at")) or self._notice_datetime(notice.get("start_time"))
+                    action, inference, state = self._infer_notice_action(
+                        snapshot, row.get("room"), row.get("rack"), direction, cutoff
+                    )
+                    row.update(current_power_state=state, inference=inference)
+                    if "action" not in changed_fields and not action_was_edited:
+                        row["action"] = action
                 if "excluded" in patch:
                     excluded = bool(patch["excluded"])
                     was_excluded = str(row.get("status", "")).startswith("excluded_")
@@ -950,7 +1081,7 @@ class CabinetBatchService:
         evidence = {
             "batch_id": batch["batch_id"], "row_id": row["row_id"], "file_name": row.get("file_name", ""),
             "file_sha256": row.get("file_sha256", ""), "application_ids": row.get("application_ids", []),
-            "application_time": row.get("application_time", ""), "order_time": row.get("order_time", ""),
+            "application_time": row.get("application_time", ""),
             "source_page": row.get("page", 0), "source_row": row.get("source_row", 0),
             "source": batch.get("source", ""), "source_notice": batch.get("source_notice", {}),
             "inference": row.get("inference", ""), "original": row.get("original", {}),
@@ -970,6 +1101,10 @@ class CabinetBatchService:
                 break
         if exact:
             return None, exact["record_id"]
+        if batch.get("source") == "pdf":
+            state = self._current_state(snap, row["room"], row["rack"])
+            if row["action"] not in POWER_ACTIONS_BY_STATE.get(state, ()):
+                raise CabinetError(f"该机柜当前为{POWER_STATE_LABELS.get(state, '状态待核实')}，与确认单操作不匹配，请重新核对",409)
         if scope in ("D", "E"):
             old = next((operation for operation in snap["operations"] if (operation["room"], operation["rack"]) == (row["room"], row["rack"])), None)
             if old:
@@ -981,39 +1116,73 @@ class CabinetBatchService:
 
     def _confirm_scope(self, batch_id, scope, row_ids, owner):
         with self._scope_locks[scope]:
+            rows={row["row_id"]:row for row in self.get(batch_id)["rows"] if row["row_id"] in row_ids}
+            waves=[]; wave=[]; racks=set()
             for row_id in row_ids:
-                try:
-                    def writing(batch):
-                        row = next(item for item in batch["rows"] if item["row_id"] == row_id)
-                        if row.get("status") not in ("queued", "failed"):
-                            raise CabinetError("该行当前不可提交", 409)
-                        row.update(status="writing", error="", operation_started=True)
-                    batch = self._change(batch_id, writing)
-                    row = next(item for item in batch["rows"] if item["row_id"] == row_id)
-                    request, existing_record_id = self._row_payload(batch, row)
-                    if request is None:
-                        saved_record_id = existing_record_id
-                    else:
-                        payload, record_id = request
-                        saved = self.cabinet.save_operation(scope, payload, owner, record_id)
-                        saved_record_id = saved["record_id"]
-                    def completed(current):
-                        target = next(item for item in current["rows"] if item["row_id"] == row_id)
-                        target.update(status="completed", error="", record_id=saved_record_id, completed_at=now())
-                    self._change(batch_id, completed)
-                except Exception as exc:
-                    def failed(current):
-                        target = next((item for item in current.get("rows", []) if item["row_id"] == row_id), None)
-                        if target and target.get("status") != "completed":
-                            target.update(status="failed", error=str(exc), operation_started=True)
+                row=rows[row_id]; rack=(row["room"],row["rack"])
+                if rack in racks or len(wave)==100:
+                    waves.append(wave); wave=[]; racks=set()
+                wave.append(row_id); racks.add(rack)
+            if wave: waves.append(wave)
+            for wave in waves:
+                pending=wave
+                if len(wave)>1:
                     try:
-                        self._change(batch_id, failed)
+                        batch=self.get(batch_id)
+                        prepared=[]
+                        for row_id in wave:
+                            row=next(item for item in batch["rows"] if item["row_id"]==row_id)
+                            request,existing_id=self._row_payload(batch,row)
+                            if request is None: raise CabinetError("本组包含既有记录，逐条核验")
+                            payload,record_id=request
+                            prepared.append((row_id,payload,record_id))
+                        def writing(current):
+                            for row in current["rows"]:
+                                if row["row_id"] in wave:
+                                    row.update(status="writing",error="",operation_started=True)
+                        self._change(batch_id,writing)
+                        saved=self.cabinet.save_batch_operations(scope,prepared,owner)
+                        for row_id,record_id in saved.items():
+                            def completed(current):
+                                row=next(item for item in current["rows"] if item["row_id"]==row_id)
+                                row.update(status="completed",error="",record_id=record_id,completed_at=now(),wrote_record=True)
+                            self._change(batch_id,completed)
+                        pending=[]
                     except Exception:
-                        pass
-            try:
-                self._change(batch_id, lambda _batch: None, validate=True)
-            except Exception:
-                pass
+                        def retry(current):
+                            for row in current["rows"]:
+                                if row["row_id"] in wave and row.get("status")=="writing":
+                                    row["status"]="queued"
+                        self._change(batch_id,retry)
+                for row_id in pending:
+                    try:
+                        def writing(batch):
+                            row = next(item for item in batch["rows"] if item["row_id"] == row_id)
+                            if row.get("status") not in ("queued", "failed"):
+                                raise CabinetError("该行当前不可提交", 409)
+                            row.update(status="writing", error="", operation_started=True)
+                        batch = self._change(batch_id, writing)
+                        row = next(item for item in batch["rows"] if item["row_id"] == row_id)
+                        request, existing_record_id = self._row_payload(batch, row)
+                        if request is None:
+                            saved_record_id = existing_record_id
+                        else:
+                            payload, record_id = request
+                            saved = self.cabinet.save_operation(scope, payload, owner, record_id)
+                            saved_record_id = saved["record_id"]
+                        def completed(current):
+                            target = next(item for item in current["rows"] if item["row_id"] == row_id)
+                            target.update(status="completed", error="", record_id=saved_record_id, completed_at=now(),wrote_record=request is not None)
+                        self._change(batch_id, completed)
+                    except Exception as exc:
+                        def failed(current):
+                            target = next((item for item in current.get("rows", []) if item["row_id"] == row_id), None)
+                            if target and target.get("status") != "completed":
+                                target.update(status="failed", error=str(exc), operation_started=True)
+                        try:
+                            self._change(batch_id, failed)
+                        except Exception:
+                            pass
 
     def confirm(self, batch_id, payload, owner, allowed, admin=False):
         expected = payload.get("version")
@@ -1058,15 +1227,71 @@ class CabinetBatchService:
             self._confirm_pool.submit(self._confirm_scope, batch_id, building, ordered, owner)
         return queued
 
+    def _rollback_scope(self,batch_id,scope,row_ids):
+        with self._scope_locks[scope]:
+            for row_id in row_ids:
+                try:
+                    def start(batch):
+                        row=next(item for item in batch["rows"] if item["row_id"]==row_id)
+                        if row.get("status")!="rollback_queued": raise CabinetError("该行当前不可回退",409)
+                        row.update(status="rolling_back",error="")
+                    batch=self._change(batch_id,start)
+                    row=next(item for item in batch["rows"] if item["row_id"]==row_id)
+                    newer_in_batch=any(
+                        other["row_id"]!=row_id and other.get("wrote_record") is not False and other.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}
+                        and (other.get("scope"),other.get("room"),other.get("rack"))==(scope,row["room"],row["rack"])
+                        and (other.get("actual", ""),other.get("source_index",0))>(row.get("actual", ""),row.get("source_index",0))
+                        for other in batch["rows"]
+                    )
+                    if newer_in_batch or self.store.later_completed(batch_id,scope,row["room"],row["rack"]):
+                        raise CabinetError("该机柜已有后续批次或本批后续操作，不能回退",409)
+                    self.cabinet.rollback_batch_operation(scope,row["operation_id"],batch_id,row["record_id"])
+                    def finished(current):
+                        target=next(item for item in current["rows"] if item["row_id"]==row_id)
+                        target.update(status="rolled_back",error="",rolled_back_at=now())
+                    self._change(batch_id,finished)
+                except Exception as exc:
+                    def failed(current):
+                        target=next((item for item in current["rows"] if item["row_id"]==row_id),None)
+                        if target and target.get("status")!="rolled_back":
+                            target.update(status="rollback_blocked" if isinstance(exc,CabinetError) and exc.status_code==409 else "rollback_failed",error=str(exc))
+                    try: self._change(batch_id,failed)
+                    except Exception: pass
+
+    def rollback(self,batch_id,payload,owner,allowed,admin=False):
+        batch=self.get(batch_id)
+        if not admin and batch["owner_id"]!=owner and not set(batch.get("scopes",[])) & set(allowed): raise CabinetError("无权查看该批次",403)
+        if int(payload.get("version",-1))!=batch["version"]: raise CabinetError("批次已更新，请重新载入",409)
+        if any(row.get("status") in {"queued","writing","rollback_queued","rolling_back"} for row in batch["rows"]): raise CabinetError("批次仍在处理中，请完成后再回退",409)
+        selected_ids={str(value) for value in payload.get("row_ids",[])}
+        if payload.get("all") and not admin and not set(batch.get("scopes",[]))<=set(allowed): raise CabinetError("整批回退需要拥有全部楼栋权限",403)
+        selected=[]
+        for row in batch["rows"]:
+            if not (payload.get("all") or row["row_id"] in selected_ids) or row.get("wrote_record") is False or row.get("status") not in {"completed","rollback_failed","rollback_blocked"}: continue
+            if not admin and row.get("scope") not in allowed: raise CabinetError("选中记录包含无权操作的楼栋",403)
+            selected.append(row)
+        if not selected: raise CabinetError("没有可回退的已完成记录",409)
+        ids={row["row_id"] for row in selected}
+        def queue(current):
+            for row in current["rows"]:
+                if row["row_id"] in ids: row.update(status="rollback_queued",error="")
+        queued=self._change(batch_id,queue,expected_version=batch["version"])
+        grouped={}
+        for row in selected: grouped.setdefault(row["scope"],[]).append(row)
+        for scope,rows in grouped.items():
+            ordered=[row["row_id"] for row in sorted(rows,key=lambda item:(item.get("actual",""),item.get("source_index",0)),reverse=True)]
+            self._confirm_pool.submit(self._rollback_scope,batch_id,scope,ordered)
+        return queued
+
     def cancel(self, batch_id, owner, admin=False):
         batch = self.get(batch_id)
         if not admin and batch["owner_id"] != owner:
             raise CabinetError("仅上传者或管理员可作废批次", 403)
         def cancel_rows(current):
-            if any(row.get("status") in ("queued", "writing") for row in current.get("rows", [])):
+            if any(row.get("status") in ("queued", "writing", "rollback_queued", "rolling_back") for row in current.get("rows", [])):
                 raise CabinetError("批次正在提交，暂不能作废", 409)
             for row in current.get("rows", []):
-                if row.get("status") != "completed":
+                if row.get("status") not in ("completed", "rolled_back", "rollback_failed", "rollback_blocked"):
                     row["status"] = "excluded_cancelled"
             current["status"] = "cancelled"
         return self._change(batch_id, cancel_rows)

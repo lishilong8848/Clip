@@ -5138,6 +5138,34 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.upload_wait_thread = old_thread
                 PortalRuntime.action_upload_timeout_s = old_timeout
 
+    def test_backend_direct_notice_upload_registers_timeout_watch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            job_id, _ = service.create_action_job({
+                "action": "start", "scope": "A", "work_type": "change",
+                "notice_type": "变更通告", "record_id": "source-direct-watch",
+                "operation_id": "direct-watch-test",
+            })
+            prepared = {
+                "job_id": job_id, "action": "start", "scope": "A",
+                "work_type": "change", "notice_type": "变更通告",
+                "active_item_id": "active-direct-watch", "title": "A楼独立变更通告",
+                "text": "【变更通告】状态：开始\n【名称】A楼独立变更通告",
+                "skip_personal_message": True,
+            }
+            with (
+                patch.object(PortalRuntime, "service", service),
+                patch.object(PortalRuntime, "state_store", service._state_store),
+                patch.object(service, "prepare_action_job", return_value=prepared),
+                patch.object(PortalRuntime, "_resolve_polling_work_order_mode", return_value=prepared),
+                patch.object(service, "_synchronize_prepared_notice_text", return_value=prepared),
+                patch.object(PortalRuntime, "_execute_backend_prepared_upload", return_value=(False, "isolated failure", "")),
+                patch.object(PortalRuntime, "track_upload_wait_job") as track,
+            ):
+                PortalRuntime._process_maintenance_action_job(job_id)
+            track.assert_called_once_with(job_id)
+            self.assertEqual(service.get_job(job_id)["phase"], "failed")
+
     def test_upload_wait_scan_clears_completed_and_times_out_uploading_jobs(self):
         class _FakeService:
             def __init__(self):
@@ -8799,6 +8827,115 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         self.assertEqual(item["payload"]["source_record_id"], f"src-{work_type}-1")
                         self.assertEqual(item["payload"]["work_type"], work_type)
                         self.assertIn(f"rec-target-{index}", upsert_record_ids)
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
+
+    def test_web_upload_replaces_matching_qt_clipboard_placeholder(self):
+        cases = [
+            ("maintenance", "维保通告"),
+            ("change", "变更通告"),
+            ("repair", "设备检修"),
+            ("power", "上电通告"),
+            ("power", "下电通告"),
+            ("polling", "设备轮巡"),
+            ("adjust", "设备调整"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _TestMaintenancePortalService()
+            try:
+                for index, (work_type, notice_type) in enumerate(cases):
+                    with self.subTest(notice_type=notice_type):
+                        old_id = f"clipboard-{index}"
+                        text = f"【{notice_type}】状态：开始\n【名称】测试A楼通告{index}"
+                        store.upsert_qt_active_item(
+                            {
+                                "active_item_id": old_id,
+                                "record_id": f"local_{old_id}",
+                                "notice_type": notice_type,
+                                "work_type": work_type,
+                                "text": text.replace("\n", "\r\n"),
+                                "_is_placeholder_record": True,
+                            },
+                            section="other",
+                            origin="clipboard",
+                        )
+                        target = f"rec-target-clipboard-{index}"
+                        PortalRuntime._upsert_backend_active_notice(
+                            {
+                                "action": "start",
+                                "notice_type": notice_type,
+                                "work_type": work_type,
+                                "title": f"测试A楼通告{index}",
+                                "text": text,
+                            },
+                            remote_record_id=target,
+                            job_id=f"job-clipboard-{index}",
+                            previous_active_item_id=old_id,
+                        )
+                        self.assertEqual(
+                            [row["active_item_id"] for row in store.list_qt_active_items()
+                             if row["notice_type"] == notice_type and row["payload"].get("title") == f"测试A楼通告{index}"],
+                            [target],
+                        )
+                        self.assertIsNotNone(
+                            store.find_qt_active_items(active_item_id=old_id)[0]["deleted_at"]
+                        )
+                events = store.lease_outbox_events("qt_action", limit=30)
+                self.assertEqual(
+                    sum(event["payload"].get("kind") == "active_delete" for event in events),
+                    len(cases),
+                )
+                reformatted_id = "clipboard-reformatted"
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": reformatted_id,
+                        "record_id": f"local_{reformatted_id}",
+                        "notice_type": "下电通告",
+                        "work_type": "power",
+                        "text": "Qt原始格式",
+                        "_is_placeholder_record": True,
+                    },
+                    section="other",
+                    origin="clipboard",
+                )
+                PortalRuntime._upsert_backend_active_notice(
+                    {"action": "start", "notice_type": "下电通告", "work_type": "power", "text": "网页整理后的格式"},
+                    remote_record_id="rec-reformatted",
+                    job_id="job-reformatted",
+                    previous_active_item_id=reformatted_id,
+                    submitted_at=time.time() + 1,
+                )
+                self.assertIsNotNone(
+                    store.find_qt_active_items(active_item_id=reformatted_id)[0]["deleted_at"]
+                )
+                changed_id = "clipboard-changed"
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": changed_id,
+                        "record_id": f"local_{changed_id}",
+                        "notice_type": "下电通告",
+                        "work_type": "power",
+                        "text": "上传期间新增的内容",
+                        "_is_placeholder_record": True,
+                    },
+                    section="other",
+                    origin="clipboard",
+                )
+                PortalRuntime._upsert_backend_active_notice(
+                    {"action": "start", "notice_type": "下电通告", "work_type": "power", "text": "原通告"},
+                    remote_record_id="rec-changed",
+                    job_id="job-changed",
+                    previous_active_item_id=changed_id,
+                    submitted_at=time.time() - 1,
+                )
+                self.assertIsNone(
+                    store.find_qt_active_items(active_item_id=changed_id)[0]["deleted_at"]
+                )
             finally:
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service
@@ -27499,6 +27636,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(action, "start")
                 self.assertEqual(draft.get("work_type"), expected_work_type)
                 self.assertEqual(draft.get("notice_type"), heading)
+                detail_html = workbench_lite_module._detail_form(
+                    record=None,
+                    ongoing_item=None,
+                    scope="A",
+                    work_type=work_type,
+                    manual=True,
+                    parsed_draft=draft,
+                    parsed_action=action,
+                )
+                self.assertIn('name="manual_binding_required" value="1"', detail_html)
+                self.assertIn("绑定已有计划通告", detail_html)
+                self.assertIn("不绑定，作为独立通告", detail_html)
 
     def test_workbench_lite_paste_unknown_header_keeps_selected_notice_type(self):
         for selected_work_type in (
@@ -27892,6 +28041,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIn('data-detail-mode="ongoing"', html)
+        self.assertIn('name="manual" value="1"', html)
+        self.assertIn('value="EA118机房E楼未上传维保"', html)
+        self.assertIn(
+            'name="manual_id" value="manual:lite:E:maintenance:active-unbound-maintenance"',
+            html,
+        )
         self.assertIn('name="manual_binding_required" value="1"', html)
         self.assertIn("绑定已有计划通告", html)
         self.assertIn("不绑定", html)
@@ -27916,6 +28071,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('name="manual_binding_required" value="1"', uploaded_html)
         self.assertIn('name="submit_action" value="update"', uploaded_html)
         self.assertIn('name="submit_action" value="end"', uploaded_html)
+
+    def test_workbench_local_placeholder_uses_manual_flow_for_all_non_event_types(self):
+        from lan_bitable_template_portal.workbench_lite import _detail_form
+
+        for work_type, notice_type in (
+            ("maintenance", "维保通告"),
+            ("change", "变更通告"),
+            ("repair", "设备检修"),
+            ("power", "上电通告"),
+            ("polling", "设备轮巡"),
+            ("adjust", "设备调整"),
+        ):
+            with self.subTest(work_type=work_type):
+                html = _detail_form(
+                    record=None,
+                    ongoing_item={
+                        "active_item_id": f"active-{work_type}",
+                        "record_id": f"local_{work_type}",
+                        "_is_placeholder_record": True,
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "title": f"E楼{notice_type}",
+                        "building_codes": ["E"],
+                    },
+                    scope="E",
+                    work_type=work_type,
+                    manual=False,
+                )
+                self.assertIn('name="manual" value="1"', html)
+                self.assertIn('name="manual_binding_required" value="1"', html)
+                self.assertIn("绑定已有计划通告", html)
+                self.assertIn("不绑定，作为独立通告", html)
+                self.assertIn("目标多维", html)
+                self.assertIn("发送预览", html)
 
     def test_workbench_source_ongoing_row_is_startable_until_active_item_exists(self):
         from lan_bitable_template_portal.workbench_lite import _record_rows
@@ -28909,6 +29098,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             scope="E",
             ongoing_items=[ongoing],
         )
+        self.assertTrue(expanded_unbound.get("manual"))
         self.assertFalse(expanded_unbound.get("source_record_id"))
 
         bound = json.loads(json.dumps(payload))

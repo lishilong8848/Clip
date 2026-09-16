@@ -44,8 +44,8 @@
 
     <template v-else-if="batchId && batch.batch_id">
       <section class="batch-summary">
-        <div class="summary-main"><strong>批次 {{ batch.batch_id.slice(0, 8) }}</strong><span :class="'status ' + batch.status">{{ statusLabel(batch.status) }}</span><small>{{ batch.created_at }} · {{ (batch.scopes || []).map((item: string) => item + '楼').join('、') || '识别中' }}</small></div>
-        <div class="metrics"><span>总数<b>{{ batch.stats?.total || 0 }}</b></span><span>待新增<b>{{ batch.stats?.new || 0 }}</b></span><span>可确认<b>{{ batch.stats?.confirmable || 0 }}</b></span><span class="duplicate">重复<b>{{ batch.stats?.duplicate || 0 }}</b></span><span class="conflict">冲突<b>{{ batch.stats?.conflict || 0 }}</b></span><span>无效<b>{{ batch.stats?.invalid || 0 }}</b></span><span class="success-text">已完成<b>{{ batch.stats?.completed || 0 }}</b></span><span class="danger-text">失败<b>{{ batch.stats?.failed || 0 }}</b></span></div>
+        <div class="summary-main"><div class="summary-title"><strong>批次 {{ batch.batch_id.slice(0, 8) }}</strong><span :class="'status ' + batch.status">{{ statusLabel(batch.status) }}</span></div><small>{{ batch.created_at }}</small><small>{{ (batch.scopes || []).map((item: string) => item + '楼').join('、') || '识别中' }}</small></div>
+        <dl class="metrics"><div><dt>总数</dt><dd>{{ batch.stats?.total || 0 }}</dd></div><div><dt>待新增</dt><dd>{{ batch.stats?.new || 0 }}</dd></div><div><dt>可确认</dt><dd>{{ batch.stats?.confirmable || 0 }}</dd></div><div class="warning-metric"><dt>重复</dt><dd>{{ batch.stats?.duplicate || 0 }}</dd></div><div class="warning-metric"><dt>冲突</dt><dd>{{ batch.stats?.conflict || 0 }}</dd></div><div><dt>无效</dt><dd>{{ batch.stats?.invalid || 0 }}</dd></div><div class="success-metric"><dt>已完成</dt><dd>{{ batch.stats?.completed || 0 }}</dd></div><div class="danger-metric"><dt>失败</dt><dd>{{ batch.stats?.failed || 0 }}</dd></div><div><dt>已回退</dt><dd>{{ batch.stats?.rolled_back || 0 }}</dd></div><div class="warning-metric"><dt>回退受阻</dt><dd>{{ (batch.stats?.rollback_failed || 0) + (batch.stats?.rollback_blocked || 0) }}</dd></div></dl>
       </section>
       <section v-if="batch.source === 'notice'" class="notice-source">
         <div><small>来源</small><strong>{{ batch.source_notice?.notice_type || '上下电通告' }}</strong></div>
@@ -55,35 +55,35 @@
         <div class="notice-source-cabinets"><small>原始柜号</small><span>{{ batch.source_notice?.cabinet || '-' }}</span></div>
       </section>
       <section v-if="batch.status === 'recognizing'" class="notice" role="status"><Loader2 class="spin" :size="18" /><div class="progress-copy"><strong>正在识别确认单</strong><progress :value="batch.progress?.pages_done || batch.progress?.files_done || 0" :max="batch.progress?.pages_total || batch.progress?.files_total || 1"></progress><small>文件 {{ batch.progress?.files_done || 0 }}/{{ batch.progress?.files_total || 0 }} · 页面 {{ batch.progress?.pages_done || 0 }}/{{ batch.progress?.pages_total || 0 }}</small></div></section>
+      <section v-if="batch.status === 'running'" class="notice" role="status"><Loader2 class="spin" :size="18" /><div class="progress-copy"><strong>{{ rollbackProgress.active ? '正在逐柜回退' : '正在批量写入多维并核验' }}</strong><progress :value="rollbackProgress.active ? rollbackProgress.done : confirmProgress.done" :max="rollbackProgress.active ? rollbackProgress.total : confirmProgress.total"></progress><small>{{ rollbackProgress.active ? `${rollbackProgress.done}/${rollbackProgress.total} 柜已处理` : `${confirmProgress.done}/${confirmProgress.total} 条已处理` }} · 各楼独立执行</small></div></section>
       <div v-if="batch.error" class="notice danger" role="alert"><span>{{ batch.error }}</span><button v-if="batch.validation_error" :disabled="saving" @click="revalidate">重新校验</button></div>
       <div v-if="batch.blocking_warnings?.length" class="notice warning" role="alert"><AlertTriangle :size="18" /><span><b>通告明细需要核对</b><small v-for="warning in batch.blocking_warnings" :key="warning.code">{{ warning.message }}</small></span><strong v-if="batch.warnings_acknowledged" class="success-text">已人工核对</strong><button v-else :disabled="saving" @click="confirmDialog = 'warnings'">以当前明细为准</button></div>
       <div v-if="batch.stats?.duplicate" class="notice warning" role="alert"><AlertTriangle :size="18" /><span>全部文件已完成重叠检测，发现 {{ batch.stats.duplicate }} 条完全重叠记录。可清空重叠行，既有台账不会被修改。</span><button @click="confirmDialog = 'overlap'">清空重叠数据</button></div>
       <section v-if="batch.files?.length" class="source-files"><h3>来源文件</h3><div v-for="file in batch.files" :key="file.file_id"><FileText :size="16" /><a v-if="batch.can_download_files && !file.cleaned_at" :href="api + '/batches/' + batch.batch_id + '/files/' + file.file_id">{{ file.name }}</a><span v-else>{{ file.name }}{{ file.cleaned_at ? '（已清理）' : '' }}</span><small>{{ file.processed_pages || 0 }}/{{ file.pages || 0 }} 页 · {{ statusLabel(file.status) }}</small><b v-if="file.error">{{ file.error }}</b><button v-if="batch.can_download_files && !file.cleaned_at && ['completed','cancelled'].includes(batch.status)" class="icon-button" title="清理原确认单" aria-label="清理原确认单" @click="requestFileCleanup(file.file_id)"><Trash2 :size="16" /></button></div></section>
 
       <section v-if="batch.rows?.length" class="batch-actions">
-        <div class="row-filters"><select v-model="rowScopeFilter"><option value="">全部楼栋</option><option v-for="item in batch.scopes || []" :key="item" :value="item">{{ item }}楼</option></select><select v-model="rowStatusFilter"><option value="">全部状态</option><option value="ready">可确认</option><option value="duplicate">重复</option><option value="conflict">冲突</option><option value="invalid">无效</option><option value="failed">失败</option><option value="completed">已完成</option><option value="excluded">已排除</option></select></div>
-        <div class="bulk-fields"><select v-model="bulk.action"><option value="">操作类型不修改</option><option v-for="action in actions" :key="action">{{ action }}</option></select><input v-model="bulk.expected" type="datetime-local" step="1" aria-label="批量期望完成时间" /><input v-model="bulk.actual" type="datetime-local" step="1" aria-label="批量实际完成时间" /><select v-model="bulk.result"><option value="">结果不修改</option><option>成功</option><option>失败</option></select><select v-model="bulk.type_resolution"><option value="">类型处理不修改</option><option value="keep_current">沿用当前机柜类型</option><option value="sync_current">同步修正当前机柜类型</option></select><button :disabled="!selectedRows.length" @click="applyBulk">应用到已选 {{ selectedRows.length }} 行</button><button :disabled="saving || !selectedRows.length" @click="excludeSelected"><Trash2 :size="16" />排除已选</button></div>
-        <div class="actions"><button :disabled="saving || !dirtyCount" @click="saveChanges"><Save :size="16" />保存更正<span v-if="dirtyCount">（{{ dirtyCount }}）</span></button><select v-model="confirmScope" aria-label="按楼确认"><option value="">选择楼栋</option><option v-for="item in batch.allowed_scopes || []" :key="item" :value="item">{{ item }}楼</option></select><button :disabled="saving || !confirmScope || warningsPending" @click="confirmRows({ scope: confirmScope })">确认本楼</button><button :disabled="saving || !selectedRows.length || warningsPending" @click="confirmRows({ row_ids: selectedRows })">确认已选</button><button class="primary" :disabled="saving || !batch.stats?.confirmable || !batch.can_confirm_all || warningsPending" :title="warningsPending ? '请先核对通告明细异常' : batch.can_confirm_all ? '' : '整批确认需要拥有全部楼栋权限'" @click="confirmDialog = 'all'">确认整批</button><button :disabled="saving || batch.status === 'completed'" @click="confirmDialog = 'cancel'">作废未提交行</button></div>
+        <div class="filter-bar"><strong>记录筛选</strong><label><span>楼栋</span><select v-model="rowScopeFilter"><option value="">全部楼栋</option><option v-for="item in batch.scopes || []" :key="item" :value="item">{{ item }}楼</option></select></label><label><span>状态</span><select v-model="rowStatusFilter"><option value="">全部状态</option><option value="ready">可确认</option><option value="duplicate">重复</option><option value="conflict">冲突</option><option value="invalid">无效</option><option value="failed">失败</option><option value="completed">已完成</option><option value="excluded">已排除</option></select></label><span class="filter-count">当前 {{ filteredRows.length }} 条</span></div>
+        <div v-if="selectedRows.length" class="selection-panel"><div class="selection-heading"><strong>已选 {{ selectedRows.length }} 条</strong><button class="link" type="button" @click="selectedRows = []">清除选择</button></div><div class="bulk-fields"><label><span>操作类型</span><select v-model="bulk.action"><option value="">不修改</option><option v-for="action in actions" :key="action">{{ action }}</option></select></label><label><span>期望完成时间</span><input v-model="bulk.expected" type="datetime-local" step="1" /></label><label><span>实际完成时间</span><input v-model="bulk.actual" type="datetime-local" step="1" /></label><label><span>结果</span><select v-model="bulk.result"><option value="">不修改</option><option>成功</option><option>失败</option></select></label><label><span>类型处理</span><select v-model="bulk.type_resolution"><option value="">不修改</option><option value="keep_current">沿用当前机柜类型</option><option value="sync_current">同步修正当前机柜类型</option></select></label><button @click="applyBulk">应用更改</button><button class="danger-ghost" :disabled="saving" @click="excludeSelected"><Trash2 :size="16" />排除已选</button></div></div>
+        <div class="commit-actions"><span v-if="saving || dirtyCount" class="save-indicator">{{ saving ? '更正保存中…' : `待自动保存 ${dirtyCount} 条` }}</span><button v-if="saveFailed" @click="saveChanges">重试保存</button><label><span>按楼确认</span><select v-model="confirmScope"><option value="">选择楼栋</option><option v-for="item in batch.allowed_scopes || []" :key="item" :value="item">{{ item }}楼</option></select></label><button :disabled="saving || !confirmScope || warningsPending" @click="confirmRows({ scope: confirmScope })">确认本楼</button><button :disabled="saving || !selectedRows.length || warningsPending" @click="confirmRows({ row_ids: selectedRows })">确认已选</button><button class="primary" :disabled="saving || !batch.stats?.confirmable || !batch.can_confirm_all || warningsPending" :title="warningsPending ? '请先核对通告明细异常' : batch.can_confirm_all ? '' : '整批确认需要拥有全部楼栋权限'" @click="confirmDialog = 'all'">确认整批</button><button :disabled="saving || !rollbackableCount || !batch.can_confirm_all" @click="requestRollback('')">回退本批已写入记录</button><button :disabled="saving || batch.status === 'completed'" @click="confirmDialog = 'cancel'">作废未提交行</button></div>
       </section>
 
-      <div v-if="batch.rows?.length" class="table-wrap detail-table"><table><thead><tr><th><input type="checkbox" :checked="allVisibleSelected" aria-label="选择本页" @change="toggleVisible" /></th><th>状态</th><th>楼栋</th><th>包间</th><th>机柜</th><th>供应商机柜号</th><th>机柜类型</th><th>类型明细</th><th>操作类型</th><th>期望完成时间</th><th>实际完成时间</th><th>结果</th><th>下单时间</th><th>来源</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="row in pagedRows" :key="row.row_id" :class="row.status">
-          <td><input v-if="row.editable || row.confirmable" v-model="selectedRows" type="checkbox" :value="row.row_id" :aria-label="'选择' + row.rack" /></td>
-          <td><span :class="'status ' + row.status">{{ statusLabel(row.status) }}</span><small v-for="issue in row.issues || []" :key="issue.code">{{ issue.message }}</small><small v-if="row.error" class="danger-text">{{ row.error }}</small></td>
-          <td><select v-model="row.scope" :disabled="!row.editable" :class="{ corrected: corrected(row,'scope') }"><option v-for="item in buildingOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></td>
-          <td><input v-model="row.room" :disabled="!row.editable" :class="{ corrected: corrected(row,'room') }" /></td>
-          <td><input v-model="row.rack" :disabled="!row.editable" :class="{ corrected: corrected(row,'rack') }" /></td>
-          <td><input v-model="row.supplier_rack" :disabled="!row.editable" :class="{ corrected: corrected(row,'supplier_rack') }" /></td>
-          <td><select v-model="row.rack_type" :disabled="!row.editable" :class="{ corrected: corrected(row,'rack_type') }"><option value="">请选择</option><option>网络机柜</option><option>服务器机柜</option></select><select v-if="row.current_rack_type && row.rack_type !== row.current_rack_type" v-model="row.type_resolution" :disabled="!row.editable"><option value="">请选择类型处理方式</option><option value="keep_current">沿用当前类型 {{ row.current_rack_type }}</option><option value="sync_current">同步修正当前机柜类型</option></select></td>
-          <td><input v-model="row.type_detail" :disabled="!row.editable" :class="{ corrected: corrected(row,'type_detail') }" /></td>
-          <td><select v-model="row.action" :disabled="!row.editable" :class="{ corrected: corrected(row,'action') }"><option value="">请选择</option><option v-for="action in actions" :key="action">{{ action }}</option></select><small v-if="row.inference">{{ row.inference }}</small></td>
-          <td><input :value="localDate(row.expected)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'expected') }" @input="row.expected = inputDate($event)" /></td>
-          <td><input :value="localDate(row.actual)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'actual') }" @input="row.actual = inputDate($event)" /></td>
-          <td><select v-model="row.result" :disabled="!row.editable" :class="{ corrected: corrected(row,'result') }"><option value="">请选择</option><option>成功</option><option>失败</option></select></td>
-          <td><input :value="localDate(row.order_time)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'order_time') }" @input="row.order_time = inputDate($event)" /></td>
-          <td><span>{{ row.file_name }}</span><small v-if="row.page">第 {{ row.page }} 页 · 源行 {{ row.source_row }}</small><small v-if="row.application_ids?.length" :title="row.application_ids.join('、')">申请单 {{ applicationSummary(row) }}</small><small v-if="row.application_time">申请于 {{ row.application_time }}</small><details v-if="row.edits?.length" class="edit-audit"><summary>已更正 {{ row.edits.length }} 项</summary><small v-for="(edit,index) in row.edits" :key="index">{{ fieldLabels[edit.field] || edit.field }}：原值“{{ edit.before || '未填写' }}” → “{{ edit.after === '' ? '已清空' : edit.after }}”</small></details></td>
-          <td><button v-if="row.editable && !String(row.status).startsWith('excluded_')" class="icon-button" title="从待办排除" aria-label="从待办排除" @click="toggleExcluded(row,true)"><Trash2 :size="16" /></button><button v-else-if="row.editable" @click="toggleExcluded(row,false)">恢复</button></td>
-        </tr>
+      <div v-if="batch.rows?.length" class="table-wrap detail-table"><table class="records-table"><thead><tr><th class="select-column"><input type="checkbox" :checked="allVisibleSelected" aria-label="选择本页" @change="toggleVisible" /></th><th class="validation-cell">状态</th><th class="location-summary">位置</th><th v-if="showRackColumn" class="rack-summary">机柜</th><th v-if="showSupplierRackColumn" class="supplier-summary">供应商机柜号</th><th class="operation-summary">当前状态 / 操作</th><th class="time-cell">期望完成</th><th class="time-cell">实际完成</th><th class="result-summary">结果</th><th class="source-cell">来源</th><th class="action-column">操作</th></tr></thead><tbody>
+        <template v-for="row in pagedRows" :key="row.row_id">
+          <tr :class="[row.status, { expanded: editingRowId === row.row_id }]">
+            <td><input v-if="row.editable || row.confirmable" v-model="selectedRows" type="checkbox" :value="row.row_id" :aria-label="'选择' + row.rack" /></td>
+            <td class="validation-cell"><span :class="'status ' + row.status">{{ statusLabel(row.status) }}</span><small v-if="row.issues?.length">{{ row.issues[0].message }}</small><small v-if="row.issues?.length > 1">另有 {{ row.issues.length - 1 }} 项</small><small v-if="row.error" class="danger-text">{{ row.error }}</small></td>
+            <td class="location-summary"><strong>{{ row.scope || '-' }}楼</strong><small>{{ row.room ? row.room + '包间' : '包间未填写' }}</small></td>
+            <td v-if="showRackColumn" class="rack-summary"><strong>{{ row.rack || '-' }}</strong></td>
+            <td v-if="showSupplierRackColumn" class="supplier-summary"><span>{{ row.supplier_rack || '-' }}</span></td>
+            <td class="operation-summary"><span v-if="row.current_power_state" :class="'power-state ' + row.current_power_state">{{ powerStateLabel(row.current_power_state) }}</span><strong :class="{ muted: !row.action }">{{ row.action || '待选择' }}</strong></td>
+            <td class="time-cell">{{ tableDate(row.expected) }}</td>
+            <td class="time-cell">{{ tableDate(row.actual) }}</td>
+            <td class="result-summary"><span :class="['result-badge', row.result === '成功' ? 'success' : row.result === '失败' ? 'failed' : 'pending']">{{ row.result || '待选择' }}</span></td>
+            <td class="source-cell"><strong>{{ row.file_name || '-' }}</strong><small v-if="row.page">第 {{ row.page }} 页 · 源行 {{ row.source_row }}</small><small v-else-if="row.application_ids?.length">申请单 {{ applicationSummary(row) }}</small></td>
+            <td class="row-actions"><button class="icon-button" :title="row.editable ? '编辑记录' : '查看记录'" :aria-label="row.editable ? '编辑记录' : '查看记录'" @click="toggleRowEditor(row)"><Pencil v-if="row.editable" :size="16" /><Eye v-else :size="16" /></button><button v-if="row.rollbackable" class="link" @click="requestRollback(row.row_id)">回退</button><button v-if="row.editable && !String(row.status).startsWith('excluded_')" class="icon-button danger-icon" title="从待办排除" aria-label="从待办排除" @click="toggleExcluded(row,true)"><Trash2 :size="16" /></button><button v-else-if="row.editable" class="link" @click="toggleExcluded(row,false)">恢复</button></td>
+          </tr>
+          <tr v-if="editingRowId === row.row_id" class="row-editor-row"><td :colspan="detailColumnCount"><section class="row-editor" :aria-label="`编辑 ${row.scope}楼 ${row.room} ${row.rack}`"><header><div><span>机柜记录</span><strong>{{ row.scope || '-' }}楼 · {{ row.room || '-' }}包间 · {{ row.rack || '机柜未填写' }}</strong></div><button class="icon-button" title="收起编辑" aria-label="收起编辑" @click="editingRowId = ''"><X :size="17" /></button></header><div class="editor-grid" @change="queueAutoSave"><fieldset><legend>机柜定位</legend><label><span>楼栋</span><select v-model="row.scope" :disabled="!row.editable" :class="{ corrected: corrected(row,'scope') }"><option v-for="item in buildingOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label><span>包间</span><input v-model="row.room" :disabled="!row.editable" :class="{ corrected: corrected(row,'room') }" /></label><label><span>机柜</span><input v-model="row.rack" :disabled="!row.editable" :class="{ corrected: corrected(row,'rack') }" /></label><label><span>供应商机柜号</span><input v-model="row.supplier_rack" :disabled="!row.editable" :class="{ corrected: corrected(row,'supplier_rack') }" /></label></fieldset><fieldset><legend>机柜资料</legend><label><span>机柜类型</span><select v-model="row.rack_type" :disabled="!row.editable" :class="{ corrected: corrected(row,'rack_type') }"><option value="">请选择</option><option>网络机柜</option><option>服务器机柜</option></select></label><label><span>类型明细</span><input v-model="row.type_detail" :disabled="!row.editable" :class="{ corrected: corrected(row,'type_detail') }" /></label><label v-if="row.current_rack_type && row.rack_type !== row.current_rack_type" class="wide-field"><span>类型差异处理</span><select v-model="row.type_resolution" :disabled="!row.editable"><option value="">请选择</option><option value="keep_current">沿用当前类型 {{ row.current_rack_type }}</option><option value="sync_current">同步修正当前机柜类型</option></select></label></fieldset><fieldset><legend>操作信息</legend><div v-if="row.current_power_state" class="state-line"><span :class="'power-state ' + row.current_power_state">当前：{{ powerStateLabel(row.current_power_state) }}</span><small>{{ row.inference || '操作类型可人工调整' }}</small></div><label class="wide-field"><span>操作类型</span><select v-model="row.action" :disabled="!row.editable" :class="{ corrected: corrected(row,'action') }"><option value="">请选择</option><option v-if="row.action && !allowedRowActions(row).includes(row.action)" :value="row.action" disabled>{{ row.action }}（原文件值，当前状态不允许）</option><option v-for="action in allowedRowActions(row)" :key="action">{{ action }}</option></select></label><label><span>期望完成时间</span><input :value="localDate(row.expected)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'expected') }" @input="row.expected = inputDate($event)" /></label><label><span>实际完成时间</span><input :value="localDate(row.actual)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'actual') }" @input="row.actual = inputDate($event)" /></label><label><span>结果</span><select v-model="row.result" :disabled="!row.editable" :class="{ corrected: corrected(row,'result') }"><option value="">请选择</option><option>成功</option><option>失败</option></select></label></fieldset></div><div class="editor-footer"><div class="source-audit"><span>{{ row.file_name || '待办记录' }}</span><small v-if="row.application_ids?.length">申请单 {{ applicationSummary(row) }}</small><small v-if="row.application_time">申请于 {{ row.application_time }}</small><details v-if="visibleEdits(row).length" class="edit-audit"><summary>查看 {{ visibleEdits(row).length }} 项更正记录</summary><small v-for="(edit,index) in visibleEdits(row)" :key="index">{{ fieldLabels[edit.field] || edit.field }}：原值“{{ edit.before || '未填写' }}” → “{{ edit.after === '' ? '已清空' : edit.after }}”</small></details></div><div class="actions"><button @click="editingRowId = ''">收起</button><span class="save-indicator">{{ saving ? '正在保存…' : dirtyCount ? '修改后自动保存' : '已保存' }}</span></div></div></section></td></tr>
+        </template>
       </tbody></table></div>
       <footer v-if="batch.rows?.length" class="pagination"><span>共 {{ filteredRows.length }} 条</span><button :disabled="rowPage <= 1" @click="rowPage--"><ChevronLeft :size="16" /></button><template v-for="page in rowPages" :key="page"><button :class="{ active: rowPage === page }" @click="rowPage = page">{{ page }}</button></template><button :disabled="rowPage >= rowPageCount" @click="rowPage++"><ChevronRight :size="16" /></button></footer>
     </template>
@@ -101,7 +101,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardList, ClipboardPaste, FileText, Files, Loader2, Plus, RefreshCw, Save, ScanText, Search, Trash2, Upload, X } from 'lucide-vue-next';
+import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardList, ClipboardPaste, Eye, FileText, Files, Loader2, Pencil, Plus, RefreshCw, Save, ScanText, Search, Trash2, Upload, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { navigate, registerNavigationGuard } from '../navigation';
 import type { ScopeOption } from '../types';
@@ -114,8 +114,8 @@ const params = new URLSearchParams(window.location.search);
 const batchId = String(params.get('batch_id') || '');
 const mode = String(params.get('mode') || '');
 const actions = ['上正式电','上测试电','测试电转正式电','正式电转测试电','下正式电','下测试电'];
-const editableFields = ['scope','room','rack','supplier_rack','rack_type','type_detail','action','expected','actual','result','order_time','type_resolution'];
-const fieldLabels: Dict = {scope:'楼栋',room:'包间',rack:'机柜',supplier_rack:'供应商机柜号',rack_type:'机柜类型',type_detail:'类型明细',action:'操作类型',expected:'期望完成时间',actual:'实际完成时间',result:'结果',order_time:'下单时间',type_resolution:'类型处理',excluded:'排除状态'};
+const editableFields = ['scope','room','rack','supplier_rack','rack_type','type_detail','action','expected','actual','result','type_resolution'];
+const fieldLabels: Dict = {scope:'楼栋',room:'包间',rack:'机柜',supplier_rack:'供应商机柜号',rack_type:'机柜类型',type_detail:'类型明细',action:'操作类型',expected:'期望完成时间',actual:'实际完成时间',result:'结果',type_resolution:'类型处理',excluded:'排除状态'};
 const read = (path: string, query: Dict = {}, timeoutMs = 90000) => requestJson(`${api}/${path}?${new URLSearchParams(query as Record<string,string>)}`, { timeoutMs });
 const write = (path: string, body: Dict, method = 'POST') => requestJson(`${api}/${path}`, { method, body: JSON.stringify(body), timeoutMs: 90000 });
 const backTarget = computed(() => batchId ? `/cabinet-power/batches${props.scope ? '?scope=' + props.scope : ''}` : mode === 'new' ? `/cabinet-power/batches${props.scope ? '?scope=' + props.scope : ''}` : props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power');
@@ -126,15 +126,15 @@ const buildingOptions = computed(() => {
   if (/^[A-E]$/.test(props.scope)) map.set(props.scope,props.scope + '楼');
   return [...map].map(([value,label]) => ({ value,label }));
 });
-const loading = ref(false), uploading = ref(false), saving = ref(false), error = ref(''), message = ref('');
+const loading = ref(false), uploading = ref(false), saving = ref(false), saveFailed = ref(false), error = ref(''), message = ref('');
 const batch = ref<Dict>({}), list = ref<Dict>({}), baseline = new Map<string,string>();
 const createMode = ref('pdf'), pdfFiles = ref<File[]>([]), fileInput = ref<HTMLInputElement>(), dragging = ref(false), manualScope = ref(props.scope || buildingOptions.value[0]?.value || 'A');
 const common = reactive({ action:'', expected:'', actual:'', result:'成功' }), bulk = reactive({ action:'', expected:'', actual:'', result:'', type_resolution:'' });
 const directory = ref<Dict[]>([]), directorySearch = ref(''), pickedRacks = ref<string[]>([]), pastedRows = ref(''), manualRows = ref<Dict[]>([]);
-const selectedRows = ref<string[]>([]), confirmScope = ref(props.scope || ''), rowPage = ref(1), rowScopeFilter = ref(props.scope || ''), rowStatusFilter = ref(''), listScope = ref(props.scope || ''), listStatus = ref(''), listFrom = ref(''), listTo = ref('');
+const selectedRows = ref<string[]>([]), editingRowId = ref(''), confirmScope = ref(props.scope || ''), rowPage = ref(1), rowScopeFilter = ref(props.scope || ''), rowStatusFilter = ref(''), listScope = ref(props.scope || ''), listStatus = ref(''), listFrom = ref(''), listTo = ref('');
 const confirmDialog = ref(''), discardOpen = ref(false);
-const cleanupFileId = ref('');
-let pollTimer: number | undefined, disposed = false, pendingNavigation: (() => void) | undefined, removeGuard: (() => void) | undefined;
+const cleanupFileId = ref(''), rollbackRowId = ref('');
+let pollTimer: number | undefined, saveTimer: number | undefined, savePromise: Promise<boolean> | undefined, disposed = false, pendingNavigation: (() => void) | undefined, removeGuard: (() => void) | undefined;
 
 const filteredDirectory = computed(() => directory.value.filter(row => !directorySearch.value || `${row.room} ${row.rack}`.toUpperCase().includes(directorySearch.value.toUpperCase())).slice(0,500));
 const filteredRows = computed<Dict[]>(() => (batch.value.rows || []).filter((row:Dict) => (!rowScopeFilter.value || row.scope===rowScopeFilter.value) && (!rowStatusFilter.value || row.status===rowStatusFilter.value || rowStatusFilter.value==='excluded'&&String(row.status).startsWith('excluded_'))));
@@ -146,19 +146,31 @@ const listPages = computed(() => pageNumbers(list.value.page || 1,listPageCount.
 const allVisibleSelected = computed(() => Boolean(pagedRows.value.length) && pagedRows.value.filter(row => row.editable || row.confirmable).every(row => selectedRows.value.includes(row.row_id)));
 const dirtyRows = computed(() => (batch.value.rows || []).filter((row: Dict) => baseline.get(row.row_id) !== rowSignature(row) && row.editable));
 const dirtyCount = computed(() => dirtyRows.value.length);
+const rollbackableCount = computed(() => (batch.value.rows || []).filter((row:Dict) => row.rollbackable).length);
+const confirmProgress = computed(() => { const rows=batch.value.rows || []; const active=rows.filter((row:Dict)=>['queued','writing'].includes(row.status)); const done=rows.filter((row:Dict)=>['completed','failed'].includes(row.status)); return {done:done.length,total:Math.max(1,active.length+done.length)}; });
+const rollbackProgress = computed(() => { const rows=batch.value.rows || []; const active=rows.filter((row:Dict)=>['rollback_queued','rolling_back'].includes(row.status)); const done=rows.filter((row:Dict)=>['rolled_back','rollback_failed','rollback_blocked'].includes(row.status)); return {active:active.length>0,done:done.length,total:Math.max(1,active.length+done.length)}; });
 const warningsPending = computed(() => Boolean(batch.value.blocking_warnings?.length && !batch.value.warnings_acknowledged));
-const confirmTitle = computed(() => confirmDialog.value === 'overlap' ? '清空完全重叠的待办行？' : confirmDialog.value === 'all' ? '确认整批有效记录？' : confirmDialog.value === 'file' ? '清理原确认单？' : confirmDialog.value === 'warnings' ? '确认以当前机柜明细为准？' : '作废尚未提交的记录？');
-const confirmMessage = computed(() => confirmDialog.value === 'overlap' ? '只排除当前批次中的重复行，既有台账和多维表不会被修改；排除记录仍保留审计并可恢复。' : confirmDialog.value === 'all' ? `将并行确认各楼共 ${batch.value.stats?.confirmable || 0} 条有效记录，异常行会留在待办。` : confirmDialog.value === 'file' ? '清理后无法再次下载原PDF，已保存的识别值、更正审计和正式台账不受影响。' : confirmDialog.value === 'warnings' ? '数量、重复或目录匹配存在异常。确认后将允许对当前有效行正式提交，后续修改机柜明细会自动取消本次确认。' : '已完成记录保留，其他尚未提交的行将标记为作废。');
-const confirmLabel = computed(() => confirmDialog.value === 'overlap' ? '清空重叠数据' : confirmDialog.value === 'all' ? '确认整批' : confirmDialog.value === 'file' ? '清理原确认单' : confirmDialog.value === 'warnings' ? '确认已核对' : '作废未提交行');
+const showRackColumn = computed(() => (batch.value.rows || []).some((row: Dict) => hasCabinetValue(row.rack)));
+const showSupplierRackColumn = computed(() => (batch.value.rows || []).some((row: Dict) => hasCabinetValue(row.supplier_rack)));
+const detailColumnCount = computed(() => 9 + Number(showRackColumn.value) + Number(showSupplierRackColumn.value));
+const confirmTitle = computed(() => confirmDialog.value === 'rollback' ? '回退已写入的机柜记录？' : confirmDialog.value === 'overlap' ? '清空完全重叠的待办行？' : confirmDialog.value === 'all' ? '确认整批有效记录？' : confirmDialog.value === 'file' ? '清理原确认单？' : confirmDialog.value === 'warnings' ? '确认以当前机柜明细为准？' : '作废尚未提交的记录？');
+const confirmMessage = computed(() => confirmDialog.value === 'rollback' ? '将逐柜核验云端并恢复到本批写入前。存在后续操作或云端冲突的机柜会跳过，其他机柜继续回退。' : confirmDialog.value === 'overlap' ? '只排除当前批次中的重复行，既有台账和多维表不会被修改；排除记录仍保留审计并可恢复。' : confirmDialog.value === 'all' ? `将并行确认各楼共 ${batch.value.stats?.confirmable || 0} 条有效记录，异常行会留在待办。` : confirmDialog.value === 'file' ? '清理后无法再次下载原PDF，已保存的识别值、更正审计和正式台账不受影响。' : confirmDialog.value === 'warnings' ? '数量、重复或目录匹配存在异常。确认后将允许对当前有效行正式提交，后续修改机柜明细会自动取消本次确认。' : '已完成记录保留，其他尚未提交的行将标记为作废。');
+const confirmLabel = computed(() => confirmDialog.value === 'rollback' ? '确认回退' : confirmDialog.value === 'overlap' ? '清空重叠数据' : confirmDialog.value === 'all' ? '确认整批' : confirmDialog.value === 'file' ? '清理原确认单' : confirmDialog.value === 'warnings' ? '确认已核对' : '作废未提交行');
 
 function pageNumbers(current: number,total: number): number[] { return [...new Set([1,total,...Array.from({length:5},(_,index)=>current+index-2)])].filter(value=>value>=1&&value<=total).sort((a,b)=>a-b); }
-function statusLabel(status: string): string { return ({ waiting:'等待',parsing:'解析中',recognizing:'识别中',pending:'待处理',ready:'可确认',duplicate:'重复',conflict:'冲突',invalid:'无效',queued:'排队中',writing:'写入中',running:'提交中',partial:'部分完成',completed:'已完成',failed:'失败',cancelled:'已作废',excluded_duplicate:'已排除重复',excluded_manual:'已排除',excluded_cancelled:'已作废' } as Dict)[status] || status || '未知'; }
+function statusLabel(status: string): string { return ({ waiting:'等待',parsing:'解析中',recognizing:'识别中',pending:'待处理',ready:'可确认',duplicate:'重复',conflict:'冲突',invalid:'无效',queued:'排队中',writing:'写入中',running:'处理中',partial:'部分完成',completed:'已完成',failed:'失败',rolled_back:'已回退',rollback_queued:'回退排队中',rolling_back:'回退中',rollback_failed:'回退失败',rollback_blocked:'无法回退',cancelled:'已作废',excluded_duplicate:'已排除重复',excluded_manual:'已排除',excluded_cancelled:'已作废' } as Dict)[status] || status || '未知'; }
 function sourceLabel(source: string): string { return source === 'pdf' ? 'PDF识别' : source === 'notice' ? '上下电通告' : '手工批量'; }
 function formatBytes(value: number): string { return value < 1024*1024 ? `${Math.ceil(value/1024)} KiB` : `${(value/1024/1024).toFixed(1)} MiB`; }
 function localDate(value: string): string { return String(value || '').replace(' ','T'); }
+function tableDate(value: string): string { return String(value || '').trim().replace('T',' ').replace(/(\d{2}:\d{2}):00$/, '$1') || '待填写'; }
 function inputDate(event: Event): string { return (event.target as HTMLInputElement).value.replace('T',' '); }
+function toggleRowEditor(row: Dict): void { editingRowId.value = editingRowId.value === row.row_id ? '' : row.row_id; }
+function hasCabinetValue(value: unknown): boolean { return !['','-','/','null','[null]','none'].includes(String(value || '').trim().toLowerCase()); }
+function powerStateLabel(value: string): string { return ({ formal:'正式电',test:'测试电',off:'未上电 / 已下电',unknown:'待核实' } as Dict)[value] || '待核实'; }
+function allowedRowActions(row:Dict):string[] { if(batch.value.source!=='pdf')return actions; return ({off:['上正式电','上测试电'],test:['测试电转正式电','下测试电'],formal:['正式电转测试电','下正式电']} as Record<string,string[]>)[row.current_power_state] || []; }
 function rowSignature(row: Dict): string { return JSON.stringify(Object.fromEntries(editableFields.map(key => [key,String(row[key] || '')]))); }
 function corrected(row: Dict,key: string): boolean { return row.original && String(row[key] || '') !== String(row.original[key] || ''); }
+function visibleEdits(row: Dict): Dict[] { return (row.edits || []).filter((edit: Dict) => edit.field !== 'order_time'); }
 function applicationSummary(row:Dict):string{return row.application_ids.length===1?row.application_ids[0]:`${row.application_ids[0]} 等 ${row.application_ids.length} 个`;}
 function snapshotRows(): void { baseline.clear(); for (const row of batch.value.rows || []) baseline.set(row.row_id,rowSignature(row)); }
 function openNew(): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),mode:'new' })}`); }
@@ -198,7 +210,7 @@ async function loadDirectory(): Promise<void> {
 }
 function makeManual(room: string,rack: string): Dict {
   const found=directory.value.find(item=>item.room===room&&item.rack===rack);
-  return {_id:crypto.randomUUID(),scope:manualScope.value,room,rack,rack_type:found?.rack_type || '',supplier_rack:'',type_detail:'',action:common.action,expected:common.expected || common.actual,actual:common.actual,result:common.result,order_time:''};
+  return {_id:crypto.randomUUID(),scope:manualScope.value,room,rack,rack_type:found?.rack_type || '',supplier_rack:'',type_detail:'',action:common.action,expected:common.expected || common.actual,actual:common.actual,result:common.result};
 }
 function addPicked(): void { const existing=new Set(manualRows.value.map(row=>`${row.scope}/${row.room}/${row.rack}`)); for (const value of pickedRacks.value) { const [room,rack]=value.split('/'); if (!existing.has(`${manualScope.value}/${room}/${rack}`)) manualRows.value.push(makeManual(room,rack)); } pickedRacks.value=[]; }
 function normalizeRoom(value: string): string { const text=value.trim().toUpperCase(); const match=text.match(/(?:EA118[-_.])?([A-E])([1-4])[-_](\d{1,2})/); return match ? `${match[2]}${String(Number(match[3])).padStart(2,'0')}` : text; }
@@ -207,29 +219,53 @@ function applyManualCommon(): void { for (const row of manualRows.value) Object.
 async function createManual(): Promise<void> { uploading.value=true; error.value=''; try { const rows=manualRows.value.map(({_id,...row})=>row); const data=await write('batches',{rows}); openBatch(data.batch_id); } catch(exc:any){error.value=exc.message||'待办创建失败';} finally{uploading.value=false;} }
 
 async function loadBatch(): Promise<void> {
-  if (!batchId) return; loading.value=true;
+  if (!batchId || dirtyCount.value || saving.value) return; loading.value=true;
   try { batch.value=await read(`batches/${batchId}`); snapshotRows(); error.value=''; if (['recognizing','running'].includes(batch.value.status)) schedulePoll(); }
   catch(exc:any){error.value=exc.message||'批次读取失败';if(['recognizing','running'].includes(batch.value.status))schedulePoll();} finally{loading.value=false;}
 }
 async function loadList(page=1): Promise<void> { loading.value=true; try { list.value=await read('batches',{scope:listScope.value,status:listStatus.value,from:listFrom.value,to:listTo.value,page:String(page),page_size:'20'}); error.value=''; } catch(exc:any){error.value=exc.message||'待办读取失败';} finally{loading.value=false;} }
-function schedulePoll(): void { window.clearTimeout(pollTimer); if (!disposed) pollTimer=window.setTimeout(async()=>{ if (!dirtyCount.value) await loadBatch(); else schedulePoll(); },1200); }
-async function reload(): Promise<void> { if (batchId) await loadBatch(); else await loadList(list.value.page || 1); }
+function schedulePoll(): void { window.clearTimeout(pollTimer); if (!disposed) pollTimer=window.setTimeout(async()=>{ if (!dirtyCount.value && !saving.value) await loadBatch(); else schedulePoll(); },1200); }
+async function reload(): Promise<void> { if (batchId) { if(await saveChanges())await loadBatch(); } else await loadList(list.value.page || 1); }
 function toggleVisible(event: Event): void { const ids=pagedRows.value.filter(row=>row.editable||row.confirmable).map(row=>row.row_id); if ((event.target as HTMLInputElement).checked) selectedRows.value=[...new Set([...selectedRows.value,...ids])]; else selectedRows.value=selectedRows.value.filter(id=>!ids.includes(id)); }
-function applyBulk(): void { for (const row of batch.value.rows || []) if (selectedRows.value.includes(row.row_id)&&row.editable) for (const key of ['action','expected','actual','result','type_resolution']) if (bulk[key as keyof typeof bulk]) row[key]=String(bulk[key as keyof typeof bulk]).replace('T',' '); }
-async function saveChanges(): Promise<void> { const rows=dirtyRows.value.map((row:Dict)=>({row_id:row.row_id,...Object.fromEntries(editableFields.map(key=>[key,row[key]||'']))})); if(!rows.length)return; saving.value=true; try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows},'PATCH');snapshotRows();message.value='批次更正已保存';}catch(exc:any){error.value=exc.message||'保存失败';}finally{saving.value=false;} }
-async function acknowledgeWarnings(): Promise<void> { if(dirtyCount.value){error.value='请先保存机柜明细更正，再确认异常。';return;} saving.value=true;try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows:[],acknowledge_warnings:true},'PATCH');snapshotRows();message.value='已记录人工核对结果';}catch(exc:any){error.value=exc.message||'异常核对保存失败';}finally{saving.value=false;} }
-async function revalidate(): Promise<void> { saving.value=true;try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows:[]},'PATCH');snapshotRows();message.value='批次已重新校验';}catch(exc:any){error.value=exc.message||'重新校验失败';}finally{saving.value=false;} }
-async function toggleExcluded(row: Dict,excluded: boolean): Promise<void> { saving.value=true; try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows:[{row_id:row.row_id,excluded}]},'PATCH');snapshotRows();}catch(exc:any){error.value=exc.message||'操作失败';}finally{saving.value=false;} }
-async function excludeSelected(): Promise<void> { saving.value=true;try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,row_ids:selectedRows.value,common:{excluded:true}},'PATCH');selectedRows.value=[];snapshotRows();message.value='已排除所选待办行';}catch(exc:any){error.value=exc.message||'批量排除失败';}finally{saving.value=false;} }
+function applyBulk(): void { for (const row of batch.value.rows || []) if (selectedRows.value.includes(row.row_id)&&row.editable) for (const key of ['action','expected','actual','result','type_resolution']) if (bulk[key as keyof typeof bulk]) row[key]=String(bulk[key as keyof typeof bulk]).replace('T',' '); void saveChanges(); }
+function queueAutoSave(): void { window.clearTimeout(saveTimer); saveFailed.value=false; saveTimer=window.setTimeout(()=>{ void saveChanges(); },350); }
+async function saveChanges(): Promise<boolean> {
+  window.clearTimeout(saveTimer);
+  if (savePromise) { const finished=await savePromise; return finished && (!dirtyCount.value || await saveChanges()); }
+  const rows=dirtyRows.value.map((row:Dict)=>({row_id:row.row_id,...Object.fromEntries(editableFields.map(key=>[key,row[key]||'']))}));
+  if (!rows.length) return true;
+  const sent=new Map(rows.map((row:Dict)=>[row.row_id,rowSignature(row)]));
+  saving.value=true;
+  savePromise=(async()=>{
+    try {
+      const saved=await write(`batches/${batchId}`,{version:batch.value.version,rows},'PATCH');
+      const pending=(batch.value.rows || []).filter((row:Dict)=>baseline.get(row.row_id)!==rowSignature(row) && sent.get(row.row_id)!==rowSignature(row)).map((row:Dict)=>({row_id:row.row_id,values:Object.fromEntries(editableFields.map(key=>[key,row[key]]))}));
+      batch.value=saved; snapshotRows();
+      for (const item of pending) { const row=(batch.value.rows || []).find((entry:Dict)=>entry.row_id===item.row_id); if (row) Object.assign(row,item.values); }
+      saveFailed.value=false; error.value=''; message.value='更正已自动保存'; return true;
+    } catch(exc:any) { saveFailed.value=true; error.value=exc.message||'自动保存失败，请重试'; return false; }
+    finally { saving.value=false; }
+  })();
+  const success=await savePromise; savePromise=undefined;
+  if (success && dirtyCount.value) queueAutoSave();
+  return success;
+}
+async function acknowledgeWarnings(): Promise<void> { if(!await saveChanges())return; saving.value=true;try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows:[],acknowledge_warnings:true},'PATCH');snapshotRows();message.value='已记录人工核对结果';}catch(exc:any){error.value=exc.message||'异常核对保存失败';}finally{saving.value=false;} }
+async function revalidate(): Promise<void> { if(!await saveChanges())return; saving.value=true;try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows:[]},'PATCH');snapshotRows();message.value='批次已重新校验';}catch(exc:any){error.value=exc.message||'重新校验失败';}finally{saving.value=false;} }
+async function toggleExcluded(row: Dict,excluded: boolean): Promise<void> { if(!await saveChanges())return; saving.value=true; try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,rows:[{row_id:row.row_id,excluded}]},'PATCH');snapshotRows();}catch(exc:any){error.value=exc.message||'操作失败';}finally{saving.value=false;} }
+async function excludeSelected(): Promise<void> { if(!await saveChanges())return; saving.value=true;try{batch.value=await write(`batches/${batchId}`,{version:batch.value.version,row_ids:selectedRows.value,common:{excluded:true}},'PATCH');selectedRows.value=[];snapshotRows();message.value='已排除所选待办行';}catch(exc:any){error.value=exc.message||'批量排除失败';}finally{saving.value=false;} }
 function requestFileCleanup(fileId:string):void{cleanupFileId.value=fileId;confirmDialog.value='file';}
-async function confirmRows(payload: Dict): Promise<void> { if(dirtyCount.value){error.value='请先保存字段更正，再确认正式写入。';return;} saving.value=true; try{batch.value=await write(`batches/${batchId}/confirm`,{version:batch.value.version,...payload});snapshotRows();selectedRows.value=[];message.value='已提交后台处理，各楼会并行写入';schedulePoll();}catch(exc:any){error.value=exc.message||'确认失败';}finally{saving.value=false;} }
-async function resolveConfirm(confirmed: boolean): Promise<void> { const action=confirmDialog.value,fileId=cleanupFileId.value;confirmDialog.value='';cleanupFileId.value='';if(!confirmed)return;if(action==='warnings'){await acknowledgeWarnings();return;}saving.value=true;try{if(action==='overlap')batch.value=await write(`batches/${batchId}/clear-overlaps`,{version:batch.value.version});else if(action==='all'){saving.value=false;await confirmRows({all:true});return;}else if(action==='file')batch.value=await write(`batches/${batchId}/files/${fileId}/cleanup`,{});else batch.value=await write(`batches/${batchId}/cancel`,{});snapshotRows();}catch(exc:any){error.value=exc.message||'操作失败';}finally{saving.value=false;} }
+async function confirmRows(payload: Dict): Promise<void> { if(!await saveChanges())return; saving.value=true; try{batch.value=await write(`batches/${batchId}/confirm`,{version:batch.value.version,...payload});snapshotRows();selectedRows.value=[];message.value='已提交后台处理，各楼会并行写入';schedulePoll();}catch(exc:any){error.value=exc.message||'确认失败';}finally{saving.value=false;} }
+function requestRollback(rowId:string):void { rollbackRowId.value=rowId; confirmDialog.value='rollback'; }
+async function rollbackRows(rowId:string):Promise<void> { if(!await saveChanges())return; saving.value=true; try{batch.value=await write(`batches/${batchId}/rollback`,{version:batch.value.version,...(rowId?{row_ids:[rowId]}:{all:true})});snapshotRows();message.value='已开始回退；后续有操作的机柜会跳过';schedulePoll();}catch(exc:any){error.value=exc.message||'回退未启动';}finally{saving.value=false;} }
+async function resolveConfirm(confirmed: boolean): Promise<void> { const action=confirmDialog.value,fileId=cleanupFileId.value,rowId=rollbackRowId.value;confirmDialog.value='';cleanupFileId.value='';rollbackRowId.value='';if(!confirmed)return;if(action==='warnings'){await acknowledgeWarnings();return;}if(action==='rollback'){await rollbackRows(rowId);return;}if(action==='all'){await confirmRows({all:true});return;}if(!await saveChanges())return;saving.value=true;try{if(action==='overlap')batch.value=await write(`batches/${batchId}/clear-overlaps`,{version:batch.value.version});else if(action==='file')batch.value=await write(`batches/${batchId}/files/${fileId}/cleanup`,{});else batch.value=await write(`batches/${batchId}/cancel`,{});snapshotRows();}catch(exc:any){error.value=exc.message||'操作失败';}finally{saving.value=false;} }
 function resolveDiscard(confirmed:boolean):void{discardOpen.value=false;const proceed=pendingNavigation;pendingNavigation=undefined;if(confirmed)proceed?.();}
 
 watch(rowPageCount,count=>{rowPage.value=Math.min(rowPage.value,count);});
-watch([rowScopeFilter,rowStatusFilter],()=>{rowPage.value=1;});
-onMounted(async()=>{window.addEventListener('paste',pasteFiles);removeGuard=registerNavigationGuard((_target,proceed)=>{if(!dirtyCount.value)return true;pendingNavigation=proceed;discardOpen.value=true;return false;});if(batchId)await loadBatch();else if(mode!=='new')await loadList();if(mode==='new'&&createMode.value==='manual')await loadDirectory();});
-onBeforeUnmount(()=>{disposed=true;window.clearTimeout(pollTimer);window.removeEventListener('paste',pasteFiles);removeGuard?.();});
+watch([rowScopeFilter,rowStatusFilter],()=>{rowPage.value=1;editingRowId.value='';});
+watch(rowPage,()=>{editingRowId.value='';});
+onMounted(async()=>{window.addEventListener('paste',pasteFiles);removeGuard=registerNavigationGuard((_target,proceed)=>{if(!dirtyCount.value&&!saving.value)return true;void saveChanges().then(ok=>{if(ok&&!dirtyCount.value)proceed();else{pendingNavigation=proceed;discardOpen.value=true;}});return false;});if(batchId)await loadBatch();else if(mode!=='new')await loadList();if(mode==='new'&&createMode.value==='manual')await loadDirectory();});
+onBeforeUnmount(()=>{disposed=true;window.clearTimeout(pollTimer);window.clearTimeout(saveTimer);window.removeEventListener('paste',pasteFiles);removeGuard?.();});
 </script>
 
 <style scoped>
@@ -238,9 +274,114 @@ onBeforeUnmount(()=>{disposed=true;window.clearTimeout(pollTimer);window.removeE
 @media(max-width:1000px){.page-heading{flex-wrap:wrap}.page-heading>.actions{width:100%}.common-fields,.notice-source{grid-template-columns:repeat(2,minmax(0,1fr))}.manual-source{grid-template-columns:1fr}.batch-summary{align-items:stretch;flex-direction:column}.metrics{grid-template-columns:repeat(4,1fr);row-gap:14px}.batch-actions{align-items:stretch;flex-direction:column}.bulk-fields,.batch-actions>.actions{width:100%}}
 @media(max-width:640px){.batch-page{padding:14px}.page-heading h1{font-size:22px}.common-fields,.notice-source{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.notice{font-size:13px}.source-files>div{align-items:flex-start;flex-wrap:wrap}.source-files small{margin-left:0}.source-files b{max-width:100%}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
-.metrics{grid-template-columns:repeat(8,minmax(70px,1fr))}.metrics span{padding-inline:12px}
-.row-filters{display:flex;gap:8px;flex-wrap:wrap}
-.edit-audit{max-width:280px;white-space:normal}.edit-audit summary{margin-top:5px;color:#9b6b00;cursor:pointer}.edit-audit small{overflow-wrap:anywhere}
-@media(max-width:1000px){.metrics{grid-template-columns:repeat(4,1fr)}}
-@media(max-width:640px){.metrics{grid-template-columns:repeat(2,1fr)}}
+.batch-summary{display:grid;grid-template-columns:240px minmax(0,1fr);gap:0;padding:0;overflow:hidden;border:1px solid #d4dfeb;border-radius:6px;background:#fff}
+.summary-main{min-width:0;justify-content:center;gap:6px;padding:18px 20px;border-right:1px solid #e3e9ef;background:#f4f7fb}
+.summary-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.summary-title strong{font-size:16px;white-space:nowrap}
+.summary-main small{font-size:12px;line-height:1.4}
+.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;margin:0}
+.metrics>div{min-width:0;padding:12px 18px;border-left:1px solid #edf1f5}
+.metrics>div:nth-child(n+6){border-top:1px solid #edf1f5}
+.metrics dt{color:#65778a;font-size:12px;line-height:1.4;white-space:nowrap}
+.metrics dd{margin:3px 0 0;color:#1d344c;font-size:21px;font-weight:650;line-height:1.2}
+.metrics .warning-metric dd{color:#a76a12}
+.metrics .success-metric dd{color:#167953}
+.metrics .danger-metric dd{color:#ae283e}
+.notice-source{border-color:#d4dfeb;border-radius:6px;box-shadow:none}
+.batch-actions{display:grid;gap:0;margin:16px 0;padding:0;border:1px solid #d4dfeb;border-radius:6px;background:#fff}
+.filter-bar{display:flex;align-items:center;gap:12px;min-width:0;padding:12px 16px}
+.filter-bar>strong{margin-right:8px;color:#29435c;font-size:13px;white-space:nowrap}
+.filter-bar label,.commit-actions label,.bulk-fields label{display:flex;align-items:center;gap:8px;min-width:0;color:#60748a;font-size:12px;white-space:nowrap}
+.filter-bar select{width:160px}
+.filter-count{margin-left:auto;color:#6b7f93;font-size:12px;white-space:nowrap}
+.selection-panel{display:grid;gap:12px;padding:12px 16px;border-top:1px solid #e1e8f0;background:#f7faff}
+.selection-heading{display:flex;align-items:center;gap:14px}
+.selection-heading strong{color:#1d4f8c}
+.selection-heading .link{min-height:28px}
+.bulk-fields{display:flex;align-items:end;gap:10px;min-width:0;flex-wrap:wrap}
+.bulk-fields label{display:grid;gap:5px}
+.bulk-fields select,.bulk-fields input{width:164px;min-width:0}
+.bulk-fields label:first-child select{width:190px}
+.bulk-fields .danger-ghost{color:#a72c3e}
+.commit-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid #e1e8f0;flex-wrap:wrap}
+.commit-actions label{padding:0 8px;border-left:1px solid #e1e8f0}
+.commit-actions select{width:116px}
+.save-indicator{color:#58718a;font-size:12px;white-space:nowrap}
+.status.rolled_back{border-color:#bed6cd;background:#edf6f1;color:#226e55}
+.status.rollback_queued,.status.rolling_back{border-color:#a9c9f2;background:#eaf3ff;color:#175dbb}
+.status.rollback_failed,.status.rollback_blocked{border-color:#f3c6cb;background:#fff0f1;color:#ae283e}
+.detail-table{max-height:68vh;border-color:#d4dfeb;border-radius:6px;scrollbar-gutter:stable}
+.detail-table .records-table{width:100%;min-width:1180px;table-layout:fixed;white-space:normal}
+.records-table th{z-index:2;padding:11px 10px;background:#eaf0f6;color:#365069;font-size:12px;line-height:1.4;white-space:nowrap}
+.records-table td{padding:12px 10px;vertical-align:middle;line-height:1.4;overflow-wrap:anywhere}
+.records-table tbody>tr:not(.row-editor-row):nth-child(even):not(.duplicate):not(.invalid):not(.conflict):not(.failed):not(.completed){background:#fbfcfe}
+.records-table tbody>tr.expanded{background:#edf5ff}
+.records-table td>strong{display:block;color:#1e354d;font-size:13px;font-weight:650}
+.records-table td>small{display:block;margin-top:4px;color:#718296;font-size:11px}
+.records-table .select-column{width:44px}
+.records-table .select-column input,.records-table tbody>tr:not(.row-editor-row) td:first-child input{width:17px;min-width:17px;height:17px;vertical-align:middle}
+.records-table .validation-cell{width:132px}
+.records-table .validation-cell small{max-width:128px;color:#a0671c}
+.records-table .location-summary{width:104px}
+.records-table .rack-summary{width:76px}
+.records-table .supplier-summary{width:114px}
+.records-table .operation-summary{width:166px}
+.operation-summary strong{margin-top:5px}
+.operation-summary .muted{color:#9a6b20}
+.records-table .time-cell{width:144px;color:#35536f;font-variant-numeric:tabular-nums;white-space:nowrap}
+.records-table .result-summary{width:74px}
+.records-table .source-cell{width:126px}
+.source-cell strong{font-size:12px!important}
+.records-table .action-column,.records-table .row-actions{width:88px}
+.row-actions{white-space:nowrap}
+.row-actions .icon-button{width:34px;min-height:34px;padding:0}
+.row-actions .danger-icon{color:#aa3846}
+.result-badge{display:inline-block;color:#67798a;font-size:12px;white-space:nowrap}
+.result-badge.success{color:#167953}
+.result-badge.failed{color:#a93242}
+.power-state{display:inline-block;max-width:100%;padding:2px 7px;border:1px solid #c9d6e4;border-radius:4px;background:#f4f7fa;color:#536a80;font-size:11px;line-height:1.45;white-space:normal}
+.power-state.formal{border-color:#f3b8bf;background:#fff0f1;color:#a3263a}
+.power-state.test{border-color:#efd18a;background:#fff7df;color:#785300}
+.power-state.off{border-color:#acd9c5;background:#edf9f3;color:#147451}
+.row-editor-row>td{padding:0!important;white-space:normal}
+.row-editor{padding:0 20px 16px;border-block:1px solid #c5d9f2;background:#f8fbff}
+.row-editor>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid #dce7f3}
+.row-editor>header>div{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.row-editor>header span{color:#60758b;font-size:12px}
+.row-editor>header strong{color:#1d3f65;font-size:15px}
+.row-editor>header .icon-button{min-height:32px}
+.editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;padding-top:16px}
+.editor-grid fieldset{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:12px;margin:0;min-width:0;padding:0 16px;border:0;border-right:1px solid #dce7f3}
+.editor-grid fieldset:first-child{padding-left:0}
+.editor-grid fieldset:last-child{padding-right:0;border-right:0}
+.editor-grid legend{padding:0 0 12px;color:#365675;font-size:13px;font-weight:650}
+.editor-grid label{display:grid;align-content:start;gap:5px;min-width:0;color:#60758b;font-size:12px}
+.editor-grid label span{line-height:1.4}
+.editor-grid input,.editor-grid select{width:100%;min-width:0;height:38px}
+.editor-grid .wide-field,.editor-grid .state-line{grid-column:1/-1}
+.state-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.state-line small{color:#60758b;font-size:11px;line-height:1.5}
+.editor-footer{display:flex;align-items:end;justify-content:space-between;gap:16px;padding-top:14px}
+.editor-footer .actions{flex-shrink:0}
+.source-audit{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap;color:#59738c;font-size:12px}
+.source-audit small{overflow-wrap:anywhere}
+.edit-audit{min-width:0;white-space:normal}
+.edit-audit summary{color:#1b62ae;cursor:pointer}
+.edit-audit small{display:block;margin-top:6px;overflow-wrap:anywhere}
+.corrected{border-color:#d89b20!important;background:#fff9e8!important}
+@media(max-width:1100px){
+  .batch-summary{grid-template-columns:1fr}
+  .summary-main{border-right:0;border-bottom:1px solid #e3e9ef}
+  .editor-grid{grid-template-columns:1fr}
+  .editor-grid fieldset{padding:12px 0;border-right:0;border-bottom:1px solid #dce7f3}
+  .editor-grid fieldset:last-child{border-bottom:0}
+}
+@media(max-width:640px){
+  .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .metrics>div:nth-child(n+3){border-top:1px solid #edf1f5}
+  .filter-bar{flex-wrap:wrap}
+  .filter-count{margin-left:0}
+  .commit-actions{justify-content:flex-start}
+  .editor-footer{align-items:start;flex-direction:column}
+}
 </style>

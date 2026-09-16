@@ -2129,9 +2129,30 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.goto(new URL(`/cabinet-power/batches?scope=A&batch_id=${{batchCreated.data.batch_id}}`, cfg.url).toString());
           await page.waitForSelector('.batch-summary');
           if (!(await page.locator('.batch-summary').innerText()).includes('待新增')) throw new Error('cabinet batch summary missing');
+          const batchHeaders = await page.locator('.detail-table th').allTextContents();
+          if (!batchHeaders.includes('机柜') || batchHeaders.includes('供应商机柜号') || batchHeaders.includes('下单时间')) throw new Error(`cabinet batch dynamic columns failed: ${{batchHeaders.join('|')}}`);
           const batchDesktopOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
           if (batchDesktopOverflow) throw new Error('cabinet batch desktop page overflows horizontally');
           await page.screenshot({{ path: 'output/playwright/cabinet-batch-desktop.png', fullPage: true }});
+          await page.getByRole('button', {{ name: '编辑记录', exact: true }}).first().click();
+          await page.locator('.row-editor').waitFor();
+          if (await page.getByRole('button', {{ name: '保存更正', exact: true }}).count()) throw new Error('cabinet batch still requires a separate save action');
+          await page.locator('.row-editor fieldset').nth(2).locator('select').first().selectOption('上正式电');
+          await page.getByText('更正已自动保存', {{ exact: true }}).waitFor();
+          const savedBatch = await page.evaluate(async id => (await (await fetch(`/api/cabinet-power/batches/${{id}}`)).json()).data, batchCreated.data.batch_id);
+          if (savedBatch.rows?.[0]?.action !== '上正式电') throw new Error('cabinet batch change was not auto-saved');
+          const editorLayout = await page.evaluate(() => {{
+            const editor = document.querySelector('.row-editor');
+            const groups = Array.from(editor?.querySelectorAll('fieldset') || []);
+            return {{
+              width: editor?.clientWidth || 0,
+              overflow: (editor?.scrollWidth || 0) > (editor?.clientWidth || 0) + 2,
+              groups: groups.map(group => (group.querySelector('legend')?.textContent || '').trim()),
+              overlapping: groups.some((group, index) => index > 0 && group.getBoundingClientRect().left < groups[index - 1].getBoundingClientRect().right - 2),
+            }};
+          }});
+          if (editorLayout.overflow || editorLayout.overlapping || editorLayout.groups.join('|') !== '机柜定位|机柜资料|操作信息') throw new Error(`cabinet batch editor layout invalid: ${{JSON.stringify(editorLayout)}}`);
+          await page.screenshot({{ path: 'output/playwright/cabinet-batch-editor-desktop.png', fullPage: true }});
           await page.setViewportSize({{ width: 390, height: 844 }});
           const batchNarrowOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
           if (batchNarrowOverflow) throw new Error('cabinet batch narrow page overflows horizontally');
@@ -2871,6 +2892,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}
             const smokeWorkOrderExempt = page.locator('#lite-polling-work-order-exempt');
             if (await smokeWorkOrderExempt.count() === 1) await smokeWorkOrderExempt.check();
+            const parsedSourceRecommendation = page.locator('[data-manual-quick-source]').first();
+            if (await parsedSourceRecommendation.count() !== 1) throw new Error('parsed notice source recommendation missing');
+            await parsedSourceRecommendation.click();
+            await page.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'bind');
             const smokeSendButton = page.getByRole('button', {{ name: /发送.*开始/ }});
             await smokeSendButton.waitFor({{ timeout: 10000 }});
             await page.evaluate(() => {{
@@ -2977,31 +3002,36 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               }});
             }});
             await bindingPage.locator('[data-manual-binding-mode="unbound"]').first().click();
-            const manualSend = bindingPage.getByRole('button', {{ name: '发送开始', exact: true }});
             await bindingPage.waitForFunction(() => !document.querySelector('#lite-notice-form button[name="submit_action"]')?.disabled);
             await bindingPage.route('**/api/workbench/source-options?*', async route => {{
               manualSourceRequests += 1;
               await new Promise(resolve => setTimeout(resolve, 500));
               await route.fulfill({{ status: 200, contentType: 'application/json', body: JSON.stringify({{ ok: true, data: {{ items: [] }} }}) }});
             }});
+            let holdJobPoll = true;
+            await bindingPage.route('**/api/jobs/*', route => holdJobPoll
+              ? route.fulfill({{ status: 200, contentType: 'application/json', body: JSON.stringify({{ ok: true, data: {{ phase: 'uploading' }} }}) }})
+              : route.continue());
+            await bindingPage.evaluate(() => {{
+              window.__manualSourceOpened = false;
+              const modal = document.getElementById('lite-manual-source-candidates');
+              new MutationObserver(() => {{ if (modal && !modal.hidden) window.__manualSourceOpened = true; }}).observe(modal, {{ attributes: true, attributeFilter: ['hidden'] }});
+            }});
+            const submitted = bindingPage.waitForRequest(request => new URL(request.url()).pathname === '/api/workbench-actions');
             await bindingPage.evaluate(() => {{
               const button = document.querySelector('#lite-notice-form button[name="submit_action"]');
               button?.click();
-              button?.click();
             }});
-            await bindingPage.locator('#lite-manual-source-candidates:not([hidden])').waitFor();
-            if (!(await bindingPage.locator('#lite-manual-source-unbound-confirm').isDisabled())) throw new Error('manual unbound confirmation enabled while candidates were loading');
-            await bindingPage.getByRole('button', {{ name: '关闭计划通告关联', exact: true }}).click();
-            await bindingPage.waitForTimeout(650);
-            if (manualSourceRequests !== 1 || manualActionRequests !== 0) throw new Error(`cancelled or duplicate manual binding preflight submitted unexpectedly: source=${{manualSourceRequests}}, action=${{manualActionRequests}}`);
-            await bindingPage.unroute('**/api/workbench/source-options?*');
-            await manualSend.click();
-            await bindingPage.getByText(/发现 \\d+ 条同楼栋、同类型的可绑定计划通告/).waitFor();
-            if (manualActionRequests !== 0) throw new Error('manual notice submitted before unbound warning approval');
-            const submitted = bindingPage.waitForRequest(request => new URL(request.url()).pathname === '/api/workbench-actions');
-            await bindingPage.getByRole('button', {{ name: '确认不绑定并发送', exact: true }}).click();
             await submitted;
-            if (manualActionRequests !== 1) throw new Error(`manual unbound approval submitted ${{manualActionRequests}} requests`);
+            if (manualSourceRequests !== 0 || manualActionRequests !== 1 || await bindingPage.evaluate(() => window.__manualSourceOpened)) throw new Error(`unbound manual notice opened source picker or submitted twice: source=${{manualSourceRequests}}, action=${{manualActionRequests}}`);
+            await bindingPage.waitForFunction(() => Boolean(document.querySelector('#lite-notice-form')?.dataset.pendingActionJobId));
+            await bindingPage.waitForTimeout(1100);
+            await bindingPage.evaluate(() => document.querySelector('#lite-notice-form [name="title"]')?.dispatchEvent(new Event('input', {{ bubbles: true }})));
+            if (!(await bindingPage.locator('#lite-notice-form button[name="submit_action"]').first().isDisabled())) throw new Error('notice send button re-enabled before upload finished');
+            holdJobPoll = false;
+            await bindingPage.waitForFunction(() => !document.querySelector('#lite-notice-form')?.dataset.pendingActionJobId, {{ timeout: 20000 }});
+            await bindingPage.unroute('**/api/jobs/*');
+            await bindingPage.unroute('**/api/workbench/source-options?*');
             await bindingPage.close();
             const recoveryPage = await context.newPage();
             await recoveryPage.route('**/CabinetPowerPage-*.js', route => route.abort());
@@ -3478,7 +3508,7 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
-                timeout=180,
+                timeout=240,
             )
         if completed.returncode != 0:
             raise RuntimeError(

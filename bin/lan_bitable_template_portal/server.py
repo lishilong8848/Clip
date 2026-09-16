@@ -11659,7 +11659,9 @@ class PortalRuntime:
 
     @classmethod
     def _upsert_backend_active_notice(
-        cls, prepared: dict, *, remote_record_id: str = "", job_id: str = ""
+        cls, prepared: dict, *, remote_record_id: str = "", job_id: str = "",
+        previous_active_item_id: str = "",
+        submitted_at: float = 0.0,
     ) -> int | str:
         event_payload = cls._prepared_to_qt_ui_payload(
             prepared,
@@ -11708,6 +11710,34 @@ class PortalRuntime:
                 }
             )
         superseded_active_ids: list[str] = []
+        previous_active_item_id = str(previous_active_item_id or "").strip()
+        if (
+            notice_type != "事件通告"
+            and str(prepared.get("action") or "").strip().lower() == "start"
+            and previous_active_item_id
+            and previous_active_item_id != active_item_id
+        ):
+            for row in cls.state_store.find_qt_active_items(
+                active_item_id=previous_active_item_id
+            ):
+                old = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if (
+                    row.get("deleted_at") is None
+                    and str(row.get("active_item_id") or "") == previous_active_item_id
+                    and str(row.get("notice_type") or "") == notice_type
+                    and is_local_record_id(str(row.get("record_id") or old.get("record_id") or ""))
+                    and (
+                        (
+                            submitted_at > 0
+                            and float(row.get("updated_at") or 0) <= submitted_at
+                        )
+                        or re.sub(r"\s+", "", str(old.get("text") or ""))
+                        == re.sub(r"\s+", "", str(event_payload.get("text") or ""))
+                    )
+                    and str(old.get("text") or "").strip()
+                ):
+                    superseded_active_ids.append(previous_active_item_id)
+                    break
         if source_record_id and active_item_id:
             for row in cls.state_store.list_qt_active_items(include_deleted=False):
                 row_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -14490,6 +14520,7 @@ class PortalRuntime:
                             phase="uploading",
                             qt_phase="backend_upload",
                         )
+                        cls.track_upload_wait_job(job_id)
                         (
                             operation_lock_key,
                             operation_lock_owner,
@@ -14877,6 +14908,10 @@ class PortalRuntime:
                                 projection_payload,
                                 remote_record_id=resolved_remote_record_id,
                                 job_id=job_id,
+                                previous_active_item_id=str(
+                                    (current_job.get("request") or {}).get("active_item_id") or ""
+                                ),
+                                submitted_at=float(current_job.get("accepted_at") or 0),
                             )
                             cls._consume_change_confirmation_today_screenshot(
                                 projection_payload,

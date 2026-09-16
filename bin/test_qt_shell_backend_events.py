@@ -1742,6 +1742,36 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_deleted_power_down_start_copy_reappears_in_other_notices(self):
+        text = (
+            "【下电通告】状态：开始\n"
+            "【名称】EA118机房E楼机柜下电通告\n"
+            "【时间】2026-09-16 13:46~2026-09-16 19:00\n"
+            "【柜号】E-402包间B15、B16、B17、B18，C13、C14、C15、C16，D15、D16、D17、D18\n"
+            "【数量】12\n"
+            "【进度】准备工作已完成，人员已就位，是否可以开始？"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                self.assertIsNotNone(entry)
+                first = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+                self.assertEqual(first["item"]["notice_type"], "下电通告")
+                self.assertEqual(first["item"]["section"], "other")
+                self.assertTrue(store.delete_qt_active_item(active_item_id=first["active_item_id"]))
+                self.assertFalse(store.list_visible_qt_active_items())
+                repeated = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+                self.assertFalse(repeated.get("ignored"), repeated)
+                visible = store.list_visible_qt_active_items()
+                self.assertEqual(len(visible), 1)
+                self.assertEqual(visible[0]["payload"]["notice_type"], "下电通告")
+                self.assertEqual(visible[0]["payload"]["cabinet"].split("包间")[0], "E-402")
+            finally:
+                PortalRuntime.state_store = original_store
+
     def test_deleted_clipboard_event_recreates_on_new_then_accepts_busy_update(self):
         first_text = (
             "【事件通告】状态：新增\n"

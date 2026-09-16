@@ -12,7 +12,46 @@ from types import SimpleNamespace
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID
+from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
+
+class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_pdf_rows_keep_missing_values_and_split_glued_result(self):
+        text=(
+            "机柜下测试电确认单\n申请时间： 2026-08-31 17:49:03\n操作类型： 下测试电\n"
+            "EA118 B4-2.EA118 B16 B16 服务器机柜 WholeRack 2026-08-31 15:03:55\n"
+            "EA118 A4-2.EA118 G02 G02 服务器机柜 WholeRack 2026-09-03 10:12:20成功 2026-08-31 14:48:26"
+        )
+        batch=object.__new__(CabinetBatchService)
+        batch.import_root=Path("unused")
+        batch._pdf_reader=lambda _path:SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda **_kwargs:text)])
+        batch._set_file_progress=lambda *_args,**_kwargs:None
+        rows=batch._parse_pdf("batch",{"file_id":"file","sha256":"hash","name":"机柜下测试电确认单.pdf"})
+        self.assertEqual(len(rows),2)
+        self.assertEqual((rows[0]["scope"],rows[0]["room"],rows[0]["actual"],rows[0]["result"],rows[0]["order_time"]),("B","402","","","2026-08-31 15:03:55"))
+        self.assertEqual((rows[1]["actual"],rows[1]["result"],rows[1]["order_time"]),("2026-09-03 10:12:20","成功","2026-08-31 14:48:26"))
+
+    def test_pdf_action_validation_uses_latest_successful_state(self):
+        inventory=[{"room":"201","rack":rack,"rack_type":"服务器机柜"} for rack in ("A01","A02","A03")]
+        events={"A02":[{"action":"上测试电","actual":"2026-09-14 10:00:00","result":"成功"}],
+                "A03":[{"action":"上正式电","actual":"2026-09-14 10:00:00","result":"成功"}]}
+        snapshot={"config":{"inventory":inventory},"operations":[{"room":"201","rack":rack,"events":items} for rack,items in events.items()]}
+        batch=object.__new__(CabinetBatchService)
+        batch.cabinet=SimpleNamespace(_snapshot=lambda _scope:snapshot)
+        self.assertEqual(POWER_ACTIONS_BY_STATE["off"],{"上测试电","上正式电"})
+        self.assertEqual(POWER_ACTIONS_BY_STATE["test"],{"测试电转正式电","下测试电"})
+        self.assertEqual(POWER_ACTIONS_BY_STATE["formal"],{"正式电转测试电","下正式电"})
+        rows=[]
+        for index,(rack,action) in enumerate((("A01","上正式电"),("A02","下测试电"),("A03","正式电转测试电"),("A01","下正式电"),("A02","上正式电"),("A03","上测试电"))):
+            actual="2026-09-15 11:00:00" if index<3 else "2026-09-15 11:01:00"
+            rows.append({"row_id":f"row_{index}","operation_id":f"operation_{index}","scope":"A","room":"201","rack":rack,"rack_type":"服务器机柜","action":action,
+                         "expected":actual,"actual":actual,"result":"成功","status":"ready"})
+        payload={"source":"pdf","rows":rows}
+        batch._validate_rows(payload)
+        self.assertEqual([row["current_power_state"] for row in rows],["off","test","formal","off","test","formal"])
+        self.assertEqual([row["status"] for row in rows],["ready"]*3+["invalid"]*3)
+        with self.assertRaisesRegex(CabinetError,"当前为测试电"):
+            batch._row_payload({"source":"pdf","batch_id":"test"},rows[4])
 
 class MemoryStore:
     db_path=Path("unused.sqlite")
@@ -22,7 +61,8 @@ class MemoryStore:
 
 class FakeFeishu:
     def __init__(self,records=()):
-        self.records={r["record_id"]:copy.deepcopy(r) for r in records}; self.creates=0; self.fail_after_create=False; self.list_calls=0
+        self.records={r["record_id"]:copy.deepcopy(r) for r in records}; self.creates=0; self.fail_after_create=False; self.fail_after_delete=False; self.list_calls=0
+        self.batch_create_calls=0; self.batch_update_calls=0; self.fail_after_batch_create=False; self.fail_after_batch_update=False
     def list_all(self,path="records"): self.list_calls+=1; return copy.deepcopy(list(self.records.values()))
     def ensure_fields(self): return True
     def get(self,rid): return copy.deepcopy(self.records[rid])
@@ -33,6 +73,21 @@ class FakeFeishu:
         return self.get(rid)
     def update(self,rid,fields):
         self.records[rid]["fields"].update(copy.deepcopy(fields)); return self.get(rid)
+    def batch_create(self,rows):
+        self.batch_create_calls+=1
+        created=[self.create(fields,"batch") for fields in rows]
+        if self.fail_after_batch_create: raise TimeoutError("batch response lost")
+        return created
+    def batch_update(self,rows):
+        self.batch_update_calls+=1
+        updated=[self.update(row["record_id"],row["fields"]) for row in rows]
+        if self.fail_after_batch_update: raise TimeoutError("batch response lost")
+        return updated
+    def batch_get(self,record_ids):
+        return [self.get(rid) for rid in record_ids if rid in self.records]
+    def delete(self,rid):
+        self.records.pop(rid)
+        if self.fail_after_delete: raise TimeoutError("delete response lost")
 
 class FakeExportFeishu:
     def __init__(self):
@@ -315,11 +370,19 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual([batch["stats"]["total"] for batch in batches],[40,4,12])
         self.assertEqual({(row["scope"],row["room"]) for row in batches[0]["rows"]},{("D","201")})
         self.assertEqual({(row["room"],row["rack_type"]) for row in batches[1]["rows"]},{("216","网络机柜"),("247","网络机柜")})
-        self.assertEqual({row["action"] for row in batches[0]["rows"]},{""})
-        self.assertEqual({row["action"] for row in batches[1]["rows"]},{""})
+        self.assertEqual({row["action"] for row in batches[0]["rows"]},{"上正式电"})
+        self.assertEqual({row["action"] for row in batches[1]["rows"]},{"上正式电"})
         self.assertEqual({row["action"] for row in batches[2]["rows"]},{"下测试电"})
         self.assertEqual({row["expected"] for row in batches[2]["rows"]},{"2026-09-03 19:00:00"})
-        self.assertTrue(all(not row["actual"] and not row["result"] for batch in batches for row in batch["rows"]))
+        self.assertTrue(all(not row["actual"] and row["result"]=="成功" for batch in batches for row in batch["rows"]))
+        self.assertTrue(all(row["current_power_state"]=="off" for row in batches[0]["rows"]))
+        self.assertEqual(self.service.batches._infer_notice_action({"config":{"inventory":[]},"operations":[]},"201","A01","up",""),("","机柜未匹配当前目录，无法自动识别操作类型","unknown"))
+        legacy=self.service.batches.store.get(batches[0]["batch_id"])
+        legacy["rows"][0].update(action="",result="")
+        legacy["rows"][0].pop("current_power_state",None)
+        self.service.batches.store.save(legacy,legacy["version"])
+        upgraded=self.service.batches.get(legacy["batch_id"])
+        self.assertEqual((upgraded["rows"][0]["action"],upgraded["rows"][0]["result"],upgraded["rows"][0]["current_power_state"]),("上正式电","成功","off"))
         repeated=self.service.batches.create_from_notice({**samples[0],"owner_id":"owner"})
         self.assertEqual(repeated["batch_id"],batches[0]["batch_id"])
 
@@ -339,6 +402,14 @@ class CabinetPowerTests(unittest.TestCase):
             "version":acknowledged["version"],"rows":[{"row_id":row["row_id"],"rack":"B06"}],
         },"owner",["B"])
         self.assertFalse(changed["warnings_acknowledged"])
+        self.assertEqual((changed["rows"][0]["current_power_state"],changed["rows"][0]["action"]),("unknown",""))
+        manual=self.service.batches.update(batch["batch_id"],{
+            "version":changed["version"],"rows":[{"row_id":row["row_id"],"action":"上测试电"}],
+        },"owner",["B"])
+        moved=self.service.batches.update(batch["batch_id"],{
+            "version":manual["version"],"rows":[{"row_id":row["row_id"],"rack":"B04","action":"上测试电"}],
+        },"owner",["B"])
+        self.assertEqual(moved["rows"][0]["action"],"上测试电")
 
     def test_power_notice_outbox_handoff_never_raises_into_notice_flow(self):
         bin_path=str(Path(__file__).parent)
@@ -451,6 +522,174 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             record_id=next(row["record_id"] for row in batch["rows"] if row["scope"]==scope)
             saved=next(op for op in self.service._snapshot(scope)["operations"] if op["record_id"]==record_id)
             self.assertTrue(any(item["batch_id"]==batch["batch_id"] for item in saved["meta"]["batch_rows"]))
+
+    def _wait_batch(self,batch_id):
+        deadline=time.time()+15
+        while time.time()<deadline:
+            batch=self.service.batches.get(batch_id)
+            if batch["status"]!="running": return batch
+            time.sleep(.01)
+        self.fail("批次处理超时")
+
+    def _manual_batch_row(self,scope,actual,action="上正式电"):
+        rack=self.configs[scope]["inventory"][0]
+        return {"scope":scope,"room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
+                "action":action,"expected":actual,"actual":actual,"result":"成功"}
+
+    def test_batch_rollback_restores_abc_create_and_de_history(self):
+        before_d=copy.deepcopy(next(op for op in self.service._snapshot("D")["operations"] if (op["room"],op["rack"])==(self.configs["D"]["inventory"][0]["room"],self.configs["D"]["inventory"][0]["rack"])))
+        count_a=self.service.overview("A")["record_count"]
+        batch=self.service.batches.create_manual([self._manual_batch_row(scope,"2026-09-14 01:02:03") for scope in ("A","D")],"owner")
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A","D"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],2)
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A","D"])
+        undone=self._wait_batch(batch["batch_id"])
+        self.assertEqual(undone["stats"]["rolled_back"],2,undone["rows"])
+        self.assertEqual(self.service.overview("A")["record_count"],count_a)
+        self.assertEqual(next(op for op in self.service._snapshot("D")["operations"] if op["record_id"]==before_d["record_id"])["groups"],before_d["groups"])
+        self.assertNotIn(next(row["record_id"] for row in undone["rows"] if row["scope"]=="A"),self.remote.records)
+
+    def test_batch_confirm_uses_one_cloud_write_per_building_and_rolls_back(self):
+        rows=[]
+        for scope in ("A","E"):
+            for rack in self.configs[scope]["inventory"][:2]:
+                rows.append({"scope":scope,"room":rack["room"],"rack":rack["rack"],
+                             "rack_type":rack["rack_type"],"action":"上正式电",
+                             "expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"})
+        batch=self.service.batches.create_manual(rows,"owner")
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A","E"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],4,done["rows"])
+        self.assertEqual((self.remote.batch_create_calls,self.remote.batch_update_calls),(1,1))
+        original_update=self.remote.update
+        def checked_update(record_id,fields):
+            for field in ("机柜功率（W）","来源行号"):
+                if fields.get(field) is not None:
+                    self.assertIsInstance(fields[field],(int,float),field)
+            return original_update(record_id,fields)
+        self.remote.update=checked_update
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A","E"])
+        undone=self._wait_batch(batch["batch_id"])
+        self.assertEqual(undone["stats"]["rolled_back"],4,undone["rows"])
+        self.assertEqual(undone["status"],"rolled_back")
+
+    def test_batch_create_lost_response_reconciles_without_duplicate(self):
+        rows=[]
+        for rack in self.configs["A"]["inventory"][:2]:
+            rows.append({"scope":"A","room":rack["room"],"rack":rack["rack"],
+                         "rack_type":rack["rack_type"],"action":"上正式电",
+                         "expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"})
+        batch=self.service.batches.create_manual(rows,"owner")
+        self.remote.fail_after_batch_create=True
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],2,done["rows"])
+        self.assertEqual(self.remote.batch_create_calls,1)
+        self.assertEqual(self.remote.creates,2)
+
+    def test_batch_update_lost_response_reconciles_each_cabinet(self):
+        rows=[]
+        for rack in self.configs["E"]["inventory"][:2]:
+            rows.append({"scope":"E","room":rack["room"],"rack":rack["rack"],
+                         "rack_type":rack["rack_type"],"action":"下正式电",
+                         "expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"})
+        batch=self.service.batches.create_manual(rows,"owner")
+        before_count=len(self.remote.records)
+        self.remote.fail_after_batch_update=True
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["E"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],2,done["rows"])
+        self.assertEqual(self.remote.batch_update_calls,1)
+        self.assertEqual(len(self.remote.records),before_count)
+
+    def test_all_failed_rollbacks_are_not_reported_as_partial(self):
+        batch={"status":"partial","rows":[{"status":"rollback_failed","scope":"E"},
+                                          {"status":"rollback_blocked","scope":"E"}]}
+        self.service.batches._refresh_summary(batch)
+        self.assertEqual(batch["status"],"failed")
+        self.assertEqual(batch["stats"]["rolled_back"],0)
+
+    def test_one_failed_rollback_does_not_block_other_cabinet(self):
+        rows=[]
+        for rack in self.configs["E"]["inventory"][:2]:
+            rows.append({"scope":"E","room":rack["room"],"rack":rack["rack"],
+                         "rack_type":rack["rack_type"],"action":"下正式电",
+                         "expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"})
+        batch=self.service.batches.create_manual(rows,"owner")
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["E"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],2)
+        blocked_id=done["rows"][-1]["record_id"]
+        original_update=self.remote.update
+        def fail_one(record_id,fields):
+            if record_id==blocked_id: raise CabinetError("模拟数字字段写入失败")
+            return original_update(record_id,fields)
+        self.remote.update=fail_one
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["E"])
+        partial=self._wait_batch(batch["batch_id"])
+        self.assertEqual(partial["stats"]["rollback_failed"],1,partial["rows"])
+        self.assertEqual(partial["stats"]["rolled_back"],1,partial["rows"])
+        self.remote.update=original_update
+        self.service.batches.rollback(batch["batch_id"],{"version":partial["version"],"all":True},"owner",["E"])
+        self.assertEqual(self._wait_batch(batch["batch_id"])["stats"]["rolled_back"],2)
+
+    def test_batch_rollback_skips_cabinet_with_later_batch(self):
+        first=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        self.service.batches.confirm(first["batch_id"],{"version":first["version"],"all":True},"owner",["A"])
+        first=self._wait_batch(first["batch_id"])
+        second=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:03:03", "下正式电")],"owner")
+        self.service.batches.confirm(second["batch_id"],{"version":second["version"],"all":True},"owner",["A"])
+        second=self._wait_batch(second["batch_id"])
+        self.service.batches.rollback(first["batch_id"],{"version":first["version"],"all":True},"owner",["A"])
+        first=self._wait_batch(first["batch_id"])
+        self.assertEqual(first["rows"][0]["status"],"rollback_blocked")
+        self.assertIn(first["rows"][0]["record_id"],self.remote.records)
+        self.service.batches.rollback(second["batch_id"],{"version":second["version"],"all":True},"owner",["A"])
+        self.assertEqual(self._wait_batch(second["batch_id"])["rows"][0]["status"],"rolled_back")
+        self.service.batches.rollback(first["batch_id"],{"version":first["version"],"all":True},"owner",["A"])
+        self.assertEqual(self._wait_batch(first["batch_id"])["rows"][0]["status"],"rolled_back")
+
+    def test_batch_rollback_recovers_lost_delete_response(self):
+        batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        lists_before=self.remote.list_calls
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(self.remote.list_calls,lists_before,"首次创建不应先扫描飞书")
+        self.remote.fail_after_delete=True
+        self.service.batches.rollback(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["rows"][0]["status"],"rollback_failed")
+        self.remote.fail_after_delete=False
+        self.service.batches.rollback(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["rows"][0]["status"],"rolled_back",batch["rows"][0])
+
+    def test_batch_rollback_restores_directory_type_and_rejects_cloud_edits(self):
+        row=self._manual_batch_row("D","2026-09-14 01:02:03")
+        original_type=row["rack_type"]
+        row["rack_type"]="网络机柜" if original_type=="服务器机柜" else "服务器机柜"
+        row["type_resolution"]="sync_current"
+        batch=self.service.batches.create_manual([row],"owner")
+        self.assertEqual(batch["rows"][0]["status"],"ready",batch["rows"][0])
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["D"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["rows"][0]["status"],"completed",batch["rows"][0])
+        self.assertEqual(next(item["rack_type"] for item in self.service._snapshot("D")["config"]["inventory"] if (item["room"],item["rack"])==(row["room"],row["rack"])),row["rack_type"])
+        self.service.batches.rollback(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["D"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["rows"][0]["status"],"rolled_back",batch["rows"][0])
+        self.assertEqual(next(item["rack_type"] for item in self.service._snapshot("D")["config"]["inventory"] if (item["room"],item["rack"])==(row["room"],row["rack"])),original_type)
+
+        other=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        self.service.batches.confirm(other["batch_id"],{"version":other["version"],"all":True},"owner",["A"])
+        other=self._wait_batch(other["batch_id"])
+        rid=other["rows"][0]["record_id"]
+        self.remote.records[rid]["fields"]["操作类型"]="下正式电"
+        self.service.batches.rollback(other["batch_id"],{"version":other["version"],"all":True},"owner",["A"])
+        other=self._wait_batch(other["batch_id"])
+        self.assertEqual(other["rows"][0]["status"],"rollback_blocked")
+        self.assertIn(rid,self.remote.records)
 
     def test_de_newest_group_stays_in_current_operation_columns(self):
         old=from_feishu(next(r for r in self.source_records if r["fields"]["楼栋"]=="E楼" and r["fields"]["来源行号"]==2))
@@ -568,5 +807,6 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                 if detail["status"]!="recognizing": break
                 time.sleep(.01)
             self.assertEqual(detail["stats"]["total"],1)
+            self.assertEqual(detail["rows"][0]["supplier_rack"],rack["rack"])
 
 if __name__=="__main__": unittest.main()

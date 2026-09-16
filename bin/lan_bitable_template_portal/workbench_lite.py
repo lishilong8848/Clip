@@ -2207,9 +2207,10 @@ def _detail_mode_note(
             return ""
         if target_record_id:
             return ""
-        return "需绑定目标"
     if manual or parsed_draft:
         return "纯手填"
+    if ongoing_item:
+        return "需绑定目标"
     if source_record_id:
         return ""
     return "待选择"
@@ -2297,16 +2298,34 @@ def _detail_form(
         )
     work = _work_type(work_type) if work_type else _item_work_type(source)
     explicit_prefill_source_id = str(prefill_source_record_id or "").strip()
+    source_id_hint = str(source.get("source_record_id") or "").strip()
+    record_id_hint = str(source.get("record_id") or "").strip()
+    local_ongoing = bool(
+        ongoing_item
+        and not _remote_target_record_id(source)
+        and (not source_id_hint or is_local_record_id(source_id_hint))
+        and (
+            source.get("_is_placeholder_record")
+            or (record_id_hint and is_local_record_id(record_id_hint))
+            or (source_id_hint and is_local_record_id(source_id_hint))
+            or (not record_id_hint and not source_id_hint)
+        )
+    )
     effective_manual = bool(
         manual
         or parsed_draft
+        or local_ongoing
         or (
             not ongoing_item
             and not record
             and not explicit_prefill_source_id
         )
     )
-    draft = _draft_from_record(source, manual=effective_manual, work_type=work)
+    draft = _draft_from_record(
+        source,
+        manual=effective_manual and not ongoing_item,
+        work_type=work,
+    )
     if parsed_draft:
         draft.update(parsed_draft)
     if prefill_draft:
@@ -2367,7 +2386,6 @@ def _detail_form(
     mop_status = _mop_status_text(source, work)
     require_manual_binding = bool(
         not source_record_id
-        and not parsed_draft
         and not prefill_draft
         and (
             effective_manual
@@ -2481,7 +2499,11 @@ def _detail_form(
         manual_id = (
             f"manual:repair-management:{context_id}"
             if context_id
-            else f"manual:lite:{scope}:{work}:{uuid.uuid4().hex}"
+            else (
+                f"manual:lite:{scope}:{work}:{active_item_id}"
+                if active_item_id
+                else f"manual:lite:{scope}:{work}:{uuid.uuid4().hex}"
+            )
         )
     return f"""
       <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
@@ -4204,6 +4226,7 @@ def render_workbench_lite(
     }}
     function setFormSubmitBusy(form, enabled) {{
       if (!form) return;
+      if (!enabled && form.dataset.pendingActionJobId) return;
       form.classList.toggle('is-submitting', Boolean(enabled));
       form.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(button => setButtonBusy(button, enabled));
     }}
@@ -5922,6 +5945,11 @@ def render_workbench_lite(
     function updateActionAvailability(form) {{
       const targetForm = form || document.getElementById('lite-notice-form');
       if (!targetForm) return;
+      if (targetForm.classList.contains('is-submitting') || targetForm.dataset.pendingActionJobId) {{
+        targetForm.querySelectorAll('button[name="submit_action"]').forEach(button => button.disabled = true);
+        setActionReason('通告正在处理，请等待结果', 'blocked');
+        return;
+      }}
       const title = previewValue(targetForm, 'title');
       const action = targetForm.dataset.action || 'start';
       const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
@@ -8996,7 +9024,7 @@ def render_workbench_lite(
         try {{
           const response = await fetch(`/api/jobs/${{encodeURIComponent(jobId)}}`, {{ credentials: 'same-origin', signal: controller.signal }});
           const data = await response.json().catch(() => ({{}}));
-          if (handleLiteAuthRequired(response, data)) return true;
+          if (handleLiteAuthRequired(response, data)) return false;
           if (response.status === 404) {{
             updateStatus('任务记录不存在，请刷新并核对通告结果，勿重复发送。');
             return false;
@@ -9028,7 +9056,7 @@ def render_workbench_lite(
             updateStatus((job.remote_written ? '多维已写入，后续处理失败：' : '发送失败：') + friendlyLiteMessage(message));
             return true;
           }}
-          const slow = Date.now() - startedAt >= 90000 ? '（处理时间较长，后台仍在执行，请勿重复提交）' : '';
+          const slow = Date.now() - startedAt >= 90000 ? `（后台仍在执行，任务号 ${{jobId}}，请勿重复提交）` : '';
           const stage = job.qt_phase === 'preparing' && ['accepted', 'queued', 'qt_queued'].includes(phase)
             ? '正在准备通告' : phase === 'qt_queued' && job.depends_on_phase
               ? '等待同一通告上一条操作完成' : jobPhaseText(phase);
@@ -9046,12 +9074,17 @@ def render_workbench_lite(
       updateStatus('等待结果已超过10分钟，当前结果尚未确认，请刷新核对，勿重复发送。');
       return false;
     }}
-    function schedulePostSubmitRefresh(label, jobId, payload) {{
+    function schedulePostSubmitRefresh(label, jobId, payload, form) {{
       if (jobId) {{
         latestSubmittedJobId = jobId;
-        pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload).catch(() => {{
-          setLiteStatus('仍在处理，请稍后刷新本页');
-        }});
+        pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload)
+          .then(completed => {{
+            if (!completed || latestSubmittedJobId !== jobId) return;
+            delete form.dataset.pendingActionJobId;
+            setFormSubmitBusy(form, false);
+            if (form.isConnected) updateActionAvailability(form);
+          }})
+          .catch(() => setLiteStatus('任务结果暂未确认，请刷新核对，勿重复发送。'));
         return;
       }}
       setTimeout(() => {{
@@ -9100,6 +9133,7 @@ def render_workbench_lite(
       const form = event.target.closest('#lite-notice-form');
       if (!form) return;
       event.preventDefault();
+      if (form.classList.contains('is-submitting') || form.dataset.pendingActionJobId) return;
       const submitter = event.submitter;
       const submitAction = form.dataset.pendingSubmitAction || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
       delete form.dataset.pendingSubmitAction;
@@ -9137,24 +9171,11 @@ def render_workbench_lite(
         updateActionAvailability(form);
         return;
       }}
-      if (
-        submitAction === 'start'
-        && previewValue(form, 'manual_binding_required') === '1'
-        && previewValue(form, 'manual_binding_choice') === 'unbound'
-        && form.dataset.unboundSubmitApproved !== '1'
-      ) {{
-        if (form.dataset.manualBindingPreflightBusy === '1') return;
-        form.dataset.manualBindingPreflightBusy = '1';
-        let shouldBlock = true;
-        try {{
-          shouldBlock = await openManualSourceCandidates('unbound-warning', submitAction);
-        }} finally {{
-          delete form.dataset.manualBindingPreflightBusy;
-        }}
-        if (shouldBlock) return;
-      }}
       delete form.dataset.unboundSubmitApproved;
       let payload = null;
+      let accepted = false;
+      setFormSubmitBusy(form, true);
+      setLiteStatus('正在提交');
       try {{
         if (liteDraftContext(form) && liteFormDirty && !(await saveLiteDraftNow(form))) {{
           showLiteError('自动保存失败，已保留当前页面，请重试后再发送。');
@@ -9166,8 +9187,6 @@ def render_workbench_lite(
         form.dataset.submitOperationId = payload.operation_id || '';
         setLiteFormDirty(false);
         clearLiteHtmlCache();
-        setFormSubmitBusy(form, true);
-        setLiteStatus('正在提交');
         await nextBrowserTurn();
         const response = await fetch('/api/workbench-actions', {{
           method: 'POST',
@@ -9178,8 +9197,10 @@ def render_workbench_lite(
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '提交失败');
         const jobId = (data && data.job_id) || (data && data.data && data.data.job_id) || '';
+        accepted = true;
+        form.dataset.pendingActionJobId = jobId || 'unknown';
         setLiteStatus(`后端已受理，正在处理。任务号 ${{jobId}}`);
-        schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload);
+        schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload, form);
       }} catch (error) {{
         delete form.dataset.submitOperationId;
         setLiteFormDirty(true);
@@ -9188,7 +9209,7 @@ def render_workbench_lite(
         showLiteError(message);
         setLiteStatus('提交失败：' + friendlyLiteMessage(message));
       }} finally {{
-        setFormSubmitBusy(form, false);
+        if (!accepted) setFormSubmitBusy(form, false);
       }}
     }});
     document.addEventListener('input', (event) => {{

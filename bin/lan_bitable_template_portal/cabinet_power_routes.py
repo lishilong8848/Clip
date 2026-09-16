@@ -71,6 +71,8 @@ def install_cabinet_power_routes(app,controller,runtime):
                     data=await asyncio.to_thread(service.batches.clear_overlaps,batch_id,payload.get("version"),owner,allowed,admin)
                 elif len(parts)==3 and parts[2]=="confirm":
                     data=await asyncio.to_thread(service.batches.confirm,batch_id,payload,owner,allowed,admin)
+                elif len(parts)==3 and parts[2]=="rollback":
+                    data=await asyncio.to_thread(service.batches.rollback,batch_id,payload,owner,allowed,admin)
                 elif len(parts)==3 and parts[2]=="cancel":
                     data=await asyncio.to_thread(service.batches.cancel,batch_id,owner,admin)
                 else: raise CabinetError("接口不存在",404)
@@ -138,7 +140,7 @@ def install_cabinet_power_routes(app,controller,runtime):
 
     for path,methods in {
         "batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
-        "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],
+        "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],"batches/{batch_id}/rollback":["POST"],
         "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
         "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],

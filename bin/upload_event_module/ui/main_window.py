@@ -409,18 +409,14 @@ class ClipboardTool(
         if self._closing or self.detail_dialog is not None:
             return
         started_at = time.perf_counter()
-        from .dialogs import ClipboardPreviewDialog, DetailDialog, ScreenshotConfirmDialog
+        from .dialogs import DetailDialog, ScreenshotConfirmDialog
         from .settings_dialog import SettingsDialog
 
         detail_dialog = DetailDialog(None, theme=self.current_theme)
-        clipboard_preview_dialog = ClipboardPreviewDialog(
-            None, theme=self.current_theme
-        )
         settings_dialog = SettingsDialog(None)
         screenshot_dialog = ScreenshotConfirmDialog(None, theme=self.current_theme)
         screenshot_dialog.bind_cache_store(self.cache_store)
         self.detail_dialog = detail_dialog
-        self.clipboard_preview_dialog = clipboard_preview_dialog
         self.settings_dialog = settings_dialog
         self.screenshot_dialog = screenshot_dialog
         self.connection_registry.connect(
@@ -434,14 +430,6 @@ class ClipboardTool(
         self.connection_registry.connect(
             "detail_dialog", self.detail_dialog, "finished",
             self._flush_pending_cache_refresh,
-        )
-        self.connection_registry.connect(
-            "clipboard_preview_dialog", self.clipboard_preview_dialog,
-            "use_requested", self._use_last_clipboard_snapshot,
-        )
-        self.connection_registry.connect(
-            "clipboard_preview_dialog", self.clipboard_preview_dialog,
-            "closed_by_user", self._on_clipboard_preview_closed_by_user,
         )
         for slot in (
             self.refresh_table_links,

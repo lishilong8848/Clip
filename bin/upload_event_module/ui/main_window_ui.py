@@ -140,11 +140,6 @@ class MainWindowUiMixin:
         self.add_btn.setToolTip("手动添加内容")
         self.add_btn.clicked.connect(self.open_manual_add)
 
-        self.preview_btn = QPushButton("最近剪贴板")
-        self.preview_btn.setObjectName("NavBtn")
-        self.preview_btn.setFixedSize(92, 40)
-        self.preview_btn.setToolTip("查看最后一条剪贴板内容")
-        self.preview_btn.clicked.connect(self.open_clipboard_preview)
 
         self.theme_btn = QPushButton("☀️")
         self.theme_btn.setObjectName("ThemeBtn")
@@ -164,7 +159,6 @@ class MainWindowUiMixin:
         nav_layout.addWidget(self.title_label, 1)
         nav_layout.addWidget(self.theme_btn)
         nav_layout.addWidget(self.minimize_btn)
-        nav_layout.addWidget(self.preview_btn)
         nav_layout.addWidget(self.add_btn)
 
         self.stack = QStackedWidget()

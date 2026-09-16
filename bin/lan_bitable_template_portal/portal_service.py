@@ -42626,7 +42626,24 @@ class MaintenancePortalService:
         patch = payload.get("patch") if isinstance(payload.get("patch"), dict) else {}
         work_type = str(payload.get("work_type") or patch.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
         active_item_id = str(payload.get("active_item_id") or patch.get("active_item_id") or "").strip()
-        manual = self._truthy_flag(payload.get("manual")) or self._truthy_flag(patch.get("manual"))
+        raw_record_id = str(payload.get("record_id") or patch.get("record_id") or "").strip()
+        source_record_id = str(payload.get("source_record_id") or patch.get("source_record_id") or "").strip()
+        manual_id = str(payload.get("manual_id") or patch.get("manual_id") or "").strip()
+        local_start = bool(
+            work_type != WORK_TYPE_EVENT
+            and action == "start"
+            and (
+                manual_id
+                or (raw_record_id and is_local_record_id(raw_record_id))
+                or (source_record_id and is_local_record_id(source_record_id))
+                or (active_item_id and not raw_record_id and not source_record_id)
+            )
+        )
+        manual = (
+            self._truthy_flag(payload.get("manual"))
+            or self._truthy_flag(patch.get("manual"))
+            or local_start
+        )
         manual_binding_choice = str(
             payload.get("manual_binding_choice")
             or patch.get("manual_binding_choice")
@@ -42637,14 +42654,12 @@ class MaintenancePortalService:
         ) or self._truthy_flag(patch.get("manual_binding_required"))
         source_binding_required = bool(
             manual_binding_required
-            or action == "start" and active_item_id
+            or action == "start" and (active_item_id or local_start)
         )
         manual_source_binding = bool(
             source_binding_required and manual_binding_choice == "bind"
         )
         manual_source_defaults: dict[str, Any] = {}
-        raw_record_id = str(payload.get("record_id") or patch.get("record_id") or "").strip()
-        source_record_id = str(payload.get("source_record_id") or patch.get("source_record_id") or "").strip()
         repair_management_record_id = str(
             payload.get("repair_management_record_id")
             or patch.get("repair_management_record_id")
@@ -42951,6 +42966,7 @@ class MaintenancePortalService:
         if manual and not manual_source_binding:
             expanded.pop("source_record_id", None)
         if manual:
+            expanded["manual"] = True
             expanded["manual_binding_choice"] = manual_binding_choice
             expanded["manual_binding_required"] = bool(manual_binding_required)
         if action in {"update", "end"} and target_record_id:

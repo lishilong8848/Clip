@@ -12341,21 +12341,25 @@ class FastAPIPortalController:
                         "reason": "目标记录已绑定其他通告类型，已忽略本次剪贴板投影。",
                     }
         existing = cls._find_qt_active_item_for_clipboard_entry(entry)
-        recreate_deleted_event = False
+        recreate_deleted_notice = False
         if (
             existing is None
-            and notice_type == "事件通告"
             and (projected_action == "start" or not status)
         ):
             deleted_match = cls._find_qt_active_item_for_clipboard_entry(
                 entry, include_deleted_event=True
             )
+            if deleted_match and notice_type != "事件通告":
+                deleted_payload = deleted_match.get("payload") or {}
+                deleted_info = extract_event_info(str(deleted_payload.get("text") or "")) or {}
+                if str(deleted_info.get("unique_key") or "") != str(entry.get("unique_key") or ""):
+                    deleted_match = None
             if (
                 deleted_match
                 and deleted_match.get("deleted_at") is not None
             ):
                 existing = deleted_match
-                recreate_deleted_event = True
+                recreate_deleted_notice = True
         active_item_id = ""
         if existing and isinstance(existing.get("payload"), dict):
             data = dict(existing.get("payload") or {})
@@ -12389,12 +12393,14 @@ class FastAPIPortalController:
                 }
         else:
             data = {}
-        if recreate_deleted_event:
+        if recreate_deleted_notice:
+            deleted_work_type = str(data.get("work_type") or data.get("lan_work_type") or ("event" if notice_type == "事件通告" else "")).strip()
             data = {"active_item_id": active_item_id}
-            PortalRuntime.state_store.mark_notice_identity_deleted(
-                work_type="event",
-                active_item_id=active_item_id,
-            )
+            if deleted_work_type:
+                PortalRuntime.state_store.mark_notice_identity_deleted(
+                    work_type=deleted_work_type,
+                    active_item_id=active_item_id,
+                )
         if (
             notice_type == "事件通告"
             and projected_action in {"update", "end"}
@@ -12446,7 +12452,7 @@ class FastAPIPortalController:
             active_item_id = str(entry.get("entry_id") or "").strip() or uuid.uuid4().hex
         projection_origin = (
             "clipboard_recreated_after_delete"
-            if recreate_deleted_event
+            if recreate_deleted_notice
             else "clipboard"
         )
         record_id = str(
@@ -12529,7 +12535,7 @@ class FastAPIPortalController:
                 data.pop("event_source", None)
             data.update(PortalRuntime._event_identity_payload_patch(data))
             recovered_target_record_id = ""
-            if not recreate_deleted_event:
+            if not recreate_deleted_notice:
                 recovered_target_record_id = (
                     PortalRuntime._event_target_from_identity_map(data)
                     or PortalRuntime._event_target_from_partial_identity_map(data)
@@ -12565,7 +12571,7 @@ class FastAPIPortalController:
             section=section,
             sort_order=0,
             origin=projection_origin,
-            allow_revive=recreate_deleted_event,
+            allow_revive=recreate_deleted_notice,
         )
         if not persisted and not any(
             str(item.get("active_item_id") or "").strip() == active_item_id
@@ -12574,7 +12580,7 @@ class FastAPIPortalController:
             return {
                 "ok": True,
                 "ignored": True,
-                "reason": "活动通告未写入共享列表；若刚删除该事件，请确认剪贴板内容确有变化后重试。",
+                "reason": "活动通告未写入共享列表，请检查该条目是否仍处于已删除状态。",
             }
         event_id = PortalRuntime.state_store.enqueue_outbox_event(
             "qt_action",

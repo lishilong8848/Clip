@@ -176,6 +176,18 @@ class CabinetStore:
             self._put(conn, "documents", "write:" + journal["operation_id"], final)
         return final
 
+    def commit_rollback(self, scope, journal, record=None, inventory=None, remove_id=""):
+        with self.connect(scope) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if record: self._record(conn, record)
+            if inventory:
+                conn.execute("INSERT OR REPLACE INTO inventory VALUES(?,?,?)", (inventory["room"], inventory["rack"], encode(inventory)))
+            if remove_id: conn.execute("DELETE FROM records WHERE record_id=?", (remove_id,))
+            self._version(conn)
+            final = {**journal, "status": "completed", "error": "", "completed_at": time.time()}
+            self._put(conn, "documents", "rollback:" + journal["operation_id"], final)
+        return final
+
     def backup(self, scope, destination):
         target = Path(destination); target.parent.mkdir(parents=True, exist_ok=True)
         with self.connect(scope) as conn, sqlite3.connect(target) as out: conn.backup(out)
