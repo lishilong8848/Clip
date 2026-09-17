@@ -339,6 +339,7 @@ class FastAPIPortalController:
         self._server = None
         self._thread: threading.Thread | None = None
         self._scheduler = None
+        self._reminder_process_started_at = time.time()
         self._shutdown_event = threading.Event()
         self._stopping_event = threading.Event()
         self._polling_relay_stop = threading.Event()
@@ -6014,6 +6015,30 @@ class FastAPIPortalController:
                     ),
                 )
                 return self._json_ok(request, session, item)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/workbench/polling-delay-status")
+        async def workbench_polling_delay_status(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            group_id = str(request.query_params.get("group_id") or "").strip()
+            try:
+                group = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_group, group_id
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+            try:
+                self._authorized_scope_or_error(session, str(group.get("scope") or ""))
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+            try:
+                return self._json_ok(request, session, {
+                    **PortalRuntime.polling_work_orders().end_delay_status(group),
+                    "state": str(group.get("state") or ""),
+                })
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
@@ -12832,6 +12857,23 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"轮巡工单附件重试失败: {exc}")
 
+    def _run_scheduled_polling_delay_reminders(self) -> None:
+        try:
+            result = PortalRuntime.polling_work_orders().process_due_reminders(
+                started_at=self._reminder_process_started_at,
+                send_text=_send_text_to_open_ids_guarded,
+            )
+            if result["failed"]:
+                log_warning(f"SOP 延时提醒发送失败: {result['failed']} 位收件人")
+        except Exception as exc:
+            log_warning(f"SOP 延时提醒处理失败: {exc}")
+
+    def _bootstrap_pending_local_sops(self) -> None:
+        try:
+            PortalRuntime.polling_work_orders().bootstrap_pending_local_sops()
+        except Exception as exc:
+            log_warning(f"本地 SOP 后台补传启动失败: {exc}")
+
     def _run_scheduled_daily_work_report(self) -> None:
         if _mock_external_enabled():
             return
@@ -13199,6 +13241,22 @@ class FastAPIPortalController:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_polling_delay_reminders,
+            "interval",
+            seconds=10,
+            id="polling_delay_reminders",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._bootstrap_pending_local_sops,
+            "date",
+            run_date=dt.datetime.now() + dt.timedelta(seconds=20),
+            id="polling_sop_bootstrap",
+            replace_existing=True,
         )
         scheduler.add_job(
             self._run_scheduled_daily_work_report,

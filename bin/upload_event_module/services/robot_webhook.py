@@ -171,10 +171,10 @@ def _send_message_to_chat(
 
 
 def _send_message_to_open_id(
-    tenant_access_token: str, open_id: str, text: str
+    tenant_access_token: str, open_id: str, text: str, *, message_uuid: str = ""
 ) -> Tuple[bool, str]:
     return _send_message_to_receive_id(
-        tenant_access_token, open_id, text, receive_id_type="open_id"
+        tenant_access_token, open_id, text, receive_id_type="open_id", message_uuid=message_uuid
     )
 
 
@@ -284,7 +284,7 @@ def _send_interactive_to_receive_id(
 
 
 def send_text_to_open_ids(
-    text: str, open_ids: List[str]
+    text: str, open_ids: List[str], *, message_uuid: str = ""
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
     """发送文本给一个或多个 open_id。任一收件人失败则整体失败。"""
     text = str(text or "").strip()
@@ -302,7 +302,10 @@ def send_text_to_open_ids(
     results: List[Dict[str, Any]] = []
     all_ok = True
     for open_id in recipients:
-        ok, msg = _send_message_to_open_id(token, open_id, text)
+        ok, msg = (
+            _send_message_to_open_id(token, open_id, text, message_uuid=message_uuid)
+            if message_uuid else _send_message_to_open_id(token, open_id, text)
+        )
         failure_kind = (
             "bot_unavailable"
             if not ok and "no availability" in str(msg or "").lower()

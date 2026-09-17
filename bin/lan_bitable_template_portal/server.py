@@ -93,6 +93,7 @@ from upload_event_module.services.service_registry import (
     update_bitable_record_fields,
     update_bitable_record_by_payload,
 )
+from upload_event_module.services.feishu_service import BitableWriteUncertainError
 from upload_event_module.core.parser import extract_event_info, extract_notice_info
 from upload_event_module.logger import log_warning
 from upload_event_module.time_parser import parse_time_range
@@ -175,7 +176,7 @@ def find_available_port(host: str, preferred_port: int) -> int:
     raise RuntimeError(f"未找到可用端口，起始端口={preferred_port}")
 
 
-def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bool, str, list[dict]]:
+def _send_text_to_open_ids_guarded(text: str, recipients: list[str], *, message_uuid: str = "") -> tuple[bool, str, list[dict]]:
     clean_recipients = [
         str(open_id or "").strip()
         for open_id in (recipients or [])
@@ -191,7 +192,10 @@ def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bo
         return False, str(guard.get("reason") or "真实外部写入未确认。"), []
     from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
-    return send_text_to_open_ids(text, clean_recipients)
+    return (
+        send_text_to_open_ids(text, clean_recipients, message_uuid=message_uuid)
+        if message_uuid else send_text_to_open_ids(text, clean_recipients)
+    )
 
 
 class PortalRuntime:
@@ -7194,6 +7198,59 @@ class PortalRuntime:
             existing_response_time = fields.get("进展更新时间", "")
         return existing_tokens, existing_extra_tokens, existing_response_time
 
+    @classmethod
+    def _event_local_fields(cls, record_id: str, data: dict) -> dict:
+        namespace = "event_notice_local_fields"
+        cached = cls.state_store.get_document(namespace, record_id)
+        has_cache = isinstance(cached, dict) and cached.get("complete") and isinstance(cached.get("fields"), dict) and bool(cached["fields"])
+        fields: dict[str, Any] = copy.deepcopy(cached["fields"]) if has_cache else {}
+        snapshot_time = float(cached.get("updated_at") or 0) if has_cache else 0.0
+        if not has_cache:
+            time_text = str(data.get("time_str") or data.get("occurrence_date") or "")
+            match = re.search(r"(\d{4})[-/年](\d{1,2})", time_text)
+            month = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}" if match else time.strftime("%Y-%m")
+            snapshot = cls.state_store.get_event_month_snapshot(month)
+            snapshot_time = float(snapshot.get("updated_at") or 0)
+            for item in snapshot.get("records") or []:
+                if str(item.get("source_record_id") or item.get("record_id") or "") == record_id:
+                    raw = item.get("raw_fields")
+                    if isinstance(raw, dict) and raw:
+                        fields = copy.deepcopy(raw)
+                    break
+        for operation in cls.state_store.list_notice_remote_operations_for_target(record_id):
+            if str((operation.get("request") or {}).get("notice_type") or "") != "事件通告":
+                continue
+            if str(operation.get("status") or "") not in {"completed", "remote_written"}:
+                continue
+            result = operation.get("result") or {}
+            if str(operation.get("status") or "") == "remote_written" and result.get("remote_verified") is False:
+                continue
+            written = result.get("written_fields") if isinstance(result, dict) else None
+            if not isinstance(written, dict) or not written:
+                continue
+            if not fields and str(operation.get("operation_type") or "") not in {"start", "upload"}:
+                continue
+            operation_time = float(operation.get("created_at" if has_cache else "updated_at") or 0)
+            if not fields or operation_time > snapshot_time:
+                fields.update(copy.deepcopy(written))
+        if not fields:
+            raise PortalError("本地缺少该事件通告的完整历史基线，已阻止覆盖式更新。请先恢复本地事件资料。")
+        if has_cache and fields == cached["fields"]:
+            return fields
+        cls.state_store.put_document(namespace, record_id, {
+            "complete": True, "fields": fields, "updated_at": time.time(),
+        })
+        return copy.deepcopy(fields)
+
+    @classmethod
+    def _save_event_local_fields(cls, record_id: str, fields: dict, operation_id: str) -> None:
+        cls.state_store.put_document("event_notice_local_fields", record_id, {
+            "complete": True,
+            "fields": copy.deepcopy(fields),
+            "operation_id": operation_id,
+            "updated_at": time.time(),
+        })
+
     @staticmethod
     def _prepared_to_notice_payload(
         prepared: dict,
@@ -7680,6 +7737,11 @@ class PortalRuntime:
         }
         if not expected_tokens or not expected_tokens.issubset(remote_tokens):
             return f"{label}工单附件与本次完成记录不一致，不能发送结束。"
+        delay = cls.polling_work_orders().end_delay_status(group)
+        if not delay["ready"]:
+            if delay["due_at_ts"] <= 0:
+                return f"{label}工单延时提醒缺少完成时间，不能发送结束。"
+            return f"{label}工单延时提醒尚未到期，还需等待 {delay['remaining_seconds']} 秒。"
         return ""
 
     @staticmethod
@@ -8675,6 +8737,15 @@ class PortalRuntime:
                 error=verify_error,
             )
             return False, {}, verify_error, {}
+        if action == "start":
+            try:
+                cls._save_event_local_fields(
+                    target_record_id,
+                    dict(query_result.get("fields") or {}),
+                    operation_id,
+                )
+            except Exception as exc:
+                log_warning(f"事件通告本地历史快照保存失败，将在首次更新前从本地资料恢复: {exc}")
         if send_message:
             robot_result = cls._send_deferred_event_robot(
                 operation_id,
@@ -9324,6 +9395,7 @@ class PortalRuntime:
         target_record_id: str,
         action: str = "",
         confirm_remote_state: bool = False,
+        skip_remote_read: bool = False,
     ) -> str:
         target_record_id = str(target_record_id or "").strip()
         if not target_record_id:
@@ -9400,7 +9472,8 @@ class PortalRuntime:
         record_version = cls._expected_remote_record_version(payload)
         guard = external_real_write_guard()
         if (
-            (confirm_remote_state or not record_version)
+            not skip_remote_read
+            and (confirm_remote_state or not record_version)
             and not is_local_record_id(target_record_id)
             and not guard.get("mock_external")
         ):
@@ -11999,6 +12072,16 @@ class PortalRuntime:
             data["target_record_id"] = target_record_id
             data["_is_placeholder_record"] = False
             record_id = target_record_id
+        direct_event_update = notice_type == "事件通告" and action_type == "update"
+        if direct_event_update and request_operation_id:
+            previous_attempt = cls._get_notice_remote_operation(request_operation_id) or {}
+            if (
+                str(previous_attempt.get("status") or "") == "failed"
+                and bool((previous_attempt.get("result") or {}).get("retry_same_operation"))
+            ):
+                payload["response_time"] = str(
+                    (previous_attempt.get("request") or {}).get("response_time") or ""
+                )
         if action_type in {"update", "end"} and not target_record_id:
             identity = cls.state_store.resolve_notice_identity(
                 work_type=str(data.get("work_type") or "").strip(),
@@ -12028,7 +12111,10 @@ class PortalRuntime:
                     data["binding_status"] = "bound"
         if action_type in {"update", "end"} and not target_record_id:
             if record_id and not is_local_record_id(record_id):
-                ok_query, query_result = query_record_by_id(record_id, notice_type)
+                ok_query, query_result = (
+                    (True, {}) if direct_event_update
+                    else query_record_by_id(record_id, notice_type)
+                )
                 action_name = "结束" if action_type == "end" else "更新"
                 if ok_query:
                     target_record_id = record_id
@@ -12046,11 +12132,17 @@ class PortalRuntime:
             if not target_record_id:
                 raise PortalError("Qt 更新/结束缺少目标多维 target_record_id。")
 
+        if direct_event_update:
+            prequery_result = {
+                "record_id": target_record_id,
+                "fields": cls._event_local_fields(target_record_id, data),
+            }
+
         query_record_id_for_action = str(target_record_id or record_id or "").strip()
         has_remote_record_for_action = bool(
             query_record_id_for_action and not is_local_record_id(query_record_id_for_action)
         )
-        if has_remote_record_for_action and action_type in {
+        if not direct_event_update and has_remote_record_for_action and action_type in {
             "update",
             "end",
             "upload_replace",
@@ -12089,6 +12181,7 @@ class PortalRuntime:
                     prequery_result = query_result if isinstance(query_result, dict) else {}
         if (
             action_type in {"update", "end", "upload_replace"}
+            and not direct_event_update
             and isinstance(prequery_result, dict)
             and prequery_result
         ):
@@ -12929,6 +13022,10 @@ class PortalRuntime:
             operation_prepared,
             payload=notice_payload,
         )
+        if direct_event_update:
+            # A manual retry may replace this attempt's screenshot, but not its logical update.
+            operation_request["file_tokens"] = []
+            operation_request["extra_file_tokens"] = []
         fallback_operation_key = hashlib.sha256(
             json.dumps(
                 operation_request,
@@ -12956,7 +13053,8 @@ class PortalRuntime:
                 target_record_id=target_record_id,
                 expected_record_version=cls._expected_remote_record_version(data),
             )
-            operation = cls._adopt_matching_event_remote_operation(operation)
+            if not direct_event_update:
+                operation = cls._adopt_matching_event_remote_operation(operation)
         if operation.get("conflict"):
             return {
                 "ok": False,
@@ -12995,7 +13093,7 @@ class PortalRuntime:
             reconciled_record_id = ""
             reconcile_message = ""
             reconcile_blocked = False
-            if not operation.get("created"):
+            if not operation.get("created") and not direct_event_update:
                 try:
                     (
                         reconciled,
@@ -13067,6 +13165,29 @@ class PortalRuntime:
                             notice_type,
                             notice_payload,
                         )
+                    except BitableWriteUncertainError as exc:
+                        cls._mark_notice_remote_operation(
+                            operation_id,
+                            status="failed",
+                            target_record_id=target_record_id,
+                            result={"retry_same_operation": bool(direct_event_update)},
+                            error=str(exc),
+                        )
+                        cls._release_event_operation_lock(event_lock_key, event_lock_owner)
+                        event_lock_key = ""
+                        event_lock_owner = ""
+                        if direct_event_update:
+                            return {
+                                "ok": False,
+                                "name": "更新",
+                                "message": "上传失败：飞书更新响应超时，结果未确认。请重新截图后继续同一次更新。",
+                                "record_id": target_record_id,
+                                "target_record_id": target_record_id,
+                                "operation_id": operation_id,
+                                "retry_same_operation": True,
+                                "remote_written": False,
+                            }
+                        raise
                     except Exception:
                         cls._release_event_operation_lock(
                             event_lock_key,
@@ -13089,7 +13210,31 @@ class PortalRuntime:
             event_lock_owner = ""
         updated_record_version = ""
         if success:
-            if notice_type == "事件通告":
+            if direct_event_update:
+                previous_result = operation.get("result") if isinstance(operation.get("result"), dict) else {}
+                written_fields = dict((
+                    previous_result.get("written_fields")
+                    if operation_status in {"remote_written", "completed"}
+                    else getattr(notice_payload, "_clipflow_written_fields", {})
+                ) or {})
+                if not written_fields:
+                    written_fields = get_notice_handler(notice_type).build_update_fields(notice_payload)
+                remote_fields_for_action = {**remote_fields_for_action, **written_fields}
+                cls._mark_notice_remote_operation(
+                    operation_id,
+                    status="remote_written",
+                    target_record_id=target_record_id,
+                    result={
+                        "record_id": target_record_id,
+                        "message": str(result or target_record_id),
+                        "written_fields": written_fields,
+                        "remote_verified": True,
+                    },
+                )
+                cls._save_event_local_fields(target_record_id, remote_fields_for_action, operation_id)
+                verified_event_query = {"record_id": target_record_id, "fields": remote_fields_for_action}
+                cls._rebase_remote_record_version(data, "")
+            elif notice_type == "事件通告":
                 try:
                     verified, updated_query, verify_error, robot_result = (
                         cls._verify_and_send_event_remote_write(
@@ -13361,6 +13506,7 @@ class PortalRuntime:
                                     notice_type=notice_type,
                                     target_record_id=target_record_id,
                                     action="update",
+                                    skip_remote_read=direct_event_update,
                                 )
                         else:
                             active_projection_warning = (

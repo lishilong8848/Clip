@@ -784,7 +784,7 @@ class MainWindowWorkflowMixin:
                 robot_group_choice=robot_group_choice,
             )
         real_record_id = str(result.get("real_record_id") or "").strip()
-        if not success and bool(result.get("remote_written")) and operation_id:
+        if not success and bool(result.get("remote_written") or result.get("retry_same_operation")) and operation_id:
             target_record_id = str(
                 result.get("target_record_id") or real_record_id or ""
             ).strip()
@@ -803,7 +803,7 @@ class MainWindowWorkflowMixin:
                     (data_snapshot or {}).get("record_id") or record_id or ""
                 ).strip(),
                 "action_type": str(action_type or "upload").strip() or "upload",
-                "remote_written": True,
+                "remote_written": bool(result.get("remote_written")),
             }
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id

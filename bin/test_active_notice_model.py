@@ -2091,6 +2091,45 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(retry["action_type"], "upload")
         self.assertFalse(retry["remote_written"])
 
+    def test_uncertain_event_update_keeps_operation_without_claiming_remote_write(self):
+        harness = _ReplaceRecordIdHarness()
+        operation_id = "qt_notice:uncertain-update"
+
+        class _UncertainController:
+            @staticmethod
+            def execute_qt_notice_upload(_payload):
+                return {
+                    "ok": False,
+                    "name": "更新",
+                    "message": "飞书写入结果未确认",
+                    "record_id": "rec-uncertain-update",
+                    "target_record_id": "rec-uncertain-update",
+                    "operation_id": operation_id,
+                    "retry_same_operation": True,
+                    "remote_written": False,
+                }
+
+        harness.lan_template_portal_controller = _UncertainController()
+        harness._post_request_finished = lambda *_args, **_kwargs: None
+        harness._delegate_qt_notice_upload_to_backend(
+            data_snapshot={
+                "record_id": "rec-uncertain-update",
+                "target_record_id": "rec-uncertain-update",
+                "notice_type": "事件通告",
+                "_upload_operation_id": operation_id,
+                "text": "【事件通告】状态：更新\n【标题】A楼事件",
+            },
+            screenshot_bytes=None,
+            extra_images=[],
+            action_type="update",
+            response_time="",
+            recover_selected=False,
+            robot_group_choice="auto",
+        )
+        retry = harness._remote_written_retry_operations[operation_id]
+        self.assertEqual(retry["operation_id"], operation_id)
+        self.assertFalse(retry["remote_written"])
+
     def test_monotonic_clock_rollback_recovers_event_without_losing_operation(self):
         harness = _ReplaceRecordIdHarness()
         harness._closing = False

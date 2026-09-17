@@ -38,7 +38,7 @@ def external_guard_status() -> dict:
     return external_real_write_guard()
 
 
-def send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bool, str, list[dict]]:
+def send_text_to_open_ids_guarded(text: str, recipients: list[str], *, message_uuid: str = "") -> tuple[bool, str, list[dict]]:
     clean_recipients = [
         str(open_id or "").strip()
         for open_id in (recipients or [])
@@ -54,4 +54,7 @@ def send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[boo
         return False, str(guard.get("reason") or "真实外部写入未确认。"), []
     from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
-    return send_text_to_open_ids(text, clean_recipients)
+    return (
+        send_text_to_open_ids(text, clean_recipients, message_uuid=message_uuid)
+        if message_uuid else send_text_to_open_ids(text, clean_recipients)
+    )

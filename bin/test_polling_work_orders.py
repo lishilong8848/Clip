@@ -32,7 +32,7 @@ from lan_bitable_template_portal.polling_work_orders import (
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 import lan_bitable_template_portal.server as portal_server
 from lan_bitable_template_portal.server import PortalRuntime
-from lan_bitable_template_portal.portal_service import MaintenancePortalService
+from lan_bitable_template_portal.portal_service import MaintenancePortalService, PortalConflictError
 from clipflow_backend.main import FastAPIPortalController
 from fastapi.testclient import TestClient
 from lan_bitable_template_portal.workbench_lite import (
@@ -63,15 +63,20 @@ class _FakePollingSopCloud:
 
     def list_sops(self, *, force: bool = False):
         self.list_calls += 1
-        return copy.deepcopy(list(self.sops.values()))
+        return [
+            {**copy.deepcopy(item), "_cloud_record_id": f"rec_{item['sop_id']}"}
+            for item in self.sops.values()
+        ]
 
     def get_sop(self, sop_id: str, *, force: bool = False):
-        return copy.deepcopy(self.sops.get(sop_id))
+        item = self.sops.get(sop_id)
+        return {**copy.deepcopy(item), "_cloud_record_id": f"rec_{sop_id}"} if item else None
 
     def save_sop(self, sop: dict, *, expected_version: int, allow_create: bool = False):
         self.saved.append((copy.deepcopy(sop), expected_version, allow_create))
-        self.sops[sop["sop_id"]] = copy.deepcopy(sop)
-        return copy.deepcopy(sop)
+        saved = {**copy.deepcopy(sop), "_cloud_record_id": f"rec_{sop['sop_id']}"}
+        self.sops[sop["sop_id"]] = saved
+        return copy.deepcopy(saved)
 
     def download_attachment(self, attachment: dict) -> bytes:
         return self.content
@@ -85,6 +90,186 @@ class _FakePollingSopCloud:
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_delay_reminder_starts_after_all_confirmations_and_skips_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            target = "rec-delay-test"
+            operator = service.role_token(target, "operator")
+            reviewer = service.role_token(target, "reviewer")
+            store.put_document("polling_work_order", target, {
+                "group_id": target, "target_record_id": target, "state": "active",
+                "scope": "A", "title": "A楼测试通告", "sop_name": "测试 SOP",
+                "version": 1, "current_index": 0, "selected_run_index": 1,
+                "runs": [{"label": "作业"}],
+                "operator": {"open_id": "ou_operator", "name": "操作人"},
+                "reviewer": {"open_id": "ou_reviewer", "name": "审核人"},
+                "token_hashes": {
+                    "operator": hashlib.sha256(operator.encode()).hexdigest(),
+                    "reviewer": hashlib.sha256(reviewer.encode()).hexdigest(),
+                },
+                "steps": [{
+                    "step_key": "1:1", "global_index": 0, "run_index": 1,
+                    "run_label": "作业", "step_index": 1, "content": "确认阀门",
+                    "operator_required": True, "reviewer_required": True,
+                    "photo_required": False, "delay_reminder_minutes": 1,
+                    "activated_at_ts": time.time(), "photos": [],
+                    "operator_confirmation": {}, "reviewer_confirmation": {},
+                }],
+            })
+            session = service.confirm(operator, step_key="1:1", expected_version=1)
+            self.assertNotIn("delay_reminder", service.get_group(target)["steps"][0])
+            service.confirm(reviewer, step_key="1:1", expected_version=session["version"])
+            group = service.get_group(target)
+            reminder = group["steps"][0]["delay_reminder"]
+            due = reminder["due_at_ts"]
+            self.assertFalse(service.end_delay_status(group, now=due - 1)["ready"])
+            self.assertTrue(service.end_delay_status(group, now=due)["ready"])
+            calls = []
+            def send(text, ids, *, message_uuid):
+                calls.append((text, ids[0], message_uuid))
+                return True, "ok", []
+            result = service.process_due_reminders(started_at=due - 90, now=due + 1, send_text=send)
+            self.assertEqual(result["sent"], 3)
+            self.assertEqual(len({item[1] for item in calls}), 3)
+            self.assertEqual(service.get_group(target)["steps"][0]["delay_reminder"]["state"], "sent")
+            service.process_due_reminders(started_at=due - 90, now=due + 2, send_text=send)
+            self.assertEqual(len(calls), 3)
+            group = service.get_group(target)
+            group["steps"][0]["delay_reminder"]["state"] = "pending"
+            group["steps"][0]["delay_reminder"]["sent_open_ids"] = []
+            store.put_document("polling_work_order", target, group)
+            service.process_due_reminders(started_at=due + 1, now=due + 2, send_text=send)
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(service.get_group(target)["steps"][0]["delay_reminder"]["state"], "skipped_offline")
+
+    def test_delay_reminder_validation_and_legacy_default(self) -> None:
+        steps = PollingWorkOrderService._normalized_steps([
+            {"content": "检查", "operator_required": True},
+            {"content": "复核", "reviewer_required": True, "delay_reminder_minutes": 30},
+        ])
+        self.assertEqual([step["delay_reminder_minutes"] for step in steps], [0, 30])
+        with self.assertRaisesRegex(Exception, "1–1440"):
+            PollingWorkOrderService._normalized_steps([
+                {"content": "检查", "operator_required": True, "delay_reminder_minutes": 1441},
+            ])
+
+    def test_multiple_step_loops_expand_once_before_work_order_publication(self) -> None:
+        raw = [
+            {"step_id": "one", "content": "步骤一", "operator_required": True, "delay_reminder_minutes": 1},
+            {"step_id": "two", "content": "步骤二", "operator_required": True,
+             "repeat_rules": [{"from_step_id": "one", "to_step_id": "two", "count": 2}]},
+            {"step_id": "three", "content": "步骤三", "operator_required": True,
+             "repeat_rules": [
+                 {"from_step_id": "two", "to_step_id": "three", "count": 1},
+                 {"from_step_id": "one", "to_step_id": "one", "count": 1},
+             ]},
+        ]
+        steps = PollingWorkOrderService._normalized_steps(raw)
+        cloud_fields = PollingSopCloudStore._fields({"sop_id": "repeat_sop", "scope": "A", "name": "循环测试", "steps": steps})
+        self.assertEqual(len(json.loads(cloud_fields["步骤数据"])[2]["repeat_rules"]), 2)
+        expanded = PollingWorkOrderService._expanded_steps(steps)
+        self.assertEqual([step["step_id"] for step in expanded], [
+            "one", "two", "one", "two", "one", "two", "three", "two", "three", "one",
+        ])
+        with tempfile.TemporaryDirectory() as temp:
+            service = PollingWorkOrderService(LanPortalStateStore(Path(temp) / "state.sqlite3"))
+            service.work_order_root = Path(temp) / "orders"
+            service.sop_root = Path(temp) / "sops"
+            sop = service.save_sop({"work_type": "maintenance", "scope": "A", "name": "循环测试", "steps": raw})
+            sop = service.add_sop_attachment(sop["sop_id"], file_name="步骤.txt", content=b"steps", expected_version=sop["version"])
+            self.assertEqual(len(service.get_sop(sop["sop_id"])["steps"]), 3)
+            prepared = service.prepare_start({
+                "work_type": "maintenance", "scope": "A", "action": "start", "_web_action_request": True,
+                "polling_sop_id": sop["sop_id"], "polling_sop_version": sop["version"],
+                "polling_operator_record_id": "operator", "polling_reviewer_record_id": "reviewer",
+            }, job_id="repeat-job", people=[
+                {"record_id": "operator", "name": "操作人", "open_id": "ou_operator"},
+                {"record_id": "reviewer", "name": "审核人", "open_id": "ou_reviewer"},
+            ])
+            self.assertEqual(len(prepared["polling_work_order_spec"]["steps"]), 10)
+            service.create_group(prepared, target_record_id="rec-loop-test", title="循环测试", public_base_url="")
+            group = service.get_group("rec-loop-test")
+            self.assertEqual(len(group["steps"]), 10)
+            self.assertEqual(group["steps"][-1]["step_key"], "1:10")
+            self.assertIn("第2组循环第1遍", group["steps"][-1]["content"])
+            self.assertEqual([group["steps"][i]["delay_reminder_minutes"] for i in (0, 2, 4, 9)], [1, 1, 1, 1])
+            published = service.session(service.role_token("rec-loop-test", "operator"))
+            self.assertEqual(published["work_orders"][0]["step_count"], 10)
+            public_step = service._step_public(group["steps"][0], 0)
+            self.assertFalse({"repeat_rules", "delay_reminder_minutes", "repeat_round"} & public_step.keys())
+        with self.assertRaisesRegex(Exception, "本步及之前"):
+            PollingWorkOrderService._normalized_steps([
+                {**raw[0], "repeat_rules": [{"from_step_id": "one", "to_step_id": "two", "count": 1}]},
+                raw[1], raw[2],
+            ])
+
+    def test_end_remains_blocked_until_all_reminders_expire(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            target = "rec-delay-end"
+            group = {
+                "target_record_id": target, "work_type": "polling", "state": "completed",
+                "uploaded_file_tokens": ["workbook-token"],
+                "steps": [{"delay_reminder_minutes": 1, "delay_reminder": {"due_at_ts": time.time() + 60}}],
+            }
+            store.put_document("polling_work_order", target, group)
+            fields = {
+                "是否涉及重要操作": True, "操作人": "操作员", "现场复核人": "审核员",
+                "工单附件": [{"file_token": "workbook-token"}],
+            }
+            with patch.object(PortalRuntime, "polling_work_orders", return_value=service):
+                error = PortalRuntime._work_order_end_error(
+                    target_record_id=target, work_type="polling", fields=fields,
+                )
+                self.assertIn("延时提醒尚未到期", error)
+                group["steps"][0]["delay_reminder"]["due_at_ts"] = time.time() - 1
+                store.put_document("polling_work_order", target, group)
+                self.assertEqual(PortalRuntime._work_order_end_error(
+                    target_record_id=target, work_type="polling", fields=fields,
+                ), "")
+
+    def test_workbench_delay_status_is_read_only_and_scope_checked(self) -> None:
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        manager = MagicMock()
+        manager.get_group.return_value = {"scope": "A", "state": "completed"}
+        manager.end_delay_status.return_value = {"enabled": True, "ready": False, "due_at_ts": 123.0, "remaining_seconds": 30}
+        with patch.object(controller, "_current_session", return_value={"user": {"open_id": "ou_test"}}), patch.object(
+            controller, "_authorized_scope_or_error", return_value="A"
+        ) as authorize, patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            response = client.get("/api/workbench/polling-delay-status?group_id=rec-delay")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["data"]["remaining_seconds"], 30)
+        authorize.assert_called_once_with({"user": {"open_id": "ou_test"}}, "A")
+        manager.get_group.assert_called_once_with("rec-delay")
+
+    def test_reminder_retry_reuses_message_uuid_per_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            due = time.time() - 1
+            store.put_document("polling_work_order", "rec-retry", {
+                "target_record_id": "rec-retry", "state": "completed", "scope": "A",
+                "operator": {"open_id": "ou_operator"}, "reviewer": {},
+                "steps": [{"step_key": "1:1", "step_index": 1, "content": "检查",
+                           "delay_reminder_minutes": 1,
+                           "delay_reminder": {"reminder_id": "same-reminder", "state": "pending",
+                                              "completed_at_ts": due - 60, "due_at_ts": due,
+                                              "sent_open_ids": []}}],
+            })
+            calls = []
+            def send(_text, ids, *, message_uuid):
+                calls.append((ids[0], message_uuid))
+                return (len([item for item in calls if item[0] == ids[0]]) > 1, "temporary", []) if ids[0] == "ou_operator" else (True, "ok", [])
+            service.process_due_reminders(started_at=due - 5, now=due + 1, send_text=send)
+            service.process_due_reminders(started_at=due - 5, now=due + 32, send_text=send)
+            operator_ids = [uuid_value for open_id, uuid_value in calls if open_id == "ou_operator"]
+            self.assertEqual(len(operator_ids), 2)
+            self.assertEqual(operator_ids[0], operator_ids[1])
+            self.assertEqual(service.get_group("rec-retry")["steps"][0]["delay_reminder"]["state"], "sent")
+
     def _refresh_fixture(self, root):
         content = b"old-guide"
         sop = {"sop_id": "refresh_sop_1234", "scope": "A", "work_type": "polling", "name": "同步测试", "version": 1,
@@ -122,6 +307,157 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(cloud.uploaded, [])
             self.assertEqual(store.get_document("polling_sop", "other_scope_1234")["scope"], "B")
             self.assertEqual(store.get_document("polling_sop", "other_type_1234")["work_type"], "maintenance")
+
+    def test_initialized_cache_still_uploads_new_local_sop_in_background(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            local = {**sop, "sop_id": "late_local_sop_1234", "name": "本地后配 SOP"}
+            local.pop("_cloud_record_id", None)
+            service.state_store.put_document("polling_sop", local["sop_id"], local)
+            self.assertEqual(service.list_sops("A", "polling")[-1]["cloud_sync_status"], "pending")
+            service._wait_local_cache_bootstrap()
+            self.assertIn(local["sop_id"], cloud.sops)
+            cached = service.state_store.get_document("polling_sop", local["sop_id"])
+            self.assertTrue(cached.get("_cloud_record_id"))
+            calls = cloud.list_calls
+            service.list_sops("A", "polling")
+            self.assertEqual(cloud.list_calls, calls)
+
+    def test_startup_bootstrap_uploads_pending_sop_without_opening_page(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, cloud, sop = self._refresh_fixture(Path(temp))
+            local = {**sop, "sop_id": "startup_local_sop", "name": "启动后补传"}
+            local.pop("_cloud_record_id", None)
+            service.state_store.put_document("polling_sop", local["sop_id"], local)
+            service.bootstrap_pending_local_sops()
+            service._wait_local_cache_bootstrap()
+            self.assertIn(local["sop_id"], cloud.sops)
+            self.assertTrue(service.state_store.get_document("polling_sop", local["sop_id"]).get("_cloud_record_id"))
+
+    def test_cloud_write_without_list_visibility_keeps_local_sop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            cloud = _FakePollingSopCloud()
+            service = PollingWorkOrderService(store, cloud)
+            local = {
+                "sop_id": "delayed_visible_sop", "scope": "A", "work_type": "maintenance",
+                "name": "待回读 SOP", "version": 1, "steps": [{"content": "检查设备", "operator_required": True}],
+                "attachments": [],
+            }
+            store.put_document("polling_sop", local["sop_id"], local)
+            original_list = cloud.list_sops
+            calls = 0
+
+            def delayed_list(*, force=False):
+                nonlocal calls
+                calls += 1
+                return [] if calls <= 2 else original_list(force=force)
+
+            with patch.object(cloud, "list_sops", side_effect=delayed_list):
+                first = service.refresh_sops("A", "maintenance")
+                self.assertEqual(first["pending_upload_count"], 1)
+                self.assertIsNotNone(store.get_document("polling_sop", local["sop_id"]))
+                second = service.refresh_sops("A", "maintenance")
+            self.assertEqual(second["pending_upload_count"], 0)
+            self.assertEqual(second["items"][0]["cloud_sync_status"], "synced")
+
+    def test_cloud_id_conflict_does_not_replace_different_local_steps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            cloud = _FakePollingSopCloud()
+            service = PollingWorkOrderService(store, cloud)
+            local = {
+                "sop_id": "conflicting_sop_id", "scope": "A", "work_type": "maintenance",
+                "name": "本地 SOP", "version": 1,
+                "steps": [{"step_id": "local_step", "content": "本地步骤", "operator_required": True}],
+                "attachments": [],
+            }
+            store.put_document("polling_sop", local["sop_id"], local)
+
+            def collide(_sop, **_kwargs):
+                cloud.sops[local["sop_id"]] = {
+                    **local,
+                    "steps": [{"step_id": "remote_step", "content": "云端其他步骤", "operator_required": True}],
+                }
+                raise PortalConflictError("version conflict")
+
+            with patch.object(cloud, "save_sop", side_effect=collide):
+                result = service.refresh_sops("A", "maintenance")
+            self.assertEqual(result["pending_upload_count"], 1)
+            self.assertEqual(result["items"][0]["cloud_sync_status"], "conflict")
+            self.assertEqual(store.get_document("polling_sop", local["sop_id"])["steps"][0]["content"], "本地步骤")
+
+    def test_missing_cloud_sop_does_not_delete_pending_local_steps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            cloud = _FakePollingSopCloud()
+            service = PollingWorkOrderService(store, cloud)
+            local = {
+                "sop_id": "missing_cloud_sop", "scope": "A", "work_type": "polling",
+                "name": "本地步骤", "version": 1,
+                "steps": [{"step_id": "local_step", "content": "检查设备", "operator_required": True}],
+                "attachments": [],
+            }
+            store.put_document("polling_sop", local["sop_id"], local)
+            with self.assertRaisesRegex(Exception, "本地资料已保留"):
+                service.get_sop(local["sop_id"], refresh=True)
+            self.assertEqual(store.get_document("polling_sop", local["sop_id"])["steps"], local["steps"])
+
+    def test_pending_local_sop_attachment_edits_stay_local_until_upload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            cloud = _FakePollingSopCloud()
+            service = PollingWorkOrderService(store, cloud)
+            service.sop_root = Path(temp) / "sops"
+            store.put_document("polling_sop", "local_attachment_sop", {
+                "sop_id": "local_attachment_sop", "scope": "A", "work_type": "maintenance",
+                "name": "本地附件", "version": 1,
+                "steps": [{"content": "检查设备", "operator_required": True}], "attachments": [],
+            })
+            added = service.add_sop_attachment(
+                "local_attachment_sop", file_name="guide.txt", content=b"guide", expected_version=1,
+            )
+            self.assertEqual(added["cloud_sync_status"], "pending")
+            self.assertEqual(len(added["attachments"]), 1)
+            self.assertEqual(cloud.uploaded, [])
+            removed = service.delete_sop_attachment(
+                "local_attachment_sop", added["attachments"][0]["attachment_id"],
+                expected_version=added["version"],
+            )
+            self.assertEqual(removed["attachments"], [])
+            self.assertEqual(cloud.saved, [])
+
+    def test_renamed_conflict_uploads_existing_local_attachment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = LanPortalStateStore(root / "state.sqlite3")
+            cloud = _FakePollingSopCloud([{
+                "sop_id": "remote_same_name", "scope": "A", "work_type": "maintenance",
+                "name": "同名 SOP", "version": 1, "steps": [], "attachments": [],
+            }])
+            service = PollingWorkOrderService(store, cloud)
+            service.sop_root = root / "sops"
+            sop_id, attachment_id = "local_same_name", "local_file_1234"
+            directory = service.sop_root / sop_id
+            directory.mkdir(parents=True)
+            path = directory / f"{attachment_id}_guide.txt"
+            path.write_bytes(b"local-guide")
+            local = {
+                "sop_id": sop_id, "scope": "A", "work_type": "maintenance",
+                "name": "同名 SOP", "version": 1,
+                "steps": [{"step_id": "local_step", "content": "保留的本地步骤", "operator_required": True}],
+                "attachments": [{"attachment_id": attachment_id, "name": "guide.txt", "path": str(path),
+                                 "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}],
+            }
+            store.put_document("polling_sop", sop_id, local)
+            service.refresh_sops("A", "maintenance")
+            with self.assertRaisesRegex(Exception, "同名 SOP"):
+                service.save_sop({**local, "expected_version": 1})
+            saved = service.save_sop({**local, "name": "改名后的本地 SOP", "expected_version": 1})
+            service._wait_local_cache_bootstrap()
+            self.assertEqual(saved["cloud_sync_status"], "synced")
+            self.assertEqual(cloud.sops[sop_id]["attachments"][0]["file_token"], "cloud-file-token")
+            self.assertEqual(len(cloud.uploaded), 1)
 
     def test_manual_refresh_failure_keeps_local_data_and_allows_retry(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -281,7 +617,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual((len(cloud.uploaded), len(cloud.saved)), (1, 1))
             self.assertEqual(cloud.list_calls, cloud_reads)
 
-    def test_legacy_local_sop_does_not_duplicate_cloud_name(self) -> None:
+    def test_legacy_local_sop_name_conflict_is_preserved_without_cloud_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = LanPortalStateStore(Path(temp) / "state.sqlite3")
             cloud_sop = {
@@ -305,7 +641,11 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual([item["sop_id"] for item in listed], ["local_sop_12345"])
             service._wait_local_cache_bootstrap()
             listed = service.list_sops("A", "maintenance")
-            self.assertEqual([item["sop_id"] for item in listed], ["cloud_sop_12345"])
+            self.assertEqual({item["sop_id"] for item in listed}, {"cloud_sop_12345", "local_sop_12345"})
+            local = next(item for item in listed if item["sop_id"] == "local_sop_12345")
+            self.assertEqual(local["cloud_sync_status"], "conflict")
+            self.assertIn("同名", local["cloud_sync_error"])
+            self.assertIsNotNone(store.get_document("polling_sop", "local_sop_12345"))
             self.assertEqual(cloud.saved, [])
 
     def test_cloud_attachment_rejects_untrusted_download_url(self) -> None:
@@ -321,7 +661,7 @@ class PollingWorkOrderTests(unittest.TestCase):
     def test_cloud_sop_create_uses_stable_client_token(self) -> None:
         cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
         cloud.ensure_schema = MagicMock()
-        cloud.get_sop = MagicMock(return_value=None)
+        cloud.list_sops = MagicMock(return_value=[])
         cloud._request = MagicMock(return_value={"record": {"record_id": "recCloudSop"}})
         cloud.invalidate = MagicMock()
         sop = {
@@ -340,6 +680,21 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(first_token, second_token)
         self.assertEqual(uuid.UUID(first_token).version, 4)
         self.assertEqual(cloud.ensure_schema.call_count, 2)
+
+    def test_cloud_sop_save_rejects_duplicate_name_before_write(self) -> None:
+        cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+        cloud.ensure_schema = MagicMock()
+        cloud.list_sops = MagicMock(return_value=[{
+            "sop_id": "other_sop", "scope": "A", "work_type": "maintenance",
+            "name": "同名 SOP", "version": 1,
+        }])
+        cloud._request = MagicMock()
+        with self.assertRaisesRegex(Exception, "同名 SOP"):
+            cloud.save_sop({
+                "sop_id": "new_sop", "scope": "A", "work_type": "maintenance",
+                "name": "同名 SOP", "version": 1, "steps": [], "attachments": [],
+            }, expected_version=0)
+        cloud._request.assert_not_called()
 
     def test_saved_sop_can_move_between_work_types(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -655,6 +1010,9 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("function pollingSopHasDevicePlaceholders", html)
         self.assertIn("button.disabled=blocked", html)
         self.assertIn("含设备指向，通用工单不可选", html)
+        self.assertIn("polling-delay-toggle", html)
+        self.assertIn("polling-loop-control", html)
+        self.assertIn("row.replaceChildren(main", html)
         button_pattern = re.compile(
             r'<h2 class="inbox-title"><span>通告处理</span>'
             r'(<button class="btn ghost" id="lite-polling-sop-open".*?</button>)'

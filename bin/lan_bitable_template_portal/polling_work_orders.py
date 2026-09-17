@@ -46,6 +46,7 @@ POLLING_SOP_MAX_FILE_BYTES = 20 * 1024 * 1024
 POLLING_SOP_MAX_FILES = 10
 POLLING_SOP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 POLLING_SOP_MAX_STEPS = 30
+POLLING_WORK_ORDER_MAX_EXPANDED_STEPS = 100
 POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
 POLLING_STEP_PHOTO_MAX_BYTES = 8 * 1024 * 1024
 POLLING_STEP_MAX_PHOTOS = 5
@@ -315,7 +316,17 @@ class PollingSopCloudStore:
 
     def save_sop(self, sop: dict, *, expected_version: int, allow_create: bool = False) -> dict:
         self.ensure_schema()
-        existing = self.get_sop(str(sop.get("sop_id") or ""), force=True)
+        cloud_items = self.list_sops(force=True)
+        sop_id = str(sop.get("sop_id") or "")
+        existing = next((item for item in cloud_items if item["sop_id"] == sop_id), None)
+        if any(
+            item["sop_id"] != sop_id
+            and str(item.get("scope") or "").strip().upper() == str(sop.get("scope") or "").strip().upper()
+            and _stored_work_order_type(item) == _stored_work_order_type(sop)
+            and str(item.get("name") or "").strip().casefold() == str(sop.get("name") or "").strip().casefold()
+            for item in cloud_items
+        ):
+            raise PortalConflictError("同楼栋、同类型的同名 SOP 已在多维存在，请先修改名称。")
         if existing and int(existing.get("version") or 0) != int(expected_version or 0):
             raise PortalConflictError("SOP 已被其他电脑修改，请刷新后重试。")
         if not existing and expected_version and not allow_create:
@@ -401,16 +412,25 @@ class PollingWorkOrderService:
         self._cloud_bootstrap_lock = threading.Lock()
         self._cloud_bootstrap_running = False
         self._cloud_bootstrap_thread: threading.Thread | None = None
+        self._cloud_bootstrap_last_started_at = 0.0
         self._manual_refresh_lock = threading.Lock()
 
     @staticmethod
     def _now_text() -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-    @staticmethod
-    def _public_sop(sop: dict) -> dict:
+    def _public_sop(self, sop: dict) -> dict:
         result = copy.deepcopy(sop or {})
+        result["cloud_sync_required"] = bool(self.cloud)
+        result["cloud_sync_status"] = (
+            "conflict" if sop.get("_cloud_sync_blocked")
+            else "pending" if not sop.get("_cloud_record_id")
+            else "synced"
+        )
+        result["cloud_sync_error"] = str(sop.get("_cloud_sync_error") or "")
         result.pop("_cloud_record_id", None)
+        result.pop("_cloud_sync_error", None)
+        result.pop("_cloud_sync_blocked", None)
         sop_id = str(result.get("sop_id") or "")
         result["attachments"] = [
             {
@@ -499,7 +519,8 @@ class PollingWorkOrderService:
         with self._legacy_cloud_sync_lock:
             if self._legacy_cloud_sync_done and not force:
                 return cloud_items, [], 0
-            known_ids = {str(item.get("sop_id") or "") for item in cloud_items}
+            cloud_by_id = {str(item.get("sop_id") or ""): item for item in cloud_items}
+            known_ids = set(cloud_by_id)
             known_names = {
                 (
                     str(item.get("scope") or "").strip().upper(),
@@ -511,13 +532,28 @@ class PollingWorkOrderService:
             pending: list[dict] = []
             changed = False
             uploaded_count = 0
+            uploaded_locals: dict[str, dict] = {}
             documents = self.state_store.list_documents(POLLING_SOP_NAMESPACE)
             for document in documents:
                 local = copy.deepcopy(document.get("payload") or {})
                 sop_id = str(local.get("sop_id") or "").strip()
-                if not sop_id or sop_id in known_ids:
+                if not sop_id:
+                    continue
+                def keep_pending(message: str, *, blocked: str = "") -> None:
+                    local["_cloud_sync_error"] = str(message)[:500]
+                    local["_cloud_sync_blocked"] = blocked
+                    self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, local)
+                    pending.append(local)
+
+                remote = cloud_by_id.get(sop_id)
+                if remote:
+                    if int(local.get("version") or 0) > int(remote.get("version") or 0):
+                        if force:
+                            raise PortalConflictError("本地 SOP 与多维存在版本冲突，本地资料未修改。")
+                        keep_pending("本地 SOP 版本高于多维，请人工核对后再同步。", blocked="version_conflict")
                     continue
                 if str(local.get("_cloud_record_id") or "").strip():
+                    keep_pending("多维中的原 SOP 记录已不存在，请人工核对后再同步。", blocked="remote_missing")
                     continue
                 try:
                     scope = str(local.get("scope") or "").strip().upper()
@@ -529,10 +565,7 @@ class PollingWorkOrderService:
                         raise PortalError("本地旧 SOP 名称无效。")
                     name_key = (scope, work_type, name.casefold())
                     if name_key in known_names:
-                        print(
-                            "[ClipFlow] 本地旧 SOP 与云端同名，保留云端版本: "
-                            f"sop_id={sop_id}, name={name}"
-                        )
+                        keep_pending("同楼栋、同类型已有同名多维 SOP，请先核对并修改本地名称。", blocked="name_conflict")
                         continue
                     local.update(
                         scope=scope,
@@ -554,7 +587,10 @@ class PollingWorkOrderService:
                         if file_token:
                             if not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", file_token):
                                 raise PortalError("本地旧 SOP 飞书附件标识无效。")
-                            size = int(attachment.get("size") or 0)
+                            try:
+                                size = int(attachment.get("size") or 0)
+                            except (TypeError, ValueError) as exc:
+                                raise PortalError("本地 SOP 附件大小无效。") from exc
                             total_size += size
                             if size < 0 or size > POLLING_SOP_MAX_FILE_BYTES or total_size > POLLING_SOP_MAX_TOTAL_BYTES:
                                 raise PortalError("本地旧 SOP 附件大小超限。")
@@ -577,23 +613,40 @@ class PollingWorkOrderService:
                         local["attachments"] = attachments
                         self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, local)
                     local["attachments"] = attachments
+                    local.pop("_cloud_sync_error", None)
+                    local.pop("_cloud_sync_blocked", None)
                     self.cloud.save_sop(local, expected_version=0, allow_create=True)
                     known_ids.add(sop_id)
                     known_names.add(name_key)
                     changed = True
                     uploaded_count += 1
-                except PortalConflictError:
+                    uploaded_locals[sop_id] = copy.deepcopy(local)
+                except PortalConflictError as exc:
                     existing = self.cloud.get_sop(sop_id, force=True)
                     if existing:
-                        known_ids.add(sop_id)
-                        changed = True
+                        remote_steps = self._normalized_steps(existing.get("steps"), work_type=_stored_work_order_type(existing))
+                        if int(local.get("version") or 0) >= int(existing.get("version") or 0) and local.get("steps") != remote_steps:
+                            keep_pending("本地步骤与多维同一 SOP 不一致，请人工核对后再同步。", blocked="content_conflict")
+                        else:
+                            known_ids.add(sop_id)
+                            changed = True
                     else:
-                        pending.append(local)
+                        message = str(exc) or "SOP 多维版本冲突，请刷新后核对。"
+                        keep_pending(message, blocked="name_conflict" if "同名" in message else "content_conflict")
                 except Exception as exc:
                     print(f"[ClipFlow] 本地旧 SOP 云端迁移待重试: sop_id={sop_id}, error={exc}")
-                    pending.append(local)
+                    keep_pending(str(exc))
             if changed:
                 cloud_items = self.cloud.list_sops(force=True)
+                visible_ids = {str(item.get("sop_id") or "") for item in cloud_items}
+                for uploaded_id, uploaded in uploaded_locals.items():
+                    if uploaded_id in visible_ids:
+                        continue
+                    uploaded["_cloud_sync_error"] = "多维写入已返回成功，但列表尚未查到该 SOP；本地已保留，稍后重试核验。"
+                    uploaded["_cloud_sync_blocked"] = ""
+                    self.state_store.put_document(POLLING_SOP_NAMESPACE, uploaded_id, uploaded)
+                    pending.append(uploaded)
+                    uploaded_count -= 1
             self._legacy_cloud_sync_done = not pending
             return cloud_items, pending, uploaded_count
 
@@ -604,7 +657,8 @@ class PollingWorkOrderService:
             cloud_items, pending, _uploaded_count = self._sync_legacy_local_sops(
                 self.cloud.list_sops(force=force)
             )
-            return [self._cache_cloud_sop(item) for item in cloud_items] + pending
+            pending_ids = {str(item.get("sop_id") or "") for item in pending}
+            return [self._cache_cloud_sop(item) for item in cloud_items if str(item.get("sop_id") or "") not in pending_ids] + pending
         except Exception as exc:
             print(f"[ClipFlow] SOP cloud read failed, using local cache: {exc}")
             return None
@@ -615,6 +669,14 @@ class PollingWorkOrderService:
             for document in self.state_store.list_documents(POLLING_SOP_NAMESPACE)
             if isinstance(document.get("payload"), dict)
         ]
+
+    def bootstrap_pending_local_sops(self) -> None:
+        if self.cloud and any(
+            not item.get("_cloud_record_id") and not item.get("_cloud_sync_blocked")
+            for item in self._local_sops()
+        ):
+            self._legacy_cloud_sync_done = False
+            self._start_local_cache_bootstrap()
 
     def _local_cache_initialized(self, scope: str = "", work_type: str = "") -> bool:
         marker = self.state_store.get_document(
@@ -645,7 +707,8 @@ class PollingWorkOrderService:
                 remote, pending, uploaded_count = self._sync_legacy_local_sops(
                     remote, force=True
                 )
-                matching = [item for item in remote if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
+                pending_ids = {str(item.get("sop_id") or "") for item in pending}
+                matching = [item for item in remote if str(item.get("sop_id") or "") not in pending_ids and str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
                 prepared = [self._cache_cloud_sop(item, persist=False) for item in matching]
                 updates = {item["sop_id"]: item for item in prepared}
                 if len(updates) != len(prepared):
@@ -655,7 +718,6 @@ class PollingWorkOrderService:
                     if local and (str(local.get("scope") or "").upper() != scope or _stored_work_order_type(local) != work_type or int(local.get("version") or 0) > int(item.get("version") or 0)):
                         raise PortalConflictError("本地 SOP 与云端存在范围或版本冲突，本地资料未修改。")
                 local_documents = self.state_store.list_documents(POLLING_SOP_NAMESPACE)
-                pending_ids = {str(item.get("sop_id") or "") for item in pending}
                 self.state_store.put_documents(POLLING_SOP_NAMESPACE, updates)
                 for document in local_documents:
                     item = document.get("payload") or {}
@@ -720,9 +782,11 @@ class PollingWorkOrderService:
 
     def _start_local_cache_bootstrap(self) -> None:
         with self._cloud_bootstrap_lock:
-            if self._cloud_bootstrap_running:
+            now = time.monotonic()
+            if self._cloud_bootstrap_running or now - self._cloud_bootstrap_last_started_at < 30:
                 return
             self._cloud_bootstrap_running = True
+            self._cloud_bootstrap_last_started_at = now
 
         def worker() -> None:
             try:
@@ -750,12 +814,11 @@ class PollingWorkOrderService:
         if scope not in POLLING_SOP_SCOPES:
             raise PortalError("请在明确的单楼页面读取 SOP。")
         source = self._local_sops()
-        if self.cloud and not self._local_cache_initialized(scope, work_type):
-            matching_source = [
-                item for item in source
-                if str(item.get("scope") or "").strip().upper() == scope
-                and _stored_work_order_type(item) == work_type
-            ]
+        matching_source = [item for item in source if str(item.get("scope") or "").strip().upper() == scope and _stored_work_order_type(item) == work_type]
+        has_unsynced_local = any(not item.get("_cloud_record_id") and not item.get("_cloud_sync_blocked") for item in matching_source)
+        if self.cloud and has_unsynced_local:
+            self._legacy_cloud_sync_done = False
+        if self.cloud and (has_unsynced_local or not self._local_cache_initialized(scope, work_type)):
             if matching_source:
                 self._start_local_cache_bootstrap()
             elif self._refresh_local_cache_from_cloud():
@@ -772,7 +835,9 @@ class PollingWorkOrderService:
                 print(f"[ClipFlow] SOP cloud read failed, using local cache: {exc}")
             else:
                 if not remote:
-                    self.state_store.delete_document(POLLING_SOP_NAMESPACE, sop_id)
+                    local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id)
+                    if isinstance(local, dict):
+                        raise PortalConflictError("多维中尚未查到该 SOP，本地资料已保留；请先同步多维后重试。")
                     raise PortalNotFoundError("轮巡 SOP 不存在。")
                 sop = self._cache_cloud_sop(remote)
                 return self._public_sop(sop) if public else copy.deepcopy(sop)
@@ -791,6 +856,7 @@ class PollingWorkOrderService:
         if len(raw_steps) > POLLING_SOP_MAX_STEPS:
             raise PortalError(f"SOP 步骤不能超过 {POLLING_SOP_MAX_STEPS} 条。")
         steps: list[dict] = []
+        seen_step_ids: set[str] = set()
         for index, raw in enumerate(raw_steps):
             if not isinstance(raw, dict):
                 raise PortalError(f"第 {index + 1} 个 SOP 步骤格式无效。")
@@ -829,18 +895,79 @@ class PollingWorkOrderService:
                 raise PortalError(
                     f"第 {index + 1} 个 SOP 步骤时间限制必须在 0–{POLLING_STEP_MAX_SECONDS} 秒之间。"
                 )
+            raw_delay = raw.get("delay_reminder_minutes") or 0
+            if isinstance(raw_delay, bool) or not re.fullmatch(r"\d+", str(raw_delay)):
+                raise PortalError(f"第 {index + 1} 个 SOP 步骤延时提醒必须为整数分钟。")
+            delay_reminder_minutes = int(raw_delay)
+            if delay_reminder_minutes not in range(1441):
+                raise PortalError(f"第 {index + 1} 个 SOP 步骤延时提醒必须在 1–1440 分钟之间，或关闭提醒。")
+            step_id = str(raw.get("step_id") or uuid.uuid4().hex).strip()
+            if step_id in seen_step_ids:
+                raise PortalError("SOP 步骤标识重复，请重新打开后保存。")
+            seen_step_ids.add(step_id)
+            raw_rules = raw.get("repeat_rules") or []
+            if not isinstance(raw_rules, list) or len(raw_rules) > 10:
+                raise PortalError(f"第 {index + 1} 个 SOP 步骤循环规则最多 10 条。")
+            repeat_rules: list[dict] = []
+            for rule_index, rule in enumerate(raw_rules, start=1):
+                if not isinstance(rule, dict):
+                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环规则格式无效。")
+                raw_count = rule.get("count") or 0
+                if isinstance(raw_count, bool) or not re.fullmatch(r"\d+", str(raw_count)):
+                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环次数必须为整数。")
+                repeat_count = int(raw_count)
+                if repeat_count not in range(1, 11):
+                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环次数必须为 1–10 遍。")
+                repeat_rules.append({
+                    "rule_id": str(rule.get("rule_id") or uuid.uuid4().hex),
+                    "from_step_id": str(rule.get("from_step_id") or "").strip(),
+                    "to_step_id": str(rule.get("to_step_id") or "").strip(),
+                    "count": repeat_count,
+                })
             steps.append(
                 {
-                    "step_id": str(raw.get("step_id") or uuid.uuid4().hex),
+                    "step_id": step_id,
                     "order": index + 1,
                     "content": content,
                     "operator_required": operator_required,
                     "reviewer_required": reviewer_required,
                     "photo_required": photo_required,
                     "time_limit_seconds": time_limit_seconds,
+                    "delay_reminder_minutes": delay_reminder_minutes,
+                    "repeat_rules": repeat_rules,
                 }
             )
+        positions = {step["step_id"]: index for index, step in enumerate(steps)}
+        expanded_count = len(steps)
+        for index, step in enumerate(steps):
+            for rule_index, rule in enumerate(step["repeat_rules"], start=1):
+                start = positions.get(rule["from_step_id"])
+                end = positions.get(rule["to_step_id"])
+                if start is None or end is None or start > end or end > index:
+                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环只能选择本步及之前的连续步骤区间。")
+                expanded_count += (end - start + 1) * rule["count"]
+        if expanded_count > POLLING_WORK_ORDER_MAX_EXPANDED_STEPS:
+            raise PortalError(f"展开后的单次工单步骤不能超过 {POLLING_WORK_ORDER_MAX_EXPANDED_STEPS} 条。")
         return steps
+
+    @staticmethod
+    def _expanded_steps(steps: list[dict]) -> list[dict]:
+        positions = {str(step.get("step_id") or ""): index for index, step in enumerate(steps)}
+        expanded: list[dict] = []
+        for index, step in enumerate(steps):
+            expanded.append({**copy.deepcopy(step), "source_step_index": index + 1, "repeat_round": 0})
+            for rule_index, rule in enumerate(step.get("repeat_rules") or [], start=1):
+                start = positions[str(rule.get("from_step_id") or "")]
+                end = positions[str(rule.get("to_step_id") or "")]
+                for round_index in range(1, int(rule.get("count") or 0) + 1):
+                    for source_index in range(start, end + 1):
+                        expanded.append({
+                            **copy.deepcopy(steps[source_index]),
+                            "source_step_index": source_index + 1,
+                            "repeat_round": round_index,
+                            "repeat_rule_index": rule_index,
+                        })
+        return expanded
 
     def save_sop(self, payload: dict, *, actor_open_id: str = "") -> dict:
         payload = payload if isinstance(payload, dict) else {}
@@ -884,7 +1011,40 @@ class PollingWorkOrderService:
                 "updated_at": now,
                 "updated_by": str(actor_open_id or ""),
             }
+            if existing and existing.get("_cloud_sync_blocked") == "name_conflict" and name.casefold() == str(existing.get("name") or "").strip().casefold():
+                raise PortalConflictError("同名 SOP 已在多维存在，请先修改本地 SOP 名称。")
+            sop.pop("_cloud_sync_error", None)
+            sop.pop("_cloud_sync_blocked", None)
             if self.cloud:
+                if existing and not str(existing.get("_cloud_record_id") or "").strip():
+                    attachments = copy.deepcopy(sop["attachments"])
+                    if len(attachments) > POLLING_SOP_MAX_FILES:
+                        raise PortalError(f"每个 SOP 最多上传 {POLLING_SOP_MAX_FILES} 个附件。")
+                    directory = self._sop_directory(sop_id)
+                    total_size = 0
+                    for attachment in attachments:
+                        file_token = str(attachment.get("file_token") or "").strip()
+                        if file_token:
+                            if not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", file_token):
+                                raise PortalError("本地 SOP 飞书附件标识无效。")
+                            size = int(attachment.get("size") or 0)
+                            total_size += size
+                            if size < 0 or size > POLLING_SOP_MAX_FILE_BYTES or total_size > POLLING_SOP_MAX_TOTAL_BYTES:
+                                raise PortalError("本地 SOP 附件大小超限。")
+                            continue
+                        path = Path(str(attachment.get("path") or "")).resolve()
+                        if not path.is_file() or not path.is_relative_to(directory):
+                            raise PortalError(f"本地 SOP 附件不存在：{_safe_file_name(attachment.get('name'))}")
+                        size = path.stat().st_size
+                        total_size += size
+                        if size > POLLING_SOP_MAX_FILE_BYTES or total_size > POLLING_SOP_MAX_TOTAL_BYTES:
+                            raise PortalError("本地 SOP 附件大小超限。")
+                        digest = _file_sha256(path)
+                        if attachment.get("sha256") and str(attachment["sha256"]).lower() != digest:
+                            raise PortalError("本地 SOP 附件校验失败。")
+                        attachment.update(size=size, sha256=digest, file_token=self.cloud.upload_attachment(path, _safe_file_name(attachment.get("name"))))
+                        self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, {**existing, "attachments": attachments})
+                    sop["attachments"] = attachments
                 sop = self.cloud.save_sop(
                     sop,
                     expected_version=expected_version,
@@ -899,6 +1059,7 @@ class PollingWorkOrderService:
             str(step.get("step_id") or ""): (
                 int(step.get("time_limit_seconds") or 0),
                 self._step_photo_required(step),
+                int(step.get("delay_reminder_minutes") or 0),
             )
             for step in sop.get("steps") or []
             if str(step.get("step_id") or "")
@@ -907,6 +1068,7 @@ class PollingWorkOrderService:
             index: (
                 int(step.get("time_limit_seconds") or 0),
                 self._step_photo_required(step),
+                int(step.get("delay_reminder_minutes") or 0),
             )
             for index, step in enumerate(sop.get("steps") or [], start=1)
         }
@@ -935,12 +1097,15 @@ class PollingWorkOrderService:
                 if not sop_step_id:
                     settings = settings_by_index.get(int(step.get("step_index") or 0))
                 if settings is not None:
-                    limit, photo_required = settings
+                    limit, photo_required, reminder_minutes = settings
                     if int(step.get("time_limit_seconds") or 0) != limit:
                         step["time_limit_seconds"] = limit
                         changed = True
                     if self._step_photo_required(step) != photo_required:
                         step["photo_required"] = photo_required
+                        changed = True
+                    if int(step.get("delay_reminder_minutes") or 0) != reminder_minutes:
+                        step["delay_reminder_minutes"] = reminder_minutes
                         changed = True
             if changed:
                 group["steps"] = steps
@@ -997,7 +1162,8 @@ class PollingWorkOrderService:
         if len(content) > POLLING_SOP_MAX_FILE_BYTES:
             raise PortalError("SOP 单个附件不能超过 20MB。")
         with self._lock:
-            sop = self.get_sop(sop_id, public=False, refresh=True)
+            local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id) or {}
+            sop = self.get_sop(sop_id, public=False, refresh=bool(self.cloud and local.get("_cloud_record_id")))
             if int(expected_version or 0) != int(sop.get("version") or 0):
                 raise PortalConflictError("SOP 已被修改，请刷新后重试。")
             attachments = list(sop.get("attachments") or [])
@@ -1024,7 +1190,7 @@ class PollingWorkOrderService:
                 "created_at": self._now_text(),
                 "created_by": str(actor_open_id or ""),
             }
-            if self.cloud:
+            if self.cloud and sop.get("_cloud_record_id"):
                 try:
                     attachment["file_token"] = self.cloud.upload_attachment(path, safe_name)
                 except Exception:
@@ -1039,7 +1205,7 @@ class PollingWorkOrderService:
                     "updated_by": str(actor_open_id or ""),
                 }
             )
-            if self.cloud:
+            if self.cloud and sop.get("_cloud_record_id"):
                 try:
                     sop = self.cloud.save_sop(sop, expected_version=expected_version)
                 except Exception:
@@ -1072,7 +1238,8 @@ class PollingWorkOrderService:
         actor_open_id: str = "",
     ) -> dict:
         with self._lock:
-            sop = self.get_sop(sop_id, public=False, refresh=True)
+            local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id) or {}
+            sop = self.get_sop(sop_id, public=False, refresh=bool(self.cloud and local.get("_cloud_record_id")))
             if int(expected_version or 0) != int(sop.get("version") or 0):
                 raise PortalConflictError("SOP 已被修改，请刷新后重试。")
             attachments = list(sop.get("attachments") or [])
@@ -1092,7 +1259,7 @@ class PollingWorkOrderService:
                     "updated_by": str(actor_open_id or ""),
                 }
             )
-            if self.cloud:
+            if self.cloud and sop.get("_cloud_record_id"):
                 sop = self.cloud.save_sop(sop, expected_version=expected_version)
             self.state_store.put_document(POLLING_SOP_NAMESPACE, sop_id, sop)
             if path.is_relative_to(directory) and path.is_file():
@@ -1101,10 +1268,11 @@ class PollingWorkOrderService:
 
     def delete_sop(self, sop_id: str, *, expected_version: int) -> dict:
         with self._lock:
-            sop = self.get_sop(sop_id, public=False, refresh=True)
+            local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id) or {}
+            sop = self.get_sop(sop_id, public=False, refresh=bool(self.cloud and local.get("_cloud_record_id")))
             if int(expected_version or 0) != int(sop.get("version") or 0):
                 raise PortalConflictError("SOP 已被修改，请刷新后重试。")
-            if self.cloud:
+            if self.cloud and sop.get("_cloud_record_id"):
                 self.cloud.delete_sop(sop)
             directory = self._sop_directory(sop_id)
             if directory.exists():
@@ -1268,6 +1436,9 @@ class PollingWorkOrderService:
             )
         ):
             raise PortalError("操作人和现场审核人不能是同一人。")
+        prepared_steps = self._expanded_steps(sop.get("steps") or [])
+        if len(prepared_steps) * len(normalized_runs) > POLLING_WORK_ORDER_MAX_EXPANDED_STEPS:
+            raise PortalError(f"本次工单展开后的总步骤不能超过 {POLLING_WORK_ORDER_MAX_EXPANDED_STEPS} 条。")
         pending_root = (self.work_order_root / "pending").resolve()
         staging = (pending_root / re.sub(r"[^A-Za-z0-9_-]", "_", job_id)).resolve()
         if staging == pending_root or not staging.is_relative_to(pending_root):
@@ -1290,7 +1461,6 @@ class PollingWorkOrderService:
                     "staged_path": str(target),
                 }
             )
-        prepared_steps = copy.deepcopy(sop.get("steps") or [])
         if has_adjust_cooling_step:
             unit_text = f"{normalized_runs[0]['other_unit']}制冷单元"
             for step in prepared_steps:
@@ -1368,6 +1538,126 @@ class PollingWorkOrderService:
             raise PortalNotFoundError("工单不存在。")
         return copy.deepcopy(group)
 
+    @staticmethod
+    def end_delay_status(group: dict, *, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        reminders = [
+            step.get("delay_reminder") or {}
+            for step in group.get("steps") or []
+            if isinstance(step, dict) and int(step.get("delay_reminder_minutes") or 0) > 0
+        ]
+        missing = any(float(item.get("due_at_ts") or 0) <= 0 for item in reminders)
+        latest_due = max((float(item.get("due_at_ts") or 0) for item in reminders), default=0.0)
+        return {
+            "enabled": bool(reminders),
+            "ready": not missing and latest_due <= now,
+            "missing_completion": missing,
+            "due_at_ts": latest_due,
+            "remaining_seconds": max(0, int(math.ceil(latest_due - now))),
+        }
+
+    def process_due_reminders(self, *, started_at: float, send_text, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        jobs: list[tuple[str, str, str, str, str, str]] = []
+        skipped = 0
+        for document in self.state_store.list_documents(POLLING_WORK_ORDER_NAMESPACE):
+            group_id = str(document.get("key") or "")
+            if not group_id:
+                continue
+            with self._lock:
+                try:
+                    group = self.get_group(group_id)
+                except PortalNotFoundError:
+                    continue
+                if str(group.get("state") or "") in {"cancelled", "stopped"}:
+                    continue
+                changed = False
+                for step in group.get("steps") or []:
+                    reminder = step.get("delay_reminder") if isinstance(step, dict) else None
+                    if not isinstance(reminder, dict) or reminder.get("state") != "pending":
+                        continue
+                    due_at = float(reminder.get("due_at_ts") or 0)
+                    if due_at <= 0 or due_at > now:
+                        continue
+                    if due_at <= started_at:
+                        reminder["state"] = "skipped_offline"
+                        changed = True
+                        skipped += 1
+                        continue
+                    if float(reminder.get("next_retry_at_ts") or 0) > now:
+                        continue
+                    recipients = list(dict.fromkeys(filter(None, (
+                        str((group.get("operator") or {}).get("open_id") or "").strip(),
+                        str((group.get("reviewer") or {}).get("open_id") or "").strip(),
+                        str(BUILDING_OPEN_ID_MAP.get(str(group.get("scope") or "").upper()) or "").strip(),
+                    ))))
+                    if not recipients:
+                        reminder["state"] = "skipped_no_recipient"
+                        changed = True
+                        skipped += 1
+                        continue
+                    if not reminder.get("recipient_open_ids"):
+                        reminder["recipient_open_ids"] = recipients
+                        changed = True
+                    completed_at = dt.datetime.fromtimestamp(float(reminder.get("completed_at_ts") or 0)).strftime("%Y-%m-%d %H:%M:%S")
+                    due_text = dt.datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
+                    message = "\n".join((
+                        "【SOP 步骤延时到点提醒】",
+                        f"通告：{group.get('title') or '-'}",
+                        f"楼栋：{group.get('scope') or '-'}",
+                        f"SOP：{group.get('sop_name') or '-'}",
+                        f"工单：{step.get('run_label') or '-'}",
+                        f"步骤 {step.get('step_index') or '-'}：{str(step.get('content') or '')[:500]}",
+                        f"完成时间：{completed_at}",
+                        f"延时终点：{due_text}",
+                        "该步骤的延时时间已到，请核对后续操作。",
+                    ))
+                    sent = set(reminder.get("sent_open_ids") or [])
+                    failed_ids = set(reminder.get("failed_open_ids") or [])
+                    for open_id in recipients:
+                        if open_id not in sent and open_id not in failed_ids:
+                            message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"clipflow:sop-delay:{reminder.get('reminder_id')}:{open_id}"))
+                            jobs.append((group_id, str(step.get("step_key") or ""), str(reminder.get("reminder_id") or ""), open_id, message_uuid, message))
+                if changed:
+                    self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, group_id, group)
+        sent_count = 0
+        failed = 0
+        for group_id, step_key, reminder_id, open_id, message_uuid, message in jobs:
+            with self._lock:
+                group = self.get_group(group_id)
+                step = next((item for item in group.get("steps") or [] if item.get("step_key") == step_key), None)
+                reminder = step.get("delay_reminder") if isinstance(step, dict) else None
+                if group.get("state") in {"cancelled", "stopped"} or not isinstance(reminder, dict) or reminder.get("reminder_id") != reminder_id or reminder.get("state") != "pending" or open_id in (reminder.get("sent_open_ids") or []):
+                    continue
+            try:
+                ok, error, _results = send_text(message, [open_id], message_uuid=message_uuid)
+            except Exception as exc:
+                ok, error = False, str(exc)
+            with self._lock:
+                group = self.get_group(group_id)
+                step = next((item for item in group.get("steps") or [] if item.get("step_key") == step_key), None)
+                reminder = step.get("delay_reminder") if isinstance(step, dict) else None
+                if not isinstance(reminder, dict) or reminder.get("reminder_id") != reminder_id:
+                    continue
+                if ok:
+                    reminder["sent_open_ids"] = list(dict.fromkeys([*(reminder.get("sent_open_ids") or []), open_id]))
+                    sent_count += 1
+                else:
+                    reminder["last_error"] = str(error or "飞书发送失败")
+                    failed += 1
+                attempts = dict(reminder.get("attempts_by_open_id") or {})
+                attempts[open_id] = int(attempts.get(open_id) or 0) + 1
+                reminder["attempts_by_open_id"] = attempts
+                if not ok and attempts[open_id] >= 3:
+                    reminder["failed_open_ids"] = list(dict.fromkeys([*(reminder.get("failed_open_ids") or []), open_id]))
+                done = set(reminder.get("sent_open_ids") or []) | set(reminder.get("failed_open_ids") or [])
+                if set(reminder.get("recipient_open_ids") or []).issubset(done):
+                    reminder["state"] = "failed" if reminder.get("failed_open_ids") else "sent"
+                elif not ok:
+                    reminder["next_retry_at_ts"] = now + min(120, 30 * attempts[open_id])
+                self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, group_id, group)
+        return {"sent": sent_count, "failed": failed, "skipped": skipped}
+
     def validate_group_token(self, token: str, target_record_id: str) -> None:
         group, _role = self._resolve_token(token)
         if str(group.get("target_record_id") or "") != str(
@@ -1443,6 +1733,8 @@ class PollingWorkOrderService:
                     content = content.replace("{{from}}", str(run.get("from_unit") or ""))
                     content = content.replace("{{to}}", str(run.get("to_unit") or ""))
                     content = content.replace("{{other}}", str(run.get("other_unit") or ""))
+                    if int(template_step.get("repeat_round") or 0) > 0:
+                        content += f"（第{template_step['repeat_rule_index']}组循环第{template_step['repeat_round']}遍，原第{template_step['source_step_index']}步）"
                     flattened.append(
                         {
                             "step_key": f"{run_index}:{step_index}",
@@ -1454,11 +1746,16 @@ class PollingWorkOrderService:
                             "step_index": step_index,
                             "step_count": len(spec.get("steps") or []),
                             "content": content,
+                            "source_step_index": int(template_step.get("source_step_index") or step_index),
+                            "repeat_round": int(template_step.get("repeat_round") or 0),
                             "operator_required": bool(template_step.get("operator_required")),
                             "reviewer_required": bool(template_step.get("reviewer_required")),
                             "photo_required": self._step_photo_required(template_step),
                             "time_limit_seconds": int(
                                 template_step.get("time_limit_seconds") or 0
+                            ),
+                            "delay_reminder_minutes": int(
+                                template_step.get("delay_reminder_minutes") or 0
                             ),
                             "activated_at_ts": 0.0,
                             "photos": [],
@@ -1555,6 +1852,11 @@ class PollingWorkOrderService:
     @staticmethod
     def _step_public(step: dict, current_index: int) -> dict:
         result = copy.deepcopy(step)
+        result.pop("delay_reminder_minutes", None)
+        result.pop("delay_reminder", None)
+        result.pop("source_step_index", None)
+        result.pop("repeat_round", None)
+        result.pop("repeat_rule_index", None)
         result["photo_required"] = PollingWorkOrderService._step_photo_required(result)
         index = int(result.get("global_index") or 0)
         result["position"] = "current" if index == current_index else "previous" if index < current_index else "next"
@@ -1959,6 +2261,17 @@ class PollingWorkOrderService:
                 and (not step.get("reviewer_required") or bool(step.get("reviewer_confirmation")))
             )
             if required_done:
+                reminder_minutes = int(step.get("delay_reminder_minutes") or 0)
+                if reminder_minutes and not step.get("delay_reminder"):
+                    completed_at = time.time()
+                    step["delay_reminder"] = {
+                        "reminder_id": uuid.uuid4().hex,
+                        "completed_at_ts": completed_at,
+                        "due_at_ts": completed_at + reminder_minutes * 60,
+                        "state": "pending",
+                        "sent_open_ids": [],
+                        "attempts": 0,
+                    }
                 next_indexes = [
                     index
                     for index, item in enumerate(steps)
@@ -2040,6 +2353,7 @@ class PollingWorkOrderService:
                 item["photos"] = []
                 item["operator_confirmation"] = {}
                 item["reviewer_confirmation"] = {}
+                item.pop("delay_reminder", None)
                 item["activated_at_ts"] = time.time() if index == current_index - 1 else 0.0
             group.update(
                 {

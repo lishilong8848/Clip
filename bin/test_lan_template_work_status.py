@@ -5784,6 +5784,153 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
+    def test_event_local_fields_seed_from_existing_local_month_snapshot(self):
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.replace_event_month_snapshot("2026-09", [{
+                    "source_record_id": "rec-local-baseline", "record_id": "rec-local-baseline",
+                    "raw_fields": {
+                        "告警描述": "测试事件", "进展更新时间": "1、2026/09/17 08:00",
+                        "进展更新截图": [{"file_token": "old-token"}],
+                    },
+                }])
+                fields = PortalRuntime._event_local_fields(
+                    "rec-local-baseline", {"time_str": "2026-09-17 08:00"},
+                )
+                self.assertEqual(fields["进展更新截图"][0]["file_token"], "old-token")
+                reopened = LanPortalStateStore(Path(temp) / "state.sqlite3")
+                PortalRuntime.state_store = reopened
+                self.assertEqual(PortalRuntime._event_local_fields(
+                    "rec-local-baseline", {"time_str": "2026-09-17 08:00"},
+                )["进展更新时间"], "1、2026/09/17 08:00")
+                store.put_document("event_notice_local_fields", "rec-missing", {
+                    "complete": True, "fields": {},
+                })
+                with self.assertRaisesRegex(Exception, "本地缺少"):
+                    PortalRuntime._event_local_fields("rec-missing", {"time_str": "2026-09-17 08:00"})
+            finally:
+                PortalRuntime.state_store = old_store
+
+    def test_event_local_fields_recovers_confirmed_write_after_snapshot_failure(self):
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            target = "rec-local-recovery"
+            try:
+                store.put_document("event_notice_local_fields", target, {
+                    "complete": True,
+                    "fields": {"进展更新时间": "旧进展"},
+                    "updated_at": time.time() - 10,
+                })
+                store.begin_notice_remote_operation(
+                    operation_id="qt_notice:local-recovery",
+                    operation_type="update",
+                    target_record_id=target,
+                    request={"notice_type": "事件通告"},
+                )
+                store.mark_notice_remote_operation(
+                    "qt_notice:local-recovery",
+                    status="remote_written",
+                    result={
+                        "remote_verified": True,
+                        "written_fields": {"进展更新时间": "旧进展\n新进展"},
+                    },
+                )
+                recovered = PortalRuntime._event_local_fields(target, {})
+                self.assertEqual(recovered["进展更新时间"], "旧进展\n新进展")
+                self.assertEqual(
+                    store.get_document("event_notice_local_fields", target)["fields"], recovered,
+                )
+                store.put_document("event_notice_local_fields", target, {
+                    "complete": True,
+                    "fields": {"进展更新时间": "更晚的进展"},
+                    "updated_at": time.time() + 1,
+                })
+                store.mark_notice_remote_operation("qt_notice:local-recovery", status="remote_written")
+                self.assertEqual(
+                    PortalRuntime._event_local_fields(target, {})["进展更新时间"],
+                    "更晚的进展",
+                )
+            finally:
+                PortalRuntime.state_store = old_store
+
+    def test_qt_event_update_uses_local_history_without_remote_get_and_manual_retry(self):
+        from upload_event_module.services.feishu_service import BitableWriteUncertainError
+
+        old_store = PortalRuntime.state_store
+        old_locks = PortalRuntime.local_upload_locks
+        old_targets = PortalRuntime.local_upload_created_targets
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            PortalRuntime.local_upload_locks = {}
+            PortalRuntime.local_upload_created_targets = {}
+            target = "rec-direct-event"
+            baseline = {
+                "告警描述": "测试事件", "机楼": "A楼", "专业": "电气",
+                "进展更新时间": "1、2026/09/17 08:00",
+                "进展更新截图": [{"file_token": "old-token"}],
+            }
+            store.put_document("event_notice_local_fields", target, {
+                "complete": True, "fields": baseline,
+            })
+            screenshots = [store.put_notice_upload_attachment(
+                open_id="qt", file_name=f"screen-{i}.png", mime_type="image/png",
+                content=f"image-{i}".encode(),
+            ) for i in (1, 2)]
+            updates = []
+            def fake_update(record_id, notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_update_fields(notice_payload)
+                notice_payload._clipflow_written_fields = dict(fields)
+                updates.append(fields)
+                if len(updates) == 1:
+                    raise BitableWriteUncertainError("write timed out")
+                return True, record_id
+            def request(upload_id):
+                return {
+                    "action_type": "update", "operation_id": "qt_notice:direct-retry",
+                    "data_dict": {
+                        "active_item_id": "active-direct-event", "record_id": target,
+                        "target_record_id": target, "_is_placeholder_record": False,
+                        "notice_type": "事件通告", "work_type": "event",
+                        "text": "【事件通告】状态：更新\n【标题】测试事件\n【事件发生时间】2026-09-17 08:00\n【进展】已处理",
+                        "time_str": "2026-09-17 08:00", "building": "A楼", "scope": "A",
+                    },
+                    "response_time": "2026-09-17 09:00",
+                    "screenshot_upload_id": upload_id,
+                }
+            try:
+                with patch.object(portal_server_module, "query_record_by_id", side_effect=AssertionError("unexpected remote GET")), patch.object(
+                    portal_server_module, "update_bitable_record_by_payload", side_effect=fake_update
+                ), patch.object(
+                    portal_server_module, "upload_media_to_feishu", side_effect=[(True, "new-token-1"), (True, "new-token-2")]
+                ), patch.object(
+                    portal_server_module, "send_robot_message_by_payload",
+                    return_value={"robot_sent": True, "robot_skipped": False, "last_robot_error": ""},
+                ) as robot_send:
+                    first = PortalRuntime.execute_local_notice_upload(request(screenshots[0]["upload_id"]))
+                    self.assertFalse(first["ok"])
+                    self.assertTrue(first["retry_same_operation"])
+                    retry_request = request(screenshots[1]["upload_id"])
+                    retry_request["response_time"] = "2026-09-17 09:05"
+                    second = PortalRuntime.execute_local_notice_upload(retry_request)
+                    self.assertTrue(second["ok"], second)
+                    robot_send.assert_called_once()
+                fields = store.get_document("event_notice_local_fields", target)["fields"]
+                self.assertEqual(fields["进展更新时间"].count("2026/09/17 09:00"), 1)
+                tokens = [item["file_token"] for item in fields["进展更新截图"]]
+                self.assertEqual(tokens, ["old-token", "new-token-2"])
+                self.assertNotIn("new-token-1", tokens)
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.state_store = old_store
+                PortalRuntime.local_upload_locks = old_locks
+                PortalRuntime.local_upload_created_targets = old_targets
+
     def test_local_event_update_and_end_reuse_created_target_across_new_local_ids(self):
         def event_text(status: str, progress: str = "测试测试测试") -> str:
             identity_fields = (
@@ -6909,6 +7056,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
+            PortalRuntime.state_store.put_document("event_notice_local_fields", "rec-existing-event", {
+                "complete": True, "fields": {"告警描述": "测试测试测试事件"},
+            })
             screenshot = PortalRuntime.state_store.put_notice_upload_attachment(
                 open_id="qt-local",
                 file_name="event-update.png",
@@ -6987,13 +7137,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["name"], "更新")
         self.assertEqual(result["record_id"], "rec-existing-event")
         self.assertEqual(result["real_record_id"], "rec-existing-event")
-        self.assertGreaterEqual(query_record.call_count, 1)
-        self.assertTrue(
-            all(
-                item.args == ("rec-existing-event", "事件通告")
-                for item in query_record.call_args_list
-            )
-        )
+        query_record.assert_not_called()
         update_record.assert_called_once()
         self.assertEqual(update_record.call_args.args[0], "rec-existing-event")
         self.assertEqual(update_record.call_args.args[2].file_tokens, ["event-update-token"])
@@ -7109,6 +7253,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 for index, (notice_type, work_type, section) in enumerate(notice_types, start=1):
                     active_item_id = f"active-all-update-{index}"
                     record_id = f"rec-all-update-{index}"
+                    if notice_type == "事件通告":
+                        store.put_document("event_notice_local_fields", record_id, {
+                            "complete": True, "fields": {"告警描述": "事件通告测试", "事件状态": "处理中"},
+                        })
                     store.upsert_qt_active_item(
                         {
                             "active_item_id": active_item_id,
@@ -13507,7 +13655,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
 
-    def test_qt_update_prefers_latest_record_version_and_rebases_after_write(self):
+    def test_qt_event_update_uses_local_fields_without_remote_version_read(self):
         old_store = PortalRuntime.state_store
         old_locks = PortalRuntime.local_upload_locks
         old_created_targets = PortalRuntime.local_upload_created_targets
@@ -13516,6 +13664,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = store
             PortalRuntime.local_upload_locks = {}
             PortalRuntime.local_upload_created_targets = {}
+            store.put_document("event_notice_local_fields", "target-qt-version-rebase", {
+                "complete": True, "fields": {"告警描述": "A楼Qt版本回填测试"},
+            })
             screenshot = store.put_notice_upload_attachment(
                 open_id="qt-version-test",
                 file_name="event-update.png",
@@ -13603,19 +13754,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     )
 
                 self.assertTrue(result["ok"])
-                self.assertEqual(result["record_version"], "version-after-write")
+                self.assertFalse(result.get("record_version"))
+                self.assertEqual(remote["record_version"], "version-after-write")
                 update_record.assert_called_once()
                 active_rows = store.list_qt_active_items()
                 self.assertEqual(len(active_rows), 1)
                 active_payload = active_rows[0]["payload"]
-                self.assertEqual(
-                    active_payload["record_version"],
-                    "version-after-write",
-                )
-                self.assertEqual(
-                    active_payload["expected_record_version"],
-                    "version-after-write",
-                )
+                self.assertFalse(active_payload.get("record_version"))
+                self.assertFalse(active_payload.get("expected_record_version"))
             finally:
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
