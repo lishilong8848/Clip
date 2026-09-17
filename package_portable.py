@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 from bin.frontend_assets import FRONTEND_INDEX, is_frontend_asset, referenced_assets
 
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 
 
@@ -1691,7 +1691,8 @@ def _should_force_include_in_patch(relative_path: Path) -> bool:
 
     norm = Path(str(relative_path).replace("\\", "/"))
 
-    return norm in FORCE_PATCH_INCLUDE_FILES
+    cabinet_templates = Path("bin/lan_bitable_template_portal/templates/cabinet_power")
+    return norm in FORCE_PATCH_INCLUDE_FILES or norm.is_relative_to(cabinet_templates)
 
 
 def _include_frontend_generation(root: Path, patch_dir: Path) -> int:
@@ -2202,6 +2203,51 @@ def _upload_patch_to_gitee(
     finally:
 
         shutil.rmtree(temp_repo, ignore_errors=True)
+
+
+def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manifest_path: str) -> None:
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    manifest_url = (
+        f"{_gitee_raw_base(repo_url, branch).rstrip('/')}/"
+        f"{manifest_path.strip().strip('/')}"
+    )
+    expected_hash = str(manifest["zip_sha256"]).lower()
+    expected_size = int(manifest["zip_size"])
+    last_error = ""
+    for attempt in range(5):
+        try:
+            manifest_request = Request(
+                manifest_url + ("&" if "?" in manifest_url else "?")
+                + urlencode({"_clipflow": str(time.time_ns())}),
+                headers={"Cache-Control": "no-cache"},
+            )
+            with urlopen(manifest_request, timeout=30) as response:
+                published = json.load(response)
+            if (
+                published.get("target_patch_version") != manifest["target_patch_version"]
+                or published.get("zip_sha256", "").lower() != expected_hash
+                or published.get("zip_name") != manifest["zip_name"]
+            ):
+                raise RuntimeError("远端清单尚未更新到本次补丁")
+            hasher = hashlib.sha256()
+            size = 0
+            with urlopen(Request(manifest["zip_url"]), timeout=60) as archive:
+                for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+                    size += len(chunk)
+                    if size > expected_size:
+                        raise RuntimeError("远端补丁大小超出本地清单")
+                    hasher.update(chunk)
+            if size != expected_size or hasher.hexdigest().lower() != expected_hash:
+                raise RuntimeError("远端补丁 ZIP 的大小或 SHA256 与本地清单不一致")
+            log("Gitee 补丁下载核验通过。")
+            return
+        except (URLError, OSError, ValueError, RuntimeError) as exc:
+            last_error = str(exc)
+            if attempt < 4:
+                time.sleep(3)
+    raise RuntimeError(f"Gitee 已推送但下载核验失败，暂不要通知用户更新：{last_error}")
 
 
 
@@ -3238,7 +3284,7 @@ def main() -> None:
 
 
     if AUTO_UPLOAD_GITEE and not args.skip_gitee_upload:
-        _upload_patch_to_gitee(
+        uploaded = _upload_patch_to_gitee(
             patch_zip,
             latest_manifest_path,
 
@@ -3250,6 +3296,14 @@ def main() -> None:
 
             manifest_repo_path=args.gitee_manifest_path,
 
+        )
+        if not uploaded:
+            raise RuntimeError("Gitee 补丁上传失败，用户尚无法更新；本地补丁已保留。")
+        _verify_published_patch(
+            latest_manifest,
+            repo_url=args.gitee_repo,
+            branch=args.gitee_branch,
+            manifest_path=args.gitee_manifest_path,
         )
 
     else:

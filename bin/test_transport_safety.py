@@ -32,6 +32,48 @@ def isolated_class(path, class_name, methods, namespace):
 
 
 class TransportSafetyTests(unittest.TestCase):
+    def test_packaging_checks_published_manifest_and_zip_hash(self):
+        content = b"patch-content"
+        manifest = {
+            "target_patch_version": 378,
+            "zip_name": "ClipFlow_V2_test_patch_only.zip",
+            "zip_url": "https://example.invalid/patch.zip",
+            "zip_sha256": hashlib.sha256(content).hexdigest(),
+            "zip_size": len(content),
+        }
+        remote_manifest = MagicMock()
+        remote_manifest.__enter__.return_value = remote_manifest
+        remote_manifest.read.return_value = json.dumps(manifest).encode()
+        archive = MagicMock()
+        archive.__enter__.return_value = archive
+        archive.read.side_effect = [content, b""]
+        with patch("urllib.request.urlopen", side_effect=[remote_manifest, archive]) as get:
+            portable_packaging._verify_published_patch(
+                manifest, repo_url="https://example.invalid/repo.git",
+                branch="master", manifest_path="updates/latest_patch.json"
+            )
+        self.assertEqual(get.call_count, 2)
+        wrong_archive = MagicMock()
+        wrong_archive.__enter__.return_value = wrong_archive
+        def wrong_get(request, **_kwargs):
+            if request.full_url == manifest["zip_url"]:
+                wrong_archive.read.side_effect = [b"wrong-content", b""]
+                return wrong_archive
+            return remote_manifest
+        with patch("urllib.request.urlopen", side_effect=wrong_get), patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "下载核验失败"):
+                portable_packaging._verify_published_patch(
+                    manifest, repo_url="https://example.invalid/repo.git",
+                    branch="master", manifest_path="updates/latest_patch.json"
+                )
+
+    def test_cabinet_templates_are_always_included_in_patch(self):
+        root = Path("bin/lan_bitable_template_portal/templates/cabinet_power")
+        for scope in "ABCDE":
+            self.assertTrue(portable_packaging._should_force_include_in_patch(root / f"{scope}.xlsm"))
+            self.assertTrue(portable_packaging._should_force_include_in_patch(root / f"{scope}.layouts.json.gz"))
+        self.assertTrue(portable_packaging._should_force_include_in_patch(root / "layouts.json.gz"))
+
     def test_manifest_fetch_bypasses_mutable_url_cache(self):
         updater = RemotePatchUpdater(
             Path.cwd(), Path(tempfile.gettempdir()), "https://example.invalid/latest.json"
