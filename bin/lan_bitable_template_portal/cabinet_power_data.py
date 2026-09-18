@@ -5,8 +5,9 @@ import json
 import re
 from .cabinet_power_excel import OPS, OP_PATTERN, dates, digest, room_code, text_value, Workbook, parse_template, T, bounds
 
-EXTRA_FIELDS = {"数据标识": 1, "来源工作表": 1, "来源行号": 2, "原始行数据": 1, "历史期望时间": 1}
-VISIBLE_FIELDS = ("操作类型", "实际完成时间", "期望完成时间", "操作类型（说明）", "完成时间", "历史期望时间")
+EXTRA_FIELDS = {"数据标识": 1, "来源工作表": 1, "来源行号": 2, "原始行数据": 1, "历史期望时间": 1,
+                "上下电确认截图": 17, "失败原因": 1}
+VISIBLE_FIELDS = ("操作类型", "实际完成时间", "期望完成时间", "操作类型（说明）", "完成时间", "历史期望时间", "失败原因")
 
 
 def normalized_actions(value):
@@ -51,12 +52,15 @@ def group_events(groups):
             issues.append(f"第{index+1}组操作与实际时间未配对")
         for i,action in enumerate(actions):
             events.append({"action":action,"actual":actual[i] if len(actions)==len(actual) else "", "expected":expected[i] if len(expected)==len(actions) else "", "group":index,
-                           "id":str(g.get("id",index))+":"+str(i), "result":g.get("result", "")})
+                           "id":str(g.get("id",index))+":"+str(i), "result":g.get("result", ""),
+                           "failure_reason":g.get("failure_reason", ""), "evidence_images":copy.deepcopy(g.get("evidence_images", []))})
     return events,issues
 
 
 def visible_groups(fields):
-    groups=[{"action":text_value(fields.get("操作类型")),"actual":date_text(fields.get("实际完成时间")),"expected":date_text(fields.get("期望完成时间"))}]
+    groups=[{"action":text_value(fields.get("操作类型")),"actual":date_text(fields.get("实际完成时间")),"expected":date_text(fields.get("期望完成时间")),
+             "failure_reason":text_value(fields.get("失败原因")),
+             "evidence_images":[{"file_token":str(item.get("file_token") or "")} for item in fields.get("上下电确认截图") or [] if isinstance(item,dict) and item.get("file_token")]}]
     note=text_value(fields.get("操作类型（说明）")); times=text_value(fields.get("完成时间")); expects=text_value(fields.get("历史期望时间"))
     if note or times or expects: groups.append({"action":note,"actual":times,"expected":expects})
     return groups
@@ -158,6 +162,8 @@ def from_feishu(record):
     primary=meta.get("primary",0)
     if groups and meta.get("schema",0)>=3 and "结果" in original and f.get("结果")!=original.get("结果"):
         groups[primary if isinstance(primary,int) and 0<=primary<len(groups) else 0]["result"]=text_value(f.get("结果"))
+    if groups and meta.get("schema",0)>=3 and "失败原因" in original and f.get("失败原因")!=original.get("失败原因"):
+        groups[primary if isinstance(primary,int) and 0<=primary<len(groups) else 0]["failure_reason"]=text_value(f.get("失败原因"))
     events,issues=group_events(groups)
     if mismatch or scope not in "ABCDE" or not room: issues.append("包间与楼栋不一致")
     power=f.get("机柜功率（W）","")
@@ -179,6 +185,15 @@ def to_fields(op):
     if not isinstance(primary,int) or not 0<=primary<len(groups): primary=0
     fields={"机房":"EA118","楼栋":op["scope"]+"楼","包间系统名称":op["system_name"],"机架":op["rack"],"机柜类型":op.get("rack_type") or None,"机柜功率（W）":op.get("power") if op.get("power") not in (None,"") else None,"结果":op.get("result") or None,**groups_to_fields(groups,primary)}
     fields["结果"]=(groups[primary].get("result") if groups else "") or None
+    fields["失败原因"]=(text_value(groups[primary].get("failure_reason")) if groups and groups[primary].get("result")=="失败" else "") or None
+    tokens=list(dict.fromkeys(
+        str(image.get("file_token") or "") for group in groups for image in group.get("evidence_images", [])
+        if isinstance(image,dict) and image.get("file_token")
+    ))
+    for image in op.get("raw_fields", {}).get("上下电确认截图") or []:
+        if isinstance(image, dict) and image.get("file_token") and image["file_token"] not in tokens:
+            tokens.append(image["file_token"])
+    fields["上下电确认截图"]=[{"file_token":token} for token in tokens]
     meta.update(schema=3,groups=groups,primary=primary,visible={k:fields.get(k) for k in (*VISIBLE_FIELDS,"结果")})
     fields["原始行数据"]=json.dumps(meta,ensure_ascii=False,separators=(",",":"))
     return fields

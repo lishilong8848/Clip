@@ -64,6 +64,10 @@ def _stable_uuid4_client_token(value):
 def equivalent(fields,actual):
     for key,value in fields.items():
         got=actual.get(key)
+        if key=="上下电确认截图":
+            tokens=lambda items:{str(item.get("file_token") or "") for item in items or [] if isinstance(item,dict) and item.get("file_token")}
+            if tokens(value)==tokens(got): continue
+            return False
         if value in (None,"") and got in (None,""): continue
         if isinstance(value,(int,float)):
             try:
@@ -176,6 +180,20 @@ class CabinetFeishu:
         if int(payload.get("code") or 0) or not token: raise CabinetError(f"机柜导出附件上传失败：{payload.get('msg') or '未返回文件标识'}")
         return token
 
+    def download_attachment(self,file_token):
+        from urllib.parse import quote
+        if not re.fullmatch(r"[A-Za-z0-9_-]{10,200}",str(file_token or "")):
+            raise CabinetError("确认截图标识无效",400)
+        if self._http is None:
+            import httpx
+            from upload_event_module.services.http_client import FeishuHttpClient
+            self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
+        content,_type=self._http.request_bytes(
+            "GET","https://open.feishu.cn/open-apis/drive/v1/medias/"+quote(file_token,safe="")+"/download",
+            headers={"Authorization":"Bearer "+self.token()},retries=1,max_bytes=10*1024*1024,
+        )
+        return content
+
     def ensure_fields(self):
         if self._schema_ready: return True
         fields={f["field_name"]:f for f in self.list_all("fields")}
@@ -184,6 +202,12 @@ class CabinetFeishu:
             if name not in fields or fields[name]["type"]!=kind: raise CabinetError(f"台账字段缺失或类型错误：{name}")
         from .cabinet_power_data import EXTRA_FIELDS
         for name,kind in EXTRA_FIELDS.items():
+            if name not in fields and name in ("上下电确认截图", "失败原因"):
+                try:
+                    self.request("POST", "fields", {"field_name": name, "type": kind})
+                except CabinetError:
+                    pass
+                fields={f["field_name"]:f for f in self.list_all("fields")}
             if name not in fields or fields[name]["type"]!=kind: raise CabinetError(f"台账字段缺失或类型错误：{name}")
         for name,options in (("操作类型",OPS),("机柜类型",RACK_TYPES),("结果",("成功","失败"))):
             field=fields[name]; prop=copy.deepcopy(field.get("property",{})); current=prop.setdefault("options",[])
@@ -523,6 +547,34 @@ class CabinetPowerService:
                 state['latest_success']={k:latest[k] for k in ('id','record_id','action','actual','expected','result') if k in latest}
         return {"items":items,"total":len(ops),"page":page,"page_size":size,"version":snap["version"],"rack_state":state}
 
+    def evidence_path(self,scope,record_id,image_id):
+        import io
+        from PIL import Image
+        if not re.fullmatch(r"[a-f0-9]{64}",str(image_id or "")):
+            raise CabinetError("确认截图标识无效",400)
+        operation=next((item for item in self._snapshot(scope)["operations"] if item["record_id"]==record_id),None)
+        if operation is None:
+            raise CabinetError("机柜记录不存在",404)
+        refs=[ref for group in operation["groups"] for ref in group.get("evidence_images", [])
+              if isinstance(ref,dict) and ref.get("image_id")==image_id]
+        if not refs:
+            raise CabinetError("该机柜记录未关联此截图",404)
+        extension=str(refs[0].get("extension") or "")
+        if extension not in (".jpg",".png",".webp"):
+            raise CabinetError("确认截图格式无效",400)
+        path=self.root/"evidence"/(image_id+extension)
+        if not path.is_file():
+            token=str(refs[0].get("file_token") or "")
+            content=self.remote_for(scope).download_attachment(token)
+            if hashlib.sha256(content).hexdigest()!=image_id:
+                raise CabinetError("飞书确认截图与机柜记录校验值不一致",409)
+            with Image.open(io.BytesIO(content)) as image:
+                if image.format!={".jpg":"JPEG",".png":"PNG",".webp":"WEBP"}[extension]:
+                    raise CabinetError("飞书确认截图格式与记录不一致",409)
+                image.verify()
+            self.batches._atomic_write(path,content)
+        return path, {".jpg":"image/jpeg",".png":"image/png",".webp":"image/webp"}[extension]
+
     def validate_op(self,scope,payload,old=None):
         op=copy.deepcopy(old or {})
         op.setdefault("result","")
@@ -559,12 +611,27 @@ class CabinetPowerService:
             g.setdefault("result",op.get("result",""))
             prior=old_groups.get(g["id"])
             for key in list(g):
-                if key not in ('id','action','actual','expected','result'): g.pop(key)
+                if key not in ('id','action','actual','expected','result','failure_reason','evidence_images'): g.pop(key)
             if prior:
                 g.update({k:copy.deepcopy(v) for k,v in prior.items() if k.startswith('source_')})
-            if prior and all(g.get(k,"")==prior.get(k,"") for k in ("action","expected","actual","result")): continue
+                for key in ('failure_reason','evidence_images'):
+                    if key not in g and key in prior: g[key]=copy.deepcopy(prior[key])
+            reason=str(g.get('failure_reason') or '').strip()
+            if len(reason)>1000: raise CabinetError('失败原因不能超过1000字')
+            if reason or 'failure_reason' in g or g.get('result')=='失败':
+                g['failure_reason']=reason if g.get('result')=='失败' else ''
+            images=g.get('evidence_images') or []
+            if not isinstance(images,list) or any(not isinstance(item,dict) or (
+                item not in (prior or {}).get('evidence_images', []) and (
+                    not re.fullmatch(r'[a-f0-9]{64}',str(item.get('image_id') or ''))
+                    or not re.fullmatch(r'[A-Za-z0-9_-]{10,200}',str(item.get('file_token') or ''))
+                )
+            ) for item in images):
+                raise CabinetError('确认截图引用无效')
+            if prior and all(g.get(k,"")==prior.get(k,"") for k in ("action","expected","actual","result","failure_reason","evidence_images")): continue
             if not any(g.get(k) for k in ("action","actual","expected")): continue
             if g.get("result") not in ("成功","失败"): raise CabinetError(f"第{i+1}组须选择成功或失败")
+            if g['result']=='失败' and not reason: raise CabinetError(f'第{i+1}组操作失败时须填写失败原因')
             actions=[a.strip() for a in g.get("action","").splitlines() if a.strip()]
             if not actions or any(a not in OPS for a in actions): raise CabinetError(f"第{i+1}组操作类型无效")
             for field in ("actual","expected"):

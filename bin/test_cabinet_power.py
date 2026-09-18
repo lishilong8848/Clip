@@ -9,9 +9,10 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline
-from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID
+from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
@@ -63,6 +64,7 @@ class FakeFeishu:
     def __init__(self,records=()):
         self.records={r["record_id"]:copy.deepcopy(r) for r in records}; self.creates=0; self.fail_after_create=False; self.fail_after_delete=False; self.list_calls=0
         self.batch_create_calls=0; self.batch_update_calls=0; self.fail_after_batch_create=False; self.fail_after_batch_update=False
+        self.attachments={}
     def list_all(self,path="records"): self.list_calls+=1; return copy.deepcopy(list(self.records.values()))
     def ensure_fields(self): return True
     def get(self,rid): return copy.deepcopy(self.records[rid])
@@ -88,6 +90,11 @@ class FakeFeishu:
     def delete(self,rid):
         self.records.pop(rid)
         if self.fail_after_delete: raise TimeoutError("delete response lost")
+    def upload_attachment(self,path,file_name):
+        token="fileEvidence"+str(len(self.attachments)+1).zfill(12)
+        self.attachments[token]=Path(path).read_bytes()
+        return token
+    def download_attachment(self,token): return self.attachments[token]
 
 class FakeExportFeishu:
     def __init__(self):
@@ -165,6 +172,11 @@ class CabinetPowerTests(unittest.TestCase):
         remote.create({"机架":"A01"},"manual_operation_123456")
         token=captured["params"]["client_token"]
         self.assertEqual((captured["method"],captured["path"],uuid.UUID(token).version),("POST","records",4))
+
+    def test_attachment_readback_checks_file_tokens(self):
+        expected={"上下电确认截图":[{"file_token":"fileEvidence12345"}]}
+        self.assertFalse(equivalent(expected,{"上下电确认截图":[]}))
+        self.assertTrue(equivalent(expected,{"上下电确认截图":[{"file_token":"fileEvidence12345","name":"proof.png"}]}))
 
     def test_export_attachment_uses_archive_base_parent(self):
         path=Path(self.tmp.name)/"sample.xlsm"; path.write_bytes(b"export")
@@ -549,6 +561,371 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(self.service.overview("A")["record_count"],count_a)
         self.assertEqual(next(op for op in self.service._snapshot("D")["operations"] if op["record_id"]==before_d["record_id"])["groups"],before_d["groups"])
         self.assertNotIn(next(row["record_id"] for row in undone["rows"] if row["scope"]=="A"),self.remote.records)
+
+    def test_rolled_back_rows_can_be_confirmed_with_new_operation_ids(self):
+        batch=self.service.batches.create_manual(
+            [self._manual_batch_row(scope,"2026-09-14 01:02:03") for scope in ("A","D")],"owner"
+        )
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A","D"])
+        first=self._wait_batch(batch["batch_id"])
+        old_ids={row["scope"]:row["operation_id"] for row in first["rows"]}
+        self.service.batches.rollback(batch["batch_id"],{"version":first["version"],"all":True},"owner",["A","D"])
+        undone=self._wait_batch(batch["batch_id"])
+        self.assertEqual(undone["stats"]["confirmable"],2)
+        self.service.batches.confirm(batch["batch_id"],{"version":undone["version"],"all":True},"owner",["A","D"])
+        repeated=self._wait_batch(batch["batch_id"])
+        self.assertEqual(repeated["stats"]["completed"],2,repeated["rows"])
+        for row in repeated["rows"]:
+            self.assertNotEqual(row["operation_id"],old_ids[row["scope"]])
+            self.assertEqual(row["attempts"][0]["operation_id"],old_ids[row["scope"]])
+
+    def test_batch_image_reason_rollback_and_reconfirm(self):
+        from PIL import Image
+        rack=self.configs["A"]["inventory"][0]
+        actual="2026-09-14 01:02:03"
+        row={**self._manual_batch_row("A",actual),"result":"失败","failure_reason":""}
+        batch=self.service.batches.create_manual([row],"owner")
+        self.assertIn("failure_reason",{issue["code"] for issue in batch["rows"][0]["issues"]})
+        batch=self.service.batches.update(batch["batch_id"],{"version":batch["version"],"rows":[{"row_id":batch["rows"][0]["row_id"],"failure_reason":"现场核验未通过"}]},"owner",["A"])
+        self.assertEqual(batch["stats"]["confirmable"],1)
+        image=Image.new("RGB",(160,80),"white"); output=io.BytesIO(); image.save(output,format="PNG")
+        candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                   "action":"上正式电","expected":actual,"actual":actual}
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+            batch=self.service.batches.add_images(batch["batch_id"],[("proof.png",output.getvalue())],"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
+        batch=self.service.batches.get(batch["batch_id"])
+        self.assertEqual(batch["images"][0]["suggestions"][0]["status"],"applied")
+        image_id=batch["images"][0]["image_id"]
+        self.assertEqual(batch["rows"][0]["evidence_images"],[image_id])
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],1,done["rows"])
+        record_id=done["rows"][0]["record_id"]
+        saved=self.remote.get(record_id)["fields"]
+        self.assertEqual(saved["失败原因"],"现场核验未通过")
+        self.assertEqual(len(saved["上下电确认截图"]),1)
+        self.assertEqual(self.service.evidence_path("A",record_id,image_id)[0].read_bytes(),output.getvalue())
+        local_image=self.service.evidence_path("A",record_id,image_id)[0]
+        local_image.unlink()
+        self.assertEqual(self.service.evidence_path("A",record_id,image_id)[0].read_bytes(),output.getvalue())
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A"])
+        undone=self._wait_batch(batch["batch_id"])
+        self.assertEqual(undone["stats"]["rolled_back"],1,undone["rows"])
+        self.service.batches.confirm(batch["batch_id"],{"version":undone["version"],"all":True},"owner",["A"])
+        again=self._wait_batch(batch["batch_id"])
+        self.assertEqual(again["stats"]["completed"],1,again["rows"])
+        self.assertEqual(len(self.remote.attachments),1)
+        self.assertEqual(self.remote.get(again["rows"][0]["record_id"])["fields"]["上下电确认截图"],saved["上下电确认截图"])
+
+    def test_existing_cloud_attachment_is_preserved_on_group_update(self):
+        rack=self.configs["D"]["inventory"][0]
+        existing=next(op for op in self.service._snapshot("D")["operations"] if (op["room"],op["rack"])==(rack["room"],rack["rack"]))
+        operation=copy.deepcopy(existing)
+        operation["raw_fields"]["上下电确认截图"]=[{"file_token":"fileOldEvidence123"}]
+        operation["groups"].append({"id":"event_new","action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功","evidence_images":[{"image_id":"a"*64,"file_token":"fileNewEvidence123","extension":".png"}]})
+        fields=to_fields(operation)
+        self.assertEqual({item["file_token"] for item in fields["上下电确认截图"]},{"fileOldEvidence123","fileNewEvidence123"})
+
+    def test_one_image_can_fill_multiple_existing_batch_rows_without_overwriting(self):
+        from PIL import Image
+        racks=self.configs["A"]["inventory"][:2]
+        rows=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
+               "action":"上正式电","expected":"","actual":"","result":"成功"} for rack in racks]
+        rows[1]["expected"]="2026-09-13 01:00:00"
+        batch=self.service.batches.create_manual(rows,"owner")
+        image=Image.new("RGB",(160,80),"white"); output=io.BytesIO(); image.save(output,format="PNG")
+        candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                     "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:03:04"} for rack in racks]
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=candidates):
+            self.service.batches.add_images(batch["batch_id"],[("both.png",output.getvalue())],"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
+        result=self.service.batches.get(batch["batch_id"])
+        self.assertEqual(result["rows"][0]["expected"],candidates[0]["expected"])
+        self.assertEqual(result["rows"][0]["actual"],candidates[0]["actual"])
+        self.assertEqual(result["rows"][0]["evidence_images"],[result["images"][0]["image_id"]])
+        self.assertEqual(result["rows"][1]["expected"],"2026-09-13 01:00:00")
+        self.assertEqual(result["rows"][1]["actual"],"")
+        self.assertEqual(result["images"][0]["suggestions"][1]["status"],"needs_review")
+        self.assertEqual(len(result["rows"]),2)
+
+    def test_pending_image_recognition_resumes_after_restart(self):
+        batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        image_id="a"*64
+        self.service.batches._change(batch["batch_id"],lambda current:current.setdefault("images",[]).append(
+            {"image_id":image_id,"name":"proof.png","extension":".png","status":"recognizing","suggestions":[]}
+        ))
+        self.service.batches.shutdown(wait=True)
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[]):
+            self.service._batches=CabinetBatchService(self.service,self.service.root)
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
+        image=self.service.batches.get(batch["batch_id"])["images"][0]
+        self.assertEqual(image["status"],"failed")
+
+    def test_de_history_keeps_evidence_group_and_rollback_removes_new_attachment(self):
+        from PIL import Image
+        rack=self.configs["D"]["inventory"][0]
+        original=copy.deepcopy(next(op for op in self.service._snapshot("D")["operations"] if (op["room"],op["rack"])==(rack["room"],rack["rack"])))
+        row=self._manual_batch_row("D","2026-09-14 01:02:03")
+        batch=self.service.batches.create_manual([row],"owner")
+        image=Image.new("RGB",(80,60),"white"); output=io.BytesIO();image.save(output,format="PNG")
+        candidate={"scope":"D","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                   "action":"上正式电","expected":row["expected"],"actual":row["actual"]}
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+            self.service.batches.add_images(batch["batch_id"],[("proof.png",output.getvalue())],"owner",["D"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
+        batch=self.service.batches.get(batch["batch_id"])
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["D"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],1,done["rows"])
+        saved=next(op for op in self.service._snapshot("D")["operations"] if op["record_id"]==original["record_id"])
+        self.assertEqual(len(saved["groups"]),len(original["groups"])+1)
+        self.assertTrue(any(group.get("evidence_images") for group in saved["groups"]))
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["D"])
+        undone=self._wait_batch(batch["batch_id"])
+        self.assertEqual(undone["stats"]["rolled_back"],1,undone["rows"])
+        restored=next(op for op in self.service._snapshot("D")["operations"] if op["record_id"]==original["record_id"])
+        self.assertEqual(restored["groups"],original["groups"])
+        self.assertFalse(self.remote.get(original["record_id"])["fields"].get("上下电确认截图"))
+
+    def test_pasted_image_can_be_removed_before_write_or_after_rollback(self):
+        from PIL import Image
+        rack=self.configs["A"]["inventory"][0]
+        row=self._manual_batch_row("A","2026-09-14 01:02:03")
+        batch=self.service.batches.create_manual([row],"owner")
+        output=io.BytesIO();Image.new("RGB",(80,60),"white").save(output,format="PNG")
+        candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                   "action":row["action"],"expected":row["expected"],"actual":row["actual"]}
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+            for attempt in range(2):
+                self.service.batches.add_images(batch["batch_id"],[("pasted.png",output.getvalue())],"owner",["A"])
+                deadline=time.time()+5
+                while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
+                batch=self.service.batches.get(batch["batch_id"])
+                image_id=batch["images"][0]["image_id"]
+                self.assertEqual(batch["rows"][0]["evidence_images"],[image_id])
+                if attempt==0:
+                    with self.assertRaises(CabinetError):
+                        self.service.batches.delete_image(batch["batch_id"],image_id,batch["version"],"other",["A"])
+                    with self.assertRaises(CabinetError):
+                        self.service.batches.delete_image(batch["batch_id"],image_id,batch["version"]-1,"owner",["A"])
+                    removed=self.service.batches.delete_image(batch["batch_id"],image_id,batch["version"],"owner",["A"])
+                    self.assertTrue(removed["images"][0]["deleted_at"])
+                    self.assertEqual(removed["rows"][0]["evidence_images"],[])
+                    self.assertTrue((self.service.root/"evidence"/(image_id+".png")).is_file())
+                    restored=self.service.batches.restore_image(batch["batch_id"],image_id,removed["version"],"owner",["A"])
+                    self.assertFalse(restored["images"][0]["deleted_at"])
+                    self.assertEqual(restored["rows"][0]["evidence_images"],[image_id])
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],1,done["rows"])
+        with self.assertRaisesRegex(CabinetError,"先回退"):
+            self.service.batches.delete_image(batch["batch_id"],image_id,done["version"],"owner",["A"])
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A"])
+        undone=self._wait_batch(batch["batch_id"])
+        removed=self.service.batches.delete_image(batch["batch_id"],image_id,undone["version"],"owner",["A"])
+        self.assertEqual(removed["rows"][0]["evidence_images"],[])
+        restored=self.service.batches.restore_image(batch["batch_id"],image_id,removed["version"],"owner",["A"])
+        self.assertEqual(restored["rows"][0]["evidence_images"],[image_id])
+
+    def test_image_registration_creates_rows_then_uses_existing_confirm_flow(self):
+        from PIL import Image
+        racks=self.configs["A"]["inventory"][:2]
+        batch=self.service.batches.create_image_batch("owner",["A"])
+        self.assertEqual((batch["source"],batch["rows"]),("image",[]))
+        content=io.BytesIO();Image.new("RGB",(160,80),"white").save(content,format="PNG")
+        states={(item["room"],item["rack"]):item["state"] for item in self.service.overview("A")["racks"]}
+        candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                     "action":{"formal":"下正式电","test":"下测试电"}.get(states.get((rack["room"],rack["rack"])),"上正式电"),"expected":"2026-09-14 01:02:03",
+                     "actual":"2026-09-14 01:02:03","result":""} for rack in racks]
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=candidates):
+            self.service.batches.add_images(batch["batch_id"],[("mail.png",content.getvalue())],"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
+        batch=self.service.batches.get(batch["batch_id"])
+        self.assertEqual(len(batch["rows"]),2)
+        image_id=batch["images"][0]["image_id"]
+        self.assertEqual({row["evidence_images"][0] for row in batch["rows"]},{image_id})
+        self.assertEqual([row["rack_type"] for row in batch["rows"]],[rack["rack_type"] for rack in racks])
+        self.assertEqual(batch["stats"]["confirmable"],0)
+        removed=self.service.batches.delete_image(batch["batch_id"],image_id,batch["version"],"owner",["A"])
+        self.assertTrue(all(row["status"]=="excluded_image" for row in removed["rows"]))
+        batch=self.service.batches.restore_image(batch["batch_id"],image_id,removed["version"],"owner",["A"])
+        self.assertEqual({row["evidence_images"][0] for row in batch["rows"]},{image_id})
+        with self.assertRaises(CabinetError):
+            self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        batch=self.service.batches.get(batch["batch_id"])
+        batch=self.service.batches.update(batch["batch_id"],{"version":batch["version"],"rows":[
+            {"row_id":row["row_id"],"result":"成功"} for row in batch["rows"]]},"owner",["A"])
+        self.assertEqual(batch["stats"]["confirmable"],2,batch["rows"])
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],2,done["rows"])
+        self.assertEqual(len(self.remote.attachments),1)
+        for row in done["rows"]:
+            self.assertEqual(len(self.remote.get(row["record_id"])["fields"]["上下电确认截图"]),1)
+
+    def test_image_registration_keeps_out_of_scope_candidates_unsubmitted(self):
+        from PIL import Image
+        batch=self.service.batches.create_image_batch("owner",["A"])
+        content=io.BytesIO();Image.new("RGB",(80,60),"white").save(content,format="PNG")
+        rack=self.configs["B"]["inventory"][0]
+        candidate={"scope":"B","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                   "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"}
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+            self.service.batches.add_images(batch["batch_id"],[("wrong-building.png",content.getvalue())],"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
+        batch=self.service.batches.get(batch["batch_id"])
+        self.assertEqual(batch["rows"],[])
+        self.assertEqual(batch["images"][0]["suggestions"][0]["status"],"unauthorized")
+
+    def test_image_registration_keeps_distinct_events_for_same_cabinet(self):
+        from PIL import Image
+        rack=self.configs["A"]["inventory"][0]
+        batch=self.service.batches.create_image_batch("owner",["A"])
+        files=[]
+        for color in ("white","gray"):
+            content=io.BytesIO();Image.new("RGB",(80,60),color).save(content,format="PNG")
+            files.append((color+".png",content.getvalue()))
+        candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                     "action":"上正式电","expected":stamp,"actual":stamp,"result":"成功"}
+                    for stamp in ("2026-09-14 01:02:03","2026-09-15 01:02:03")]
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",side_effect=[[item] for item in candidates]):
+            self.service.batches.add_images(batch["batch_id"],files,"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and any(item["status"]=="recognizing" for item in self.service.batches.get(batch["batch_id"])["images"]):time.sleep(.01)
+        result=self.service.batches.get(batch["batch_id"])
+        self.assertEqual(len(result["rows"]),2)
+        self.assertEqual({row["actual"] for row in result["rows"]},{item["actual"] for item in candidates})
+        self.assertEqual({row["evidence_images"][0] for row in result["rows"]},{item["image_id"] for item in result["images"]})
+
+    def test_todo_batch_list_and_badge_are_scoped_to_building(self):
+        a=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        b=self.service.batches.create_manual([self._manual_batch_row("B","2026-09-14 01:02:03")],"owner")
+        pending_a=self.service.batches.list("owner",["A","B"],scope="A",status="todo")
+        pending_b=self.service.batches.list("owner",["A","B"],scope="B",status="todo")
+        self.assertEqual(([item["batch_id"] for item in pending_a["items"]],pending_a["pending_count"]),([a["batch_id"]],1))
+        self.assertEqual(([item["batch_id"] for item in pending_b["items"]],pending_b["pending_count"]),([b["batch_id"]],1))
+        image=self.service.batches.create_image_batch("owner",["A","B"],"A")
+        self.assertEqual(self.service.batches.list("owner",["A","B"],scope="A",status="todo")["pending_count"],2)
+        self.assertNotIn(image["batch_id"],[item["batch_id"] for item in self.service.batches.list("owner",["A","B"],scope="B")["items"]])
+        mixed=self.service.batches.create_manual([self._manual_batch_row(scope,"2026-09-14 01:05:03") for scope in ("A","B")],"owner")
+        limited=next(item for item in self.service.batches.list("viewer",["A"],scope="A")["items"] if item["batch_id"]==mixed["batch_id"])
+        self.assertEqual((limited["scopes"],limited["stats"]["total"],limited["pending_rows"]),(["A"],1,1))
+        self.service.batches.confirm(a["batch_id"],{"version":a["version"],"all":True},"owner",["A"])
+        self._wait_batch(a["batch_id"])
+        self.assertEqual(self.service.batches.list("owner",["A","B"],scope="A",status="todo")["pending_count"],2)
+
+    def test_cancelled_batch_detail_and_selected_restore_stay_consistent(self):
+        racks=self.configs["A"]["inventory"][:2]
+        rows=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
+               "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"}
+              for rack in racks]
+        batch=self.service.batches.create_manual(rows,"owner")
+        cancelled=self.service.batches.cancel(batch["batch_id"],"owner",expected_version=batch["version"])
+        self.assertEqual(cancelled["status"],"cancelled")
+        self.assertEqual([row["status"] for row in self.service.batches.get(batch["batch_id"])["rows"]],["excluded_cancelled"]*2)
+        listing=self.service.batches.list("owner",["A"],scope="A")
+        self.assertEqual(next(item for item in listing["items"] if item["batch_id"]==batch["batch_id"])["status"],"cancelled")
+        self.assertTrue(all(row["restorable"] for row in self.service.batches.visible(cancelled,"owner",["A"])["rows"]))
+        first=cancelled["rows"][0]["row_id"]
+        restored=self.service.batches.restore_rows(batch["batch_id"],{"version":cancelled["version"],"row_ids":[first]},"owner",["A"])
+        self.assertEqual(restored["status"],"pending")
+        self.assertEqual([row["status"] for row in restored["rows"]],["ready","excluded_cancelled"])
+        self.assertEqual(self.service.batches.list("owner",["A"],scope="A",status="todo")["pending_count"],1)
+        restored=self.service.batches.restore_rows(batch["batch_id"],{"version":restored["version"],"row_ids":[restored["rows"][1]["row_id"]]},"owner",["A"])
+        self.assertEqual([row["status"] for row in restored["rows"]],["ready","ready"])
+
+    def test_cancel_during_image_ocr_does_not_recreate_rows(self):
+        from PIL import Image
+        batch=self.service.batches.create_image_batch("owner",["A"])
+        content=io.BytesIO();Image.new("RGB",(80,60),"white").save(content,format="PNG")
+        rack=self.configs["A"]["inventory"][0]
+        candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                   "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"}
+        entered=threading.Event();release=threading.Event()
+        def slow_ocr(_content):
+            entered.set();release.wait(5);return [candidate]
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",side_effect=slow_ocr):
+            self.service.batches.add_images(batch["batch_id"],[("mail.png",content.getvalue())],"owner",["A"])
+            self.assertTrue(entered.wait(5))
+            current=self.service.batches.get(batch["batch_id"])
+            cancelled=self.service.batches.cancel(batch["batch_id"],"owner",expected_version=current["version"])
+            release.set()
+            self.service.batches._parse_pool.shutdown(wait=True)
+        final=self.service.batches.get(batch["batch_id"])
+        self.assertEqual((cancelled["status"],final["status"],final["rows"],final["images"][0]["status"]),
+                         ("cancelled","cancelled",[],"cancelled"))
+
+    def test_cancel_rejects_unverified_write(self):
+        batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        def pending(current):current["rows"][0].update(status="failed",operation_started=True)
+        batch=self.service.batches._change(batch["batch_id"],pending)
+        with self.assertRaisesRegex(CabinetError,"未核验"):
+            self.service.batches.cancel(batch["batch_id"],"owner",expected_version=batch["version"])
+
+    def test_cancel_then_restore_preserves_rolled_back_attempt(self):
+        batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        self.service.batches.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A"])
+        undone=self._wait_batch(batch["batch_id"])
+        old_id=undone["rows"][0]["operation_id"]
+        cancelled=self.service.batches.cancel(batch["batch_id"],"owner",expected_version=undone["version"])
+        self.assertEqual(cancelled["rows"][0]["status"],"excluded_cancelled")
+        restored=self.service.batches.restore_rows(batch["batch_id"],{"version":cancelled["version"],"row_ids":[cancelled["rows"][0]["row_id"]]},"owner",["A"])
+        self.assertEqual(restored["rows"][0]["status"],"rolled_back")
+        self.service.batches.confirm(batch["batch_id"],{"version":restored["version"],"all":True},"owner",["A"])
+        again=self._wait_batch(batch["batch_id"])
+        self.assertEqual(again["stats"]["completed"],1,again["rows"])
+        self.assertNotEqual(again["rows"][0]["operation_id"],old_id)
+
+    def test_image_registration_validates_sequential_events_on_same_cabinet(self):
+        from PIL import Image
+        rack=self.configs["A"]["inventory"][0]
+        current=next(item for item in self.service.overview("A")["racks"] if (item["room"],item["rack"])==(rack["room"],rack["rack"]))
+        first,second={"formal":("下正式电","上正式电"),"test":("下测试电","上测试电"),"off":("上正式电","下正式电")}[current["state"]]
+        candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                     "action":action,"expected":stamp,"actual":stamp,"result":"成功"}
+                    for action,stamp in ((first,"2026-09-18 00:01:00"),(second,"2026-09-18 00:02:00"))]
+        files=[]
+        for color in ("white","gray"):
+            content=io.BytesIO();Image.new("RGB",(80,60),color).save(content,format="PNG")
+            files.append((color+".png",content.getvalue()))
+        batch=self.service.batches.create_image_batch("owner",["A"])
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",side_effect=[[item] for item in candidates]):
+            self.service.batches.add_images(batch["batch_id"],files,"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and any(item["status"]=="recognizing" for item in self.service.batches.get(batch["batch_id"])["images"]):time.sleep(.01)
+        result=self.service.batches.get(batch["batch_id"])
+        self.assertEqual(result["stats"]["confirmable"],2,result["rows"])
+        self.assertEqual(result["rows"][1]["current_power_state"],{"下正式电":"off","下测试电":"off","上正式电":"formal"}[first])
+
+    def test_deleted_photo_cannot_be_restored_into_completed_record(self):
+        from PIL import Image
+        rack=self.configs["A"]["inventory"][0]
+        row=self._manual_batch_row("A","2026-09-14 01:02:03")
+        batch=self.service.batches.create_manual([row],"owner")
+        content=io.BytesIO();Image.new("RGB",(80,60),"white").save(content,format="PNG")
+        candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
+                   "action":row["action"],"expected":row["expected"],"actual":row["actual"]}
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+            self.service.batches.add_images(batch["batch_id"],[("proof.png",content.getvalue())],"owner",["A"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
+        batch=self.service.batches.get(batch["batch_id"])
+        image_id=batch["images"][0]["image_id"]
+        removed=self.service.batches.delete_image(batch["batch_id"],image_id,batch["version"],"owner",["A"])
+        self.service.batches.confirm(batch["batch_id"],{"version":removed["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],1,done["rows"])
+        with self.assertRaisesRegex(CabinetError,"先回退"):
+            self.service.batches.restore_image(batch["batch_id"],image_id,done["version"],"owner",["A"])
 
     def test_batch_confirm_uses_one_cloud_write_per_building_and_rolls_back(self):
         rows=[]

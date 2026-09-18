@@ -3,6 +3,7 @@ import asyncio
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 from .cabinet_power import CabinetPowerService
+from .cabinet_power_batches import MAX_FILE_BYTES, MAX_TOTAL_BYTES
 from .cabinet_power_excel import CabinetError, TOTALS
 from pathlib import Path
 
@@ -43,13 +44,17 @@ def install_cabinet_power_routes(app,controller,runtime):
                     data=service.batches.visible(data,owner,allowed,admin)
                     response=controller._json_ok(request,session,data); response.status_code=202
                     return response
-                payload=await controller._read_json_request(request,max_bytes=4*1024*1024) if request.method in ("POST","PATCH") else {}
+                payload=await controller._read_json_request(request,max_bytes=4*1024*1024) if request.method in ("POST","PATCH") and not (path.endswith("/images") and request.method=="POST") else {}
                 if path=="batches":
                     if request.method=="POST":
-                        rows=payload.get("rows",[])
-                        requested={str(row.get("scope") or "").upper().replace("楼","") for row in rows if isinstance(row,dict)}
-                        if not admin and not requested<=set(allowed): raise CabinetError("批量内容包含无权操作的楼栋",403)
-                        data=await asyncio.to_thread(service.batches.create_manual,rows,owner)
+                        if payload.get("source")=="image":
+                            if payload.get("rows"): raise CabinetError("图片识别批次不能预置机柜记录",400)
+                            data=await asyncio.to_thread(service.batches.create_image_batch,owner,allowed,payload.get("scope"))
+                        else:
+                            rows=payload.get("rows",[])
+                            requested={str(row.get("scope") or "").upper().replace("楼","") for row in rows if isinstance(row,dict)}
+                            if not admin and not requested<=set(allowed): raise CabinetError("批量内容包含无权操作的楼栋",403)
+                            data=await asyncio.to_thread(service.batches.create_manual,rows,owner)
                         data=service.batches.visible(data,owner,allowed,admin)
                     else:
                         data=await asyncio.to_thread(service.batches.list,owner,allowed,admin,str(query.get("scope") or ""),str(query.get("status") or ""),str(query.get("from") or ""),str(query.get("to") or ""),query.get("page",1),query.get("page_size",20))
@@ -57,6 +62,37 @@ def install_cabinet_power_routes(app,controller,runtime):
                 parts=path.split("/")
                 if len(parts)<2: raise CabinetError("接口不存在",404)
                 batch_id=parts[1]
+                if len(parts)==3 and parts[2]=="images" and request.method=="POST":
+                    try:
+                        form=await request.form(max_files=10,max_fields=20,max_part_size=MAX_FILE_BYTES)
+                    except TypeError:
+                        form=await request.form(max_files=10,max_fields=20)
+                    uploads=form.getlist("files")
+                    files=[]; total=0
+                    for upload in uploads:
+                        if not getattr(upload,"filename","") or not hasattr(upload,"read"): continue
+                        try: content=await upload.read(MAX_FILE_BYTES+1)
+                        finally: await upload.close()
+                        total+=len(content)
+                        if len(content)>MAX_FILE_BYTES or total>MAX_TOTAL_BYTES: raise CabinetError("截图超出单张10MiB或每次30MiB限制",413)
+                        files.append((upload.filename,content))
+                    data=await asyncio.to_thread(service.batches.add_images,batch_id,files,owner,allowed,admin)
+                    response=controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
+                    response.status_code=202
+                    return response
+                if len(parts)==4 and parts[2]=="images" and request.method=="GET":
+                    file_path,image=await asyncio.to_thread(service.batches.image_path,batch_id,parts[3],owner,allowed,admin)
+                    media_type={".jpg":"image/jpeg",".png":"image/png",".webp":"image/webp"}.get(image["extension"],"application/octet-stream")
+                    return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=3600", "X-Content-Type-Options":"nosniff"})
+                if len(parts)==4 and parts[2]=="images" and request.method=="DELETE":
+                    data=await asyncio.to_thread(service.batches.delete_image,batch_id,parts[3],query.get("version"),owner,allowed,admin)
+                    return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
+                if len(parts)==5 and parts[2]=="images" and parts[4]=="apply" and request.method=="POST":
+                    data=await asyncio.to_thread(service.batches.apply_image,batch_id,parts[3],payload,owner,allowed,admin)
+                    return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
+                if len(parts)==5 and parts[2]=="images" and parts[4]=="restore" and request.method=="POST":
+                    data=await asyncio.to_thread(service.batches.restore_image,batch_id,parts[3],payload.get("version"),owner,allowed,admin)
+                    return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
                 if len(parts)==4 and parts[2]=="files" and request.method=="GET":
                     file_path,filename=await asyncio.to_thread(service.batches.file_path,batch_id,parts[3],owner,admin)
                     return FileResponse(file_path,filename=filename,media_type="application/pdf",headers={"Cache-Control":"no-store"})
@@ -73,8 +109,10 @@ def install_cabinet_power_routes(app,controller,runtime):
                     data=await asyncio.to_thread(service.batches.confirm,batch_id,payload,owner,allowed,admin)
                 elif len(parts)==3 and parts[2]=="rollback":
                     data=await asyncio.to_thread(service.batches.rollback,batch_id,payload,owner,allowed,admin)
+                elif len(parts)==3 and parts[2]=="restore-rows":
+                    data=await asyncio.to_thread(service.batches.restore_rows,batch_id,payload,owner,allowed,admin)
                 elif len(parts)==3 and parts[2]=="cancel":
-                    data=await asyncio.to_thread(service.batches.cancel,batch_id,owner,admin)
+                    data=await asyncio.to_thread(service.batches.cancel,batch_id,owner,admin,payload.get("version"))
                 else: raise CabinetError("接口不存在",404)
                 return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
             if path=="buildings":
@@ -126,6 +164,10 @@ def install_cabinet_power_routes(app,controller,runtime):
             elif path=="racks": data=await asyncio.to_thread(service.racks,scope)
             elif path.startswith("rooms/") and path.endswith("/layout"): data=await asyncio.to_thread(service.layout,scope,path.split("/")[1])
             elif path=="operations" and request.method=="GET": data=await asyncio.to_thread(service.operations,scope,query)
+            elif path.startswith("operations/") and path.count("/")==3 and "/evidence/" in path and request.method=="GET":
+                _,record_id,_,image_id=path.split("/")
+                file_path,media_type=await asyncio.to_thread(service.evidence_path,scope,record_id,image_id)
+                return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=3600","X-Content-Type-Options":"nosniff"})
             elif (path=="operations" and request.method=="POST") or (path.startswith("operations/") and request.method=="PATCH"):
                 rid=path.split("/")[1] if "/" in path else ""
                 data=await asyncio.to_thread(service.save_operation,scope,payload,owner,rid,can_move_scope=bool(admin and payload.get("confirm_scope_move") is True),defer=query.get('defer')=='1')
@@ -141,10 +183,14 @@ def install_cabinet_power_routes(app,controller,runtime):
     for path,methods in {
         "batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
         "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],"batches/{batch_id}/rollback":["POST"],
-        "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
+        "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/restore-rows":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
+        "batches/{batch_id}/images":["POST"],"batches/{batch_id}/images/{image_id}":["GET","DELETE"],
+        "batches/{batch_id}/images/{image_id}/apply":["POST"],
+        "batches/{batch_id}/images/{image_id}/restore":["POST"],
         "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],
-        "operations":["GET","POST"],"operations/{record_id}":["PATCH"],"refresh":["POST"],
+        "operations":["GET","POST"],"operations/{record_id}":["PATCH"],
+        "operations/{record_id}/evidence/{image_id}":["GET"],"refresh":["POST"],
         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],
         "writes/{operation_id}/reconcile":["POST"],

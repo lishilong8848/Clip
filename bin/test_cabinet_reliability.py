@@ -277,7 +277,10 @@ class CabinetReliabilityTests(unittest.TestCase):
     def test_failed_latest_operation_keeps_last_success(self):
         rack=next(r for r in self.service.overview('D')['racks'] if r['state']=='formal')
         old=next(o for o in self.service.snapshot('D')['operations'] if (o['room'],o['rack'])==(rack['room'],rack['rack']))
-        groups=[{'id':'new_failed_event','action':'下正式电','actual':'2026-09-09 12:00:00','expected':'','result':'失败'},*old['groups']]
+        groups=[{'id':'new_failed_event','action':'下正式电','actual':'2026-09-09 12:00:00','expected':'','result':'失败','failure_reason':'现场测试未通过'},*old['groups']]
+        missing_reason=copy.deepcopy(groups);missing_reason[0].pop('failure_reason')
+        with self.assertRaisesRegex(CabinetError,'失败原因'):
+            self.service.save_operation('D',self.payload(old,groups=missing_reason),'owner',old['record_id'])
         self.service.save_operation('D',self.payload(old,groups=groups),'owner',old['record_id'])
         actual=next(r for r in self.service.overview('D')['racks'] if (r['room'],r['rack'])==(rack['room'],rack['rack']))
         self.assertEqual(actual['state'],'formal'); self.assertEqual(actual['last_operation'],rack['last_operation'])

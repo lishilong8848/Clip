@@ -6,7 +6,7 @@
       <div class="actions">
         <button :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
         <button @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
-        <button @click="navigate('/cabinet-power/batches' + (scope ? '?scope=' + scope : ''))"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount" class="count-badge">{{ batchPendingCount }}</span></button>
+        <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount" class="count-badge">{{ batchPendingCount }}</span></button>
         <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy" @click="startAllExports"><CloudUpload :size="16" />一键导出/上传所有楼栋</button>
         <template v-if="scope">
           <a v-if="overview.table_url" :href="overview.table_url" target="_blank" rel="noopener"><ExternalLink :size="16" />多维表</a>
@@ -116,7 +116,7 @@
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
             <div class="section-title"><strong>{{ op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="openEditor(op)">编辑</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
-            <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl></li></ol>
+            <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
             <details v-if="op.issues.length"><summary>原始操作内容</summary><div v-for="(group, i) in op.groups" :key="i" class="raw-group"><div><small>操作类型</small><pre>{{ group.action }}</pre></div><div><small>期望完成时间</small><pre>{{ group.expected || '未填写' }}</pre><small>实际完成时间</small><pre>{{ group.actual || '未填写' }}</pre></div></div></details>
           </article>
@@ -140,7 +140,13 @@
             </div>
             <div class="section-title"><h3>{{ form.source || '操作明细' }}</h3><button type="button" @click="form.groups.push(newGroup())"><Plus :size="16" />添加一组</button></div>
             <div v-for="(group, i) in editableGroups" :key="group.id || i" class="group-editor" :class="{ 'current-operation': ['D','E'].includes(scope) && i === 0, 'history-operation': ['D','E'].includes(scope) && i > 0 }">
-              <b>{{ editorGroupLabel(group, i) }}</b><label>操作类型<select v-if="!group.action || actionOptions.includes(group.action)" v-model="group.action" :disabled="!!form.target_state && group._editing"><option value="">未填写</option><option v-for="action in actionOptions" :key="action">{{ action }}</option></select><textarea v-else v-model="group.action" rows="2" :disabled="!!form.target_state && group._editing" /></label><label>期望完成时间<input v-if="singleDate(group.expected)" v-model="group.expected" type="datetime-local" step="1" /><textarea v-else v-model="group.expected" rows="2" /></label><label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label><label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label><button type="button" title="移除此组" aria-label="移除此组" :disabled="!!form.target_state && group._editing" @click="removeGroup(group)"><Trash2 :size="16" /></button>
+              <b>{{ editorGroupLabel(group, i) }}</b>
+              <label>操作类型<select v-if="!group.action || actionOptions.includes(group.action)" v-model="group.action" :disabled="!!form.target_state && group._editing"><option value="">未填写</option><option v-for="action in actionOptions" :key="action">{{ action }}</option></select><textarea v-else v-model="group.action" rows="2" :disabled="!!form.target_state && group._editing" /></label>
+              <label>期望完成时间<input v-if="singleDate(group.expected)" v-model="group.expected" type="datetime-local" step="1" /><textarea v-else v-model="group.expected" rows="2" /></label>
+              <label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label>
+              <label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label>
+              <button type="button" title="移除此组" aria-label="移除此组" :disabled="!!form.target_state && group._editing" @click="removeGroup(group)"><Trash2 :size="16" /></button>
+              <div v-if="group.result === '失败' || imagesWithIds(group).length" class="group-evidence"><label v-if="group.result === '失败'">失败原因<input v-model="group.failure_reason" maxlength="1000" required placeholder="填写本次操作失败原因" /></label><div v-if="imagesWithIds(group).length" class="history-images"><button v-for="image in imagesWithIds(group)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + image.image_id.slice(0,8)" @click="previewEvidence = evidenceUrl(editingId,image.image_id)"><img :src="evidenceUrl(editingId,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></div>
             </div>
             <label v-if="form.original_scope && form.original_scope !== (form.scope || scope)" class="checkbox"><input v-model="form.confirm_scope_move" type="checkbox" required />将原 {{ form.original_scope }} 楼记录调整到 {{ form.scope }} 楼</label>
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
@@ -162,6 +168,7 @@
       @resolve="resolveDiscardConfirmation"
     />
     <ConfirmDialog :open="restoreDialogOpen" title="恢复未保存的机柜记录？" message="检测到上次未完成的填写。" confirm-label="恢复编辑" cancel-label="丢弃草稿" @resolve="restoreDraft" />
+    <div v-if="previewEvidence" class="evidence-preview" role="dialog" aria-modal="true" aria-label="上下电确认截图原图" @click.self="previewEvidence = ''"><button aria-label="关闭原图" @click="previewEvidence = ''"><X :size="20" /></button><img :src="previewEvidence" alt="上下电确认截图原图" /></div>
   </main>
 </template>
 
@@ -184,6 +191,7 @@ const draftStorage = resilientStorage('sessionStorage', storageFailed);
 const overview = ref<Dict>({}), buildings = ref<Dict[]>([]), loading = ref(false), error = ref(''), message = ref(''), bootstrap = ref<Dict>({});
 const batchPendingCount = ref(0);
 const batchCreateUrl = computed(() => `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? { scope:props.scope } : {}), mode:'new' })}`);
+function openTodoBatches():void{navigate(`/cabinet-power/batches?${new URLSearchParams({...(props.scope?{scope:props.scope}:{}),status:'todo'})}`);}
 const bootstrapActive = computed(() => ['starting','pending','running'].includes(String(bootstrap.value.status || '')));
 const bootstrapTarget = computed(() => props.scope ? (bootstrap.value.buildings || []).find((item: Dict) => item.scope === props.scope) : null);
 const bootstrapTargetReady = computed(() => props.scope ? bootstrapTarget.value?.status === 'succeeded' : bootstrap.value.status === 'succeeded');
@@ -255,7 +263,7 @@ async function load(): Promise<void> {
   catch (exc) { fail(exc); } finally { loading.value = false; }
   racksLoading.value = false;
 }
-async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1'})).pending_count || 0); } catch {} }
+async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1',...(props.scope?{scope:props.scope}:{})})).pending_count || 0); } catch {} }
 const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false);
 const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false);
 const allExportItems = ref<Dict[]>([]), allExportBusy = ref(false);
@@ -406,6 +414,9 @@ async function editIssue(id: string): Promise<void> {
   if (record) openEditor(record);
 }
 const editorOpen = ref(false), discardDialogOpen = ref(false), editingId = ref(''), saving = ref(false), saveError = ref(''), form = reactive<Dict>({});
+const previewEvidence = ref('');
+function imagesWithIds(value:Dict):Dict[] { return (value.evidence_images || []).filter((item:Dict)=>item && item.image_id); }
+function evidenceUrl(recordId:string,imageId:string):string { return `/api/cabinet-power/operations/${encodeURIComponent(recordId)}/evidence/${encodeURIComponent(imageId)}?scope=${encodeURIComponent(props.scope)}`; }
 const saveStatus = ref<Dict>({}), saveQueryError = ref(false);
 const saveStorageKey = 'cabinet-upload:' + (props.userId || 'session') + ':' + props.scope;
 let savePollTimer: number | undefined;
@@ -416,7 +427,7 @@ const saveStepLabel = computed(() => {
   return label + (s.elapsed_ms ? ' · ' + Math.floor(s.elapsed_ms/1000) + '秒' : '…');
 });
 const restoreDialogOpen = ref(false), discardMessage = ref('继续后，当前机柜记录中的修改会丢失。');
-const newGroup = (editing = true) => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', _editing: editing });
+const newGroup = (editing = true) => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', failure_reason: '', evidence_images: [], _editing: editing });
 const groupHasBusinessData = (group: Dict) => Boolean(group?.action || group?.expected || group?.actual);
 const editableGroups = computed(() => {
   const populated = (form.groups || []).filter((group: Dict) => groupHasBusinessData(group) || group?._editing);
@@ -528,6 +539,7 @@ function reconcilePending(id: string): void {
 async function showExports(): Promise<void> { try { exportList.value = (await read('export-history')).items; exportListOpen.value = true; } catch (e) { fail(e); } }
 function confirmCleanup(item: Dict): void { askDiscard(() => { void write('exports/' + item.export_id + '/cleanup', {}).then(showExports).catch(fail); }, '清理此导出文件后无法再次下载，机柜台账不受影响。'); }
 function keyboard(e: KeyboardEvent): void {
+  if (previewEvidence.value) { if (e.key === 'Escape') { e.preventDefault(); previewEvidence.value = ''; } else if (e.key === 'Tab') { e.preventDefault(); document.querySelector<HTMLElement>('.evidence-preview>button')?.focus(); } return; }
   if (!editorOpen.value && !historyOpen.value && !discardDialogOpen.value && !restoreDialogOpen.value) return;
   if (e.key === 'Escape') { e.preventDefault(); if (discardDialogOpen.value) resolveDiscardConfirmation(false); else if (restoreDialogOpen.value) restoreDraft(false); else if (editorOpen.value) closeEditor(); else historyOpen.value = false; return; }
   if (e.key !== 'Tab') return;
@@ -537,6 +549,7 @@ function keyboard(e: KeyboardEvent): void {
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
   if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
 }
+watch(previewEvidence,value=>{if(value)void nextTick(()=>document.querySelector<HTMLElement>('.evidence-preview>button')?.focus());});
 onMounted(async () => {
   window.addEventListener('keydown', keyboard);
   window.addEventListener('pagehide', flushDraft);
@@ -590,4 +603,15 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
   .pagination{flex-wrap:wrap;justify-content:center}
   .pagination>span:first-child{width:100%;margin:0;text-align:center}
 }
+.event-failure{margin:4px 0;color:#a93242;overflow-wrap:anywhere}
+.history-images{display:flex;gap:8px;flex-wrap:wrap}
+.history-images button{width:84px;height:66px;min-height:0;padding:0;overflow:hidden}
+.history-images img{width:100%;height:100%;object-fit:contain}
+.group-editor .group-evidence{grid-column:2/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0;padding-top:12px;border-top:1px solid #dce6f1}
+.group-editor .group-evidence label{display:flex;flex:1;align-items:center;flex-direction:row;gap:10px;min-width:240px;color:#61768b}
+.group-editor .group-evidence input{flex:1;min-width:0;width:min(480px,65vw)}
+@media(max-width:820px){.group-editor .group-evidence{grid-column:1/-1}.group-editor .group-evidence label{min-width:0;flex-wrap:wrap}.group-editor .group-evidence input{width:100%}}
+.evidence-preview{position:fixed;inset:0;z-index:300;display:grid;place-items:center;padding:52px 24px 24px;background:rgba(15,28,43,.86)}
+.evidence-preview img{max-width:100%;max-height:100%;object-fit:contain}
+.evidence-preview>button{position:absolute;right:20px;top:12px;width:38px;padding:0}
 </style>

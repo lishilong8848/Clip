@@ -306,6 +306,7 @@ SMOKE_IMPORT_MODULES = [
     "clipflow_backend.main",
     "clipflow_backend.process_controller",
     "lan_bitable_template_portal.cabinet_power_batches",
+    "lan_bitable_template_portal.cabinet_power_evidence",
     "pypdf",
     "lark_oapi",
 ]
@@ -1457,6 +1458,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "cabinet_power_evidence.py",
         PROJECT_ROOT / "bin" / "test_critical_guard.py",
         PROJECT_ROOT / "bin" / "test_notice_identity_boundaries.py",
         PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py",
