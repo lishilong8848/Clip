@@ -192,7 +192,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             group = service.get_group("rec-loop-test")
             self.assertEqual(len(group["steps"]), 10)
             self.assertEqual(group["steps"][-1]["step_key"], "1:10")
-            self.assertIn("第2组循环第1遍", group["steps"][-1]["content"])
+            self.assertIn("第3组循环第1遍", group["steps"][-1]["content"])
             self.assertEqual([group["steps"][i]["delay_reminder_minutes"] for i in (0, 2, 4, 9)], [1, 1, 1, 1])
             published = service.session(service.role_token("rec-loop-test", "operator"))
             self.assertEqual(published["work_orders"][0]["step_count"], 10)
@@ -203,6 +203,24 @@ class PollingWorkOrderTests(unittest.TestCase):
                 {**raw[0], "repeat_rules": [{"from_step_id": "one", "to_step_id": "two", "count": 1}]},
                 raw[1], raw[2],
             ])
+
+    def test_separate_maintenance_loops_keep_their_own_ranges_and_labels(self) -> None:
+        raw = [
+            {"step_id": str(i), "content": f"原第{i}步", "operator_required": True}
+            for i in range(1, 15)
+        ]
+        raw[5]["repeat_rules"] = [{"from_step_id": "1", "to_step_id": "6", "count": 4}]
+        raw[13]["repeat_rules"] = [{"from_step_id": "11", "to_step_id": "14", "count": 4}]
+        steps = PollingWorkOrderService._normalized_steps(raw, work_type="maintenance")
+        expanded = PollingWorkOrderService._expanded_steps(steps)
+        self.assertEqual(
+            [step["source_step_index"] for step in expanded],
+            list(range(1, 7)) + list(range(1, 7)) * 4
+            + list(range(7, 15)) + list(range(11, 15)) * 4,
+        )
+        self.assertEqual({step["repeat_rule_index"] for step in expanded[6:30]}, {1})
+        self.assertEqual({step["repeat_rule_index"] for step in expanded[38:]}, {2})
+        self.assertEqual(len(expanded), 54)
 
     def test_end_remains_blocked_until_all_reminders_expire(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1012,6 +1030,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("含设备指向，通用工单不可选", html)
         self.assertIn("polling-delay-toggle", html)
         self.assertIn("polling-loop-control", html)
+        self.assertIn("ruleLabel.textContent=`循环 ${globalRuleIndex}`", html)
         self.assertIn("row.replaceChildren(main", html)
         button_pattern = re.compile(
             r'<h2 class="inbox-title"><span>通告处理</span>'

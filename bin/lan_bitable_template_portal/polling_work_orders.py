@@ -954,9 +954,11 @@ class PollingWorkOrderService:
     def _expanded_steps(steps: list[dict]) -> list[dict]:
         positions = {str(step.get("step_id") or ""): index for index, step in enumerate(steps)}
         expanded: list[dict] = []
+        rule_number = 0
         for index, step in enumerate(steps):
             expanded.append({**copy.deepcopy(step), "source_step_index": index + 1, "repeat_round": 0})
-            for rule_index, rule in enumerate(step.get("repeat_rules") or [], start=1):
+            for rule in step.get("repeat_rules") or []:
+                rule_number += 1
                 start = positions[str(rule.get("from_step_id") or "")]
                 end = positions[str(rule.get("to_step_id") or "")]
                 for round_index in range(1, int(rule.get("count") or 0) + 1):
@@ -965,7 +967,7 @@ class PollingWorkOrderService:
                             **copy.deepcopy(steps[source_index]),
                             "source_step_index": source_index + 1,
                             "repeat_round": round_index,
-                            "repeat_rule_index": rule_index,
+                            "repeat_rule_index": rule_number,
                         })
         return expanded
 

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -32,6 +33,64 @@ def isolated_class(path, class_name, methods, namespace):
 
 
 class TransportSafetyTests(unittest.TestCase):
+    def test_sparse_patch_upload_and_existing_archive_validation(self):
+        def git(*args, cwd=None):
+            return subprocess.run(
+                ["git", *map(str, args)], cwd=cwd, check=True,
+                capture_output=True, text=True,
+            ).stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, source, build = (root / name for name in ("remote.git", "source", "build"))
+            git("init", "--bare", "--initial-branch=master", remote)
+            git("init", "-b", "master", source)
+            git("-C", source, "config", "user.name", "Package Test")
+            git("-C", source, "config", "user.email", "package@example.invalid")
+            patches = source / "updates" / "patches"
+            patches.mkdir(parents=True)
+            for stamp in ("100000", "110000", "120000"):
+                (patches / f"ClipFlow_V2_20260917_{stamp}_patch_only.zip").write_bytes(b"old")
+            (patches / "ClipFlow_patch_only.zip").write_bytes(b"legacy")
+            (source / "updates" / "latest_patch.json").write_text("old", encoding="utf-8")
+            git("-C", source, "add", ".")
+            git("-C", source, "commit", "-m", "initial")
+            git("-C", source, "remote", "add", "origin", remote)
+            git("-C", source, "push", "origin", "master")
+
+            build.mkdir()
+            name = "ClipFlow_V2_20260918_153651_patch_only.zip"
+            archive = build / name
+            archive.write_bytes(b"new-patch")
+            manifest = {
+                "target_version": "ClipFlow_V2_20260918_153651",
+                "target_patch_version": 381,
+                "zip_name": name,
+                "zip_size": archive.stat().st_size,
+                "zip_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }
+            manifest_path = build / "latest_patch.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with patch.object(portable_packaging, "BUILD_DIR", build), patch.dict(os.environ, {
+                "GIT_AUTHOR_NAME": "Package Test", "GIT_AUTHOR_EMAIL": "package@example.invalid",
+                "GIT_COMMITTER_NAME": "Package Test", "GIT_COMMITTER_EMAIL": "package@example.invalid",
+            }):
+                self.assertEqual(portable_packaging._load_existing_patch()[0], archive)
+                self.assertTrue(portable_packaging._upload_patch_to_gitee(
+                    archive, manifest_path, repo_url=remote.as_uri(), branch="master",
+                    subdir="updates/patches", manifest_repo_path="updates/latest_patch.json",
+                ))
+                self.assertFalse(list(build.glob(".gitee_upload_*")))
+                archive.write_bytes(b"tampered")
+                with self.assertRaisesRegex(RuntimeError, "ZIP 与清单不一致"):
+                    portable_packaging._load_existing_patch()
+
+            tracked = git("--git-dir", remote, "ls-tree", "-r", "--name-only", "master")
+            self.assertIn(name, tracked)
+            self.assertNotIn("ClipFlow_V2_20260917_100000_patch_only.zip", tracked)
+            self.assertIn("ClipFlow_patch_only.zip", tracked)
+            self.assertEqual(git("--git-dir", remote, "show", "master:updates/latest_patch.json"), json.dumps(manifest))
+
     def test_packaging_checks_published_manifest_and_zip_hash(self):
         content = b"patch-content"
         manifest = {

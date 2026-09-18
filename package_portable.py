@@ -2077,6 +2077,21 @@ def _write_latest_patch_manifest(
 
 
 
+def _remove_gitee_upload_dir(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.resolve().parent != BUILD_DIR.resolve() or not path.name.startswith(".gitee_upload_"):
+        raise RuntimeError(f"拒绝清理非打包临时目录: {path}")
+
+    def clear_readonly(func, name, error):
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(name, 0o666)
+        func(name)
+
+    shutil.rmtree(path, onexc=clear_readonly)
+
+
 def _upload_patch_to_gitee(
 
     patch_zip: Path,
@@ -2101,56 +2116,69 @@ def _upload_patch_to_gitee(
 
         return False
 
-    temp_repo = BUILD_DIR / f".gitee_upload_{int(time.time())}"
+    patch_subdir_name = (subdir or "").strip().strip("/")
+    manifest_name = manifest_repo_path.strip().strip("/")
+    patch_repo_name = f"{patch_subdir_name}/{patch_zip.name}" if patch_subdir_name else patch_zip.name
+    git_http = ["git"]
+    if os.name == "nt":
+        git_http += ["-c", "http.sslBackend=openssl", "-c", "http.version=HTTP/1.1"]
 
-    if temp_repo.exists():
-
-        shutil.rmtree(temp_repo, ignore_errors=True)
-
-    clone_ok = _run_cmd(
-
-        ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(temp_repo)]
-
-    )
-
-    if not clone_ok:
-
-        log("Gitee 上传失败：clone 仓库失败。")
-
+    for attempt in range(3):
+        temp_repo = BUILD_DIR / f".gitee_upload_{time.time_ns()}"
+        clone_ok = _run_cmd(
+            git_http + ["clone", "--depth", "1", "--single-branch", "--filter=blob:none",
+                        "--no-checkout", "-b", branch, repo_url, str(temp_repo)]
+        )
+        if clone_ok:
+            clone_ok = _run_cmd(
+                ["git", "sparse-checkout", "set", "--no-cone", f"/{manifest_name}", f"/{patch_repo_name}"],
+                cwd=temp_repo,
+            ) and _run_cmd(git_http + ["read-tree", "-mu", "HEAD"], cwd=temp_repo)
+        if clone_ok:
+            break
+        _remove_gitee_upload_dir(temp_repo)
+        if attempt < 2:
+            log(f"Gitee 稀疏克隆中断，稍后重试（{attempt + 1}/3）。")
+            time.sleep(2 * (attempt + 1))
+    else:
+        log("Gitee 上传失败：稀疏克隆连续 3 次失败。")
         return False
 
 
 
     try:
 
-        patch_subdir = temp_repo / (subdir or "").strip().strip("/")
+        patch_subdir = temp_repo / patch_subdir_name
 
         patch_subdir.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(patch_zip, patch_subdir / patch_zip.name)
 
-        removed_old = 0
+        ok, tracked_paths = _run_cmd_capture(
+            ["git", "ls-tree", "-r", "--name-only", "HEAD", "--", patch_subdir_name or "."],
+            cwd=temp_repo,
+        )
+        if not ok:
+            log("Gitee 上传失败：无法读取旧补丁列表。")
+            return False
         versioned_zips = sorted(
-            (
-                path
-                for path in patch_subdir.glob("*_patch_only.zip")
-                if path.name != LEGACY_PATCH_ZIP_NAME
-            ),
-            key=lambda path: path.name,
+            {patch_repo_name, *(path for path in tracked_paths.splitlines()
+                                if path.endswith("_patch_only.zip")
+                                and Path(path).name != LEGACY_PATCH_ZIP_NAME)},
             reverse=True,
         )
+        removed_old = 0
         for old_zip in versioned_zips[REMOTE_PATCH_HISTORY:]:
-            try:
-                old_zip.unlink()
-                removed_old += 1
-            except Exception as exc:
-                log(f"跳过删除远端旧补丁压缩包 {old_zip.name}: {exc}")
+            if not _run_cmd(["git", "rm", "--cached", "--sparse", "--", old_zip], cwd=temp_repo):
+                log(f"Gitee 上传失败：无法移除旧补丁 {old_zip}。")
+                return False
+            removed_old += 1
         if removed_old:
             log(f"Gitee 仓库中已删除过期补丁压缩包: {removed_old}")
 
 
 
-        manifest_target = temp_repo / manifest_repo_path.strip().strip("/")
+        manifest_target = temp_repo / manifest_name
 
         manifest_target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2158,7 +2186,9 @@ def _upload_patch_to_gitee(
 
 
 
-        _run_cmd(["git", "add", "."], cwd=temp_repo)
+        if not _run_cmd(["git", "add", "--", patch_repo_name, manifest_name], cwd=temp_repo):
+            log("Gitee 上传失败：无法暂存补丁文件。")
+            return False
 
         commit_msg = f"chore: publish patch {patch_zip.stem}"
 
@@ -2204,7 +2234,41 @@ def _upload_patch_to_gitee(
 
     finally:
 
-        shutil.rmtree(temp_repo, ignore_errors=True)
+        try:
+            _remove_gitee_upload_dir(temp_repo)
+        except OSError as exc:
+            log(f"Gitee 上传临时目录清理失败: {exc}")
+
+
+def _load_existing_patch() -> tuple[Path, Path, dict]:
+    manifest_path = BUILD_DIR / "latest_patch.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or _safe_int(manifest.get("target_patch_version"), 0) <= 0:
+        raise RuntimeError("本地补丁清单格式或补丁号无效。")
+    name = manifest.get("zip_name")
+    if (not isinstance(name, str) or not name or name != Path(name).name
+            or "\\" in name or name != f"{manifest.get('target_version', '')}_patch_only.zip"):
+        raise RuntimeError("本地补丁清单的 ZIP 文件名无效。")
+    patch_zip = BUILD_DIR / name
+    if (not patch_zip.is_file()
+            or patch_zip.stat().st_size != _safe_int(manifest.get("zip_size"), -1)
+            or _hash_file(patch_zip) != str(manifest.get("zip_sha256", "")).lower()):
+        raise RuntimeError("本地补丁 ZIP 与清单不一致，停止上传。")
+    return patch_zip, manifest_path, manifest
+
+
+def _publish_patch(
+    patch_zip: Path, manifest_path: Path, manifest: dict, *,
+    repo_url: str, branch: str, subdir: str, manifest_repo_path: str,
+) -> None:
+    if not _upload_patch_to_gitee(
+        patch_zip, manifest_path, repo_url=repo_url, branch=branch,
+        subdir=subdir, manifest_repo_path=manifest_repo_path,
+    ):
+        raise RuntimeError("Gitee 补丁上传失败，用户尚无法更新；本地补丁已保留。")
+    _verify_published_patch(
+        manifest, repo_url=repo_url, branch=branch, manifest_path=manifest_repo_path,
+    )
 
 
 def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manifest_path: str) -> None:
@@ -2859,8 +2923,32 @@ def main() -> None:
         help="Build patch locally but skip cloning/pushing the Gitee update repository.",
 
     )
+    parser.add_argument(
+        "--retry-upload", action="store_true",
+        help="Upload and verify the existing build_output/latest_patch.json and ZIP without rebuilding.",
+    )
 
     args = parser.parse_args()
+
+    if args.retry_upload:
+        if args.skip_gitee_upload:
+            parser.error("--retry-upload cannot be combined with --skip-gitee-upload")
+        patch_zip, manifest_path, manifest = _load_existing_patch()
+        log(f"重试上传现有补丁: {patch_zip.name}")
+        _publish_patch(
+            patch_zip, manifest_path, manifest,
+            repo_url=args.gitee_repo, branch=args.gitee_branch,
+            subdir=args.gitee_subdir, manifest_repo_path=args.gitee_manifest_path,
+        )
+        major_version = _safe_int(manifest.get("major_version"), DEFAULT_MAJOR_VERSION)
+        _advance_local_patch_sequence(
+            _patch_sequence_key(BASE_VERSION_ID, major_version),
+            target_patch_version=_safe_int(manifest["target_patch_version"], 0),
+            target_display_version=str(manifest.get("target_display_version", "")),
+            major_version=major_version, base_build_id=BASE_VERSION_ID,
+        )
+        log("现有补丁上传并核验完成。")
+        return
 
     if args.preflight_test:
 
@@ -3286,26 +3374,10 @@ def main() -> None:
 
 
     if AUTO_UPLOAD_GITEE and not args.skip_gitee_upload:
-        uploaded = _upload_patch_to_gitee(
-            patch_zip,
-            latest_manifest_path,
-
-            repo_url=args.gitee_repo,
-
-            branch=args.gitee_branch,
-
-            subdir=args.gitee_subdir,
-
-            manifest_repo_path=args.gitee_manifest_path,
-
-        )
-        if not uploaded:
-            raise RuntimeError("Gitee 补丁上传失败，用户尚无法更新；本地补丁已保留。")
-        _verify_published_patch(
-            latest_manifest,
-            repo_url=args.gitee_repo,
-            branch=args.gitee_branch,
-            manifest_path=args.gitee_manifest_path,
+        _publish_patch(
+            patch_zip, latest_manifest_path, latest_manifest,
+            repo_url=args.gitee_repo, branch=args.gitee_branch,
+            subdir=args.gitee_subdir, manifest_repo_path=args.gitee_manifest_path,
         )
 
     else:
