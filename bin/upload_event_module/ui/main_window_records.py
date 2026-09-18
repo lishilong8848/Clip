@@ -228,6 +228,107 @@ class MainWindowRecordsMixin:
             value = 300
         return float(max(60, min(value, 3600)))
 
+    def _probe_event_upload(self, data: dict) -> None:
+        operation_id = str(data.get("_upload_operation_id") or "").strip()
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if not operation_id or not callable(getattr(controller, "get_qt_notice_operation", None)):
+            return
+        now = time.monotonic()
+        last = getattr(self, "_event_upload_probe_last", None)
+        if last is None:
+            last = self._event_upload_probe_last = {}
+        first_seen = getattr(self, "_event_upload_probe_first_seen", None)
+        if first_seen is None:
+            first_seen = self._event_upload_probe_first_seen = {}
+        first_seen.setdefault(operation_id, now)
+        first_seen_at = first_seen[operation_id]
+        active = getattr(self, "_event_upload_probe_active", None)
+        if active is None:
+            active = self._event_upload_probe_active = set()
+        if operation_id in active or now - last.get(operation_id, 0) < 30:
+            return
+        last[operation_id] = now
+        active.add(operation_id)
+        original = data.get("_event_inflight_retry_snapshot")
+        original = dict(original) if isinstance(original, dict) else dict(data)
+        record_id = str(original.get("record_id") or data.get("record_id") or "")
+
+        def finish(name: str, success: bool, message: str) -> None:
+            self._post_request_finished(name, success, message, record_id, operation_id)
+
+        def mark_waiting() -> None:
+            _list_widget, item = self._find_active_item_by_upload_operation(operation_id)
+            if not item or not self._is_valid_list_item(item):
+                return
+            current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+            if current.get("_upload_verification_pending"):
+                return
+            current["_upload_verification_pending"] = True
+            current["_upload_in_progress"] = False
+            item.setData(Qt.ItemDataRole.UserRole, current)
+            self._rebuild_active_item_widget(
+                _list_widget, item, current, force_status=None,
+                upload_in_progress=False,
+                pending_upload_hash=current.get("_pending_upload_hash"),
+                has_unuploaded_changes=current.get("_has_unuploaded_changes"),
+            )
+
+        def worker() -> None:
+            try:
+                operation = controller.get_qt_notice_operation(operation_id) or {}
+                status = str(operation.get("status") or "")
+                result = dict(operation.get("result") or {})
+                action = {"start": "upload"}.get(
+                    str(operation.get("operation_type") or ""),
+                    str(operation.get("operation_type") or "upload"),
+                )
+                name = {"upload": "上传", "update": "更新", "end": "结束"}.get(action, "上传")
+                target = str(operation.get("target_record_id") or result.get("record_id") or "")
+                settled = status == "completed" or (
+                    status == "remote_written"
+                    and result.get("local_projection_completed")
+                    and (
+                        result.get("operation_settled")
+                        or result.get("robot_sent")
+                        or result.get("robot_skipped")
+                        or result.get("last_robot_error")
+                    )
+                )
+                if settled and target:
+                    finish(name, True, target)
+                elif status == "failed":
+                    finish(name, False, str(operation.get("error") or "上传失败，可重试。"))
+                elif status == "remote_written" and target:
+                    self._enqueue_ui_mutation("event_upload_verification", mark_waiting)
+                    if action in {"upload", "update", "end"} and time.time() - float(
+                        operation.get("updated_at") or 0
+                    ) >= 10:
+                        retry_data = dict(original)
+                        retry_data.update({
+                            "_remote_written_pending_verification": True,
+                            "_remote_written_retry_action": action,
+                            "target_record_id": target,
+                        })
+                        retry = controller.execute_qt_notice_upload({
+                            "action_type": action,
+                            "operation_id": operation_id,
+                            "data_dict": retry_data,
+                        })
+                        if isinstance(retry, dict) and retry.get("ok"):
+                            finish(name, True, str(retry.get("real_record_id") or target))
+                elif status in {"intent", "executing"} and now - float(
+                    data.get("_upload_started_monotonic") or first_seen_at
+                ) >= self._upload_state_hard_timeout_seconds():
+                    self._enqueue_ui_mutation("event_upload_verification", mark_waiting)
+                elif not status and now - first_seen_at >= self._upload_state_hard_timeout_seconds():
+                    self._enqueue_ui_mutation("event_upload_verification", mark_waiting)
+            except Exception as exc:
+                log_warning(f"事件上传状态核验暂不可用: operation_id={operation_id}, error={exc}")
+            finally:
+                active.discard(operation_id)
+
+        threading.Thread(target=worker, name="ClipFlowEventUploadProbe", daemon=True).start()
+
     def _recover_stale_upload_states(self) -> dict[str, int]:
         recovered = 0
         recovered_payloads: list[dict] = []
@@ -240,6 +341,13 @@ class MainWindowRecordsMixin:
         for list_widget, item, data in entries:
             if not self._is_valid_list_item(item) or not isinstance(data, dict):
                 continue
+            if str(data.get("notice_type") or "") == "事件通告" and (
+                data.get("_queued_upload_requested")
+                or data.get("_remote_written_pending_verification")
+                or data.get("_upload_verification_pending")
+                or (data.get("_upload_in_progress") and data.get("_upload_operation_id"))
+            ):
+                self._probe_event_upload(data)
             if not bool(data.get("_upload_in_progress")):
                 continue
             if self._upload_state_is_busy(data):
@@ -494,6 +602,19 @@ class MainWindowRecordsMixin:
 
     def _run_runtime_maintenance(self):
         stats = {}
+        try:
+            live_operations = {
+                str(data.get("_upload_operation_id") or "")
+                for data in self._active_notice_store().data_snapshot()
+                if isinstance(data, dict) and data.get("_upload_operation_id")
+            }
+            for name in ("_event_upload_probe_last", "_event_upload_probe_first_seen"):
+                pending = getattr(self, name, None)
+                if isinstance(pending, dict):
+                    for operation_id in set(pending) - live_operations:
+                        pending.pop(operation_id, None)
+        except Exception:
+            pass
         try:
             stats.update(self._trim_runtime_state_sets())
         except Exception as exc:
@@ -4473,6 +4594,7 @@ class MainWindowRecordsMixin:
                 data["_upload_in_progress"] = False
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_upload_started_monotonic", None)
+                data.pop("_upload_verification_pending", None)
                 if success:
                     data.pop("_event_inflight_retry_snapshot", None)
                 if preserve_operation:

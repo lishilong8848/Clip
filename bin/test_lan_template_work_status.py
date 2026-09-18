@@ -5698,6 +5698,74 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
+    def test_event_create_keeps_target_when_readback_times_out(self):
+        request_payload = {
+            "action_type": "upload",
+            "operation_id": "qt_notice:readback-timeout",
+            "data_dict": {
+                "active_item_id": "active-readback-timeout",
+                "record_id": "local_event_readback_timeout",
+                "_is_placeholder_record": True,
+                "notice_type": "事件通告",
+                "text": (
+                    "【事件通告】状态：开始\n【标题】A楼事件通报\n"
+                    "【时间】2026-09-18 09:00\n【概述】测试回读超时"
+                ),
+                "time_str": "2026-09-18 09:00",
+                "level": "I3",
+            },
+            "response_time": "2026-09-18 09:01",
+        }
+        old_store = PortalRuntime.state_store
+        old_targets = PortalRuntime.local_upload_created_targets
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            PortalRuntime.local_upload_created_targets = {}
+            remote_fields = {}
+
+            def create_event(notice_type, notice_payload):
+                fields = EventNoticeHandler(notice_type).build_create_fields(notice_payload)
+                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
+                remote_fields.update(fields)
+                return True, "rec-readback-timeout"
+
+            try:
+                with patch.object(
+                    portal_server_module, "create_bitable_record_by_payload",
+                    side_effect=create_event,
+                ) as create_record, patch.object(
+                    portal_server_module, "query_record_by_id",
+                    side_effect=[RuntimeError("read timeout"), (True, {
+                        "fields": remote_fields, "record_version": "v1",
+                    })],
+                ), patch.object(
+                    portal_server_module, "send_robot_message_by_payload",
+                    return_value={"robot_sent": True, "robot_skipped": False, "last_robot_error": ""},
+                ):
+                    first = PortalRuntime.execute_local_notice_upload(request_payload)
+                    pending = store.get_notice_remote_operation(request_payload["operation_id"])
+                    second = PortalRuntime.execute_local_notice_upload({
+                        **request_payload,
+                        "data_dict": {
+                            **request_payload["data_dict"],
+                            "target_record_id": "rec-readback-timeout",
+                            "_remote_written_pending_verification": True,
+                            "_remote_written_retry_action": "upload",
+                        },
+                    })
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.state_store = old_store
+                PortalRuntime.local_upload_created_targets = old_targets
+
+        self.assertFalse(first["ok"])
+        self.assertEqual(first["real_record_id"], "rec-readback-timeout")
+        self.assertEqual(pending["status"], "remote_written")
+        self.assertEqual(pending["target_record_id"], "rec-readback-timeout")
+        self.assertTrue(second["ok"], second)
+        create_record.assert_called_once()
+
     def test_local_event_upload_dedupes_different_local_ids_by_notice_text(self):
         def payload(local_id: str) -> dict:
             return {
@@ -27184,6 +27252,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["real_record_id"], "recv-recovered")
         self.assertEqual(result["record_version"], "version-recovered")
         self.assertTrue(result["operation_recovered"])
+
+    def test_qt_upload_recovery_waits_for_local_projection_to_settle(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
+        payload = {
+            "action_type": "upload",
+            "operation_id": "qt_notice:recover-pending",
+            "data_dict": {"record_id": "local-pending", "notice_type": "事件通告"},
+        }
+        operation = {
+            "status": "remote_written",
+            "target_record_id": "rec-pending",
+            "result": {"record_id": "rec-pending", "local_projection_completed": True},
+        }
+        with patch.object(controller, "get_qt_notice_operation", return_value=operation), patch(
+            "clipflow_backend.process_controller.time.sleep"
+        ):
+            pending = controller._recover_qt_notice_upload_result(
+                payload, action_type="upload", operation_id=payload["operation_id"]
+            )
+        self.assertFalse(pending["ok"])
+        self.assertTrue(pending["remote_written"])
+        operation["result"]["operation_settled"] = True
+        with patch.object(controller, "get_qt_notice_operation", return_value=operation):
+            complete = controller._recover_qt_notice_upload_result(
+                payload, action_type="upload", operation_id=payload["operation_id"]
+            )
+        self.assertTrue(complete["ok"])
+        self.assertEqual(complete["real_record_id"], "rec-pending")
+        operation["result"].pop("operation_settled")
+        with patch.object(controller, "get_qt_notice_operation", return_value=operation):
+            other = controller._recover_qt_notice_upload_result(
+                {**payload, "data_dict": {"record_id": "local-pending", "notice_type": "维保通告"}},
+                action_type="upload", operation_id=payload["operation_id"],
+            )
+        self.assertTrue(other["ok"])
 
     def test_backend_process_controller_dispatches_notice_outbox_event(self):
         controller = BackendProcessPortalController(host="127.0.0.1", port=18766)

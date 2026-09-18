@@ -805,6 +805,13 @@ class MainWindowWorkflowMixin:
                 "action_type": str(action_type or "upload").strip() or "upload",
                 "remote_written": bool(result.get("remote_written")),
             }
+            if (
+                str((data_snapshot or {}).get("notice_type") or "") == "事件通告"
+                and bool(result.get("remote_written"))
+            ):
+                # The target exists. Leave the original operation and any next
+                # generation intact while the watchdog resumes its readback.
+                return True
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id
         today_in_progress_state = str(
@@ -3561,7 +3568,10 @@ class MainWindowWorkflowMixin:
                 if not stale_result and callable(clear_state):
                     clear_state(record_id, real_record_id)
 
-        self._enqueue_ui_mutation("request_finished", _apply_updates)
+        if self._enqueue_ui_mutation("request_finished", _apply_updates) is False and not self._closing:
+            # This slot is invoked on the Qt thread; dropping a terminal result
+            # would strand a queued next event indefinitely.
+            _apply_updates()
 
     def _on_manual_add_accepted(self):
         if not self.add_dialog:

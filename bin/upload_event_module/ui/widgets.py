@@ -1394,6 +1394,10 @@ class ClipboardItemWidget(QWidget):
         btn = self._safe_action_btn()
         if not btn:
             return
+        if bool((self.data or {}).get("_upload_verification_pending")):
+            btn.setEnabled(False)
+            btn.setText("待核验")
+            return
         if getattr(self, "upload_in_progress", False):
             btn.setProperty("uploaded", "false")
             btn.setEnabled(False)

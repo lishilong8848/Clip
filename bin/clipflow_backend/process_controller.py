@@ -1275,6 +1275,9 @@ class BackendProcessPortalController:
     ) -> dict | None:
         if not operation_id:
             return None
+        data_dict = payload.get("data_dict")
+        data_dict = data_dict if isinstance(data_dict, dict) else {}
+        event_notice = str(data_dict.get("notice_type") or "") == "事件通告"
         operation = None
         for delay in (0.0, 0.5, 1.0, 2.0, 4.0, 8.0):
             if delay:
@@ -1285,6 +1288,15 @@ class BackendProcessPortalController:
             if status in {"completed", "failed"} or (
                 status == "remote_written"
                 and bool(operation_result.get("local_projection_completed"))
+                and (
+                    not event_notice
+                    or bool(
+                        operation_result.get("operation_settled")
+                        or operation_result.get("robot_sent")
+                        or operation_result.get("robot_skipped")
+                        or operation_result.get("last_robot_error")
+                    )
+                )
             ):
                 break
         if not isinstance(operation, dict):
@@ -1292,8 +1304,6 @@ class BackendProcessPortalController:
         status = str(operation.get("status") or "").strip()
         if status not in {"completed", "remote_written", "failed"}:
             return None
-        data_dict = payload.get("data_dict")
-        data_dict = data_dict if isinstance(data_dict, dict) else {}
         original_record_id = str(data_dict.get("record_id") or "").strip()
         target_record_id = str(
             operation.get("target_record_id")
@@ -1317,8 +1327,15 @@ class BackendProcessPortalController:
                 "real_record_id": "",
                 "operation_recovered": True,
             }
-        if status == "remote_written" and not bool(
+        if status == "remote_written" and not (
             result_payload.get("local_projection_completed")
+            and (
+                not event_notice
+                or result_payload.get("operation_settled")
+                or result_payload.get("robot_sent")
+                or result_payload.get("robot_skipped")
+                or result_payload.get("last_robot_error")
+            )
         ):
             return {
                 "ok": False,

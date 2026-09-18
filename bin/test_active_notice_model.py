@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -1385,6 +1386,153 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertFalse(data["_queued_upload_requested"])
         self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "更新")
         self.assertFalse(harness.pending_action_record_ids)
+
+    def test_queued_event_probe_resumes_written_target_without_new_create(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._closing = False
+        harness._event_upload_probe_last = {}
+        harness._event_upload_probe_active = set()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        original = {
+            "record_id": "local_event_probe",
+            "notice_type": "事件通告",
+            "text": "【事件通告】状态：开始\n【标题】A楼事件\n【概述】初次上传",
+        }
+        current = {
+            **original,
+            "record_id": "rec-event-probe",
+            "target_record_id": "rec-event-probe",
+            "text": "【事件通告】状态：更新\n【标题】A楼事件\n【概述】下一条",
+            "_upload_operation_id": "qt_notice:probe",
+            "_queued_after_upload": True,
+            "_queued_upload_requested": True,
+            "_event_inflight_retry_snapshot": original,
+        }
+        item.setData(Qt.ItemDataRole.UserRole, current)
+        seen = []
+
+        class Controller:
+            def get_qt_notice_operation(self, operation_id):
+                return {
+                    "status": "remote_written",
+                    "operation_type": "start",
+                    "target_record_id": "rec-event-probe",
+                    "updated_at": 0,
+                    "result": {"local_projection_completed": False},
+                }
+
+            def execute_qt_notice_upload(self, payload):
+                seen.append(payload)
+                return {"ok": True, "real_record_id": "rec-event-probe"}
+
+        class InlineThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        harness.lan_template_portal_controller = Controller()
+        harness._enqueue_ui_mutation = lambda _tag, fn: fn()
+        harness._post_request_finished = lambda *args: seen.append(args)
+        with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+            harness._probe_event_upload(current)
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0]["operation_id"], "qt_notice:probe")
+        self.assertEqual(seen[0]["data_dict"]["text"], original["text"])
+        self.assertEqual(seen[0]["data_dict"]["target_record_id"], "rec-event-probe")
+        self.assertTrue(seen[0]["data_dict"]["_remote_written_pending_verification"])
+        self.assertEqual(seen[1], ("上传", True, "rec-event-probe", "local_event_probe", "qt_notice:probe"))
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(item.data(Qt.ItemDataRole.UserRole)), "待核验")
+        self.assertEqual(ActiveNoticeModel.action_for_record(item.data(Qt.ItemDataRole.UserRole)), "")
+
+    def test_queued_event_without_uploading_flag_is_still_probed(self):
+        harness = _ReplaceRecordIdHarness()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        item.setData(Qt.ItemDataRole.UserRole, {
+            "record_id": "rec-queued-probe",
+            "notice_type": "事件通告",
+            "_upload_operation_id": "qt_notice:queued-probe",
+            "_upload_in_progress": False,
+            "_queued_upload_requested": True,
+        })
+        seen = []
+        harness._probe_event_upload = lambda data: seen.append(data["_upload_operation_id"])
+        harness._recover_stale_upload_states()
+        self.assertEqual(seen, ["qt_notice:queued-probe"])
+
+    def test_event_probe_releases_queued_update_after_cloud_completion(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._event_upload_probe_last = {}
+        harness._event_upload_probe_active = set()
+        seen = []
+
+        class Controller:
+            def get_qt_notice_operation(self, _operation_id):
+                return {
+                    "status": "completed",
+                    "operation_type": "start",
+                    "target_record_id": "rec-already-created",
+                    "result": {"record_id": "rec-already-created"},
+                }
+
+            def execute_qt_notice_upload(self, _payload):
+                raise AssertionError("already completed operation must not write again")
+
+        class InlineThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        harness.lan_template_portal_controller = Controller()
+        harness._post_request_finished = lambda *args: seen.append(args)
+        with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+            harness._probe_event_upload({
+                "record_id": "local-event-created",
+                "notice_type": "事件通告",
+                "_upload_operation_id": "qt_notice:already-created",
+            })
+        self.assertEqual(seen, [(
+            "上传", True, "rec-already-created", "local-event-created",
+            "qt_notice:already-created",
+        )])
+
+    def test_legacy_executing_event_does_not_remain_labeled_queued(self):
+        harness = _ReplaceRecordIdHarness()
+        harness._event_upload_probe_last = {}
+        harness._event_upload_probe_first_seen = {
+            "qt_notice:legacy": time.monotonic() - 301,
+        }
+        harness._event_upload_probe_active = set()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        data = {
+            "record_id": "local-event-legacy",
+            "notice_type": "事件通告",
+            "_upload_operation_id": "qt_notice:legacy",
+            "_queued_upload_requested": True,
+        }
+        item.setData(Qt.ItemDataRole.UserRole, data)
+
+        class InlineThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        harness.lan_template_portal_controller = type("Controller", (), {
+            "get_qt_notice_operation": lambda _self, _id: {"status": "executing"},
+        })()
+        harness._enqueue_ui_mutation = lambda _tag, fn: fn()
+        with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+            harness._probe_event_upload(data)
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(item.data(Qt.ItemDataRole.UserRole)), "待核验")
 
     def test_queued_event_upload_failure_rolls_back_and_discards_next_generation(self):
         harness = _ReplaceRecordIdHarness()

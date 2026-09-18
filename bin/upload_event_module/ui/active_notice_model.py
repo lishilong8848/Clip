@@ -99,6 +99,8 @@ class ActiveNoticeModel(QAbstractListModel):
     def action_for_record(cls, record: dict[str, Any] | None) -> str:
         if not isinstance(record, dict):
             return ""
+        if bool(record.get("_upload_verification_pending")):
+            return ""
         if bool(record.get("_queued_upload_requested")):
             return ""
         if cls.is_uploaded_record(record) or cls.is_uploading_record(record):
@@ -127,6 +129,8 @@ class ActiveNoticeModel(QAbstractListModel):
 
     @classmethod
     def action_label_for_record(cls, record: dict[str, Any] | None) -> str:
+        if isinstance(record, dict) and bool(record.get("_upload_verification_pending")):
+            return "待核验"
         if isinstance(record, dict) and bool(record.get("_queued_upload_requested")):
             return "已排队"
         if cls.is_uploading_record(record):

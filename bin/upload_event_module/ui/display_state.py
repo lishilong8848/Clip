@@ -34,6 +34,7 @@ _TRANSIENT_UPLOAD_FIELDS = {
     "_queued_after_upload",
     "_queued_action",
     "_queued_upload_requested",
+    "_upload_verification_pending",
     "_event_inflight_retry_snapshot",
 }
 

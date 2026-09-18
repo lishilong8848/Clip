@@ -12072,7 +12072,10 @@ class PortalRuntime:
             data["target_record_id"] = target_record_id
             data["_is_placeholder_record"] = False
             record_id = target_record_id
-        direct_event_update = notice_type == "事件通告" and action_type == "update"
+        direct_event_update = (
+            notice_type == "事件通告"
+            and requested_action_type == "update"
+        )
         if direct_event_update and request_operation_id:
             previous_attempt = cls._get_notice_remote_operation(request_operation_id) or {}
             if (
@@ -12494,16 +12497,37 @@ class PortalRuntime:
                 ) -> dict:
                     robot_result: dict = {}
                     if notice_type == "事件通告":
-                        verified, verified_query, verify_error, robot_result = (
-                            cls._verify_and_send_event_remote_write(
+                        if str(operation.get("status") or "") not in {"remote_written", "completed"}:
+                            cls._mark_notice_remote_operation(
                                 operation_id,
-                                notice_payload,
+                                status="remote_written",
                                 target_record_id=target,
-                                action="start",
-                                result_message=message,
-                                send_message=False,
+                                result={
+                                    "record_id": target,
+                                    "message": message,
+                                    "written_fields": dict(getattr(notice_payload, "_clipflow_written_fields", {}) or {}),
+                                },
                             )
-                        )
+                        try:
+                            verified, verified_query, verify_error, robot_result = (
+                                cls._verify_and_send_event_remote_write(
+                                    operation_id,
+                                    notice_payload,
+                                    target_record_id=target,
+                                    action="start",
+                                    result_message=message,
+                                    send_message=False,
+                                )
+                            )
+                        except Exception as exc:
+                            verified, verified_query, verify_error = False, {}, str(exc)
+                            cls._mark_notice_remote_operation(
+                                operation_id,
+                                status="remote_written",
+                                target_record_id=target,
+                                result={"remote_verified": False, "verification_error": verify_error},
+                                error=verify_error,
+                            )
                         if not verified:
                             failure_message = (
                                 f"多维写入后回读校验失败：{verify_error}"
@@ -12550,7 +12574,7 @@ class PortalRuntime:
                             operation_id,
                             status="remote_written",
                             target_record_id=target,
-                            result={"local_projection_completed": True},
+                            result={"remote_verified": True, "local_projection_completed": True},
                         )
                         robot_result = cls._send_deferred_event_robot(
                             operation_id,
@@ -12574,6 +12598,7 @@ class PortalRuntime:
                             "message": str(message or target),
                             "deduped": bool(deduped),
                             "local_projection_completed": True,
+                            "operation_settled": True,
                             **robot_result,
                         },
                         error=str(robot_result.get("last_robot_error") or ""),
