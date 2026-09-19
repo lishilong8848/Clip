@@ -1027,6 +1027,11 @@ def export_workbook(content, config, operations, notice_summary=None):
     verified=Workbook(out.getvalue())
     expected=["机柜上电汇总表（邮件）","机柜上电汇总表（通告）",*(name for name in book.sheets if name!="机柜上电汇总表")]
     if list(verified.sheets)!=expected: raise CabinetError("通告汇总工作表关系校验失败")
+    formula_errors=[(name,ref,cell.findtext(T("v"),"")) for name in verified.sheets
+                    for ref,cell in verified.cells(name).items()
+                    if cell.get("t")=="e" or cell.findtext(T("v"),"") in {"#VALUE!","#REF!","#NAME?","#DIV/0!","#N/A","#NUM!","#NULL!"}]
+    if formula_errors:
+        raise CabinetError("导出文件存在公式错误："+"、".join(f"{name}!{ref}={value}" for name,ref,value in formula_errors[:10]))
     if "xl/vbaProject.bin" in parts and verified.archive.read("xl/vbaProject.bin")!=book.archive.read("xl/vbaProject.bin"): raise CabinetError("宏资源校验失败")
     return out.getvalue()
 
