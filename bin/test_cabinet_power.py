@@ -1,6 +1,9 @@
 import copy
+import datetime as dt
 import io
 import json
+import os
+import re
 import sys
 import tempfile
 import threading
@@ -10,13 +13,30 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from xml.etree import ElementTree as ET
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
-from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline
+from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline, room_code, system_name
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_b_carrier_legacy_aliases_display_as_separate_named_rooms(self):
+        for room, old_name in (("216", "EA118-B2-16"), ("247", "EA118-B2-47")):
+            with self.subTest(room=room):
+                expected = f"EA118-B-{room}运营商机房"
+                self.assertEqual(system_name("B", room), expected)
+                self.assertEqual(room_code(old_name, "B"), (room, False))
+                self.assertEqual(room_code(expected, "B"), (room, False))
+                op = from_feishu({"record_id": "recCarrier", "fields": {
+                    "楼栋": "B楼", "包间系统名称": old_name, "机架": "B02",
+                    "操作类型": "上测试电", "实际完成时间": 1741859439000,
+                    "结果": "成功",
+                }})
+                self.assertEqual((op["room"], op["system_name"]), (room, expected))
+                self.assertEqual(op["raw_fields"]["包间系统名称"], old_name)
+        self.assertEqual(system_name("B", "201"), "EA118-B2-1")
+
     def test_pdf_rows_keep_missing_values_and_split_glued_result(self):
         text=(
             "机柜下测试电确认单\n申请时间： 2026-08-31 17:49:03\n操作类型： 下测试电\n"
@@ -177,6 +197,15 @@ class CabinetPowerTests(unittest.TestCase):
         expected={"上下电确认截图":[{"file_token":"fileEvidence12345"}]}
         self.assertFalse(equivalent(expected,{"上下电确认截图":[]}))
         self.assertTrue(equivalent(expected,{"上下电确认截图":[{"file_token":"fileEvidence12345","name":"proof.png"}]}))
+
+    def test_b_carrier_rooms_stay_separate_from_standard_rooms(self):
+        rooms = {room["id"]: room for room in self.service.overview("B")["rooms"]}
+        for room in ("216", "247"):
+            self.assertEqual(rooms[room]["name"], f"EA118-B-{room}运营商机房")
+            self.assertTrue(rooms[room]["carrier"])
+            self.assertEqual(rooms[room]["total"], 10)
+        self.assertEqual(rooms["201"]["name"], "EA118-B2-1")
+        self.assertFalse(rooms["201"]["carrier"])
 
     def test_export_attachment_uses_archive_base_parent(self):
         path=Path(self.tmp.name)/"sample.xlsm"; path.write_bytes(b"export")
@@ -398,6 +427,187 @@ class CabinetPowerTests(unittest.TestCase):
         repeated=self.service.batches.create_from_notice({**samples[0],"owner_id":"owner"})
         self.assertEqual(repeated["batch_id"],batches[0]["batch_id"])
 
+    def test_notice_summary_counts_start_and_obeys_row_flag_and_lifecycle(self):
+        source={"event_action":"start","target_record_id":"rec-notice-summary","notice_type":"上电通告",
+                "scope":"B","cabinet":"B-216运营商机房B04、B05","quantity":"2","owner_id":"owner",
+                "start_time":"2026-09-03 11:05","end_time":"2026-09-03 23:59","sent_at":"2026-09-03 11:06:00"}
+        service=self.service.batches
+        batch=service.apply_notice_event(source)
+        summary=lambda: service.notice_summary("B",self.configs["B"])["items"]
+        self.assertEqual(len(summary()),2)
+        self.assertEqual({item["date"] for item in summary()},{"2026-09-03"})
+        batch=service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-04 00:05:00"})
+        self.assertEqual(len(summary()),2)
+        self.assertEqual({item["date"] for item in summary()},{"2026-09-03"})
+        prior_version=service.notice_summary("B",self.configs["B"])["version"]
+        row=batch["rows"][0]
+        batch=service.update(batch["batch_id"],{"version":batch["version"],"rows":[
+            {"row_id":row["row_id"],"exclude_notice_summary":True}]},"owner",["B"])
+        self.assertEqual(len(summary()),1)
+        self.assertNotEqual(prior_version,service.notice_summary("B",self.configs["B"])["version"])
+        self.assertEqual(batch["rows"][0]["edits"][-1]["field"],"exclude_notice_summary")
+        batch=service.apply_notice_event({**source,"event_action":"update","cabinet":"B-247运营商机房B05",
+                                          "quantity":"1"})
+        self.assertEqual([(row["room"],row["rack"]) for row in summary()],[('247','B05')])
+        self.assertEqual(summary()[0]["date"],"2026-09-03")
+        self.assertEqual(sum(bool(row.get("notice_removed")) for row in batch["rows"]),2)
+        service.apply_notice_event({**source,"event_action":"undo_end"})
+        self.assertEqual(len(summary()),1)
+        service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-05 09:00:00"})
+        self.assertEqual(summary()[0]["date"],"2026-09-03")
+        service.apply_notice_event({**source,"event_action":"delete"})
+        self.assertEqual(summary(),[])
+        self.assertFalse(service.list("owner",["B"])["items"])
+        service.apply_notice_event({**source,"event_action":"undo_delete","prior_record_id":"rec-notice-summary",
+                                    "target_record_id":"rec-notice-restored"})
+        self.assertEqual(len(summary()),1)
+
+    def test_legacy_notice_end_requires_finished_status_and_actual_time(self):
+        service=self.service.batches
+        batch=service.create_from_notice({"target_record_id":"rec-old-notice","notice_type":"下电通告",
+            "scope":"B","cabinet":"B-402包间B15","quantity":"1","owner_id":"owner"})
+        self.assertEqual(len(service.notice_summary("B",self.configs["B"])["items"]),1)
+        self.assertEqual(service.reconcile_legacy_notice_end_times(lambda _id,_type:(True,{"fields":{
+            "上电状态":"开始","实际结束时间":1790000000000}})),0)
+        self.assertEqual(service.get(batch["batch_id"])["source_notice"]["end_time_check"]["status"],"pending")
+        self.assertEqual(service.reconcile_legacy_notice_end_times(lambda _id,_type:(True,{"fields":{
+            "上电状态":"结束","实际结束时间":1790000000000}}),force=True),1)
+        self.assertEqual(service.get(batch["batch_id"])["source_notice"]["ended_at"],service._notice_datetime(1790000000000))
+
+    def test_deleted_notice_rollback_failure_stays_visible_as_exception(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-delete","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+        batch=service.create_from_notice(source)
+        stored=service.store.get(batch["batch_id"])
+        stored["rows"][0].update(status="completed",wrote_record=True,record_id="rec-written",
+                                   operation_id="batch_written_operation")
+        service.store.save(stored,stored["version"])
+        self.service.rollback_batch_operation=lambda *_args: (_ for _ in ()).throw(CabinetError("已有后续操作",409))
+        service.apply_notice_event({**source,"event_action":"delete"})
+        result=self._wait_batch(batch["batch_id"])
+        self.assertEqual(result["rows"][0]["status"],"rollback_blocked")
+        self.assertEqual(service.list("owner",["B"])["total"],0)
+        exceptions=service.list("owner",["B"],status="notice_rollback_error")
+        self.assertEqual([item["batch_id"] for item in exceptions["items"]],[batch["batch_id"]])
+
+    def test_notice_summary_checkbox_remains_editable_after_confirmation_or_cancel(self):
+        service=self.service.batches
+        batch=service.create_from_notice({"target_record_id":"rec-notice-flag","notice_type":"上电通告",
+            "scope":"B","cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"})
+        stored=service.store.get(batch["batch_id"])
+        stored["rows"][0]["status"]="completed"
+        stored=service.store.save(stored,stored["version"])
+        visible=service.visible(stored,"owner",["B"])["rows"][0]
+        self.assertFalse(visible["editable"])
+        self.assertTrue(visible["can_edit_notice_summary"])
+        row_id=visible["row_id"]
+        changed=service.update(batch["batch_id"],{"version":stored["version"],"rows":[
+            {"row_id":row_id,"exclude_notice_summary":True}]},"owner",["B"])
+        self.assertTrue(changed["rows"][0]["exclude_notice_summary"])
+        changed["status"]="cancelled"
+        changed=service.store.save(changed,changed["version"])
+        restored=service.update(batch["batch_id"],{"version":changed["version"],"rows":[
+            {"row_id":row_id,"exclude_notice_summary":False}]},"owner",["B"])
+        self.assertFalse(restored["rows"][0]["exclude_notice_summary"])
+        with self.assertRaises(CabinetError):
+            service.update(batch["batch_id"],{"version":restored["version"],"rows":[
+                {"row_id":row_id,"exclude_notice_summary":True}]},"other",["A"])
+
+    def test_notice_delete_waits_for_inflight_write_then_resumes_rollback(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-race","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+        batch=service.create_from_notice(source)
+        stored=service.store.get(batch["batch_id"])
+        stored["rows"][0].update(status="writing",operation_started=True,operation_id="batch_race_operation")
+        service.store.save(stored,stored["version"])
+        with self.assertRaisesRegex(CabinetError,"正在写入"):
+            service.apply_notice_event({**source,"event_action":"delete"})
+        self.assertEqual(service.list("owner",["B"],status="notice_rollback_error")["total"],1)
+        stored=service.store.get(batch["batch_id"])
+        stored["rows"][0].update(status="completed",record_id="rec-race-written",wrote_record=True)
+        service.store.save(stored,stored["version"])
+        calls=[]
+        self.service.rollback_batch_operation=lambda *args: calls.append(args)
+        service._resume_notice_rollback_after_confirm(batch["batch_id"])
+        result=self._wait_batch(batch["batch_id"])
+        self.assertEqual(result["rows"][0]["status"],"rolled_back")
+        self.assertEqual(len(calls),1)
+        self.assertEqual(service.list("owner",["B"],status="notice_rollback_error")["total"],0)
+
+    def test_notice_update_removed_confirmed_rack_rolls_back_without_counting_it(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-update","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04、B05","quantity":"2","owner_id":"owner"}
+        batch=service.create_from_notice(source)
+        stored=service.store.get(batch["batch_id"])
+        stored["rows"][0].update(status="completed",record_id="rec-written-update",wrote_record=True,
+                                   operation_id="batch_update_operation")
+        service.store.save(stored,stored["version"])
+        calls=[]
+        self.service.rollback_batch_operation=lambda *args: calls.append(args)
+        service.apply_notice_event({**source,"event_action":"update",
+            "cabinet":"B-247运营商机房B05","quantity":"1"})
+        self._wait_batch(batch["batch_id"])
+        self.assertEqual(len(calls),1)
+        rows=service.get(batch["batch_id"])["rows"]
+        self.assertEqual({(row["room"],row["rack"]) for row in rows if not row.get("notice_removed")},
+                         {("247","B05")})
+        service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-05 11:00:00"})
+        self.assertEqual([(item["room"],item["rack"]) for item in service.notice_summary("B",self.configs["B"])["items"]],
+                         [("247","B05")])
+
+    def test_notice_update_keeps_committed_identity_when_original_row_was_corrected(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-corrected","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+        batch=service.create_from_notice(source)
+        stored=service.store.get(batch["batch_id"])
+        stored["rows"][0].update(rack="B05",status="completed",wrote_record=True,
+                                   record_id="rec-written-B05",operation_id="batch_corrected_operation")
+        service.store.save(stored,stored["version"])
+        self.service.rollback_batch_operation=lambda *_args: None
+        service.apply_notice_event({**source,"event_action":"update"})
+        rows=service.get(batch["batch_id"])["rows"]
+        old=next(row for row in rows if row.get("record_id")=="rec-written-B05")
+        self.assertEqual(old["rack"],"B05")
+        self.assertTrue(old["notice_removed"])
+        self.assertTrue(any(row["rack"]=="B04" and not row.get("notice_removed") for row in rows))
+
+    def test_notice_end_uses_final_cabinets_even_when_prior_update_failed(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-final","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+        service.create_from_notice(source)
+        with self.assertRaises(CabinetError):
+            service.apply_notice_event({**source,"event_action":"update","cabinet":"无法识别"})
+        service.apply_notice_event({**source,"event_action":"end",
+            "cabinet":"B-247运营商机房B05","cabinet_verified":True,"sent_at":"2026-09-18 18:00:00"})
+        self.assertEqual([(row["room"],row["rack"]) for row in service.notice_summary("B",self.configs["B"])["items"]],
+                         [("247","B05")])
+
+    def test_notice_summary_does_not_count_other_building_invalid_row(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-scope","notice_type":"上电通告","scope":"A",
+                "cabinet":"A-202包间B01","quantity":"1","owner_id":"owner"}
+        batch=service.create_from_notice(source)
+        row=batch["rows"][0]
+        batch=service.update(batch["batch_id"],{"version":batch["version"],"rows":[
+            {"row_id":row["row_id"],"scope":"B","room":"202","rack":"B01"}]},"owner",["A","B"],True)
+        self.assertIn("notice_scope",{issue["code"] for issue in batch["rows"][0]["issues"]})
+        service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-18 18:00:00"})
+        self.assertEqual(service.notice_summary("B",self.configs["B"])["items"],[])
+
+    def test_notice_direction_change_resets_unconfirmed_action(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-notice-direction","notice_type":"上电通告","scope":"D",
+                "cabinet":"D-201包间B02","quantity":"1","owner_id":"owner"}
+        batch=service.create_from_notice(source)
+        self.assertEqual(batch["rows"][0]["action"],"上正式电")
+        changed=service.apply_notice_event({**source,"event_action":"update","notice_type":"下电通告"})
+        self.assertNotEqual(changed["rows"][0]["action"],"上正式电")
+
     def test_power_notice_count_warning_requires_fresh_acknowledgement(self):
         batch=self.service.batches.create_from_notice({
             "job_id":"job-notice-warning","target_record_id":"rec-notice-warning","notice_type":"上电通告","scope":"B",
@@ -429,9 +639,11 @@ class CabinetPowerTests(unittest.TestCase):
         if added_path: sys.path.insert(0,bin_path)
         from .lan_bitable_template_portal.server import PortalRuntime
         original=PortalRuntime.state_store
+        original_service=PortalRuntime.cabinet_power_service
         class BrokenStore:
             def enqueue_outbox_event(self,*_args,**_kwargs): raise TimeoutError("locked")
         PortalRuntime.state_store=BrokenStore()
+        PortalRuntime.cabinet_power_service=None
         try:
             event_id=PortalRuntime.enqueue_cabinet_notice_batch({
                 "work_type":"power","action":"start","notice_type":"上电通告","scope":"B",
@@ -441,7 +653,58 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual(event_id,0)
         finally:
             PortalRuntime.state_store=original
+            PortalRuntime.cabinet_power_service=original_service
             if added_path: sys.path.remove(bin_path)
+
+    def test_power_notice_handoff_survives_primary_outbox_failure(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        original_store,original_service=PortalRuntime.state_store,PortalRuntime.cabinet_power_service
+        class BrokenStore:
+            def enqueue_outbox_event(self,*_args,**_kwargs): raise TimeoutError("locked")
+            def lease_outbox_events(self,*_args,**_kwargs): raise TimeoutError("locked")
+            def append_event_async(self,*_args,**_kwargs): raise TimeoutError("locked")
+        PortalRuntime.state_store=BrokenStore()
+        PortalRuntime.cabinet_power_service=self.service
+        try:
+            with patch.object(PortalRuntime,"ensure_cabinet_notice_worker",return_value=None):
+                queued=PortalRuntime.enqueue_cabinet_notice_batch({
+                    "work_type":"power","action":"start","notice_type":"上电通告","scope":"B",
+                    "cabinet":"B-216运营商机房B04","quantity":"1",
+                },job_id="fallback-job",target_record_id="rec-fallback")
+            self.assertEqual(queued,-1)
+            self.assertIsNotNone(self.service.batches.store.next_notice_handoff())
+            result=PortalRuntime._process_cabinet_notice_queue_once()
+            self.assertEqual(result["status"],"success")
+            self.assertIsNone(self.service.batches.store.next_notice_handoff())
+            self.assertEqual(self.service.batches.get(result["batch_id"])["stats"]["total"],1)
+        finally:
+            PortalRuntime.state_store=original_store
+            PortalRuntime.cabinet_power_service=original_service
+            if added_path: sys.path.remove(bin_path)
+
+    def test_failed_notice_handoff_can_resume_after_restart(self):
+        store=self.service.batches.store
+        store.queue_notice_handoff({"idempotency_key":"resume-notice-handoff","event_action":"start"})
+        for _ in range(5):
+            self.assertIsNotNone(store.next_notice_handoff())
+            store.finish_notice_handoff("resume-notice-handoff","temporary failure")
+        self.assertIsNone(store.next_notice_handoff())
+        store.requeue_failed_notice_handoffs()
+        self.assertEqual(store.next_notice_handoff()["attempts"],0)
+
+    def test_stale_notice_update_does_not_overwrite_newer_end_snapshot(self):
+        service=self.service.batches
+        source={"target_record_id":"rec-ordered-notice","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner","event_at":1.0}
+        service.apply_notice_event(source)
+        service.apply_notice_event({**source,"event_action":"end","event_at":3.0,
+            "cabinet":"B-247运营商机房B05","cabinet_verified":True,"sent_at":"2026-09-18 18:00:00"})
+        service.apply_notice_event({**source,"event_action":"update","event_at":2.0})
+        self.assertEqual([(item["room"],item["rack"]) for item in service.notice_summary("B",self.configs["B"])["items"]],
+                         [("247","B05")])
 
     def test_power_notice_outbox_creates_one_idempotent_batch(self):
         bin_path=str(Path(__file__).parent)
@@ -472,6 +735,95 @@ class CabinetPowerTests(unittest.TestCase):
             PortalRuntime.stop_cabinet_notice_worker()
             PortalRuntime.state_store=original_store
             PortalRuntime.cabinet_power_service=original_service
+            state.shutdown_write_worker(timeout=1)
+            if added_path: sys.path.remove(bin_path)
+
+    def test_power_notice_outbox_updates_then_counts_successful_end(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        from .lan_bitable_template_portal.state_store import LanPortalStateStore
+        old_store,old_service=PortalRuntime.state_store,PortalRuntime.cabinet_power_service
+        state=LanPortalStateStore(Path(self.tmp.name)/"notice-lifecycle.sqlite3")
+        PortalRuntime.state_store=state; PortalRuntime.cabinet_power_service=None
+        try:
+            base={"work_type":"power","notice_type":"上电通告","scope":"B",
+                  "cabinet":"B-216运营商机房B04、B05","quantity":"2","response_time":"2026-09-03 11:05:00"}
+            for action,job,changes in (
+                ("start","start-job",{}),
+                ("update","update-job",{"cabinet":"B-247运营商机房B05","quantity":"1"}),
+                ("end","end-job",{"response_time":"2026-09-05 09:12:00"}),
+            ):
+                PortalRuntime.enqueue_cabinet_notice_batch({**base,**changes,"action":action},job_id=job,
+                    target_record_id="rec-lifecycle",request_payload={"_auth_open_id":"owner"})
+            PortalRuntime.cabinet_power_service=self.service
+            with patch("bin.lan_bitable_template_portal.server.query_record_by_id",return_value=(True,{"fields":{
+                "柜号":"B-247运营商机房B05","数量（个）":"1","上电状态":"结束","实际结束时间":"2026-09-05 09:12:00"}})):
+                self.assertEqual([PortalRuntime._process_cabinet_notice_queue_once()["status"] for _ in range(3)],["success"]*3)
+            summary=self.service.batches.notice_summary("B",self.configs["B"])
+            self.assertEqual([(item["room"],item["rack"],item["date"]) for item in summary["items"]],
+                             [("247","B05","2026-09-03")])
+            self.assertFalse(PortalRuntime._process_cabinet_notice_queue_once()["processed"])
+        finally:
+            PortalRuntime.stop_cabinet_notice_worker()
+            PortalRuntime.state_store=old_store; PortalRuntime.cabinet_power_service=old_service
+            state.shutdown_write_worker(timeout=1)
+            if added_path: sys.path.remove(bin_path)
+
+    def test_notice_end_read_failure_keeps_start_cabinets_until_verified(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        from .lan_bitable_template_portal.state_store import LanPortalStateStore
+        old_store,old_service=PortalRuntime.state_store,PortalRuntime.cabinet_power_service
+        state=LanPortalStateStore(Path(self.tmp.name)/"notice-final-read.sqlite3")
+        PortalRuntime.state_store=state; PortalRuntime.cabinet_power_service=self.service
+        try:
+            source={"target_record_id":"rec-notice-final-read","notice_type":"上电通告","scope":"B",
+                    "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+            self.service.batches.create_from_notice(source)
+            with patch.object(PortalRuntime,"ensure_cabinet_notice_worker",return_value=None):
+                PortalRuntime.enqueue_cabinet_notice_batch({**source,"work_type":"power","action":"end",
+                    "response_time":"2026-09-18 19:00:00"},job_id="final-read",target_record_id=source["target_record_id"])
+            with patch("bin.lan_bitable_template_portal.server.query_record_by_id",return_value=(False,"timeout")):
+                self.assertEqual(PortalRuntime._process_cabinet_notice_queue_once()["status"],"pending")
+            self.assertEqual([(item["room"],item["rack"]) for item in self.service.batches.notice_summary("B",self.configs["B"])["items"]],[('216','B04')])
+            with patch("bin.lan_bitable_template_portal.server.query_record_by_id",return_value=(True,{"fields":{
+                "柜号":"B-216运营商机房B04","上电状态":"开始","实际结束时间":"2026-09-18 19:00:00"}})):
+                self.assertEqual(PortalRuntime._process_cabinet_notice_queue_once()["status"],"pending")
+            self.assertEqual([(item["room"],item["rack"]) for item in self.service.batches.notice_summary("B",self.configs["B"])["items"]],[('216','B04')])
+            with patch("bin.lan_bitable_template_portal.server.query_record_by_id",return_value=(True,{"fields":{
+                "柜号":"B-247运营商机房B05","数量（个）":"1","上电状态":"结束","实际结束时间":"2026-09-18 19:00:00"}})):
+                self.assertEqual(PortalRuntime._process_cabinet_notice_queue_once()["status"],"success")
+            self.assertEqual([(item["room"],item["rack"]) for item in self.service.batches.notice_summary("B",self.configs["B"])["items"]],[("247","B05")])
+        finally:
+            PortalRuntime.stop_cabinet_notice_worker()
+            PortalRuntime.state_store=old_store; PortalRuntime.cabinet_power_service=old_service
+            state.shutdown_write_worker(timeout=1)
+            if added_path: sys.path.remove(bin_path)
+
+    def test_power_notice_outbox_extracts_qt_notice_text(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        from .lan_bitable_template_portal.state_store import LanPortalStateStore
+        old_store,old_service=PortalRuntime.state_store,PortalRuntime.cabinet_power_service
+        state=LanPortalStateStore(Path(self.tmp.name)/"qt-notice.sqlite3")
+        PortalRuntime.state_store=state; PortalRuntime.cabinet_power_service=None
+        try:
+            text="【下电通告】状态：开始\n【名称】EA118机房B楼机柜下电通告\n【时间】2026-09-03 14:55~2026-09-03 19:00\n【柜号】B-402包间B15、B16\n【数量】2\n【进度】准备工作已完成"
+            PortalRuntime.enqueue_cabinet_notice_batch({"work_type":"power","action":"start",
+                "notice_type":"下电通告","text":text},job_id="qt-start",target_record_id="rec-qt-power")
+            PortalRuntime.cabinet_power_service=self.service
+            result=PortalRuntime._process_cabinet_notice_queue_once()
+            self.assertEqual(result["status"],"success")
+            self.assertEqual(self.service.batches.get(result["batch_id"])["stats"]["total"],2)
+        finally:
+            PortalRuntime.stop_cabinet_notice_worker()
+            PortalRuntime.state_store=old_store; PortalRuntime.cabinet_power_service=old_service
             state.shutdown_write_worker(timeout=1)
             if added_path: sys.path.remove(bin_path)
 
@@ -821,6 +1173,18 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self._wait_batch(a["batch_id"])
         self.assertEqual(self.service.batches.list("owner",["A","B"],scope="A",status="todo")["pending_count"],2)
 
+    def test_notice_rollback_error_filter_does_not_leak_other_building(self):
+        service=self.service.batches
+        batch=service.create_from_notice({"target_record_id":"rec-mixed-notice","notice_type":"上电通告",
+            "scope":"CAMPUS","cabinet":"A-202包间B01、B-202包间B01","quantity":"2","owner_id":"owner"})
+        stored=service.store.get(batch["batch_id"])
+        target=next(row for row in stored["rows"] if row["scope"]=="B")
+        target.update(status="rollback_blocked",error="后续操作")
+        stored["source_notice"]["deleted_at"]="2026-09-18 19:00:00"
+        service.store.save(stored,stored["version"])
+        self.assertEqual(service.list("viewer",["A"],status="notice_rollback_error")["total"],0)
+        self.assertEqual(service.list("owner",["A","B"],status="notice_rollback_error")["total"],1)
+
     def test_cancelled_batch_detail_and_selected_restore_stay_consistent(self):
         racks=self.configs["A"]["inventory"][:2]
         rows=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
@@ -1081,11 +1445,11 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             original=(TEMPLATES/(scope+".xlsm")).read_bytes(); before=Workbook(original)
             ops=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]==scope+"楼"]
             result=export_workbook(original,self.configs[scope],ops); after=Workbook(result)
-            self.assertEqual(list(before.sheets),list(after.sheets))
+            self.assertEqual(list(after.sheets),["机柜上电汇总表（邮件）","机柜上电汇总表（通告）",*(name for name in before.sheets if name!="机柜上电汇总表")])
             self.assertEqual(before.archive.read("xl/vbaProject.bin"),after.archive.read("xl/vbaProject.bin"))
             for name in before.sheets:
                 original_merges=[x.get("ref") for x in before.sheet(name).iter(T("mergeCell"))]
-                exported_merges=[x.get("ref") for x in after.sheet(name).iter(T("mergeCell"))]
+                exported_merges=[x.get("ref") for x in after.sheet("机柜上电汇总表（邮件）" if name=="机柜上电汇总表" else name).iter(T("mergeCell"))]
                 self.assertTrue(set(original_merges)<=set(exported_merges),name)
                 if "平面图" not in name: self.assertEqual(original_merges,exported_merges)
             for fmt in self.models[scope]["formats"]:
@@ -1095,6 +1459,197 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     for col,value in row.items():
                         self.assertEqual(actual[rn].get(col,""),value,(scope,name,rn,col))
             checked=load_workbook(io.BytesIO(result),keep_vba=True,data_only=True); checked.close()
+
+    def test_notice_export_counts_by_start_date_and_keeps_carrier_rooms_separate(self):
+        scope="B"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
+        ops=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]==scope+"楼"]
+        summary={"items":[
+            {"room":"216","rack":"B04","date":"2026-09-03","direction":"up"},
+            {"room":"247","rack":"B05","date":"2026-09-03","direction":"up"},
+            {"room":"402","rack":"B15","date":"2026-09-04","direction":"down"},
+        ]}
+        book=Workbook(export_workbook(original,self.configs[scope],ops,summary))
+        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        by_name={str(values.get(1)):values for values in rows.values() if values.get(1)}
+        self.assertIn("B-216运营商机房",by_name)
+        self.assertIn("B-247运营商机房",by_name)
+        self.assertEqual((rows[7][14],rows[7][15],rows[7][16]),(6.0,12.0,1022.0))
+        self.assertEqual((rows[8].get(14,""),rows[8][15],rows[8][16]),("",1.0,1022.0))
+
+    def test_finished_notice_reaches_both_download_sheets_and_archive(self):
+        archive=FakeExportFeishu()
+        self.service.export_remote=archive
+        source={"target_record_id":"rec-export-chain","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04、B-247运营商机房B05","quantity":"2","owner_id":"owner",
+                "sent_at":"2026-09-18 18:05:00"}
+        self.service.batches.apply_notice_event(source)
+        self.service.batches.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-18 19:05:00"})
+        job=self.service.job("B","export","owner",{"batch_id":"all_"+"d"*32})
+        deadline=time.time()+30
+        while time.time()<deadline:
+            state=self.service.job_status(job["job_id"])
+            if state["status"] in ("succeeded","failed"): break
+            time.sleep(.02)
+        self.assertEqual(state["status"],"succeeded",state.get("error"))
+        result=state["result"]
+        self.assertEqual(result["cloud_upload_status"],"succeeded")
+        saved=self.service.local.document("B","export:"+result["export_id"])
+        workbook=Workbook(Path(saved["path"]).read_bytes())
+        self.assertIn("机柜上电汇总表（邮件）",workbook.sheets)
+        notice=dict(workbook.rows("机柜上电汇总表（通告）"))
+        added=next(values for values in notice.values() if values.get(13)=="2026.9.18")
+        self.assertEqual((added[14],added.get(15,""),added[16]),(2.0,"",1022.0))
+        self.assertEqual(len(archive.records),1)
+        self.assertEqual(next(iter(archive.records.values()))["fields"]["文件SHA256"],result["sha256"])
+
+    def test_notice_counts_do_not_change_mail_sheet_for_any_building(self):
+        for scope in "ABCDE":
+            with self.subTest(scope=scope):
+                original=(TEMPLATES/(scope+".xlsm")).read_bytes()
+                ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
+                baseline=map_state_baseline(original,self.configs[scope],ops)[0]
+                room_rack=next((key.split("/") for key,state in baseline.items() if state["state"]=="off"),None)
+                self.assertIsNotNone(room_rack,scope)
+                room=next(item for item in self.configs[scope]["rooms"] if item["id"]==room_rack[0])
+                rack=room_rack[1]
+                items=[{"room":room["id"],"rack":rack,"date":"2026-09-17","direction":"up"},
+                       {"room":room["id"],"rack":rack,"date":"2026-09-18","direction":"down"}]
+                empty=Workbook(export_workbook(original,self.configs[scope],ops))
+                filled=Workbook(export_workbook(original,self.configs[scope],ops,{"items":items}))
+                mail="机柜上电汇总表（邮件）"
+                def stable_mail(book):
+                    root=book.sheet(mail)
+                    for row in root.iter(T("row")):
+                        cells=list(row)
+                        for index,cell in enumerate(cells[:-1]):
+                            if book.value(cell)=="数据更新":
+                                row.remove(cells[index+1])
+                    return ET.tostring(root)
+                self.assertEqual(stable_mail(empty),stable_mail(filled))
+                mail_root=filled.sheet("机柜上电汇总表（邮件）")
+                notice_root=filled.sheet("机柜上电汇总表（通告）")
+                for tag in ("sheetPr","sheetFormatPr","printOptions","pageMargins","pageSetup","headerFooter"):
+                    mail_node,notice_node=mail_root.find(T(tag)),notice_root.find(T(tag))
+                    self.assertEqual(ET.tostring(mail_node) if mail_node is not None else None,
+                                     ET.tostring(notice_node) if notice_node is not None else None,(scope,tag))
+                mail_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（邮件）").items()}
+                notice_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（通告）").items()}
+                for ref,style in mail_styles.items():
+                    if ref in notice_styles:
+                        self.assertEqual(notice_styles[ref],style,(scope,ref))
+
+                rows=dict(filled.rows("机柜上电汇总表（通告）"))
+                columns={"A":(2,3,5,6),"B":(13,14,15,16),"C":(27,28,29,30),"D":(2,3,4,5),"E":(2,3,4,5)}[scope]
+                date_col,up_col,down_col,total_col=columns
+                def date_key(value):
+                    if isinstance(value,(int,float)):
+                        return (dt.datetime(1899,12,30)+dt.timedelta(days=value)).strftime("%Y-%m-%d")
+                    match=re.search(r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})",str(value or ""))
+                    return f"{int(match[1]):04d}-{int(match[2]):02d}-{int(match[3]):02d}" if match else ""
+                up_row=next(values for values in rows.values() if date_key(values.get(date_col))=="2026-09-17")
+                if scope=="A":
+                    down_row=next(values for values in rows.values() if date_key(values.get(4))=="2026-09-18")
+                else:
+                    down_row=next(values for values in rows.values() if date_key(values.get(date_col))=="2026-09-18")
+                self.assertEqual(up_row[up_col],1.0)
+                self.assertEqual(down_row[down_col],1.0)
+                self.assertEqual(down_row[total_col],{"A":970.0,"B":1022.0,"C":970.0,"D":673.0,"E":402.0}[scope])
+                month_cols={"A":(9,10,11,12),"B":(19,20,21,22),"C":(33,34,35,36),"D":(8,9,10,11),"E":(8,9,10,11)}[scope]
+                month_date,month_up,month_down,month_total=month_cols
+                def month_key(raw):
+                    if isinstance(raw,(int,float)):
+                        return (dt.datetime(1899,12,30)+dt.timedelta(days=raw)).strftime("%Y-%m")
+                    match=re.search(r"(20\d{2})\D+(\d{1,2})",str(raw or ""))
+                    return f"{int(match[1]):04d}-{int(match[2]):02d}" if match else ""
+                empty_rows=dict(empty.rows("机柜上电汇总表（通告）"))
+                base_month=next((values for values in empty_rows.values() if month_key(values.get(month_date))=="2026-09"),None)
+                filled_month=next(values for values in rows.values() if month_key(values.get(month_date))=="2026-09")
+                numeric=lambda raw: float(raw) if raw not in (None,"") else 0.0
+                self.assertEqual(numeric(filled_month.get(month_up)),numeric((base_month or {}).get(month_up))+1)
+                self.assertEqual(numeric(filled_month.get(month_down)),numeric((base_month or {}).get(month_down))+1)
+                expected_total=numeric((base_month or {}).get(month_total)) or {"A":970.0,"B":1022.0,"C":970.0,"D":673.0,"E":402.0}[scope]
+                self.assertEqual(filled_month[month_total],expected_total)
+
+    def test_e_notice_summary_extends_original_daily_and_monthly_tables(self):
+        scope="E"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
+        ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
+        baseline=map_state_baseline(original,self.configs[scope],ops)[0]
+        targets=[key.split("/") for key,state in baseline.items() if state["state"]=="off"][:6]
+        items=[{"room":room,"rack":rack,"date":"2026-09-19","direction":"up","action":"上正式电"} for room,rack in targets]
+        book=Workbook(export_workbook(original,self.configs[scope],ops,{"items":items}))
+        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        self.assertEqual(tuple(rows[48].get(col,"") for col in (1,2,3,4,5)),(32.0,"2026.9.19",6.0,"",408.0))
+        month=(dt.datetime(1899,12,30)+dt.timedelta(days=rows[32][8])).strftime("%Y-%m")
+        self.assertEqual((rows[32][7],month,rows[32][9],rows[32].get(10,""),rows[32][11]),(16.0,"2026-09",6.0,"",408.0))
+        mail=dict(book.rows("机柜上电汇总表（邮件）"))
+        self.assertEqual((mail[10][3],rows[10][3]),(402.0,408.0))
+        self.assertEqual((mail[10][4],rows[10][4]),(870.0,864.0))
+        self.assertEqual(rows[10][11],408.0)
+        self.assertFalse(any(str(value).startswith("系统新增上下电") for row in rows.values() for value in row.values()))
+        styles=book.cells("机柜上电汇总表（通告）")
+        self.assertEqual([styles[f"{col}48"].get("s") for col in "ABCDE"],[styles[f"{col}47"].get("s") for col in "ABCDE"])
+        self.assertEqual([styles[f"{col}32"].get("s") for col in "GHIJK"],[styles[f"{col}31"].get("s") for col in "GHIJK"])
+
+    def test_notice_summary_builds_missing_month_tables_and_future_c_year(self):
+        scope="A"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
+        ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
+        book=Workbook(export_workbook(original,self.configs[scope],ops))
+        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        def month_row(period):
+            for values in rows.values():
+                raw=values.get(9)
+                key=(dt.datetime(1899,12,30)+dt.timedelta(days=raw)).strftime("%Y-%m") if isinstance(raw,(int,float)) else (
+                    f"{int(match[1]):04d}-{int(match[2]):02d}" if (match:=re.search(r"(20\d{2})\D+(\d{1,2})",str(raw or ""))) else "")
+                if key==period:
+                    return values
+            raise AssertionError(period)
+        self.assertEqual(tuple(month_row("2025-11").get(col,"") for col in (10,11,12)),(4.0,3.0,964.0))
+        self.assertEqual(tuple(month_row("2026-01").get(col,"") for col in (10,11,12)),(3.0,1.0,969.0))
+        self.assertEqual(tuple(month_row("2026-03").get(col,"") for col in (10,11,12)),("",1.0,969.0))
+
+        scope="C"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
+        ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
+        baseline=map_state_baseline(original,self.configs[scope],ops)[0]
+        room,rack=next(key.split("/") for key,state in baseline.items() if state["state"]=="off")
+        summary={"items":[{"room":room,"rack":rack,"date":"2027-01-02","sent_at":"2027-01-02 09:00:00",
+                           "direction":"up","action":"上测试电","rack_type":"服务器机柜"}]}
+        book=Workbook(export_workbook(original,self.configs[scope],ops,summary))
+        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        self.assertTrue(any(values.get(1)=="C栋2027年上、下电总数量统计" for values in rows.values()))
+        added=next(values for values in rows.values() if values.get(2)=="2027.1.2")
+        self.assertEqual((added[3],added.get(4,""),added[5]),(1.0,"",971.0))
+        self.assertEqual((rows[3][15],rows[4][15],rows[5][15],rows[6][15]),(32.0,939.0,27.0,971.0))
+
+    def test_notice_exclusion_marks_old_export_stale_and_same_request_rebuilds(self):
+        source={"target_record_id":"rec-stale-export","notice_type":"上电通告","scope":"B",
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner",
+                "sent_at":"2026-09-19 08:30:00"}
+        batch=self.service.batches.create_from_notice(source)
+        before=self.service.batches.notice_summary("B",self.configs["B"])["version"]
+        version=self.service.local.version("B")
+        self.service.write("export:old-stale",{"export_id":"old-stale","scope":"B","path":str(Path(self.tmp.name)/"old.xlsm"),
+            "filename":"old.xlsm","version":version,"notice_summary_version":before,"created_at":"2026-09-19 08:31:00"})
+        calls=[]
+        self.service.do_export=lambda scope,payload,job: calls.append(payload["notice_summary"]["version"]) or {"scope":scope,"version":payload["snapshot"]["version"]}
+        request={"batch_id":"single_"+"f"*32}
+        first=self.service.job("B","export","owner",request)
+        deadline=time.time()+10
+        while time.time()<deadline and self.service.job_status(first["job_id"])["status"] not in ("succeeded","failed"): time.sleep(.01)
+        row=batch["rows"][0]
+        changed=self.service.batches.update(batch["batch_id"],{"version":batch["version"],"rows":[
+            {"row_id":row["row_id"],"exclude_notice_summary":True} ]},"owner",["B"])
+        second=self.service.job("B","export","owner",request)
+        self.assertNotEqual(first["job_id"],second["job_id"])
+        deadline=time.time()+10
+        while time.time()<deadline and self.service.job_status(second["job_id"])["status"] not in ("succeeded","failed"): time.sleep(.01)
+        self.assertEqual(len(calls),2)
+        self.assertNotEqual(calls[0],calls[1])
+        history=self.service.export_history("B")
+        old=next(item for item in history["items"] if item["export_id"]=="old-stale")
+        self.assertTrue(old["is_stale"])
+        self.assertIn("通告汇总已变化",old["stale_reason"])
+        self.assertTrue(self.service.overview("B",False)["export_state"]["is_stale"])
+        self.assertTrue(changed["rows"][0]["exclude_notice_summary"])
 
     def test_export_uses_local_snapshot_and_all_buildings_can_run_together(self):
         self.service.overview("D")
@@ -1109,6 +1664,54 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         while time.time()<deadline and any(self.service.job_status(job["job_id"])["status"] not in ("succeeded","failed") for job in jobs): time.sleep(.01)
         states=[self.service.job_status(job["job_id"])["status"] for job in jobs]
         self.assertEqual(states,["succeeded"]*5,[self.service.job_status(job['job_id']) for job in jobs])
+
+    def test_completed_all_export_request_reuses_same_batch_job(self):
+        calls=[]
+        self.service.do_export=lambda scope,payload,job: calls.append(payload["batch_id"]) or {"scope":scope}
+        batch_id="all_"+"a"*32
+        first=self.service.job("D","export","owner",{"batch_id":batch_id})
+        deadline=time.time()+5
+        while time.time()<deadline and self.service.job_status(first["job_id"])["status"]!="succeeded": time.sleep(.01)
+        self.assertEqual(self.service.job_status(first["job_id"])["status"],"succeeded")
+        retry=self.service.job("D","export","owner",{"batch_id":batch_id})
+        self.assertEqual(retry["job_id"],first["job_id"])
+        self.assertEqual(calls,[batch_id])
+        second=self.service.job("D","export","owner",{"batch_id":"all_"+"b"*32})
+        self.assertNotEqual(second["job_id"],first["job_id"])
+
+    def test_export_start_response_is_immutable_when_worker_runs_immediately(self):
+        def start_immediately(_func,job):
+            job.update(status="running",started_at="2026-09-18 20:00:00")
+        with patch.object(self.service._pools["D"],"submit",side_effect=start_immediately):
+            response=self.service.job("D","export","owner",{"batch_id":"all_"+"c"*32})
+        self.assertEqual(response["status"],"pending")
+        self.assertNotIn("started_at",response)
+        self.assertNotIn("payload",response)
+        self.service._running.pop(response["job_id"],None)
+
+    def test_running_all_export_retry_keeps_original_job_after_summary_changes(self):
+        started=threading.Event(); release=threading.Event()
+        def slow_export(scope,payload,job):
+            started.set(); self.assertTrue(release.wait(5)); return {"scope":scope}
+        self.service.do_export=slow_export
+        batch_id="all_"+"e"*32
+        first=self.service.job("D","export","owner",{"batch_id":batch_id})
+        self.assertTrue(started.wait(5))
+        try:
+            with patch.object(self.service.batches,"notice_summary",return_value={"version":"changed","items":[]}):
+                retry=self.service.job("D","export","owner",{"batch_id":batch_id})
+            self.assertEqual(retry["job_id"],first["job_id"])
+        finally: release.set()
+
+    def test_job_status_tolerates_short_worker_registration_gap(self):
+        jid=uuid.uuid4().hex
+        job={"job_id":jid,"scope":"D","kind":"export","status":"pending","pid":os.getpid(),
+             "created_at":dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"version":1,"payload":{}}
+        self.service.write("job:"+jid,job)
+        self.assertEqual(self.service.job_status(jid)["status"],"pending")
+        job["created_at"]="2020-01-01 00:00:00"
+        self.service.write("job:"+jid,job)
+        self.assertEqual(self.service.job_status(jid)["status"],"failed")
 
     def test_export_archive_schema_and_response_loss_retry_are_idempotent(self):
         archive=FakeExportFeishu(); archive.fail_after_create=True
@@ -1125,6 +1728,35 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         fields=next(iter(archive.records.values()))["fields"]
         self.assertEqual((fields["楼栋"],fields["批次标识"],fields["导出人"]),("D楼","all_12345678","owner-open-id"))
         self.assertEqual(fields["导出文件"],[{"file_token":"file-export-token"}])
+
+    def test_export_cleanup_waits_for_upload_before_removing_file(self):
+        archive=FakeExportFeishu(); started=threading.Event(); release=threading.Event(); cleaned=threading.Event()
+        original_upload=archive.upload_attachment
+        def slow_upload(path,name):
+            started.set(); self.assertTrue(release.wait(5)); return original_upload(path,name)
+        archive.upload_attachment=slow_upload
+        self.service.export_remote=archive
+        eid="cleanup-during-upload"
+        path=self.service.atomic_file(Path("exports")/eid/"test.xlsm",b"test")
+        self.service.write("export:"+eid,{"export_id":eid,"scope":"D","path":path,"filename":"test.xlsm",
+            "version":1,"created_at":"2026-09-18 20:00:00","sha256":"test","owner":"owner","batch_id":"",
+            "cloud_upload_status":"pending"})
+        uploads=[]
+        upload=threading.Thread(target=lambda:uploads.append(self.service.upload_export("D",eid,"owner")))
+        cleanup=threading.Thread(target=lambda:(self.service.cleanup_export("D",eid),cleaned.set()))
+        upload.start(); self.assertTrue(started.wait(5)); cleanup.start()
+        try:
+            self.assertFalse(cleaned.wait(.1))
+            self.assertTrue(Path(path).is_file())
+        finally:
+            release.set(); upload.join(5); cleanup.join(5)
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(uploads[0]["cloud_upload_status"],"succeeded")
+        self.assertTrue(self.service.local.document("D","export:"+eid)["deleted"])
+        self.assertFalse(Path(path).exists())
+        history=next(item for item in self.service.export_history("D")["items"] if item["export_id"]==eid)
+        self.assertFalse(history["file_available"])
+        self.assertEqual(history["cloud_upload_status"],"succeeded")
 
     def test_export_remote_edit_overrides_original_cells_and_keeps_conversion(self):
         original=(TEMPLATES/"E.xlsm").read_bytes()

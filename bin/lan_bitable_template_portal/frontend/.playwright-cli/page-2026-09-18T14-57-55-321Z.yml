@@ -1,0 +1,264 @@
+- generic [ref=f3e1]:
+  - main [ref=f3e3]:
+    - generic [aria-hidden]:
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+      - generic: 内部资料 · VNET · 2026/09/18
+    - generic [ref=f3e4]:
+      - generic [ref=f3e5]:
+        - img "世纪互联官方标识" [ref=f3e6]
+        - generic [ref=f3e7]:
+          - heading "南通基地-运维灯塔工作台" [level=1] [ref=f3e8]
+          - paragraph [ref=f3e9]: 机柜上下电
+      - generic [ref=f3e10]:
+        - generic [ref=f3e11]: 已登录
+        - button "打开管理员诊断和权限管理" [ref=f3e12] [cursor=pointer]
+        - button "退出" [ref=f3e14] [cursor=pointer]
+    - main [ref=f3e16]:
+      - generic [ref=f3e17]:
+        - button "返回" [ref=f3e18] [cursor=pointer]:
+          - generic [aria-hidden] [ref=f3e19]: ‹
+          - text: 返回
+        - generic [ref=f3e20]:
+          - heading "上下电待办详情" [level=1] [ref=f3e21]
+          - paragraph [ref=f3e22]: 识别和手工录入先进入待办，人工确认后才写入正式台账。
+        - generic [ref=f3e23]:
+          - button "返回待办" [ref=f3e24] [cursor=pointer]
+          - button "刷新" [ref=f3e28] [cursor=pointer]
+      - generic [ref=f3e34]:
+        - generic [ref=f3e35]:
+          - generic [ref=f3e36]:
+            - strong [ref=f3e37]: 批次 aaaaaaaa
+            - generic [ref=f3e38]: 待处理
+          - generic [ref=f3e39]: 2026-09-18 18:00:00
+          - generic [ref=f3e40]: B楼
+        - generic [ref=f3e41]:
+          - generic [ref=f3e42]:
+            - term [ref=f3e43]: 总数
+            - definition [ref=f3e44]: "1"
+          - generic [ref=f3e45]:
+            - term [ref=f3e46]: 待新增
+            - definition [ref=f3e47]: "1"
+          - generic [ref=f3e48]:
+            - term [ref=f3e49]: 可确认
+            - definition [ref=f3e50]: "0"
+          - generic [ref=f3e51]:
+            - term [ref=f3e52]: 重复
+            - definition [ref=f3e53]: "0"
+          - generic [ref=f3e54]:
+            - term [ref=f3e55]: 冲突
+            - definition [ref=f3e56]: "0"
+          - generic [ref=f3e57]:
+            - term [ref=f3e58]: 无效
+            - definition [ref=f3e59]: "0"
+          - generic [ref=f3e60]:
+            - term [ref=f3e61]: 已完成
+            - definition [ref=f3e62]: "0"
+          - generic [ref=f3e63]:
+            - term [ref=f3e64]: 失败
+            - definition [ref=f3e65]: "0"
+          - generic [ref=f3e66]:
+            - term [ref=f3e67]: 已回退
+            - definition [ref=f3e68]: "0"
+          - generic [ref=f3e69]:
+            - term [ref=f3e70]: 回退受阻
+            - definition [ref=f3e71]: "0"
+      - generic [ref=f3e72]:
+        - generic [ref=f3e73]:
+          - generic [ref=f3e74]: 来源
+          - strong [ref=f3e75]: 上电通告
+        - generic [ref=f3e76]:
+          - generic [ref=f3e77]: 通告名称
+          - strong [ref=f3e78]: B楼机柜上电通告
+        - generic [ref=f3e79]:
+          - generic [ref=f3e80]: 计划时间
+          - generic [ref=f3e81]: 2026-09-18 17:00:00 ~ 2026-09-18 19:00:00
+        - generic [ref=f3e82]:
+          - generic [ref=f3e83]: 结束通告实际发送
+          - generic [ref=f3e84]: 2026-09-18 19:05:00
+        - generic [ref=f3e85]:
+          - generic [ref=f3e86]: 数量核对
+          - generic [ref=f3e87]: 声明 1 柜 · 唯一 1 柜 · 目录匹配 1 柜
+        - generic [ref=f3e88]:
+          - generic [ref=f3e89]: 原始柜号
+          - generic [ref=f3e90]: B-216运营商机房B04
+      - generic [ref=f3e91]:
+        - generic [ref=f3e92]:
+          - heading "确认截图" [level=3] [ref=f3e93]
+          - generic [ref=f3e94]: 0 张
+        - generic [ref=f3e95]:
+          - generic [ref=f3e99]: 拖入截图或按 Ctrl+V 粘贴
+          - generic [ref=f3e100] [cursor=pointer]:
+            - text: 选择图片
+            - button "选择图片" [ref=f3e101]
+          - generic [ref=f3e102] [cursor=pointer]:
+            - text: 选择文件夹
+            - button "选择文件夹" [ref=f3e103]
+      - generic [ref=f3e104]:
+        - generic [ref=f3e105]:
+          - strong [ref=f3e106]: 记录筛选
+          - generic [ref=f3e107]:
+            - generic [ref=f3e108]: 楼栋
+            - combobox "楼栋" [ref=f3e109] [cursor=pointer]:
+              - option "全部楼栋"
+              - option "B楼" [selected]
+          - generic [ref=f3e110]:
+            - generic [ref=f3e111]: 状态
+            - combobox "状态" [ref=f3e112] [cursor=pointer]:
+              - option "全部状态" [selected]
+              - option "可确认"
+              - option "已回退"
+              - option "重复"
+              - option "冲突"
+              - option "无效"
+              - option "失败"
+              - option "已完成"
+              - option "已排除"
+          - generic [ref=f3e113]: 当前 1 条
+        - generic [ref=f3e114]:
+          - generic [ref=f3e115]:
+            - generic [ref=f3e116]: 按楼确认
+            - combobox "按楼确认" [ref=f3e117] [cursor=pointer]:
+              - option "选择楼栋"
+              - option "B楼" [selected]
+          - button "确认本楼" [ref=f3e118] [cursor=pointer]
+          - button "确认已选" [disabled] [ref=f3e119]
+          - button "确认整批" [disabled] [ref=f3e120]
+          - button "回退本批已写入记录" [disabled] [ref=f3e121]
+          - button "作废未提交行" [ref=f3e122] [cursor=pointer]
+      - table [ref=f3e124]:
+        - rowgroup [ref=f3e125]:
+          - row [ref=f3e126]:
+            - columnheader [ref=f3e127]:
+              - checkbox "选择本页" [ref=f3e128]
+            - columnheader "状态" [ref=f3e129]
+            - columnheader "位置" [ref=f3e130]
+            - columnheader "机柜" [ref=f3e131]
+            - columnheader "不计入通告汇总" [ref=f3e132]
+            - columnheader "当前状态 / 操作" [ref=f3e133]
+            - columnheader "期望完成" [ref=f3e134]
+            - columnheader "实际完成" [ref=f3e135]
+            - columnheader "结果" [ref=f3e136]
+            - columnheader "来源" [ref=f3e137]
+            - columnheader "操作" [ref=f3e138]
+        - rowgroup [ref=f3e139]:
+          - row [ref=f3e140]:
+            - cell [ref=f3e141]:
+              - checkbox "选择B04" [ref=f3e142]
+            - cell "可确认" [ref=f3e143]
+            - cell "B楼 216包间" [ref=f3e145]:
+              - strong [ref=f3e146]: B楼
+              - generic [ref=f3e147]: 216包间
+            - cell [ref=f3e148]:
+              - strong [ref=f3e149]: B04
+            - cell [ref=f3e150]:
+              - checkbox "B楼 216 B04 不计入通告汇总" [ref=f3e151]
+            - cell "未上电 / 已下电 上正式电" [ref=f3e152]:
+              - generic [ref=f3e153]: 未上电 / 已下电
+              - strong [ref=f3e154]: 上正式电
+            - cell "2026-09-18 18:00" [ref=f3e155]
+            - cell "待填写" [ref=f3e156]
+            - cell "成功" [ref=f3e157]
+            - cell [ref=f3e159]:
+              - strong [ref=f3e160]: "-"
+            - cell [ref=f3e161]:
+              - button "编辑记录" [ref=f3e162] [cursor=pointer]
+              - button "从待办排除" [ref=f3e166] [cursor=pointer]
+      - generic [ref=f3e170]:
+        - generic [ref=f3e171]: 共 1 条
+        - button [disabled] [ref=f3e172]
+        - button "1" [ref=f3e175] [cursor=pointer]
+        - button [disabled] [ref=f3e176]
+  - dialog "编辑 B楼 216 B04" [active] [ref=f3e180]:
+    - banner [ref=f3e181]:
+      - generic [ref=f3e182]:
+        - generic [ref=f3e183]: 机柜记录
+        - strong [ref=f3e184]: B楼 · 216包间 · B04
+      - button "关闭编辑" [ref=f3e185] [cursor=pointer]
+    - generic [ref=f3e189]:
+      - group "机柜定位" [ref=f3e190]:
+        - generic [ref=f3e192]:
+          - generic [ref=f3e193]: 楼栋
+          - combobox "楼栋" [ref=f3e194]:
+            - option "B楼" [selected]
+            - option "A楼"
+            - option "C楼"
+            - option "D楼"
+            - option "E楼"
+        - generic [ref=f3e195]:
+          - generic [ref=f3e196]: 包间
+          - textbox "包间" [ref=f3e197]: "216"
+        - generic [ref=f3e198]:
+          - generic [ref=f3e199]: 机柜
+          - textbox "机柜" [ref=f3e200]: B04
+        - generic [ref=f3e201]:
+          - generic [ref=f3e202]: 供应商机柜号
+          - textbox "供应商机柜号" [ref=f3e203]
+      - group "机柜资料" [ref=f3e204]:
+        - generic [ref=f3e206]:
+          - generic [ref=f3e207]: 机柜类型
+          - combobox "机柜类型" [ref=f3e208]:
+            - option "请选择"
+            - option "网络机柜" [selected]
+            - option "服务器机柜"
+        - generic [ref=f3e209]:
+          - generic [ref=f3e210]: 类型明细
+          - textbox "类型明细" [ref=f3e211]
+      - group "操作信息" [ref=f3e212]:
+        - generic [ref=f3e214]:
+          - generic [ref=f3e215]: 当前：未上电 / 已下电
+          - generic [ref=f3e216]: 操作类型可人工调整
+        - generic [ref=f3e217]:
+          - generic [ref=f3e218]: 操作类型
+          - combobox "操作类型" [ref=f3e219]:
+            - option "请选择"
+            - option "上正式电" [selected]
+            - option "上测试电"
+            - option "测试电转正式电"
+            - option "正式电转测试电"
+            - option "下正式电"
+            - option "下测试电"
+        - generic [ref=f3e220]:
+          - generic [ref=f3e221]: 期望完成时间
+          - textbox "期望完成时间" [ref=f3e222]: 2026-09-18T18:00
+        - generic [ref=f3e223]:
+          - generic [ref=f3e224]: 实际完成时间
+          - textbox "实际完成时间" [ref=f3e225]
+        - generic [ref=f3e226]:
+          - generic [ref=f3e227]: 结果
+          - combobox "结果" [ref=f3e228]:
+            - option "请选择"
+            - option "成功" [selected]
+            - option "失败"
+    - generic [ref=f3e229]:
+      - generic [ref=f3e230]: "-"
+      - generic [ref=f3e232]:
+        - button "关闭" [ref=f3e233] [cursor=pointer]
+        - generic [ref=f3e234]: 已保存

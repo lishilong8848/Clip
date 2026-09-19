@@ -579,7 +579,7 @@ REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME = "设备品牌"
 REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME = "设备型号"
 REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME = "设备类型"
 REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY = "repair_equipment_brand_model_catalog"
-REPAIR_FOLLOWUP_CATALOG_VERSION = 2
+REPAIR_FOLLOWUP_CATALOG_VERSION = 3
 REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
 REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS = 5000
 REPAIR_SNAPSHOT_SOURCE_PROJECTS = "repair_projects"
@@ -7417,12 +7417,17 @@ class MaintenancePortalService:
                     persisted.get("device_mapping")
                 )
             )
+            persisted_device_names = list(dict.fromkeys(
+                str(name or "").strip()
+                for name in persisted.get("device_names") or []
+                if str(name or "").strip()
+            ))
             persisted_at = float(
                 persisted.get("refreshed_at") or persisted.get("updated_at") or 0
             )
             if (
                 not force_refresh
-                and persisted_mapping
+                and (persisted_mapping or persisted_device_names)
                 and int(persisted.get("version") or 0)
                 >= REPAIR_FOLLOWUP_CATALOG_VERSION
                 and now - persisted_at <= REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS
@@ -7432,6 +7437,7 @@ class MaintenancePortalService:
                     "refreshed_at": persisted_at,
                     "mapping": persisted_mapping,
                     "device_mapping": persisted_device_mapping,
+                    "device_names": persisted_device_names,
                 }
                 return persisted_mapping
 
@@ -7470,15 +7476,29 @@ class MaintenancePortalService:
                 device_mapping = (
                     self._repair_equipment_catalog_device_brand_model_options(records)
                 )
-                if not mapping:
-                    raise PortalError("设备目录没有可用的品牌型号数据。")
+                device_meta = catalog_meta_by_name[REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME]
+                device_names = list(dict.fromkeys([
+                    *device_meta.option_names,
+                    *(
+                        self._repair_management_option_name(
+                            device_meta,
+                            (record.get("display_fields") or {}).get(REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME)
+                            or (record.get("raw_fields") or {}).get(REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME),
+                        )
+                        for record in records
+                    ),
+                ]))
+                device_names = [name for name in device_names if name]
+                if not mapping and not device_names:
+                    raise PortalError("设备目录没有可用的设备名称或品牌型号数据。")
             except Exception:
-                if persisted_mapping:
+                if not force_refresh and (persisted_mapping or persisted_device_names):
                     self._repair_followup_catalog_cache = {
                         "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
                         "refreshed_at": now,
                         "mapping": persisted_mapping,
                         "device_mapping": persisted_device_mapping,
+                        "device_names": persisted_device_names,
                     }
                     return persisted_mapping
                 raise
@@ -7488,6 +7508,7 @@ class MaintenancePortalService:
                 "refreshed_at": now,
                 "mapping": mapping,
                 "device_mapping": device_mapping,
+                "device_names": device_names,
             }
             self._state_store.put_backend_runtime(
                 REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY,
@@ -7499,6 +7520,7 @@ class MaintenancePortalService:
                     "record_count": len(records),
                     "brand_count": len(mapping),
                     "device_count": len(device_mapping),
+                    "device_names": device_names,
                     "mapping": mapping,
                     "device_mapping": device_mapping,
                 },
@@ -8183,9 +8205,11 @@ class MaintenancePortalService:
         )
         try:
             catalog_mapping = self._load_repair_followup_brand_model_catalog(
-                meta_by_name
+                meta_by_name, force_refresh=force_refresh
             )
         except PortalError:
+            if force_refresh:
+                raise
             catalog_mapping = {}
         brand_model_options = {
             brand: list(models)
@@ -8207,6 +8231,15 @@ class MaintenancePortalService:
                     if model not in merged_models:
                         merged_models.append(model)
         field_payloads = [self._repair_followup_field_payload(meta) for meta in metas]
+        with self._repair_followup_catalog_cache_lock:
+            catalog_device_names = list(
+                (self._repair_followup_catalog_cache or {}).get("device_names") or []
+            )
+        for field_payload in field_payloads:
+            if field_payload.get("field_name") == REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME:
+                field_payload["options"] = list(dict.fromkeys([
+                    *field_payload.get("options", []), *catalog_device_names,
+                ]))
         shared_fields, shared_field_warnings = self._repair_followup_shared_fields(
             summary_record,
             scope=scope,

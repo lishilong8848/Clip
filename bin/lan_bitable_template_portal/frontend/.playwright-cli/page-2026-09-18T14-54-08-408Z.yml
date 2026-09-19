@@ -1,0 +1,157 @@
+- main [ref=f2e3]:
+  - generic [aria-hidden]:
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - img "世纪互联官方标识" [ref=f2e6]
+      - generic [ref=f2e7]:
+        - heading "南通基地-运维灯塔工作台" [level=1] [ref=f2e8]
+        - paragraph [ref=f2e9]: 机柜上下电
+    - generic [ref=f2e10]:
+      - generic [ref=f2e11]: 已登录
+      - button "打开管理员诊断和权限管理" [ref=f2e12] [cursor=pointer]
+      - button "退出" [ref=f2e14] [cursor=pointer]
+  - main [ref=f2e16]:
+    - generic [ref=f2e17]:
+      - button "返回" [ref=f2e18] [cursor=pointer]:
+        - generic [aria-hidden] [ref=f2e19]: ‹
+        - text: 返回
+      - generic [ref=f2e20]:
+        - heading "B楼机柜上下电" [level=1] [ref=f2e21]
+        - paragraph [ref=f2e22]: 机柜台账
+      - generic [ref=f2e23]:
+        - button "刷新" [ref=f2e24] [cursor=pointer]
+        - button "批量登记" [ref=f2e30] [cursor=pointer]
+        - button "上下电待办 1" [ref=f2e35] [cursor=pointer]:
+          - text: 上下电待办
+          - generic [ref=f2e39]: "1"
+        - button "新增记录" [ref=f2e40] [cursor=pointer]
+        - button "导出" [ref=f2e42] [cursor=pointer]
+        - button "导出历史" [active] [ref=f2e46] [cursor=pointer]
+    - alert [ref=f2e138]:
+      - text: 服务器响应格式异常，当前输入已保留，请重试。
+      - button "关闭错误" [ref=f2e139] [cursor=pointer]
+    - generic [ref=f2e143]:
+      - generic [ref=f2e144]:
+        - heading "导出历史" [level=3] [ref=f2e145]
+        - button "关闭导出历史" [ref=f2e146] [cursor=pointer]
+      - table [ref=f2e150]:
+        - rowgroup [ref=f2e151]:
+          - row [ref=f2e152]:
+            - columnheader "文件" [ref=f2e153]
+            - columnheader "生成时间" [ref=f2e154]
+            - columnheader "云端归档" [ref=f2e155]
+            - columnheader "下载" [ref=f2e156]
+            - columnheader "操作" [ref=f2e157]
+        - rowgroup
+    - generic [ref=f2e51]:
+      - button "查看机柜总数机柜" [ref=f2e53] [cursor=pointer]:
+        - generic [ref=f2e54]: 机柜总数
+        - strong [ref=f2e55]: "4"
+      - button "查看已上电机柜" [ref=f2e57] [cursor=pointer]:
+        - generic [ref=f2e58]: 已上电
+        - strong [ref=f2e59]: "3"
+      - button "查看正式电机柜" [ref=f2e61] [cursor=pointer]:
+        - generic [ref=f2e62]: 正式电
+        - strong [ref=f2e63]: "2"
+      - button "查看测试电机柜" [ref=f2e65] [cursor=pointer]:
+        - generic [ref=f2e66]: 测试电
+        - strong [ref=f2e67]: "1"
+      - button "查看未上电 / 已下电机柜" [ref=f2e69] [cursor=pointer]:
+        - generic [ref=f2e70]: 未上电 / 已下电
+        - strong [ref=f2e71]: "1"
+      - button "查看待核实机柜" [ref=f2e73] [cursor=pointer]:
+        - generic [ref=f2e74]: 待核实
+        - strong [ref=f2e75]: "0"
+    - navigation "机柜视图" [ref=f2e76]:
+      - button "包间汇总" [ref=f2e77] [cursor=pointer]
+      - button "原始平面图" [ref=f2e78] [cursor=pointer]
+      - button "机柜台账" [ref=f2e79] [cursor=pointer]
+      - button "机柜状态" [ref=f2e80] [cursor=pointer]
+      - button "运营商机房" [ref=f2e81] [cursor=pointer]
+      - generic [ref=f2e82]: 4 条台账
+    - table [ref=f2e84]:
+      - rowgroup [ref=f2e85]:
+        - row [ref=f2e86]:
+          - columnheader "包间" [ref=f2e87]
+          - columnheader "总数" [ref=f2e88]
+          - columnheader "已上电" [ref=f2e89]
+          - columnheader "正式电" [ref=f2e90]
+          - columnheader "测试电" [ref=f2e91]
+          - columnheader "未上电/已下电" [ref=f2e92]
+          - columnheader "待核实" [ref=f2e93]
+          - columnheader "网络机柜" [ref=f2e94]
+          - columnheader "服务器机柜" [ref=f2e95]
+          - columnheader "平面图" [ref=f2e96]
+      - rowgroup [ref=f2e97]:
+        - row [ref=f2e98]:
+          - cell [ref=f2e99]:
+            - button "B-216运营商机房 216 包间" [ref=f2e100] [cursor=pointer]:
+              - text: B-216运营商机房
+              - generic [ref=f2e101]: 216 包间
+          - cell [ref=f2e102]:
+            - button "2" [ref=f2e103] [cursor=pointer]
+          - cell [ref=f2e104]:
+            - button "216包间已上电" [ref=f2e105] [cursor=pointer]: "2"
+          - cell [ref=f2e106]:
+            - button "216包间正式电" [ref=f2e107] [cursor=pointer]: "1"
+          - cell [ref=f2e108]:
+            - button "216包间测试电" [ref=f2e109] [cursor=pointer]: "1"
+          - cell [ref=f2e110]:
+            - button "216包间未上电/已下电" [ref=f2e111] [cursor=pointer]: "0"
+          - cell [ref=f2e112]:
+            - button "216包间待核实" [ref=f2e113] [cursor=pointer]: "0"
+          - cell "2" [ref=f2e114]
+          - cell "0" [ref=f2e115]
+          - cell [ref=f2e116]:
+            - button "运营商机房" [ref=f2e117] [cursor=pointer]
+        - row [ref=f2e118]:
+          - cell [ref=f2e119]:
+            - button "B-247运营商机房 247 包间" [ref=f2e120] [cursor=pointer]:
+              - text: B-247运营商机房
+              - generic [ref=f2e121]: 247 包间
+          - cell [ref=f2e122]:
+            - button "2" [ref=f2e123] [cursor=pointer]
+          - cell [ref=f2e124]:
+            - button "247包间已上电" [ref=f2e125] [cursor=pointer]: "1"
+          - cell [ref=f2e126]:
+            - button "247包间正式电" [ref=f2e127] [cursor=pointer]: "1"
+          - cell [ref=f2e128]:
+            - button "247包间测试电" [ref=f2e129] [cursor=pointer]: "0"
+          - cell [ref=f2e130]:
+            - button "247包间未上电/已下电" [ref=f2e131] [cursor=pointer]: "1"
+          - cell [ref=f2e132]:
+            - button "247包间待核实" [ref=f2e133] [cursor=pointer]: "0"
+          - cell "2" [ref=f2e134]
+          - cell "0" [ref=f2e135]
+          - cell [ref=f2e136]:
+            - button "运营商机房" [ref=f2e137] [cursor=pointer]

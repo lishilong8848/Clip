@@ -31,8 +31,8 @@ INITIAL_TEMPLATES=Path(__file__).with_name("templates")/"cabinet_power"
 LAYOUT_CACHE=INITIAL_TEMPLATES/"layouts.json.gz"
 SNAPSHOT_KEY="feishu_snapshot_v1:"
 
-def export_snapshot(config,operations):
-    return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations)
+def export_snapshot(config,operations,notice_summary=None):
+    return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations,notice_summary)
 
 def process_alive(pid):
     if not isinstance(pid,int) or pid<=0: return False
@@ -469,8 +469,9 @@ class CabinetPowerService:
     def overview(self,scope,include_racks=True):
         snap=self._snapshot(scope); config=snap["config"]
         if "overview" in snap:
-            result=snap["overview"]
-            return copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
+            result=copy.deepcopy(snap["overview"] if include_racks else {k:v for k,v in snap["overview"].items() if k!="racks"})
+            result["export_state"]=self._export_state(scope,snap)
+            return result
         derived=derive_records(config,snap["operations"]); issues=derived["issues"]
         rooms=[]
         for room in config["rooms"]:
@@ -490,7 +491,9 @@ class CabinetPowerService:
             formats.append({**f,"columns":table_columns(f,scope),"count":len(selected)})
         result={"scope":scope,"configured":True,"activated":True,"history_ready":True,"source":"local","counts":derived["counts"],"rooms":rooms,"racks":derived["racks"],"issues":issues,"version":snap["version"],"updated_at":snap["updated_at"],"error":snap.get("error",""),"daily":derived["daily"],"record_count":len(snap["operations"]),"inventory_only":sum(o["empty"] for o in snap["operations"]),"sheet_formats":formats,"table_url":f"https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}"}
         snap["overview"]=result
-        return copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
+        response=copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
+        response["export_state"]=self._export_state(scope,snap)
+        return response
 
     def racks(self,scope):
         overview=self.overview(scope)
@@ -1155,20 +1158,35 @@ class CabinetPowerService:
         if scope not in TOTALS or kind not in ("refresh","export"): raise CabinetError("任务类型无效")
         if kind=="export": self.ensure_loaded(scope)
         version=self.local.version(scope)
+        if kind=="export":
+            snapshot=self.snapshot(scope); version=snapshot["version"]
+            notice_summary=self.batches.notice_summary(scope,snapshot["config"])
+            payload={**payload,"snapshot":snapshot,"notice_summary":notice_summary}
         with self.local.locked([scope]):
             for existing in self.local.documents(scope,"job:"):
+                if (kind=="export" and payload.get("batch_id") and existing.get("kind")=="export"
+                        and (existing.get("payload") or {}).get("batch_id")==payload["batch_id"]
+                        and existing.get("status")=="succeeded"):
+                    old_payload=existing.get("payload") or {}
+                    if (old_payload.get("snapshot") or {}).get("version")==version and \
+                            (old_payload.get("notice_summary") or {}).get("version")==payload["notice_summary"]["version"]:
+                        return {k:v for k,v in existing.items() if k!="payload"}
+                if existing.get("kind")!=kind or existing.get("status") not in ("pending","running"):
+                    continue
                 same_batch=not payload.get("batch_id") or (existing.get("payload") or {}).get("batch_id")==payload.get("batch_id")
-                if existing.get("kind")==kind and existing.get("status") in ("pending","running") and process_alive(existing.get("pid")) and (kind=="refresh" or existing.get("version")==version and same_batch): return existing
-            if kind=="export":
-                snapshot=self.snapshot(scope); version=snapshot["version"]; payload={**payload,"snapshot":snapshot}
+                same_notice=(existing.get("payload") or {}).get("notice_summary",{}).get("version")==payload.get("notice_summary",{}).get("version")
+                alive=process_alive(existing.get("pid")) and (existing.get("pid")!=os.getpid() or existing.get("job_id") in self._running)
+                same_request=kind=="export" and bool(payload.get("batch_id")) and same_batch
+                if alive and (same_request or kind=="refresh" or existing.get("version")==version and same_batch and same_notice): return {k:v for k,v in existing.items() if k!="payload"}
             jid=uuid.uuid4().hex; job={"job_id":jid,"scope":scope,"kind":kind,"owner":owner,"payload":payload,"status":"pending","created_at":stamp(),"pid":os.getpid(),"version":version}
             self.write("job:"+jid,job)
+            response={k:v for k,v in job.items() if k!="payload"}
             with self._lock: self._running[jid]=job
             try: self._pools[scope].submit(self._run_job,job)
             except Exception:
                 with self._lock: self._running.pop(jid,None)
                 job.update(status="failed",error="服务正在停止，请稍后重试"); self.write("job:"+jid,job); raise
-            return copy.deepcopy(job)
+            return response
 
     def _run_job(self,job):
         try:
@@ -1184,33 +1202,62 @@ class CabinetPowerService:
     def job_status(self,jid,scope=None):
         job=self.local.document(scope,"job:"+jid) if scope in TOTALS else self.read("job:"+jid)
         if not job: raise CabinetError("任务不存在",404)
-        if job["status"] in ("pending","running") and (not process_alive(job.get("pid")) or job.get("pid")==os.getpid() and jid not in self._running): job.update(status="failed",error="任务已中断，请重新执行")
+        created=job.get("started_at") or job.get("created_at") or ""
+        try: stale=time.time()-dt.datetime.fromisoformat(created).timestamp()>30
+        except (ValueError,TypeError): stale=True
+        if job["status"] in ("pending","running") and (not process_alive(job.get("pid")) or job.get("pid")==os.getpid() and jid not in self._running and stale): job.update(status="failed",error="任务已中断，请重新执行")
         return {k:v for k,v in job.items() if k!="payload"}
 
     def do_export(self,scope,payload,job):
         snap=payload.get("snapshot") or self.snapshot(scope); config=snap["config"]
         with self._lock:
             if self._exports is None: self._exports=ProcessPoolExecutor(max_workers=5,mp_context=multiprocessing.get_context("spawn"))
-        content=self._exports.submit(export_snapshot,config,snap["operations"]).result()
+        content=self._exports.submit(export_snapshot,config,snap["operations"],payload.get("notice_summary")).result()
         batch_id=str(payload.get("batch_id") or "").strip()
         if batch_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}",batch_id): raise CabinetError("一键导出批次标识无效")
         eid=uuid.uuid4().hex; filename=f"南通{scope}栋机柜平面图及上下电数量汇总表_{dt.datetime.now():%Y%m%d_%H%M%S}.xlsm"
         path=self.atomic_file(Path("exports")/eid/filename,content)
-        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
+        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"notice_summary_version":(payload.get("notice_summary") or {}).get("version",""),"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
         self.write("export:"+eid,result)
         return self.upload_export(scope,eid,result["owner"])
 
     def cleanup_export(self,scope,eid):
-        record=self.local.document(scope,"export:"+eid)
-        if not record: raise CabinetError("导出文件不存在",404)
-        path=Path(record["path"]).resolve(); directory=(self.root/"exports").resolve()
-        if not path.is_relative_to(directory): raise CabinetError("导出路径无效")
-        if path.exists(): path.unlink()
-        record["deleted"]=True; self.write("export:"+eid,record)
-        return {"deleted":True,"export_id":eid}
+        with self._export_upload_locks[scope]:
+            record=self.local.document(scope,"export:"+eid)
+            if not record: raise CabinetError("导出文件不存在",404)
+            path=Path(record["path"]).resolve(); directory=(self.root/"exports").resolve()
+            if not path.is_relative_to(directory): raise CabinetError("导出路径无效")
+            if path.exists(): path.unlink()
+            record["deleted"]=True; self.write("export:"+eid,record)
+            return {"deleted":True,"export_id":eid}
 
     def pending_status(self,scope,owner,admin=False):
         return {"items":[self.write_status(scope,j["operation_id"],owner,admin) for j in self.pending_writes(scope) if admin or j.get("owner")==owner]}
 
+    def _export_state(self,scope,snapshot=None):
+        snap=snapshot or self._snapshot(scope)
+        current_notice=self.batches.notice_summary(scope,snap["config"])["version"]
+        exports=sorted(self.local.documents(scope,"export:"),key=lambda item:str(item.get("created_at") or ""),reverse=True)
+        latest=exports[0] if exports else None
+        if latest is None:
+            return {"has_export":False,"is_stale":False,"current_version":snap["version"],
+                    "current_notice_summary_version":current_notice}
+        reasons=[]
+        if str(latest.get("version"))!=str(snap["version"]): reasons.append("机柜台账已变化")
+        if str(latest.get("notice_summary_version") or "")!=current_notice: reasons.append("通告汇总已变化")
+        return {"has_export":True,"export_id":latest.get("export_id","") ,"created_at":latest.get("created_at",""),
+                "is_stale":bool(reasons),"stale_reason":"；".join(reasons),"current_version":snap["version"],
+                "current_notice_summary_version":current_notice}
+
     def export_history(self,scope):
-        return {"items":sorted([{k:v for k,v in item.items() if k!="path"} for item in self.local.documents(scope,"export:") if not item.get("deleted")],key=lambda item:item["created_at"],reverse=True)}
+        state=self._export_state(scope)
+        items=[]
+        for item in self.local.documents(scope,"export:"):
+            public=self._public_export(item)
+            public["file_available"]=not item.get("deleted") and Path(item.get("path") or "").is_file()
+            reasons=[]
+            if str(item.get("version"))!=str(state["current_version"]): reasons.append("机柜台账已变化")
+            if str(item.get("notice_summary_version") or "")!=state["current_notice_summary_version"]: reasons.append("通告汇总已变化")
+            public.update(is_stale=bool(reasons),stale_reason="；".join(reasons))
+            items.append(public)
+        return {"items":sorted(items,key=lambda item:item["created_at"],reverse=True),"current":state}

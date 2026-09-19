@@ -119,6 +119,17 @@
           <section v-for="group in groupedFields" :key="group.key" class="followup-field-section">
             <header>
               <strong>{{ group.label }}</strong>
+              <button
+                v-if="group.key === 'equipment'"
+                type="button"
+                class="followup-button quiet compact"
+                :disabled="loading || saving || equipmentRefreshing"
+                title="从多维表刷新设备名称、品牌和型号"
+                @click="refreshEquipmentOptions"
+              >
+                <RefreshCw :size="14" :class="{ spinning: equipmentRefreshing }" aria-hidden="true" />
+                <span>{{ equipmentRefreshing ? "刷新中" : "刷新设备选项" }}</span>
+              </button>
             </header>
             <label v-if="group.key === 'execution'" class="spare-parts-toggle">
               <input
@@ -445,6 +456,7 @@ const workerPeople = ref<LooseDict[]>([]);
 const involvesSpareParts = ref(false);
 const brandModelOptions = ref<Record<string, string[]>>({});
 const deviceBrandModelOptions = ref<Record<string, Record<string, string[]>>>({});
+const equipmentRefreshing = ref(false);
 const total = ref(0);
 const page = ref(1);
 const deleteDialogOpen = ref(false);
@@ -468,6 +480,7 @@ let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let skipNextQueryReload = false;
 let recordsAbortController: AbortController | null = null;
 let sourceRefreshAbortController: AbortController | null = null;
+let equipmentRefreshAbortController: AbortController | null = null;
 let cmdbAbortController: AbortController | null = null;
 let bindAbortController: AbortController | null = null;
 let cmdbCachePollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1029,6 +1042,9 @@ function resetForParent(): void {
   recordsAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
+  equipmentRefreshAbortController?.abort();
+  equipmentRefreshAbortController = null;
+  equipmentRefreshing.value = false;
   stopCmdbCachePolling();
   cmdbCacheRefreshing.value = false;
   cmdbPickerMessage.value = "";
@@ -1131,6 +1147,43 @@ async function refreshRepairSource(): Promise<void> {
       sourceRefreshAbortController = null;
     }
     sourceRefreshing.value = false;
+  }
+}
+
+async function refreshEquipmentOptions(): Promise<void> {
+  if (!props.summaryRecordId || equipmentRefreshing.value) return;
+  const summaryId = props.summaryRecordId;
+  const scope = props.scope || "ALL";
+  const controller = new AbortController();
+  equipmentRefreshAbortController = controller;
+  equipmentRefreshing.value = true;
+  try {
+    const params = new URLSearchParams({
+      scope, summary_record_id: summaryId, limit: "1", refresh: "1",
+    });
+    const payload = await requestJson(
+      `/api/repair-management/followups?${params.toString()}`,
+      { signal: controller.signal },
+    );
+    if (controller.signal.aborted || summaryId !== props.summaryRecordId || scope !== (props.scope || "ALL")) return;
+    const equipmentNames = new Set([DEVICE_NAME_FIELD_NAME, BRAND_FIELD_NAME, MODEL_FIELD_NAME]);
+    const fresh = new Map((Array.isArray(payload.fields) ? payload.fields : [])
+      .filter((field: LooseDict) => equipmentNames.has(String(field.field_name || "")))
+      .map((field: LooseDict) => [String(field.field_name), field]));
+    fields.value = fields.value.map((field) => fresh.get(String(field.field_name || "")) || field);
+    brandModelOptions.value = payload.brand_model_options || {};
+    deviceBrandModelOptions.value = payload.device_brand_model_options || {};
+    clearRepairFollowupCache(summaryId);
+    showMessage("设备名称、品牌和型号已刷新。", "success");
+  } catch (error: unknown) {
+    if (!controller.signal.aborted) {
+      showMessage(error instanceof Error ? error.message : "设备选项刷新失败。", "failed");
+    }
+  } finally {
+    if (equipmentRefreshAbortController === controller) {
+      equipmentRefreshAbortController = null;
+      equipmentRefreshing.value = false;
+    }
   }
 }
 
@@ -1893,6 +1946,8 @@ onBeforeUnmount(() => {
   recordsAbortController = null;
   sourceRefreshAbortController?.abort();
   sourceRefreshAbortController = null;
+  equipmentRefreshAbortController?.abort();
+  equipmentRefreshAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
   stopCmdbCachePolling();

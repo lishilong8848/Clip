@@ -1,0 +1,44 @@
+- main [ref=e3]:
+  - generic [aria-hidden]:
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - img "世纪互联官方标识" [ref=e6]
+      - generic [ref=e7]:
+        - heading "南通基地-运维灯塔工作台" [level=1] [ref=e8]
+        - paragraph [ref=e9]: 机柜上下电
+    - generic [ref=e10]:
+      - generic [ref=e11]: 已登录
+      - button "打开管理员诊断和权限管理" [ref=e12] [cursor=pointer]
+      - button "退出" [ref=e14] [cursor=pointer]
+  - status [ref=e16]:
+    - strong [ref=e19]: 正在打开页面

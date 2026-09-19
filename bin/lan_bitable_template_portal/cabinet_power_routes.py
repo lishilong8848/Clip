@@ -25,6 +25,9 @@ def install_cabinet_power_routes(app,controller,runtime):
             allowed=[s for s in TOTALS if admin or runtime.auth_manager.scope_allowed(session,s)]
             query=dict(request.query_params)
             if path.startswith("batches"):
+                if path=="batches/reconcile-notices" and request.method=="POST":
+                    if not admin: raise CabinetError("仅管理员可核对旧通告结束时间",403)
+                    return controller._json_ok(request,session,{"started":runtime.start_cabinet_notice_history_reconcile(force=True)})
                 if path=="batches/recognize" and request.method=="POST":
                     try:
                         form=await request.form(max_files=10,max_fields=20,max_part_size=10*1024*1024)
@@ -181,7 +184,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         except Exception as exc: return controller._portal_error_response(exc,default_status=400)
 
     for path,methods in {
-        "batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
+        "batches/reconcile-notices":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
         "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],"batches/{batch_id}/rollback":["POST"],
         "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/restore-rows":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
         "batches/{batch_id}/images":["POST"],"batches/{batch_id}/images/{image_id}":["GET","DELETE"],

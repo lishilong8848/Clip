@@ -1,0 +1,94 @@
+- main [ref=f2e3]:
+  - generic [aria-hidden]:
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - img "世纪互联官方标识" [ref=f2e6]
+      - generic [ref=f2e7]:
+        - heading "南通基地-运维灯塔工作台" [level=1] [ref=f2e8]
+        - paragraph [ref=f2e9]: 机柜上下电
+    - generic [ref=f2e10]:
+      - generic [ref=f2e11]: 已登录
+      - button "打开管理员诊断和权限管理" [ref=f2e12] [cursor=pointer]
+      - button "退出" [ref=f2e14] [cursor=pointer]
+  - main [ref=f2e226]:
+    - generic [ref=f2e227]:
+      - button "返回" [ref=f2e228] [cursor=pointer]:
+        - generic [aria-hidden] [ref=f2e229]: ‹
+        - text: 返回
+      - generic [ref=f2e230]:
+        - heading "上下电待办详情" [level=1] [ref=f2e231]
+        - paragraph [ref=f2e232]: 识别和手工录入先进入待办，人工确认后才写入正式台账。
+      - generic [ref=f2e233]:
+        - button "返回待办" [ref=f2e234] [cursor=pointer]
+        - button "刷新" [ref=f2e238] [cursor=pointer]
+    - alert [ref=f2e244]:
+      - text: 服务器响应格式异常，当前输入已保留，请重试。
+      - button "关闭错误" [ref=f2e245] [cursor=pointer]
+    - generic [ref=f2e249]:
+      - combobox [ref=f2e250] [cursor=pointer]:
+        - option "全部楼栋"
+        - option "B楼" [selected]
+        - option "A楼"
+        - option "C楼"
+        - option "D楼"
+        - option "E楼"
+      - combobox [ref=f2e251] [cursor=pointer]:
+        - option "仅看待办" [selected]
+        - option "通告回退异常"
+        - option "全部状态"
+        - option "待处理"
+        - option "提交中"
+        - option "部分完成"
+        - option "已完成"
+        - option "已回退"
+        - option "已作废"
+        - option "失败"
+      - textbox "开始日期" [ref=f2e252]
+      - textbox "结束日期" [ref=f2e253]
+      - button "查询" [ref=f2e254] [cursor=pointer]
+    - generic [ref=f2e258]:
+      - table [ref=f2e259]:
+        - rowgroup [ref=f2e260]:
+          - row [ref=f2e261]:
+            - columnheader "批次" [ref=f2e262]
+            - columnheader "来源" [ref=f2e263]
+            - columnheader "楼栋" [ref=f2e264]
+            - columnheader "状态" [ref=f2e265]
+            - columnheader "总数" [ref=f2e266]
+            - columnheader "待处理" [ref=f2e267]
+            - columnheader "可确认" [ref=f2e268]
+            - columnheader "异常" [ref=f2e269]
+            - columnheader "创建时间" [ref=f2e270]
+            - columnheader "操作" [ref=f2e271]
+        - rowgroup
+      - paragraph [ref=f2e272]: 当前没有待处理批次，可切换“全部状态”查看历史。

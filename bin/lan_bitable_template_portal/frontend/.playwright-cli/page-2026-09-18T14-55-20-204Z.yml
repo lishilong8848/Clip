@@ -1,0 +1,109 @@
+- main [ref=f2e3]:
+  - generic [aria-hidden]:
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+    - generic: 内部资料 · VNET · 2026/09/18
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - img "世纪互联官方标识" [ref=f2e6]
+      - generic [ref=f2e7]:
+        - heading "南通基地-运维灯塔工作台" [level=1] [ref=f2e8]
+        - paragraph [ref=f2e9]: 机柜上下电
+    - generic [ref=f2e10]:
+      - generic [ref=f2e11]: 已登录
+      - button "打开管理员诊断和权限管理" [ref=f2e12] [cursor=pointer]
+      - button "退出" [ref=f2e14] [cursor=pointer]
+  - main [ref=f2e158]:
+    - generic [ref=f2e159]:
+      - button "返回" [ref=f2e160] [cursor=pointer]:
+        - generic [aria-hidden] [ref=f2e161]: ‹
+        - text: 返回
+      - generic [ref=f2e162]:
+        - heading "上下电待办" [level=1] [ref=f2e163]
+        - paragraph [ref=f2e164]: 识别和手工录入先进入待办，人工确认后才写入正式台账。
+      - generic [ref=f2e165]:
+        - button "批量登记" [ref=f2e166] [cursor=pointer]
+        - button "刷新" [ref=f2e171] [cursor=pointer]
+    - generic [ref=f2e177]:
+      - combobox [ref=f2e178] [cursor=pointer]:
+        - option "全部楼栋"
+        - option "B楼" [selected]
+        - option "A楼"
+        - option "C楼"
+        - option "D楼"
+        - option "E楼"
+      - combobox [ref=f2e179] [cursor=pointer]:
+        - option "仅看待办" [selected]
+        - option "通告回退异常"
+        - option "全部状态"
+        - option "待处理"
+        - option "提交中"
+        - option "部分完成"
+        - option "已完成"
+        - option "已回退"
+        - option "已作废"
+        - option "失败"
+      - textbox "开始日期" [ref=f2e180]
+      - textbox "结束日期" [ref=f2e181]
+      - button "查询" [ref=f2e182] [cursor=pointer]
+    - table [ref=f2e187]:
+      - rowgroup [ref=f2e188]:
+        - row [ref=f2e189]:
+          - columnheader "批次" [ref=f2e190]
+          - columnheader "来源" [ref=f2e191]
+          - columnheader "楼栋" [ref=f2e192]
+          - columnheader "状态" [ref=f2e193]
+          - columnheader "总数" [ref=f2e194]
+          - columnheader "待处理" [ref=f2e195]
+          - columnheader "可确认" [ref=f2e196]
+          - columnheader "异常" [ref=f2e197]
+          - columnheader "创建时间" [ref=f2e198]
+          - columnheader "操作" [ref=f2e199]
+      - rowgroup [ref=f2e200]:
+        - row [ref=f2e201]:
+          - cell "aaaaaaaa 待办" [ref=f2e202]:
+            - strong [ref=f2e203]: aaaaaaaa
+            - generic [ref=f2e204]: 待办
+          - cell "上下电通告" [ref=f2e205]
+          - cell "B楼" [ref=f2e206]
+          - cell "待处理" [ref=f2e207]
+          - cell "1" [ref=f2e209]
+          - cell [ref=f2e210]:
+            - strong [ref=f2e211]: "1"
+          - cell "0" [ref=f2e212]
+          - cell "0" [ref=f2e213]
+          - cell "2026-09-18 18:00:00" [ref=f2e214]
+          - cell [ref=f2e215]:
+            - button "处理待办" [ref=f2e216] [cursor=pointer]
+    - generic [ref=f2e217]:
+      - generic [ref=f2e218]: 共 1 个批次
+      - button [disabled] [ref=f2e219]
+      - button "1" [ref=f2e222] [cursor=pointer]
+      - button [disabled] [ref=f2e223]

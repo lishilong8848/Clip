@@ -37512,7 +37512,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             3,
             False,
             {},
-            ["蓄电池", "柴油发电机"],
+            ["蓄电池", "柴油发电机", "漏水绳"],
             False,
         )
         catalog_brand = FieldMeta(
@@ -37582,6 +37582,48 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             persisted[0][1]["device_mapping"]["蓄电池"]["圣阳"],
             ["SP12-100", "SP12-200"],
         )
+        self.assertIn("漏水绳", persisted[0][1]["device_names"])
+
+    def test_repair_followup_device_options_merge_catalog_names_and_force_refresh(self):
+        service = _TestMaintenancePortalService()
+        device = FieldMeta("fld_device", "设备名称", "SingleSelect", 3, False, {}, ["蓄电池"], False)
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {"record_id": "rec_summary"}
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([device], {device.field_name: device}, [])
+        )
+        calls = []
+        def load_catalog(_meta, *, force_refresh=False):
+            calls.append(force_refresh)
+            service._repair_followup_catalog_cache = {
+                "device_names": ["蓄电池", "漏水绳"],
+                "device_mapping": {},
+            }
+            return {}
+        service._load_repair_followup_brand_model_catalog = load_catalog  # type: ignore[method-assign]
+        payload = service.get_repair_followup_records(
+            summary_record_id="rec_summary", force_refresh=True,
+        )
+        field = next(item for item in payload["fields"] if item["field_name"] == "设备名称")
+        self.assertEqual(field["options"], ["蓄电池", "漏水绳"])
+        self.assertEqual(calls, [True])
+
+    def test_repair_followup_forced_catalog_refresh_does_not_use_stale_cache(self):
+        service = _TestMaintenancePortalService()
+        service._state_store.get_backend_runtime = (  # type: ignore[method-assign]
+            lambda _key: {
+                "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
+                "refreshed_at": time.time(),
+                "mapping": {"旧品牌": ["旧型号"]},
+                "device_names": ["旧设备"],
+            }
+        )
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: (_ for _ in ()).throw(PortalError("设备目录读取失败"))
+        )
+        with self.assertRaisesRegex(PortalError, "设备目录读取失败"):
+            service._load_repair_followup_brand_model_catalog({}, force_refresh=True)
 
     def test_repair_followup_brand_model_catalog_uses_fresh_sqlite_snapshot(self):
         service = _TestMaintenancePortalService()

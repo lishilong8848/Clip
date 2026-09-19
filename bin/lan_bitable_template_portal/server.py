@@ -694,6 +694,7 @@ class PortalRuntime:
     cabinet_notice_queue_lock = threading.RLock()
     cabinet_notice_queue_event = threading.Event()
     cabinet_notice_worker_thread: threading.Thread | None = None
+    cabinet_notice_history_thread: threading.Thread | None = None
     cabinet_notice_worker_stop = False
     cabinet_notice_queue_channel = "cabinet_power_notice"
     cabinet_notice_max_attempts = 5
@@ -6259,6 +6260,10 @@ class PortalRuntime:
                 )
             except Exception as exc:
                 log_warning(f"恢复上下电通告待办任务失败: {exc}")
+            try:
+                cls.cabinet_power_service.batches.store.requeue_failed_notice_handoffs()
+            except Exception as exc:
+                log_warning(f"恢复上下电通告兜底任务失败: {exc}")
             cls.cabinet_notice_worker_stop = False
             cls.cabinet_notice_queue_event.clear()
             cls.cabinet_notice_worker_thread = threading.Thread(
@@ -6267,12 +6272,45 @@ class PortalRuntime:
                 daemon=True,
             )
             cls.cabinet_notice_worker_thread.start()
-            if cls.state_store.list_outbox_events(
-                cls.cabinet_notice_queue_channel,
-                status="pending",
-                limit=1,
-            ):
+            cls.start_cabinet_notice_history_reconcile()
+            pending = False
+            try:
+                pending = bool(cls.state_store.list_outbox_events(
+                    cls.cabinet_notice_queue_channel, status="pending", limit=1,
+                ))
+            except Exception as exc:
+                log_warning(f"读取上下电通告联动队列失败: {exc}")
+            try:
+                pending = pending or bool(cls.cabinet_power_service.batches.store.next_notice_handoff())
+            except Exception as exc:
+                log_warning(f"读取上下电通告兜底队列失败: {exc}")
+            if pending:
                 cls.cabinet_notice_queue_event.set()
+
+    @classmethod
+    def start_cabinet_notice_history_reconcile(cls, force: bool = False) -> bool:
+        if cls.cabinet_power_service is None:
+            return False
+        with cls.cabinet_notice_queue_lock:
+            if cls.cabinet_notice_history_thread is not None and cls.cabinet_notice_history_thread.is_alive():
+                return False
+            cls.cabinet_notice_history_thread = threading.Thread(
+                target=cls._reconcile_cabinet_notice_history,
+                args=(force,), name="LANCabinetNoticeHistory", daemon=True,
+            )
+            cls.cabinet_notice_history_thread.start()
+            return True
+
+    @classmethod
+    def _reconcile_cabinet_notice_history(cls, force: bool = False) -> None:
+        try:
+            batches = cls.cabinet_power_service.batches
+            for batch in batches.store.notice_batches():
+                if (batch.get("source_notice") or {}).get("rollback_error"):
+                    batches._resume_notice_rollback_after_confirm(batch["batch_id"])
+            batches.reconcile_legacy_notice_end_times(query_record_by_id, force=force)
+        except Exception as exc:
+            log_warning(f"核对旧上下电通告结束时间失败: {exc}")
 
     @classmethod
     def stop_cabinet_notice_worker(cls) -> None:
@@ -6295,12 +6333,14 @@ class PortalRuntime:
         target_record_id: str,
         request_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Best-effort handoff after a notice has already completed successfully."""
+        """Best-effort handoff after a power notice action has succeeded."""
+        event_payload: dict[str, Any] | None = None
         try:
             notice = dict(prepared or {})
+            action = str(notice.get("action") or "").lower()
             if (
                 str(notice.get("work_type") or "") != WORK_TYPE_POWER
-                or str(notice.get("action") or "").lower() != "start"
+                or action not in {"start", "update", "end", "undo_end", "undo_delete", "delete"}
                 or str(notice.get("notice_type") or "")
                 not in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}
             ):
@@ -6310,25 +6350,34 @@ class PortalRuntime:
                 return 0
             request = dict(request_payload or {})
             notice_type = str(notice.get("notice_type") or "")
-            event_id = cls.state_store.enqueue_outbox_event(
-                cls.cabinet_notice_queue_channel,
-                {
-                    "idempotency_key": f"cabinet_power_notice:{notice_type}:{record_id}",
+            text = str(notice.get("text") or notice.get("content") or "")
+            handler = get_notice_handler(notice_type)
+            cabinet = str(notice.get("cabinet") or "") or handler._extract_section(text, "柜号")
+            quantity = str(notice.get("quantity") or "") or handler._extract_section(text, "数量")
+            time_range = handler._extract_section(text, "时间")
+            start_dt, end_dt = parse_time_range(time_range) if time_range else (None, None)
+            operation_key = str(notice.get("operation_id") or job_id or notice.get("response_time") or notice_type)
+            event_payload = {
+                    "idempotency_key": f"cabinet_power_notice:{action}:{notice_type}:{record_id}:"
+                                       f"{record_id if action == 'start' else operation_key}",
+                    "event_at": time.time(),
+                    "event_action": action,
                     "job_id": str(job_id or ""),
                     "target_record_id": record_id,
+                    "prior_record_id": str(notice.get("prior_record_id") or ""),
                     "notice_type": notice_type,
                     "title": str(notice.get("title") or ""),
                     "scope": str(notice.get("scope") or request.get("scope") or ""),
-                    "start_time": str(notice.get("start_time") or ""),
-                    "end_time": str(notice.get("end_time") or ""),
-                    "cabinet": str(notice.get("cabinet") or ""),
-                    "quantity": str(notice.get("quantity") or ""),
+                    "start_time": str(notice.get("start_time") or (start_dt.strftime("%Y-%m-%d %H:%M:%S") if start_dt else "")),
+                    "end_time": str(notice.get("end_time") or (end_dt.strftime("%Y-%m-%d %H:%M:%S") if end_dt else "")),
+                    "cabinet": cabinet,
+                    "quantity": quantity,
                     "sender_open_id": str(request.get("_auth_open_id") or ""),
                     "sender_name": str(request.get("_auth_user_name") or ""),
                     "owner_id": str(request.get("_auth_open_id") or "system"),
                     "sent_at": str(notice.get("response_time") or ""),
-                },
-            )
+                }
+            event_id = cls.state_store.enqueue_outbox_event(cls.cabinet_notice_queue_channel, event_payload)
             if event_id > 0:
                 cls.ensure_cabinet_notice_worker()
                 cls.cabinet_notice_queue_event.set()
@@ -6336,6 +6385,15 @@ class PortalRuntime:
         except Exception as exc:
             # The notice is already complete. This integration must never alter
             # its result or put it back into the notice upload queue.
+            if event_payload is not None and cls.cabinet_power_service is not None:
+                try:
+                    cls.cabinet_power_service.batches.store.queue_notice_handoff(event_payload)
+                    with suppress(Exception):
+                        cls.ensure_cabinet_notice_worker()
+                    cls.cabinet_notice_queue_event.set()
+                    return -1
+                except Exception as fallback_exc:
+                    log_warning(f"上下电通告兜底投递也失败: {fallback_exc}")
             with suppress(Exception):
                 log_warning(
                     "上下电通告已成功，但待办异步投递失败: "
@@ -6345,36 +6403,63 @@ class PortalRuntime:
 
     @classmethod
     def _process_cabinet_notice_queue_once(cls) -> dict[str, Any]:
-        tasks = cls.state_store.lease_outbox_events(
-            cls.cabinet_notice_queue_channel,
-            limit=1,
-            lease_seconds=5 * 60,
-        )
+        lease_error = ""
+        try:
+            tasks = cls.state_store.lease_outbox_events(
+                cls.cabinet_notice_queue_channel, limit=1, lease_seconds=5 * 60,
+            )
+        except Exception as exc:
+            tasks = []
+            lease_error = str(exc)
+        fallback = None
+        if not tasks and cls.cabinet_power_service is not None:
+            try:
+                fallback = cls.cabinet_power_service.batches.store.next_notice_handoff()
+            except Exception as exc:
+                log_warning(f"读取上下电通告兜底队列失败: {exc}")
+                return {"processed": False, "status": "pending", "retry_after": 5}
         if not tasks:
-            return {"processed": False, "status": "idle"}
-        task = tasks[0]
+            if fallback is None:
+                return {"processed": False, "status": "pending" if lease_error else "idle", "retry_after": 5}
+        task = tasks[0] if tasks else {"id": 0, "payload": fallback["payload"]}
         event_id = int(task.get("id") or 0)
         payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
         try:
             service = cls.cabinet_power_service
             if service is None:
                 raise RuntimeError("机柜上下电服务尚未就绪")
-            batch = service.batches.create_from_notice(payload)
+            if payload.get("event_action") == "end":
+                ok, record = query_record_by_id(str(payload.get("target_record_id") or ""), str(payload.get("notice_type") or ""))
+                if not ok or not isinstance(record, dict):
+                    raise RuntimeError(f"核对结束通告目标记录失败: {record}")
+                fields = record.get("fields") if isinstance(record.get("fields"), dict) else record
+                config = get_field_config(payload["notice_type"])
+                if "结束" not in str(fields.get(config["status"]) or ""):
+                    raise RuntimeError("结束通告目标记录尚未更新为结束状态")
+                cabinet = str(fields.get(config["cabinet"]) or "").strip()
+                if not cabinet:
+                    raise RuntimeError("结束通告目标记录缺少柜号")
+                payload["cabinet"] = cabinet
+                payload["quantity"] = str(fields.get(config["quantity"]) or "")
+                payload["sent_at"] = fields.get(config["actual_end"], "")
+                payload["cabinet_verified"] = True
+            batch = service.batches.apply_notice_event(payload)
             batch_id = str(batch.get("batch_id") or "")
             if not batch_id:
                 raise RuntimeError("待办创建未返回批次ID")
-            cls.state_store.mark_outbox_event(event_id, "done")
-            cls.state_store.append_event_async(
-                "cabinet_power_notice_result",
-                {
+            if fallback:
+                cls.cabinet_power_service.batches.store.finish_notice_handoff(fallback["key"])
+            else:
+                cls.state_store.mark_outbox_event(event_id, "done")
+            with suppress(Exception):
+                cls.state_store.append_event_async("cabinet_power_notice_result", {
                     "event_id": event_id,
                     "job_id": str(payload.get("job_id") or ""),
                     "target_record_id": str(payload.get("target_record_id") or ""),
                     "batch_id": batch_id,
                     "created": not bool(batch.get("duplicate_source")),
                     "status": "success",
-                },
-            )
+                })
             return {
                 "processed": True,
                 "status": "success",
@@ -6382,26 +6467,26 @@ class PortalRuntime:
                 "batch_id": batch_id,
             }
         except Exception as exc:
-            marked = cls.state_store.mark_outbox_event(
-                event_id,
-                "pending",
-                error=str(exc),
-                max_attempts=cls.cabinet_notice_max_attempts,
-            ) or {}
+            try:
+                marked = (cls.cabinet_power_service.batches.store.finish_notice_handoff(fallback["key"], str(exc))
+                          if fallback else cls.state_store.mark_outbox_event(
+                              event_id, "pending", error=str(exc), max_attempts=cls.cabinet_notice_max_attempts,
+                          )) or {}
+            except Exception as mark_exc:
+                marked = {"status": "pending", "attempts": 1}
+                log_warning(f"上下电通告联动失败状态保存异常: {mark_exc}")
             status = str(marked.get("status") or "failed")
             attempts = max(1, int(marked.get("attempts") or 1))
             retry_after = min(30.0, float(2 ** min(attempts, 5)))
-            cls.state_store.append_event_async(
-                "cabinet_power_notice_result",
-                {
+            with suppress(Exception):
+                cls.state_store.append_event_async("cabinet_power_notice_result", {
                     "event_id": event_id,
                     "job_id": str(payload.get("job_id") or ""),
                     "target_record_id": str(payload.get("target_record_id") or ""),
                     "status": status,
                     "attempts": attempts,
                     "error": str(exc),
-                },
-            )
+                })
             log_warning(
                 "上下电通告不受影响，关联待办创建失败: "
                 f"target_record_id={payload.get('target_record_id')}, "
@@ -10223,6 +10308,17 @@ class PortalRuntime:
                 "related_remote": related_remote_result,
             },
         )
+        if notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
+            undo_action = {"start": "delete", "update": "update", "end": "undo_end", "delete": "undo_delete"}.get(action_type)
+            if undo_action:
+                field_config = get_field_config(notice_type)
+                cls.enqueue_cabinet_notice_batch(
+                    {"work_type": WORK_TYPE_POWER, "action": undo_action, "notice_type": notice_type,
+                     "target_record_id": restored_record_id, "prior_record_id": str(undo.get("target_record_id") or ""),
+                     "operation_id": undo_id, "cabinet": remote_fields.get(field_config.get("cabinet", ""), ""),
+                     "quantity": remote_fields.get(field_config.get("quantity", ""), "")},
+                    job_id=undo_id, target_record_id=restored_record_id,
+                )
         event_payload = local_result.get("active_payload") if isinstance(local_result, dict) else {}
         if isinstance(event_payload, dict) and event_payload:
             cls.state_store.enqueue_outbox_event(
@@ -13627,6 +13723,16 @@ class PortalRuntime:
             message=result_message,
             robot_result=robot_result,
         )
+        if success and notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
+            cls.enqueue_cabinet_notice_batch(
+                {**data, "work_type": WORK_TYPE_POWER,
+                 "action": {"upload": "start", "upload_replace": "update"}.get(action_type, action_type),
+                 "notice_type": notice_type, "operation_id": operation_id,
+                 "response_time": str(payload.get("response_time") or data.get("response_time") or ""),
+                 "text": str(data.get("text") or data.get("content") or "")},
+                job_id=operation_id, target_record_id=target_record_id,
+                request_payload=payload,
+            )
         return {
             "ok": bool(success),
             "name": action_name,
@@ -13659,6 +13765,7 @@ class PortalRuntime:
         *,
         operation_id: str,
         work_type: str,
+        notice_type: str,
         active_item_id: str,
         source_record_id: str,
         target_record_id: str,
@@ -13753,6 +13860,12 @@ class PortalRuntime:
             },
             error="",
         )
+        if work_type == WORK_TYPE_POWER:
+            cls.enqueue_cabinet_notice_batch(
+                {"work_type": work_type, "notice_type": notice_type, "action": "delete",
+                 "operation_id": operation_id},
+                job_id=operation_id, target_record_id=target_record_id,
+            )
         return {
             "ok": True,
             "message": "",
@@ -14025,6 +14138,7 @@ class PortalRuntime:
                             return cls._finalize_local_delete_after_remote(
                                 operation_id=operation_id,
                                 work_type=work_type,
+                                notice_type=notice_type,
                                 active_item_id=active_item_id,
                                 source_record_id=source_record_id,
                                 target_record_id=target_record_id,
@@ -14177,6 +14291,7 @@ class PortalRuntime:
             return cls._finalize_local_delete_after_remote(
                 operation_id=operation_id,
                 work_type=work_type,
+                notice_type=notice_type,
                 active_item_id=active_item_id,
                 source_record_id=source_record_id,
                 target_record_id=target_record_id,
@@ -15415,6 +15530,10 @@ class PortalRuntime:
                     pass
                 cls.delete_workbench_notice_drafts_for_target(
                     resolved_remote_record_id
+                )
+                cls.enqueue_cabinet_notice_batch(
+                    prepared, job_id=job_id, target_record_id=resolved_remote_record_id,
+                    request_payload=(current_job.get("request") if isinstance(current_job.get("request"), dict) else {}),
                 )
                 return
             try:

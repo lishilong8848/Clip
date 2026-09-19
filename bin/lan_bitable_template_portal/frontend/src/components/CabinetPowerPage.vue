@@ -7,12 +7,12 @@
         <button :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
         <button @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
         <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount" class="count-badge">{{ batchPendingCount }}</span></button>
-        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy" @click="startAllExports"><CloudUpload :size="16" />一键导出/上传所有楼栋</button>
+        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || allExportItems.some(item => ['pending','running','checking','unknown'].includes(item.status))" :title="allExportItems.some(item => ['checking','unknown'].includes(item.status)) ? '请先核对未确认的导出任务' : ''" @click="startAllExports"><CloudUpload :size="16" />{{ allExportBusy ? '各楼正在导出' : '一键导出/上传所有楼栋' }}</button>
         <template v-if="scope">
           <a v-if="overview.table_url" :href="overview.table_url" target="_blank" rel="noopener"><ExternalLink :size="16" />多维表</a>
           <button :disabled="!overview.rooms || racksLoading || busy || saving" @click="['D','E'].includes(scope) ? changeTab('records') : openEditor()"><Plus :size="16" />{{ ['D','E'].includes(scope) ? '登记机柜操作' : '新增记录' }}</button>
-          <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />导出</button>
-      <button @click="showExports"><History :size="16" />导出历史</button>
+          <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />{{ pendingExportRequest ? '继续上次导出' : '导出' }}</button>
+      <button :disabled="exportHistoryLoading" @click="showExports"><History :size="16" />{{ exportHistoryLoading ? '读取历史中' : '导出历史' }}</button>
         </template>
       </div>
     </header>
@@ -27,15 +27,30 @@
       <button v-if="bootstrapHasFailures" :disabled="bootstrapActive" @click="startBootstrap(true)">重试初始化</button>
     </div>
     <div v-if="loading && !bootstrapActive" class="notice" role="status"><Loader2 class="spin" :size="18" />正在读取台账…</div>
-    <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ job.kind === 'export' ? '正在生成原模板表格并上传多维…' : '正在同步飞书…' }}</div>
+    <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ startingJob ? (startingKind === 'exports' ? '正在准备导出数据…' : '正在启动同步…') : job.kind === 'export' ? '正在生成原模板表格并上传多维…' : '正在同步飞书…' }}</div>
     <div v-if="job.status === 'failed'" class="notice danger">{{ job.error }}<button @click="startJob(job.kind === 'export' ? 'exports' : 'refresh')">重试</button></div>
-    <div v-if="exported.export_id" class="notice" :class="exported.cloud_upload_status === 'failed' ? 'danger' : 'success'"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a><a v-if="exported.archive_url" :href="exported.archive_url" target="_blank" rel="noopener"><ExternalLink :size="16" />归档表</a><button v-if="!['succeeded','skipped'].includes(String(exported.cloud_upload_status || ''))" :disabled="exported._retrying" @click="retryExportUpload(exported)"><CloudUpload :size="16" />{{ exported._retrying ? '上传中' : '重试上传' }}</button></div>
+    <div v-if="exported.export_id" class="notice" :class="exported.cloud_upload_status === 'failed' ? 'danger' : 'success'"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a><a v-if="exported.archive_url && exported.cloud_upload_status === 'succeeded'" :href="exported.archive_url" target="_blank" rel="noopener"><ExternalLink :size="16" />归档表</a><button v-if="!['succeeded','skipped'].includes(String(exported.cloud_upload_status || ''))" :disabled="exported._retrying" @click="retryExportUpload(exported)"><CloudUpload :size="16" />{{ exported._retrying ? '上传中' : '重试上传' }}</button></div>
+    <div v-if="scope && overview.export_state?.is_stale" class="notice danger" role="status"><TriangleAlert :size="18" /><span>最近导出已过期：{{ overview.export_state.stale_reason }}。请重新导出。</span></div>
     <div v-if="storageWarning" class="notice danger" role="status">{{ storageWarning }}</div>
     <div v-if="message" class="notice success" role="status">{{ message }}</div>
     <div v-if="saving && !editorOpen" class="notice" role="status"><Loader2 class="spin" :size="16" /><span>{{ saveStepLabel }}</span><button v-if="saveStatus.operation_id" @click="showSubmission(saveStatus.operation_id)">查看提交内容</button></div>
     <div v-for="pending in pendingWrites.filter(p => !saving || p.operation_id !== saveStatus.operation_id)" :key="pending.operation_id" class="notice danger" role="alert"><span>{{ pending.status === 'conflict' ? '上传存在冲突' : '上传待完成' }}：{{ pending.error || pending.error_stage }}</span><button @click="showSubmission(pending.operation_id)">查看提交内容</button><button :disabled="saving" @click="resumePending(pending.operation_id)">继续核验</button><button :disabled="saving" @click="reconcilePending(pending.operation_id)">载入云端版本</button></div>
-    <section v-if="allExportItems.length" class="all-export-panel" aria-live="polite"><div class="section-title"><h3>全部楼栋导出/上传</h3><span>{{ allExportCompleted }}/{{ allExportItems.length }} 栋完成</span></div><div class="all-export-items"><div v-for="item in allExportItems" :key="item.scope"><strong>{{ item.scope }}楼</strong><Loader2 v-if="['pending','running','checking'].includes(item.status)" class="spin" :size="16" /><span>{{ allExportLabel(item) }}</span><a v-if="item.result?.export_id" :href="api + '/exports/' + item.result.export_id + '/download'"><Download :size="15" />下载</a><button v-if="item.result?.cloud_upload_status === 'failed'" :disabled="item.result._retrying" @click="retryExportUpload(item.result,item)"><CloudUpload :size="15" />{{ item.result._retrying ? '上传中' : '重试上传' }}</button><small v-if="item.error || item.result?.cloud_upload_error">{{ item.error || item.result.cloud_upload_error }}</small></div></div></section>
-    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><table><thead><tr><th>文件</th><th>生成时间</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><button v-if="!['succeeded','skipped'].includes(String(item.cloud_upload_status || ''))" :disabled="item._retrying" @click="retryExportUpload(item)">{{ item._retrying ? '上传中' : '重试上传' }}</button></td><td data-label="下载"><a :href="api + '/exports/' + item.export_id + '/download'">下载</a></td><td data-label="操作"><button title="清理导出文件" aria-label="清理导出文件" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table></section>
+    <section v-if="allExportItems.length" class="all-export-panel" aria-live="polite">
+      <div class="section-title"><h3>全部楼栋导出/上传</h3><span>{{ allExportCompleted }}/{{ allExportItems.length }} 栋完成</span></div>
+      <div class="all-export-items"><div v-for="item in allExportItems" :key="item.scope">
+        <strong>{{ item.scope }}楼</strong><span class="export-item-icon"><Loader2 v-if="['pending','running','checking'].includes(item.status)" class="spin" :size="16" /></span>
+        <span>{{ allExportLabel(item) }}</span>
+        <div class="export-item-actions">
+          <a v-if="item.result?.export_id && !item.result?.deleted" :href="api + '/exports/' + item.result.export_id + '/download'"><Download :size="15" />下载</a>
+          <a v-if="item.result?.archive_url && item.result?.cloud_upload_status === 'succeeded'" :href="item.result.archive_url" target="_blank" rel="noopener"><ExternalLink :size="15" />归档表</a>
+          <button v-if="item.status === 'checking'" :disabled="item._retrying" @click="retryAllExportStatus(item)"><RefreshCw :size="15" />{{ item._retrying ? '查询中' : '继续查询' }}</button>
+          <button v-if="['failed','unknown'].includes(item.status)" :disabled="item._retrying" @click="retryAllExportItem(item)"><RefreshCw :size="15" />{{ item._retrying ? '核验中' : item.status === 'unknown' ? '核验并继续' : '重试导出' }}</button>
+          <button v-if="item.result?.cloud_upload_status === 'failed' && !item.result?.deleted" :disabled="item.result._retrying" @click="retryExportUpload(item.result,item)"><CloudUpload :size="15" />{{ item.result._retrying ? '上传中' : '重试上传' }}</button>
+        </div>
+        <small v-if="item.error || item.result?.cloud_upload_error">{{ item.error || item.result.cloud_upload_error }}</small>
+      </div></div>
+    </section>
+    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status">正在读取导出历史…</p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档表</a><button v-if="!['succeeded','skipped'].includes(String(item.cloud_upload_status || '')) && item.file_available !== false" :disabled="item._retrying" @click="retryExportUpload(item)">{{ item._retrying ? '上传中' : '重试上传' }}</button></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._retrying || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table></section>
 
     <section v-if="!scope" class="buildings">
       <button v-for="building in buildings" :key="building.scope" class="building" :disabled="building.bootstrap_status !== 'succeeded'" @click="navigate('/cabinet-power?scope=' + building.scope)">
@@ -167,6 +182,7 @@
       confirm-class="danger"
       @resolve="resolveDiscardConfirmation"
     />
+    <ConfirmDialog :open="Boolean(cleanupTarget)" tone="danger" title="清理导出文件？" message="清理后无法再次从本机下载此文件；机柜台账和已上传的云端归档不受影响。" confirm-label="清理文件" cancel-label="保留文件" @resolve="resolveExportCleanup" />
     <ConfirmDialog :open="restoreDialogOpen" title="恢复未保存的机柜记录？" message="检测到上次未完成的填写。" confirm-label="恢复编辑" cancel-label="丢弃草稿" @resolve="restoreDraft" />
     <div v-if="previewEvidence" class="evidence-preview" role="dialog" aria-modal="true" aria-label="上下电确认截图原图" @click.self="previewEvidence = ''"><button aria-label="关闭原图" @click="previewEvidence = ''"><X :size="20" /></button><img :src="previewEvidence" alt="上下电确认截图原图" /></div>
   </main>
@@ -175,7 +191,7 @@
 <script setup lang="ts">
 import { resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, ExternalLink, FileCheck2, FileSpreadsheet, Files, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, ExternalLink, FileCheck2, FileSpreadsheet, Files, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { navigate, registerNavigationGuard } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -264,23 +280,29 @@ async function load(): Promise<void> {
   racksLoading.value = false;
 }
 async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1',...(props.scope?{scope:props.scope}:{})})).pending_count || 0); } catch {} }
-const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false);
-const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false);
-const allExportItems = ref<Dict[]>([]), allExportBusy = ref(false);
+const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false), startingKind = ref(''), pendingExportRequest = ref('');
+const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false), exportHistoryLoading = ref(false), cleanupTarget = ref<Dict | null>(null);
+const allExportItems = ref<Dict[]>([]), allExportBusy = ref(false), allExportBatchId = ref('');
 const busy = computed(() => startingJob.value || ['pending', 'running'].includes(job.value.status));
 const allExportReady = computed(() => Boolean(buildings.value.length) && buildings.value.every(item => item.bootstrap_status === 'succeeded'));
 const allExportCompleted = computed(() => allExportItems.value.filter(item => ['succeeded','failed'].includes(item.status)).length);
 const storageKey = 'cabinet-job:' + props.scope;
+const exportRequestKey = 'cabinet-export-request:v1:' + props.scope + ':' + (props.userId || 'anonymous');
+const allExportStorageKey = 'cabinet-all-export:v1:' + (props.userId || 'anonymous');
 const cloudUploadLabel = (item: Dict) => ({ pending:'等待上传', uploading:'正在上传多维', succeeded:'已上传多维', failed:'上传失败', skipped:'未配置云端归档' }[String(item.cloud_upload_status || '')] || '等待上传');
 function allExportLabel(item: Dict): string {
+  if (item.result?.deleted) return '本地文件已清理';
   if (item.status === 'failed') return '导出失败';
-  if (item.status === 'succeeded') return item.result?.cloud_upload_status === 'failed' ? '导出完成，上传失败' : '导出并上传完成';
-  if (item.status === 'checking') return '状态暂未读到，继续查询中';
+  if (item.status === 'unknown') return '启动状态待核验';
+  if (item.status === 'succeeded') return item.result?.cloud_upload_status === 'failed' ? '导出完成，上传失败' : item.result?.cloud_upload_status === 'skipped' ? '导出完成，未配置云端归档' : item.result?.cloud_upload_status === 'succeeded' ? '导出并上传完成' : '导出完成，归档状态待核对';
+  if (item.status === 'checking') return '状态暂未确认';
   return item.status === 'running' ? '正在生成并上传' : '等待执行';
 }
 async function startJob(path: string): Promise<void> {
-  if (busy.value) return; startingJob.value = true; error.value = '';
-  try { job.value = await write(path, {}); taskStorage.setItem(storageKey, job.value.job_id); void pollJob(); } catch (exc) { fail(exc); } finally { startingJob.value = false; }
+  if (busy.value) return; startingJob.value = true; startingKind.value = path; error.value = '';
+  const requestId = path === 'exports' ? pendingExportRequest.value || 'single_' + crypto.randomUUID().replace(/-/g,'') : '';
+  if (requestId) { pendingExportRequest.value = requestId; taskStorage.setItem(exportRequestKey,JSON.stringify({id:requestId,at:Date.now()})); }
+  try { job.value = await write(path,requestId ? {batch_id:requestId} : {}); taskStorage.setItem(storageKey, job.value.job_id); void pollJob(); } catch (exc: any) { if (requestId && (!exc?.status || exc.status >= 500)) error.value = '导出启动响应未确认，后台可能仍在执行。请点击“继续上次导出”核验原任务。'; else fail(exc); } finally { startingJob.value = false; startingKind.value = ''; }
 }
 async function pollJob(): Promise<void> {
   if (disposed) return;
@@ -288,6 +310,7 @@ async function pollJob(): Promise<void> {
     job.value = await read('jobs/' + job.value.job_id);
     if (['pending', 'running'].includes(job.value.status)) { pollTimer = scheduleVisible(pollJob,1800); return; }
     taskStorage.removeItem(storageKey);
+    if (job.value.kind === 'export' && job.value.status === 'succeeded') { pendingExportRequest.value = ''; taskStorage.removeItem(exportRequestKey); }
     if (job.value.status === 'succeeded') {
       if (job.value.kind === 'export') exported.value = job.value.result;
       await load();
@@ -296,35 +319,88 @@ async function pollJob(): Promise<void> {
     }
   } catch (exc) { fail(exc); if (!disposed) pollTimer = scheduleVisible(pollJob,4000); }
 }
+function saveAllExportState(): void {
+  if (!allExportBatchId.value) return;
+  const items = allExportItems.value.map(item => ({
+    scope:item.scope, job_id:item.job_id || '', status:item.status, error:item.error || '',
+    result:item.result?.export_id ? Object.fromEntries(['scope','export_id','filename','archive_url','cloud_upload_status','cloud_upload_error','deleted'].map(key => [key,item.result[key]])) : {},
+  }));
+  taskStorage.setItem(allExportStorageKey,JSON.stringify({batch_id:allExportBatchId.value,items}));
+}
+function finishAllExportRun(): void {
+  const running = allExportItems.value.filter(item => ['pending','running'].includes(item.status)).length;
+  const uncertain = allExportItems.value.filter(item => ['checking','unknown'].includes(item.status)).length;
+  const failures = allExportItems.value.filter(item => item.status === 'failed' || item.result?.cloud_upload_status === 'failed').length;
+  const archiveUnknown = allExportItems.value.filter(item => item.status === 'succeeded' && !['succeeded','failed','skipped'].includes(item.result?.cloud_upload_status)).length;
+  error.value = ''; message.value = '';
+  if (uncertain) error.value = `${uncertain} 栋导出状态尚未确认，请核验原请求，勿重新发起整批导出。`;
+  else if (running) message.value = `${running} 栋仍在导出，其余楼栋可独立操作。`;
+  else if (failures) error.value = `${failures} 栋上传或导出失败，可单独重试。`;
+  else if (archiveUnknown) error.value = `${archiveUnknown} 栋云端归档状态尚未确认，请查看各楼导出历史。`;
+  else if (allExportItems.value.some(item => item.result?.cloud_upload_status === 'skipped')) message.value = '所有楼栋已导出；未配置云端归档的楼栋未上传。';
+  else message.value = '所有楼栋均已导出并上传多维表。';
+}
 async function pollAllExport(item: Dict): Promise<void> {
+  let failures = 0;
   while (!disposed) {
     try {
       const current = await read('jobs/' + item.job_id,{ scope:item.scope });
       Object.assign(item,{ status:current.status,error:current.error || '',result:current.result || item.result });
+      failures = 0; saveAllExportState();
       if (!['pending','running'].includes(current.status)) return;
       await new Promise(resolve => setTimeout(resolve,1800));
     } catch (exc: any) {
-      item.status = 'checking'; item.error = exc?.message || '状态查询失败';
+      item.status = 'checking'; item.error = exc?.status ? exc.message : '暂时无法读取任务状态，导出结果尚未确认'; saveAllExportState();
+      if (++failures >= 3) return;
       await new Promise(resolve => setTimeout(resolve,4000));
     }
   }
 }
+async function startAllExportItem(item: Dict): Promise<void> {
+  item.status = 'pending'; item.error = ''; item.job_id = ''; saveAllExportState();
+  try {
+    const started = await write('exports',{ scope:item.scope,batch_id:allExportBatchId.value });
+    Object.assign(item,{ job_id:started.job_id,status:started.status || 'pending' }); saveAllExportState();
+    await pollAllExport(item);
+  } catch (exc: any) { const uncertain = !exc?.status || exc.status >= 500; item.status = uncertain ? 'unknown' : 'failed'; item.error = uncertain ? '启动响应未确认，原任务可能仍在执行；点击“核验并继续”恢复本楼请求' : exc.message; saveAllExportState(); }
+}
+function restoreAllExports(): void {
+  const raw = taskStorage.getItem(allExportStorageKey);
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw);
+    const items = saved?.items;
+    if (!/^all_[a-f0-9]{32}$/.test(saved?.batch_id || '') || !Array.isArray(items) || items.length !== 5 ||
+        new Set(items.map((item: Dict) => item.scope)).size !== 5 || items.some((item: Dict) => !/^[A-E]$/.test(String(item.scope)) || item.job_id && !/^[a-f0-9]{32}$/.test(item.job_id))) throw new Error('无效导出状态');
+    allExportBatchId.value = saved.batch_id;
+    allExportItems.value = items;
+    const pending = items.filter((item: Dict) => ['pending','running','checking'].includes(item.status));
+    if (pending.length) {
+      allExportBusy.value = true;
+      void Promise.all(pending.map((item: Dict) => item.job_id ? pollAllExport(item) : startAllExportItem(item)))
+        .finally(() => { if (!disposed) { allExportBusy.value = false; finishAllExportRun(); } });
+    }
+  } catch { taskStorage.removeItem(allExportStorageKey); }
+}
 async function startAllExports(): Promise<void> {
-  if (allExportBusy.value || !allExportReady.value) return;
-  const batchId = 'all_' + crypto.randomUUID().replace(/-/g,'');
+  if (allExportBusy.value || !allExportReady.value || allExportItems.value.some(item => ['pending','running','checking','unknown'].includes(item.status))) return;
+  allExportBatchId.value = 'all_' + crypto.randomUUID().replace(/-/g,'');
   allExportItems.value = buildings.value.map(item => ({ scope:item.scope,status:'pending',error:'',result:{} }));
-  allExportBusy.value = true; error.value = ''; message.value = '';
-  await Promise.all(allExportItems.value.map(async item => {
-    try {
-      const started = await write('exports',{ scope:item.scope,batch_id:batchId });
-      Object.assign(item,{ job_id:started.job_id,status:started.status || 'pending' });
-      await pollAllExport(item);
-    } catch (exc: any) { item.status = 'failed'; item.error = exc?.message || '导出任务启动失败'; }
-  }));
-  allExportBusy.value = false;
-  const failures = allExportItems.value.filter(item => item.status === 'failed' || item.result?.cloud_upload_status === 'failed').length;
-  if (failures) error.value = `全部楼栋导出完成，${failures} 栋上传或导出失败，可单独重试。`;
-  else message.value = '所有楼栋均已导出并上传多维表。';
+  allExportBusy.value = true; error.value = ''; message.value = ''; saveAllExportState();
+  try { await Promise.all(allExportItems.value.map(startAllExportItem)); }
+  finally { if (!disposed) { allExportBusy.value = false; finishAllExportRun(); } }
+}
+async function retryAllExportItem(item: Dict): Promise<void> {
+  if (item._retrying || !['failed','unknown'].includes(item.status)) return;
+  item._retrying = true;
+  try { await startAllExportItem(item); }
+  finally { item._retrying = false; if (!disposed) finishAllExportRun(); }
+}
+async function retryAllExportStatus(item: Dict): Promise<void> {
+  if (item._retrying || item.status !== 'checking' || !item.job_id) return;
+  item._retrying = true;
+  try { await pollAllExport(item); }
+  finally { item._retrying = false; if (!disposed) finishAllExportRun(); }
 }
 async function retryExportUpload(record: Dict, allItem?: Dict): Promise<void> {
   if (record._retrying) return;
@@ -338,7 +414,7 @@ async function retryExportUpload(record: Dict, allItem?: Dict): Promise<void> {
     if (result.cloud_upload_status === 'succeeded') message.value = `${result.scope}楼导出文件已上传多维表。`;
     else error.value = result.cloud_upload_error || `${result.scope}楼导出文件仍未上传成功。`;
   } catch (exc: any) { record.cloud_upload_status = 'failed'; record.cloud_upload_error = exc?.message || '上传失败'; fail(exc); }
-  finally { record._retrying = false; }
+  finally { record._retrying = false; if (allItem) { saveAllExportState(); finishAllExportRun(); } }
 }
 async function refresh(): Promise<void> { if (!initialDataLoaded || bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
 const query = reactive({ q: '', room: '', direction: '', from: '', to: '', sheet: '' }), onlyIssues = ref(false), records = ref<Dict>({}), recordsLoading = ref(false);
@@ -536,8 +612,21 @@ function reconcilePending(id: string): void {
     void write('writes/' + id + '/reconcile', {}).then(async () => { clearDraft(); editorOpen.value = false; if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey); await refreshSavedViews(); }).catch(fail).finally(()=>{saving.value = false; saveStatus.value = {};});
   }, '将载入云端最新记录。原提交内容保留在上传日志中。');
 }
-async function showExports(): Promise<void> { try { exportList.value = (await read('export-history')).items; exportListOpen.value = true; } catch (e) { fail(e); } }
-function confirmCleanup(item: Dict): void { askDiscard(() => { void write('exports/' + item.export_id + '/cleanup', {}).then(showExports).catch(fail); }, '清理此导出文件后无法再次下载，机柜台账不受影响。'); }
+async function showExports(): Promise<void> { exportListOpen.value = true; exportHistoryLoading.value = true; error.value = ''; try { exportList.value = (await read('export-history')).items || []; } catch (e) { fail(e); } finally { exportHistoryLoading.value = false; } }
+function confirmCleanup(item: Dict): void { cleanupTarget.value = item; }
+async function resolveExportCleanup(confirmed: boolean): Promise<void> {
+  const item = cleanupTarget.value; cleanupTarget.value = null;
+  if (!confirmed || !item) return;
+  item._cleaning = true;
+  try {
+    await write('exports/' + item.export_id + '/cleanup', { scope:item.scope });
+    if (exported.value.export_id === item.export_id) exported.value = {};
+    for (const entry of allExportItems.value) if (entry.result?.export_id === item.export_id) entry.result.deleted = true;
+    saveAllExportState(); message.value = '本地导出文件已清理，云端归档不受影响。';
+    await showExports();
+  } catch (exc) { fail(exc); }
+  finally { item._cleaning = false; }
+}
 function keyboard(e: KeyboardEvent): void {
   if (previewEvidence.value) { if (e.key === 'Escape') { e.preventDefault(); previewEvidence.value = ''; } else if (e.key === 'Tab') { e.preventDefault(); document.querySelector<HTMLElement>('.evidence-preview>button')?.focus(); } return; }
   if (!editorOpen.value && !historyOpen.value && !discardDialogOpen.value && !restoreDialogOpen.value) return;
@@ -555,6 +644,14 @@ onMounted(async () => {
   window.addEventListener('pagehide', flushDraft);
   removeNavigationGuard = registerNavigationGuard((_target, proceed) => { if (saving.value && editorOpen.value) return false; if (!editorOpen.value || JSON.stringify(form) === editBaseline) return true; askDiscard(() => { clearDraft(); editorOpen.value = false; proceed(); }); return false; });
   await startBootstrap(); if (disposed) return;
+  if (props.scope) {
+    try {
+      const savedRequest = JSON.parse(taskStorage.getItem(exportRequestKey) || '{}');
+      if (/^single_[a-f0-9]{32}$/.test(savedRequest.id) && Date.now() - Number(savedRequest.at) < 24*60*60*1000) pendingExportRequest.value = savedRequest.id;
+      else taskStorage.removeItem(exportRequestKey);
+    } catch { taskStorage.removeItem(exportRequestKey); }
+  }
+  if (!props.scope) restoreAllExports();
   void loadBatchCount();
   await loadPending(); if (disposed) return;
   const uploadId = taskStorage.getItem(saveStorageKey);
@@ -573,6 +670,7 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 .cabinet-page{max-width:1800px;margin:auto;padding:24px;color:#203650;background:#f7f9fc;min-height:80vh;font-size:14px;letter-spacing:0}.heading{display:flex;align-items:center;gap:18px;margin-bottom:22px}.heading-title{flex:1;min-width:0}h1{font-size:26px;margin:0 0 8px}h2{font-size:20px;margin:0}h3{font-size:16px;margin:0}.heading p,.building p{margin:0;color:#63768c;font-size:12px}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}button,a,input,select,textarea{font:inherit}button,.actions a,.notice a{display:inline-flex;gap:6px;align-items:center;justify-content:center;border:1px solid #d4dfed;border-radius:6px;padding:9px 12px;min-height:38px;background:#fff;color:#214969;text-decoration:none;cursor:pointer}button:hover:not(:disabled){background:#edf5ff;border-color:#8db7ec}button:disabled{opacity:.45;cursor:not-allowed}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #76aaf0;outline-offset:2px}.primary{background:#1764dd;color:white;border-color:#1764dd}.primary:hover:not(:disabled){background:#1154bc;color:white}.notice{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin:12px 0;background:#ebf4ff;border:1px solid #cbdffb;border-radius:6px;overflow-wrap:anywhere}.notice button,.notice a{margin-left:auto}.notice.danger{background:#fff0f1;border-color:#f8c9cd;color:#ae283e}.notice.success{background:#eaf9f2;border-color:#bee8d6;color:#167953}.buildings{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}.building{display:flex;flex-direction:column;align-items:stretch;text-align:left;padding:22px;gap:24px;border-radius:8px;min-height:245px}.building-title{display:flex;align-items:center;gap:12px}.building-title svg:last-child{margin-left:auto}.building>strong{font-size:36px}.building strong small{display:inline;margin-left:8px;font-size:13px}.building-stats{display:flex;justify-content:space-between;gap:8px;font-size:12px}.building-stats b{display:block;margin-top:8px;font-size:22px}.metrics{display:grid;grid-template-columns:repeat(5,1fr);border-block:1px solid #dbe4ef;background:#fff;padding:18px 0;margin:20px 0}.metrics>div{display:flex;flex-direction:column;gap:8px;padding:0 20px;border-right:1px solid #edf1f6}.metrics strong{font-size:30px}.metrics .formal strong,.formal-text{color:#c42d48}.metrics .test strong,.test-text{color:#946800}.metrics .off strong,.off-text{color:#16855c}.metrics .unknown strong{color:#657990}.tabs{display:flex;align-items:center;gap:8px;margin:20px 0;border-bottom:1px solid #dbe4ef;padding-bottom:12px}.tabs .active,.room-sidebar .active{background:#eaf2ff;color:#175dbb;border-color:#bcd4f9}.tabs>span{margin-left:auto;color:#65768b;font-size:12px}.table-wrap{overflow:auto;background:#fff}table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:13px}th{text-align:left;background:#edf3fa;color:#425c77;padding:13px 12px;font-weight:600}td{padding:12px;border-bottom:1px solid #e8eef5}tbody tr:hover{background:#f8fbff}small{display:block;font-size:11px;color:#687e96;margin-top:5px}.link{padding:0;border:0;background:transparent;color:#175ebd;min-height:28px;text-align:left;display:inline-block}.icon-button{width:36px;height:36px;padding:0}.filter-bar{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin:16px 0}.search{display:flex;align-items:center;gap:7px;padding:0 10px;border:1px solid #ccd9e8;border-radius:6px;background:#fff}.search input{border:0;min-width:0;width:100%;padding-left:0}input,select,textarea{padding:9px;border:1px solid #ccd9e8;border-radius:5px;color:#263f5b;background:#fff;box-sizing:border-box;max-width:100%;min-height:38px}.checkbox{display:flex;align-items:center;gap:6px}.checkbox input{min-height:auto}.pagination{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:15px}.pagination>span:first-child{margin-right:auto;color:#60768c}.pagination .page-number{width:38px;padding:0}.pagination .page-number.active{background:#1764dd;border-color:#1764dd;color:#fff}.pagination .ellipsis{color:#60768c}.empty{padding:40px;text-align:center;color:#697f94}.map-shell{display:grid;grid-template-columns:185px minmax(0,1fr);gap:16px}.room-sidebar{display:flex;flex-direction:column;gap:8px}.room-sidebar>button{display:flex;justify-content:space-between;text-align:left}.room-sidebar small{margin:0}.map-main{min-width:0}.map-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:12px}.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px}.legend span{display:flex;align-items:center;gap:5px}i{display:inline-block;width:10px;height:10px;border-radius:2px;flex-shrink:0}.map-viewport{overflow:auto;max-height:70vh;min-height:350px;background:#fff;border:1px solid #d5e1ef;padding:8px}.map-canvas{position:absolute;transform-origin:top left}.map-cell{position:absolute;box-sizing:border-box;overflow:hidden;margin:0;padding:0 2px;border-radius:0;display:flex;align-items:center;justify-content:center;min-height:0;line-height:1.2;user-select:none;border:0}.map-cell.found{outline:3px solid #095fd4;outline-offset:1px;z-index:2}.rack-list{display:flex;flex-wrap:wrap;gap:8px}.issues{margin-top:20px;border-top:1px solid #e1d8c5;padding-top:15px}summary{cursor:pointer;color:#536a82;font-weight:600}.issue-scroll{max-height:320px;overflow:auto;margin-top:12px}.issue-row{display:flex;width:100%;text-align:left;justify-content:flex-start;gap:12px;border:0;border-bottom:1px solid #f1e6d2;background:#fffaf1;border-radius:0}.issue-row svg{margin-left:auto;flex-shrink:0}.issue-row small{margin:0}.scrim{position:fixed;inset:0;background:#152b4666;z-index:140;display:flex;justify-content:flex-end}.modal{background:#fff;display:flex;flex-direction:column;max-height:100%;outline:0;box-shadow:-12px 0 50px #12345820}.modal header{display:flex;justify-content:space-between;align-items:center;padding:20px;border-bottom:1px solid #dce6f1;gap:12px}.modal header p{margin:8px 0 0;color:#627b94}.drawer{width:min(680px,100vw);height:100%}.drawer-body{overflow:auto;padding:20px;flex:1}.section-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}.history-record{padding:20px 0;border-bottom:1px solid #dce6f1}.timeline{list-style:none;padding:0;margin:12px 0}.timeline li{position:relative;border-left:2px solid #ccdbec;padding:0 0 20px 18px;margin-left:4px;display:flex;flex-direction:column;gap:7px}.timeline li:before{content:'';position:absolute;left:-5px;top:5px;width:8px;height:8px;background:#427fd1;border-radius:50%}.timeline time{color:#60788f;font-size:12px}.raw-group{display:grid;grid-template-columns:1fr 1fr;gap:12px;border-bottom:1px solid #dce6f1}.raw-group pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}.editor-layer{z-index:160;justify-content:center;align-items:center}.editor{width:min(1050px,96vw);max-height:94vh;border-radius:8px}.editor form{min-height:0;display:flex;flex-direction:column}.editor-body{padding:20px;overflow:auto}.form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:24px}.form-grid label,.group-editor label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#4a6581}.group-editor{display:grid;grid-template-columns:65px minmax(140px,1fr) minmax(160px,1fr) minmax(160px,1fr) 38px;gap:10px;align-items:center;margin:14px 0;padding:12px 0;border-top:1px solid #e0e8f1}.group-editor textarea{resize:vertical;white-space:pre-wrap;min-height:70px;width:100%}.group-editor button{padding:0;width:36px;height:36px}.editor footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;border-top:1px solid #dce6f1;padding:16px 20px;flex-shrink:0}.editor footer span{margin-right:auto;display:flex;gap:8px;align-items:center}.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:900px){.heading{flex-wrap:wrap}.heading>.actions{width:100%}.metrics>div{padding:0 10px}.map-shell{grid-template-columns:140px minmax(0,1fr)}.form-grid{grid-template-columns:1fr 1fr}.group-editor{grid-template-columns:1fr 1fr}.group-editor>b{grid-column:1/-1}.group-editor button{justify-self:end}.group-editor label{min-width:0}.issue-row{flex-wrap:wrap}}@media(max-width:640px){.cabinet-page{padding:14px}.heading{gap:10px}h1{font-size:22px}.metrics{grid-template-columns:repeat(2,1fr);gap:18px}.metrics strong{font-size:26px}.metrics>div{border:0}.tabs{flex-wrap:wrap}.tabs>span{width:100%;margin:4px 0}.map-shell{display:flex;flex-direction:column}.room-sidebar{flex-direction:row;overflow:auto;align-items:center}.room-sidebar>.search{min-width:160px}.room-sidebar>button{min-width:110px;flex-direction:column}.map-toolbar .actions{width:100%}.editor{width:100vw;height:100dvh;max-height:100dvh;border-radius:0}.editor form{flex:1}.editor-body{padding:14px;flex:1}.group-editor{grid-template-columns:1fr}.group-editor>b{grid-column:auto}.form-grid{gap:12px}.pagination{gap:7px}.state-actions button{flex:1}.filter-bar>select{max-width:100%}.notice{font-size:13px}.building{min-height:230px}.issue-row{gap:6px}.issue-row>span{white-space:normal}.raw-group{grid-template-columns:1fr}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 .count-badge{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 4px;border-radius:10px;background:#c42d48;color:#fff;font-size:11px;font-weight:700}
 .all-export-panel{margin:14px 0 18px;border-block:1px solid #dce6f1;padding:14px 0}.all-export-panel .section-title>span{color:#60768c;font-size:12px}.all-export-items{display:grid;gap:8px}.all-export-items>div{display:grid;grid-template-columns:56px 18px minmax(180px,1fr) auto auto;align-items:center;gap:9px;min-width:0;padding:9px 12px;background:#fff;border-bottom:1px solid #e8eef5}.all-export-items>div>span{grid-column:3;min-width:0}.all-export-items small{grid-column:3/-1;margin:0;color:#ae283e;white-space:normal;overflow-wrap:anywhere}.all-export-items a{display:inline-flex;align-items:center;gap:5px;color:#175ebd;text-decoration:none}
+.all-export-items>div{grid-template-columns:56px 18px minmax(180px,1fr) minmax(0,auto)}.all-export-items>div>.export-item-icon{grid-column:2;min-height:18px}.export-item-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;min-width:0}.export-item-actions a{display:inline-flex;align-items:center;gap:5px}
 .sheet-tabs{display:flex;gap:8px;margin:16px 0;flex-wrap:wrap}.sheet-tabs button{border-radius:6px}.sheet-tabs .active{background:#eaf2ff;border-color:#9ebfe8;color:#175dbb}.sheet-tabs small{display:inline;margin:0;padding-left:5px}.source-table-wrap{max-height:66vh;position:relative;border:1px solid #dce6f1}.source-table{table-layout:fixed;min-width:100%;white-space:normal}.source-table th{position:sticky;top:0;z-index:3}.source-table td{white-space:pre-wrap;overflow-wrap:anywhere;vertical-align:top;font-size:12px;line-height:1.65}.source-table .frozen{position:sticky;z-index:2;background:#fff;border-right:1px solid #e3eaf3}.source-table th.frozen{z-index:4;background:#edf3fa}.source-table .row-actions{position:sticky;right:0;background:#fff;border-left:1px solid #e3eaf3;z-index:2;text-align:center}.source-table th.row-actions{z-index:4;background:#edf3fa}.source-table .source-issue td{background:#fffaf0}.source-table .icon-button{margin:0 3px}.group-editor{grid-template-columns:100px minmax(140px,1fr) minmax(160px,1fr) minmax(160px,1fr) 38px}.group-editor input{width:100%}
 .group-editor.current-operation{padding:12px;border:1px solid #bcd4f9;border-left:4px solid #1764dd;border-radius:6px;background:#edf5ff}.group-editor.current-operation>b{color:#175dbb}.group-editor.history-operation{padding:12px;border:1px solid #e2e8f0;border-left:4px solid #94a3b8;border-radius:6px;background:#f8fafc}.group-editor.history-operation>b{color:#64748b}
 .editor-body{border:0;margin:0;min-width:0}.group-editor{grid-template-columns:85px minmax(120px,1fr) minmax(180px,1.2fr) minmax(180px,1.2fr) 80px 36px}

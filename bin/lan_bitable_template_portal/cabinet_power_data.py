@@ -3,7 +3,7 @@ import copy
 import datetime as dt
 import json
 import re
-from .cabinet_power_excel import OPS, OP_PATTERN, dates, digest, room_code, text_value, Workbook, parse_template, T, bounds
+from .cabinet_power_excel import OPS, OP_PATTERN, dates, digest, room_code, system_name, text_value, Workbook, parse_template, T, bounds
 
 EXTRA_FIELDS = {"数据标识": 1, "来源工作表": 1, "来源行号": 2, "原始行数据": 1, "历史期望时间": 1,
                 "上下电确认截图": 17, "失败原因": 1}
@@ -170,7 +170,10 @@ def from_feishu(record):
     try: power=float(power) if power not in (None,"") else ""
     except (TypeError,ValueError): issues.append("功率格式异常")
     empty=not any(any(text_value(g.get(k)) for k in ("action","actual","expected")) for g in groups)
-    op={"record_id":record["record_id"],"version":digest(f),"scope":scope,"room":room,"system_name":text_value(f.get("包间系统名称")),"rack":text_value(f.get("机架")).upper(),"rack_type":text_value(f.get("机柜类型")),"power":power,"result":text_value(f.get("结果")),"action":text_value(f.get("操作类型")),"actual":date_text(f.get("实际完成时间")),"expected":date_text(f.get("期望完成时间")),"action_note":text_value(f.get("操作类型（说明）")),"completion_time":text_value(f.get("完成时间")),"groups":groups,"events":events,"issues":issues,"empty":empty,"source":text_value(f.get("来源工作表")),"source_row":f.get("来源行号"),"category":meta.get("category") or ("down" if text_value(f.get("操作类型")).startswith("下") else "up"),"meta":meta,"raw_fields":f}
+    name=text_value(f.get("包间系统名称"))
+    if scope=="B" and room in ("216","247") and name==f"EA118-B2-{int(room[1:])}":
+        name=system_name(scope,room)
+    op={"record_id":record["record_id"],"version":digest(f),"scope":scope,"room":room,"system_name":name,"rack":text_value(f.get("机架")).upper(),"rack_type":text_value(f.get("机柜类型")),"power":power,"result":text_value(f.get("结果")),"action":text_value(f.get("操作类型")),"actual":date_text(f.get("实际完成时间")),"expected":date_text(f.get("期望完成时间")),"action_note":text_value(f.get("操作类型（说明）")),"completion_time":text_value(f.get("完成时间")),"groups":groups,"events":events,"issues":issues,"empty":empty,"source":text_value(f.get("来源工作表")),"source_row":f.get("来源行号"),"category":meta.get("category") or ("down" if text_value(f.get("操作类型")).startswith("下") else "up"),"meta":meta,"raw_fields":f}
     if not re.fullmatch(r"[A-Z]\d{2}",op["rack"]): issues.append("机架号格式异常")
     if any(g.get("result") not in ("成功","失败") and any(g.get(k) for k in ("action","actual","expected")) for g in groups): issues.append("操作结果未确认")
     op["last_operation"]=max((e["actual"] for e in events if e["actual"]),default="")
