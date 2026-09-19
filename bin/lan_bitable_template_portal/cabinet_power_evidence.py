@@ -2,6 +2,8 @@
 import asyncio
 import datetime as dt
 import io
+import multiprocessing
+import os
 import re
 from PIL import Image
 
@@ -106,3 +108,48 @@ def recognize_image(content):
                    for previous in rows):
             rows.append(candidate)
     return rows
+
+
+def _recognize_worker(content, sender):
+    try:
+        if os.name == "nt":
+            try:
+                import ctypes
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x00004000)
+            except Exception:
+                pass
+        sender.send((True, recognize_image(content)))
+    except BaseException as exc:
+        sender.send((False, str(exc)))
+    finally:
+        sender.close()
+
+
+def recognize_image_with_timeout(content, timeout=45):
+    """Run WinOCR out of process so one bad image cannot block later work."""
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_recognize_worker, args=(content, sender), daemon=True)
+    try:
+        process.start()
+    except Exception:
+        receiver.close()
+        sender.close()
+        raise
+    sender.close()
+    try:
+        if not receiver.poll(max(1, float(timeout))):
+            raise TimeoutError(f"图片识别超过 {int(timeout)} 秒")
+        succeeded, payload = receiver.recv()
+        if not succeeded:
+            raise RuntimeError(payload or "图片识别失败")
+        return payload
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=2)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)

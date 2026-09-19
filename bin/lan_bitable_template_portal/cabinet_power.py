@@ -34,6 +34,16 @@ SNAPSHOT_KEY="feishu_snapshot_v1:"
 def export_snapshot(config,operations,notice_summary=None):
     return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations,notice_summary)
 
+def lower_export_priority():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL_PRIORITY_CLASS
+    except Exception:
+        pass
+
 def process_alive(pid):
     if not isinstance(pid,int) or pid<=0: return False
     if pid==os.getpid(): return True
@@ -1211,7 +1221,8 @@ class CabinetPowerService:
     def do_export(self,scope,payload,job):
         snap=payload.get("snapshot") or self.snapshot(scope); config=snap["config"]
         with self._lock:
-            if self._exports is None: self._exports=ProcessPoolExecutor(max_workers=5,mp_context=multiprocessing.get_context("spawn"))
+            if self._exports is None: self._exports=ProcessPoolExecutor(
+                max_workers=5,mp_context=multiprocessing.get_context("spawn"),initializer=lower_export_priority)
         content=self._exports.submit(export_snapshot,config,snap["operations"],payload.get("notice_summary")).result()
         batch_id=str(payload.get("batch_id") or "").strip()
         if batch_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}",batch_id): raise CabinetError("一键导出批次标识无效")
@@ -1237,8 +1248,7 @@ class CabinetPowerService:
     def _export_state(self,scope,snapshot=None):
         snap=snapshot or self._snapshot(scope)
         current_notice=self.batches.notice_summary(scope,snap["config"])["version"]
-        exports=sorted(self.local.documents(scope,"export:"),key=lambda item:str(item.get("created_at") or ""),reverse=True)
-        latest=exports[0] if exports else None
+        latest=self.local.latest_document(scope,"export:")
         if latest is None:
             return {"has_export":False,"is_stale":False,"current_version":snap["version"],
                     "current_notice_summary_version":current_notice}
@@ -1249,10 +1259,11 @@ class CabinetPowerService:
                 "is_stale":bool(reasons),"stale_reason":"；".join(reasons),"current_version":snap["version"],
                 "current_notice_summary_version":current_notice}
 
-    def export_history(self,scope):
+    def export_history(self,scope,page=1,page_size=20):
         state=self._export_state(scope)
+        exports,total,page,page_size=self.local.documents_page(scope,"export:",page,page_size)
         items=[]
-        for item in self.local.documents(scope,"export:"):
+        for item in exports:
             public=self._public_export(item)
             public["file_available"]=not item.get("deleted") and Path(item.get("path") or "").is_file()
             reasons=[]
@@ -1260,4 +1271,4 @@ class CabinetPowerService:
             if str(item.get("notice_summary_version") or "")!=state["current_notice_summary_version"]: reasons.append("通告汇总已变化")
             public.update(is_stale=bool(reasons),stale_reason="；".join(reasons))
             items.append(public)
-        return {"items":sorted(items,key=lambda item:item["created_at"],reverse=True),"current":state}
+        return {"items":items,"total":total,"page":page,"page_size":page_size,"current":state}

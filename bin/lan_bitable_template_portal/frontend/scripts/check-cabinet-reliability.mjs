@@ -88,14 +88,23 @@ try {
   });
   await page.goto(base + "/cabinet-power");
   await page.getByRole("button", { name: "一键导出/上传所有楼栋" }).click();
-  await page.getByRole("button", { name: "核验并继续" }).waitFor({ timeout: 120000 });
+  await page.getByRole("button", { name: "核验并继续" }).first().waitFor({ timeout: 120000 });
   assert(lostExportResponse, "C building response loss was not simulated");
-  assert(await page.getByRole("button", { name: "核验并继续" }).isEnabled(), "C building retry must not wait for other buildings");
+  assert(await page.getByRole("button", { name: "核验并继续" }).first().isEnabled(), "C building retry must not wait for other buildings");
   await page.screenshot({ path: path.join(output, "all-building-export-retry.png") });
   await page.reload();
-  await page.getByRole("button", { name: "核验并继续" }).waitFor({ timeout: 30000 });
+  await page.getByRole("button", { name: "核验并继续" }).first().waitFor({ timeout: 30000 });
   await page.unroute("**/api/cabinet-power/exports");
-  await page.getByRole("button", { name: "核验并继续" }).click();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const buttons = page.getByRole("button", { name: "核验并继续" });
+    const count = await buttons.count();
+    if (!count) break;
+    let clicked = false;
+    for (let index = 0; index < count; index++) {
+      if (await buttons.nth(index).isEnabled()) { await buttons.nth(index).click(); clicked = true; break; }
+    }
+    await page.waitForTimeout(clicked ? 500 : 1000);
+  }
   await page.getByText("所有楼栋均已导出并上传多维表。", { exact: true }).waitFor({ timeout: 120000 });
   const history = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=C")).json();
   assert.equal(history.data.items.length, 1, "retry must reuse the original C building export");
@@ -154,6 +163,72 @@ try {
   await page.unroute("**/api/cabinet-power/export-history**");
   assert.deepEqual(exportErrors, []);
   await exportContext.close();
+
+  const batchContext = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+  page = await batchContext.newPage();
+  const batchErrors = [];
+  page.on("pageerror", error => batchErrors.push(error.message));
+  const rows = Array.from({ length: 60 }, (_, index) => ({
+    row_id:`row-${index + 1}`, scope:"E", room:"202", rack:`B${String(index + 1).padStart(2,"0")}`,
+    rack_type:"服务器机柜", action:"上正式电", expected:"2026-09-19 10:00:00", actual:"",
+    result:"成功", status:"ready", issues:[], edits:[], evidence_images:[], editable:true,
+    confirmable:true, rollbackable:false, restorable:false, can_edit_notice_summary:true,
+  }));
+  const images = Array.from({ length: 25 }, (_, index) => ({
+    image_id:`image-${index + 1}`, name:`确认截图-${index + 1}.png`, extension:".png",
+    status:"done", suggestions:[], error:"",
+  }));
+  let batch = {
+    batch_id:"batch-test", owner_id:"owner", source:"notice", status:"pending", version:1,
+    created_at:"2026-09-19 10:00:00", scopes:["E"], allowed_scopes:["E"], rows, images,
+    stats:{ total:60,new:60,confirmable:60,duplicate:0,conflict:0,invalid:0,completed:0,failed:0,rolled_back:0 },
+    source_notice:{ notice_type:"上电通告",title:"E楼机柜上电通告",scope:"E",start_time:"2026-09-19 09:00:00",end_time:"2026-09-19 18:00:00",sent_at:"2026-09-19 09:01:00",ended_at:"",cabinet:"E-202包间B01至B60" },
+    notice_counts:{declared:60,unique:60,directory_matched:60}, can_download_files:true,can_confirm_all:true,
+  };
+  let rejectPatch = true;
+  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  await page.route("**/api/cabinet-power/batches/batch-test**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.includes("/images/")) return route.fulfill({ status:200,contentType:"image/png",body:pixel });
+    if (route.request().method() === "PATCH") {
+      if (rejectPatch) return route.abort("connectionreset");
+      for (const patch of route.request().postDataJSON().rows || []) Object.assign(batch.rows.find(row => row.row_id === patch.row_id), patch);
+      batch = { ...batch,version:batch.version + 1 };
+    }
+    return route.fulfill({ status:200,contentType:"application/json",body:JSON.stringify({ok:true,data:batch}) });
+  });
+  await page.goto(base + "/cabinet-power/batches?scope=E&batch_id=batch-test");
+  await page.getByRole("heading", { name:"上下电待办详情" }).waitFor();
+  assert.equal(await page.locator(".evidence-item").count(),12,"evidence gallery must paginate");
+  assert((await page.locator(".evidence-match select").first().locator("option").count()) <= 51,"cabinet matcher must cap options");
+  assert(await page.getByText("开始通告实际发送", { exact:true }).isVisible());
+  await page.screenshot({ path:path.join(output,"batch-detail-1366.png"),fullPage:true });
+  await page.getByRole("button", { name:"编辑记录",exact:true }).first().click();
+  await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").fill("2026-09-19T12:34:56");
+  await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").press("Tab");
+  await page.getByText("自动保存失败，请重试", { exact:false }).waitFor({ timeout:10000 });
+  await page.reload();
+  await page.getByRole("dialog", { name:"恢复未保存的批次更正？" }).waitFor();
+  rejectPatch = false;
+  await page.getByRole("button", { name:"恢复更正",exact:true }).click();
+  await page.getByText("更正已自动保存", { exact:true }).waitFor({ timeout:10000 });
+  await page.getByRole("button", { name:"编辑记录",exact:true }).first().click();
+  assert.equal(await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").inputValue(),"2026-09-19T12:34:56");
+  await page.setViewportSize({ width:1024,height:768 });
+  await page.screenshot({ path:path.join(output,"batch-detail-1024.png"),fullPage:true });
+  rejectPatch = true;
+  await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").fill("2026-09-19T13:34:56");
+  await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").press("Tab");
+  await page.getByText("自动保存失败，请重试", { exact:false }).waitFor({ timeout:10000 });
+  await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByRole("button", { name:"关闭",exact:true }).click();
+  await page.getByRole("button", { name:"返回待办",exact:true }).click();
+  await page.getByRole("dialog", { name:"放弃未保存的批次修改？" }).waitFor();
+  await page.getByRole("button", { name:"放弃修改",exact:true }).click();
+  await page.goto(base + "/cabinet-power/batches?scope=E&batch_id=batch-test");
+  await page.getByRole("heading", { name:"上下电待办详情" }).waitFor();
+  assert.equal(await page.getByRole("dialog", { name:"恢复未保存的批次更正？" }).count(),0,"discarded draft must not return");
+  assert.deepEqual(batchErrors, []);
+  await batchContext.close();
   console.log("cabinet saves, export response recovery, five-building upload and layout passed");
 } catch (error) {
   if (page && !page.isClosed()) await page.screenshot({ path: path.join(output, "failure.png") });

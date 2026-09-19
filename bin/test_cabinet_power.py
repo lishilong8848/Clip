@@ -15,12 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
-from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, calculate, export_workbook, dates, digest, map_state_baseline, room_code, system_name
+from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, _notice_period_dates, calculate, export_workbook, dates, digest, map_state_baseline, room_code, system_name
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_notice_period_range_uses_the_real_end_date(self):
+        self.assertEqual(_notice_period_dates("2026.3.23-25"),["2026-03-23","2026-03-25"])
+        self.assertEqual(_notice_period_dates("2026.3.27-4.1"),["2026-03-27","2026-04-01"])
+
     def test_b_carrier_legacy_aliases_display_as_separate_named_rooms(self):
         for room, old_name in (("216", "EA118-B2-16"), ("247", "EA118-B2-47")):
             with self.subTest(room=room):
@@ -430,15 +434,15 @@ class CabinetPowerTests(unittest.TestCase):
     def test_notice_summary_counts_start_and_obeys_row_flag_and_lifecycle(self):
         source={"event_action":"start","target_record_id":"rec-notice-summary","notice_type":"上电通告",
                 "scope":"B","cabinet":"B-216运营商机房B04、B05","quantity":"2","owner_id":"owner",
-                "start_time":"2026-09-03 11:05","end_time":"2026-09-03 23:59","sent_at":"2026-09-03 11:06:00"}
+                "start_time":"2026-09-19 11:05","end_time":"2026-09-19 23:59","sent_at":"2026-09-19 11:06:00"}
         service=self.service.batches
         batch=service.apply_notice_event(source)
         summary=lambda: service.notice_summary("B",self.configs["B"])["items"]
         self.assertEqual(len(summary()),2)
-        self.assertEqual({item["date"] for item in summary()},{"2026-09-03"})
-        batch=service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-04 00:05:00"})
+        self.assertEqual({item["date"] for item in summary()},{"2026-09-19"})
+        batch=service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-20 00:05:00"})
         self.assertEqual(len(summary()),2)
-        self.assertEqual({item["date"] for item in summary()},{"2026-09-03"})
+        self.assertEqual({item["date"] for item in summary()},{"2026-09-19"})
         prior_version=service.notice_summary("B",self.configs["B"])["version"]
         row=batch["rows"][0]
         batch=service.update(batch["batch_id"],{"version":batch["version"],"rows":[
@@ -449,12 +453,12 @@ class CabinetPowerTests(unittest.TestCase):
         batch=service.apply_notice_event({**source,"event_action":"update","cabinet":"B-247运营商机房B05",
                                           "quantity":"1"})
         self.assertEqual([(row["room"],row["rack"]) for row in summary()],[('247','B05')])
-        self.assertEqual(summary()[0]["date"],"2026-09-03")
+        self.assertEqual(summary()[0]["date"],"2026-09-19")
         self.assertEqual(sum(bool(row.get("notice_removed")) for row in batch["rows"]),2)
         service.apply_notice_event({**source,"event_action":"undo_end"})
         self.assertEqual(len(summary()),1)
-        service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-05 09:00:00"})
-        self.assertEqual(summary()[0]["date"],"2026-09-03")
+        service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-20 09:00:00"})
+        self.assertEqual(summary()[0]["date"],"2026-09-19")
         service.apply_notice_event({**source,"event_action":"delete"})
         self.assertEqual(summary(),[])
         self.assertFalse(service.list("owner",["B"])["items"])
@@ -462,11 +466,56 @@ class CabinetPowerTests(unittest.TestCase):
                                     "target_record_id":"rec-notice-restored"})
         self.assertEqual(len(summary()),1)
 
+    def test_notice_summary_freezes_template_history_and_requires_real_start_time(self):
+        service=self.service.batches
+        historical=service.create_from_notice({"target_record_id":"rec-notice-baseline","notice_type":"上电通告",
+            "scope":"B","cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner",
+            "sent_at":"2026-09-03 10:00:00"})
+        summary=service.notice_summary("B",self.configs["B"])
+        self.assertEqual(summary["baseline_date"],"2026-09-03")
+        self.assertEqual(summary["items"],[])
+        pending=service.create_from_notice({"target_record_id":"rec-notice-no-time","notice_type":"上电通告",
+            "scope":"B","cabinet":"B-247运营商机房B05","quantity":"1","owner_id":"owner"})
+        self.assertEqual(service.notice_summary("B",self.configs["B"])["items"],[])
+        service.apply_notice_event({"event_action":"start","target_record_id":"rec-notice-no-time",
+            "notice_type":"上电通告","sent_at":"2026-09-19 10:00:00"})
+        self.assertEqual([(item["room"],item["rack"]) for item in service.notice_summary("B",self.configs["B"])["items"]],
+                         [("247","B05")])
+        self.assertTrue(historical["batch_id"] and pending["batch_id"])
+
+    def test_batch_store_version_compare_is_atomic_across_instances(self):
+        batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-19 01:02:03")],"owner")
+        first=self.service.batches.store.get(batch["batch_id"])
+        other=type(self.service.batches.store)(self.service.batches.store.path)
+        stale=other.get(batch["batch_id"])
+        first["error"]="first"
+        self.service.batches.store.save(first,first["version"])
+        stale["error"]="stale"
+        with self.assertRaisesRegex(CabinetError,"其他操作更新"):
+            other.save(stale,stale["version"])
+
+    def test_batch_store_migrates_legacy_embedded_rows_without_loss(self):
+        store=self.service.batches.store
+        batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-19 01:02:03")],"owner")
+        current=store.get(batch["batch_id"])
+        with store._connect() as conn,conn:
+            payload=json.loads(conn.execute("SELECT payload_json FROM batches WHERE batch_id=?",(batch["batch_id"],)).fetchone()[0])
+            payload["rows"]=current["rows"]
+            conn.execute("UPDATE batches SET payload_json=? WHERE batch_id=?",(json.dumps(payload,ensure_ascii=False),batch["batch_id"]))
+            conn.execute("DELETE FROM batch_rows WHERE batch_id=?",(batch["batch_id"],))
+            conn.execute("DELETE FROM batch_meta WHERE key='batch_payload_normalization_version'")
+        migrated=type(store)(store.path)
+        restored=migrated.get(batch["batch_id"])
+        self.assertEqual([(row["room"],row["rack"]) for row in restored["rows"]],
+                         [(current["rows"][0]["room"],current["rows"][0]["rack"])])
+        with migrated._connect() as conn:
+            self.assertNotIn("rows",json.loads(conn.execute("SELECT payload_json FROM batches WHERE batch_id=?",(batch["batch_id"],)).fetchone()[0]))
+
     def test_legacy_notice_end_requires_finished_status_and_actual_time(self):
         service=self.service.batches
         batch=service.create_from_notice({"target_record_id":"rec-old-notice","notice_type":"下电通告",
             "scope":"B","cabinet":"B-402包间B15","quantity":"1","owner_id":"owner"})
-        self.assertEqual(len(service.notice_summary("B",self.configs["B"])["items"]),1)
+        self.assertEqual(len(service.notice_summary("B",self.configs["B"])["items"]),0)
         self.assertEqual(service.reconcile_legacy_notice_end_times(lambda _id,_type:(True,{"fields":{
             "上电状态":"开始","实际结束时间":1790000000000}})),0)
         self.assertEqual(service.get(batch["batch_id"])["source_notice"]["end_time_check"]["status"],"pending")
@@ -539,7 +588,8 @@ class CabinetPowerTests(unittest.TestCase):
     def test_notice_update_removed_confirmed_rack_rolls_back_without_counting_it(self):
         service=self.service.batches
         source={"target_record_id":"rec-notice-update","notice_type":"上电通告","scope":"B",
-                "cabinet":"B-216运营商机房B04、B05","quantity":"2","owner_id":"owner"}
+                "cabinet":"B-216运营商机房B04、B05","quantity":"2","owner_id":"owner",
+                "sent_at":"2026-09-18 10:00:00"}
         batch=service.create_from_notice(source)
         stored=service.store.get(batch["batch_id"])
         stored["rows"][0].update(status="completed",record_id="rec-written-update",wrote_record=True,
@@ -578,7 +628,8 @@ class CabinetPowerTests(unittest.TestCase):
     def test_notice_end_uses_final_cabinets_even_when_prior_update_failed(self):
         service=self.service.batches
         source={"target_record_id":"rec-notice-final","notice_type":"上电通告","scope":"B",
-                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner",
+                "sent_at":"2026-09-18 10:00:00"}
         service.create_from_notice(source)
         with self.assertRaises(CabinetError):
             service.apply_notice_event({**source,"event_action":"update","cabinet":"无法识别"})
@@ -698,7 +749,8 @@ class CabinetPowerTests(unittest.TestCase):
     def test_stale_notice_update_does_not_overwrite_newer_end_snapshot(self):
         service=self.service.batches
         source={"target_record_id":"rec-ordered-notice","notice_type":"上电通告","scope":"B",
-                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner","event_at":1.0}
+                "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner","event_at":1.0,
+                "sent_at":"2026-09-18 10:00:00"}
         service.apply_notice_event(source)
         service.apply_notice_event({**source,"event_action":"end","event_at":3.0,
             "cabinet":"B-247运营商机房B05","cabinet_verified":True,"sent_at":"2026-09-18 18:00:00"})
@@ -749,7 +801,7 @@ class CabinetPowerTests(unittest.TestCase):
         PortalRuntime.state_store=state; PortalRuntime.cabinet_power_service=None
         try:
             base={"work_type":"power","notice_type":"上电通告","scope":"B",
-                  "cabinet":"B-216运营商机房B04、B05","quantity":"2","response_time":"2026-09-03 11:05:00"}
+                  "cabinet":"B-216运营商机房B04、B05","quantity":"2","response_time":"2026-09-19 11:05:00"}
             for action,job,changes in (
                 ("start","start-job",{}),
                 ("update","update-job",{"cabinet":"B-247运营商机房B05","quantity":"1"}),
@@ -763,7 +815,7 @@ class CabinetPowerTests(unittest.TestCase):
                 self.assertEqual([PortalRuntime._process_cabinet_notice_queue_once()["status"] for _ in range(3)],["success"]*3)
             summary=self.service.batches.notice_summary("B",self.configs["B"])
             self.assertEqual([(item["room"],item["rack"],item["date"]) for item in summary["items"]],
-                             [("247","B05","2026-09-03")])
+                             [("247","B05","2026-09-19")])
             self.assertFalse(PortalRuntime._process_cabinet_notice_queue_once()["processed"])
         finally:
             PortalRuntime.stop_cabinet_notice_worker()
@@ -782,7 +834,8 @@ class CabinetPowerTests(unittest.TestCase):
         PortalRuntime.state_store=state; PortalRuntime.cabinet_power_service=self.service
         try:
             source={"target_record_id":"rec-notice-final-read","notice_type":"上电通告","scope":"B",
-                    "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner"}
+                    "cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner",
+                    "sent_at":"2026-09-18 10:00:00"}
             self.service.batches.create_from_notice(source)
             with patch.object(PortalRuntime,"ensure_cabinet_notice_worker",return_value=None):
                 PortalRuntime.enqueue_cabinet_notice_batch({**source,"work_type":"power","action":"end",
@@ -943,7 +996,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         image=Image.new("RGB",(160,80),"white"); output=io.BytesIO(); image.save(output,format="PNG")
         candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                    "action":"上正式电","expected":actual,"actual":actual}
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
             batch=self.service.batches.add_images(batch["batch_id"],[("proof.png",output.getvalue())],"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
@@ -990,7 +1043,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         image=Image.new("RGB",(160,80),"white"); output=io.BytesIO(); image.save(output,format="PNG")
         candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                      "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:03:04"} for rack in racks]
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=candidates):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=candidates):
             self.service.batches.add_images(batch["batch_id"],[("both.png",output.getvalue())],"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
@@ -1010,7 +1063,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             {"image_id":image_id,"name":"proof.png","extension":".png","status":"recognizing","suggestions":[]}
         ))
         self.service.batches.shutdown(wait=True)
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[]):
             self.service._batches=CabinetBatchService(self.service,self.service.root)
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
@@ -1026,7 +1079,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         image=Image.new("RGB",(80,60),"white"); output=io.BytesIO();image.save(output,format="PNG")
         candidate={"scope":"D","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                    "action":"上正式电","expected":row["expected"],"actual":row["actual"]}
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
             self.service.batches.add_images(batch["batch_id"],[("proof.png",output.getvalue())],"owner",["D"])
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
@@ -1052,7 +1105,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         output=io.BytesIO();Image.new("RGB",(80,60),"white").save(output,format="PNG")
         candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                    "action":row["action"],"expected":row["expected"],"actual":row["actual"]}
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
             for attempt in range(2):
                 self.service.batches.add_images(batch["batch_id"],[("pasted.png",output.getvalue())],"owner",["A"])
                 deadline=time.time()+5
@@ -1094,7 +1147,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                      "action":{"formal":"下正式电","test":"下测试电"}.get(states.get((rack["room"],rack["rack"])),"上正式电"),"expected":"2026-09-14 01:02:03",
                      "actual":"2026-09-14 01:02:03","result":""} for rack in racks]
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=candidates):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=candidates):
             self.service.batches.add_images(batch["batch_id"],[("mail.png",content.getvalue())],"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
@@ -1128,7 +1181,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         rack=self.configs["B"]["inventory"][0]
         candidate={"scope":"B","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                    "action":"上正式电","expected":"2026-09-14 01:02:03","actual":"2026-09-14 01:02:03","result":"成功"}
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
             self.service.batches.add_images(batch["batch_id"],[("wrong-building.png",content.getvalue())],"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
@@ -1147,7 +1200,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         candidates=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                      "action":"上正式电","expected":stamp,"actual":stamp,"result":"成功"}
                     for stamp in ("2026-09-14 01:02:03","2026-09-15 01:02:03")]
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",side_effect=[[item] for item in candidates]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",side_effect=[[item] for item in candidates]):
             self.service.batches.add_images(batch["batch_id"],files,"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and any(item["status"]=="recognizing" for item in self.service.batches.get(batch["batch_id"])["images"]):time.sleep(.01)
@@ -1215,7 +1268,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         entered=threading.Event();release=threading.Event()
         def slow_ocr(_content):
             entered.set();release.wait(5);return [candidate]
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",side_effect=slow_ocr):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",side_effect=slow_ocr):
             self.service.batches.add_images(batch["batch_id"],[("mail.png",content.getvalue())],"owner",["A"])
             self.assertTrue(entered.wait(5))
             current=self.service.batches.get(batch["batch_id"])
@@ -1262,7 +1315,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             content=io.BytesIO();Image.new("RGB",(80,60),color).save(content,format="PNG")
             files.append((color+".png",content.getvalue()))
         batch=self.service.batches.create_image_batch("owner",["A"])
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",side_effect=[[item] for item in candidates]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",side_effect=[[item] for item in candidates]):
             self.service.batches.add_images(batch["batch_id"],files,"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and any(item["status"]=="recognizing" for item in self.service.batches.get(batch["batch_id"])["images"]):time.sleep(.01)
@@ -1278,7 +1331,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         content=io.BytesIO();Image.new("RGB",(80,60),"white").save(content,format="PNG")
         candidate={"scope":"A","room":rack["room"],"rack":rack["rack"],"supplier_rack":"",
                    "action":row["action"],"expected":row["expected"],"actual":row["actual"]}
-        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image",return_value=[candidate]):
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
             self.service.batches.add_images(batch["batch_id"],[("proof.png",content.getvalue())],"owner",["A"])
             deadline=time.time()+5
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
@@ -1460,6 +1513,16 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                         self.assertEqual(actual[rn].get(col,""),value,(scope,name,rn,col))
             checked=load_workbook(io.BytesIO(result),keep_vba=True,data_only=True); checked.close()
 
+    def test_exported_summary_formula_inputs_keep_empty_counts_numeric_blank(self):
+        scope="A"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
+        ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
+        exported=Workbook(export_workbook(original,self.configs[scope],ops))
+        for sheet in ("机柜上电汇总表（邮件）","机柜上电汇总表（通告）"):
+            cells=exported.cells(sheet)
+            self.assertIsNone(cells["E15"].get("t"),(sheet,"E15"))
+            self.assertIsNone(cells["E15"].find(T("is")),(sheet,"E15"))
+            self.assertEqual(cells["F15"].findtext(T("f")),"F14+C15-E15")
+
     def test_notice_export_counts_by_start_date_and_keeps_carrier_rooms_separate(self):
         scope="B"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
         ops=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]==scope+"楼"]
@@ -1532,6 +1595,11 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     mail_node,notice_node=mail_root.find(T(tag)),notice_root.find(T(tag))
                     self.assertEqual(ET.tostring(mail_node) if mail_node is not None else None,
                                      ET.tostring(notice_node) if notice_node is not None else None,(scope,tag))
+                def relation_types(book,name):
+                    path=book.sheets[name]; rel=path.rsplit("/",1)[0]+"/_rels/"+path.rsplit("/",1)[1]+".rels"
+                    if rel not in book.archive.namelist(): return []
+                    return sorted(item.get("Type","").rsplit("/",1)[-1] for item in ET.fromstring(book.archive.read(rel)))
+                self.assertEqual(relation_types(filled,mail),relation_types(filled,"机柜上电汇总表（通告）"),(scope,"relationships"))
                 mail_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（邮件）").items()}
                 notice_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（通告）").items()}
                 for ref,style in mail_styles.items():
@@ -1758,6 +1826,20 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertFalse(history["file_available"])
         self.assertEqual(history["cloud_upload_status"],"succeeded")
 
+    def test_export_history_is_paged_in_sqlite_order(self):
+        version=self.service.local.version("D")
+        notice_version=self.service.batches.notice_summary("D",self.configs["D"])["version"]
+        for index in range(25):
+            eid=f"paged-{index:02d}"
+            self.service.write("export:"+eid,{"export_id":eid,"scope":"D","path":str(Path(self.tmp.name)/(eid+".xlsm")),
+                "filename":eid+".xlsm","version":version,"notice_summary_version":notice_version,
+                "created_at":f"2026-09-{index+1:02d} 10:00:00"})
+        page=self.service.export_history("D",2,10)
+        self.assertEqual((page["total"],page["page"],page["page_size"]),(25,2,10))
+        self.assertEqual([item["export_id"] for item in page["items"]],
+                         [f"paged-{index:02d}" for index in range(14,4,-1)])
+        self.assertEqual(page["current"]["export_id"],"paged-24")
+
     def test_export_remote_edit_overrides_original_cells_and_keeps_conversion(self):
         original=(TEMPLATES/"E.xlsm").read_bytes()
         rows=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]=="E楼"]
@@ -1803,6 +1885,9 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             created=client.post("/api/cabinet-power/batches",headers={"x-test-login":"1"},json={"rows":[{"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],"action":"上正式电","expected":"2026-09-14 12:00:00","actual":"2026-09-14 12:00:00","result":"成功"}]}).json()["data"]
             self.assertEqual(created["stats"]["total"],1)
             self.assertEqual(client.get("/api/cabinet-power/batches/"+created["batch_id"],headers={"x-test-login":"1"}).status_code,200)
+            compact=client.get("/api/cabinet-power/batches/"+created["batch_id"]+"/status",headers={"x-test-login":"1"}).json()["data"]
+            self.assertEqual((compact["batch_id"],compact["version"],compact["status"]),(created["batch_id"],created["version"],created["status"]))
+            self.assertNotIn("rows",compact)
             text=f"机柜上测试电确认单\n申请时间： 2026-09-14 10:00:00\n申请单号：[Z260914001234567890] 操作类型： 上测试电\nEA118  A{rack['room'][0]}-{int(rack['room'][1:])}.EA118  {rack['rack']}  {rack['rack']}  {rack['rack_type']}  2UR  2026-09-14 10:00:00  成功  2026-09-14 09:59:00"
             class Page:
                 def extract_text(self,**_kwargs): return text

@@ -6442,6 +6442,7 @@ class PortalRuntime:
                 payload["cabinet"] = cabinet
                 payload["quantity"] = str(fields.get(config["quantity"]) or "")
                 payload["sent_at"] = fields.get(config["actual_end"], "")
+                payload["start_sent_at"] = fields.get(config["actual_start"], "")
                 payload["cabinet_verified"] = True
             batch = service.batches.apply_notice_event(payload)
             batch_id = str(batch.get("batch_id") or "")

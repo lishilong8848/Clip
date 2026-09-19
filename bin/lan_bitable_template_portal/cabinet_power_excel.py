@@ -365,6 +365,63 @@ def parse_template(content, scope):
     return result
 
 
+def _notice_period_dates(value):
+    result = [date[:10] for date in dates(value)]
+    match = re.search(
+        r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})\s*[-~至]\s*(?:(\d{1,2})\D+)?(\d{1,2})",
+        str(value or ""),
+    )
+    if match:
+        year, month, _day, end_month, end_day = (int(item or 0) for item in match.groups())
+        try:
+            result.append(dt.date(year, end_month or month, end_day).isoformat())
+        except ValueError:
+            pass
+    return result
+
+
+def notice_summary_baseline_date(content):
+    """Return the last real daily-statistics date, ignoring update timestamps and month tables."""
+    book = Workbook(content)
+    summary = next((name for name in book.sheets if "汇总" in name), "")
+    if not summary:
+        return ""
+    rows = list(book.rows(summary))
+    found = []
+    for index, (_row_number, row) in enumerate(rows):
+        for start, label in row.items():
+            if str(label).strip() != "序号":
+                continue
+            next_label = str(row.get(start + 1, "")).strip()
+            if "月份" in next_label:
+                continue
+            if "上电日期" in next_label and "下电日期" in str(row.get(start + 3, "")):
+                offsets, width = (1, 3), 6
+            elif "日期" in next_label and "上电数量" in str(row.get(start + 2, "")):
+                offsets, width = (1,), 5
+            else:
+                continue
+            started = False
+            blank_rows = 0
+            for _number, values in rows[index + 1:]:
+                parsed = []
+                for offset in offsets:
+                    parsed.extend(_notice_period_dates(values.get(start + offset)))
+                if parsed:
+                    found.extend(parsed)
+                    started = True
+                    blank_rows = 0
+                    continue
+                section_values = [values.get(column) for column in range(start, start + width)]
+                if started and not any(value not in (None, "") for value in section_values):
+                    blank_rows += 1
+                    if blank_rows >= 2:
+                        break
+                elif started and str(values.get(start, "")).strip() and not isinstance(values.get(start), (int, float)):
+                    break
+    return max(found, default="")
+
+
 def calculate(inventory, operations, issues=()):
     grouped = defaultdict(list)
     for record in operations:
@@ -548,6 +605,11 @@ def put_cell(root, ref, value, style=0, formula=None, cell=None):
         if isinstance(formula,ET.Element): cell.append(copy.deepcopy(formula))
         else: ET.SubElement(cell,T("f")).text=formula
         ET.SubElement(cell,T("v")).text=str(value)
+    elif value in (None, ""):
+        # Keep cleared numeric inputs truly blank.  Excel treats an empty
+        # inline string as text, so arithmetic formulas that reference it
+        # recalculate to #VALUE! even when the cached value is valid.
+        pass
     elif isinstance(value,(int,float)) and math.isfinite(value):
         ET.SubElement(cell,T("v")).text=str(value)
     else:
@@ -1021,12 +1083,9 @@ def append_notice_summary_parts(parts, book, config, summary):
     root = ET.fromstring(parts[source_path])
     for view in root.findall(f"{T('sheetViews')}/{T('sheetView')}"):
         view.attrib.pop("tabSelected", None)
-    for node in list(root):
-        if node.tag in (T("legacyDrawing"), T("legacyDrawingHF")):
-            root.remove(node)
 
     # The mail sheet keeps its post-baseline audit blocks. The notice sheet uses
-    # the same template table and folds ended notices into its dated rows.
+    # the same template table and folds successfully sent start notices into its dated rows.
     sheet_data = root.find(T("sheetData"))
     generated_start = next((int(row.get("r")) for row in sheet_data
                             if any(str(book.value(cell)).startswith("系统新增上下电") for cell in row if cell.tag == T("c"))), None)
@@ -1404,11 +1463,30 @@ def append_notice_summary_parts(parts, book, config, summary):
     parts[sheet_path] = xml_bytes(root, parts[source_path])
 
     source_rels = posixpath.join(posixpath.dirname(source_path), "_rels", posixpath.basename(source_path) + ".rels")
+    cloned_relationship_parts = []
     if source_rels in parts:
         relationships = ET.fromstring(parts[source_rels])
         for relationship in list(relationships):
-            if not relationship.get("Type", "").endswith("/printerSettings"):
+            kind = relationship.get("Type", "").rsplit("/", 1)[-1]
+            if kind == "printerSettings":
+                continue
+            if kind not in {"comments", "vmlDrawing"} or relationship.get("TargetMode") == "External":
                 relationships.remove(relationship)
+                continue
+            source_part = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), relationship.get("Target", "")))
+            if source_part not in parts:
+                relationships.remove(relationship)
+                continue
+            parent, filename = posixpath.split(source_part)
+            stem, suffix = posixpath.splitext(filename)
+            index = 2
+            cloned_part = posixpath.join(parent, f"{stem}{index}{suffix}")
+            while cloned_part in parts:
+                index += 1
+                cloned_part = posixpath.join(parent, f"{stem}{index}{suffix}")
+            parts[cloned_part] = parts[source_part]
+            relationship.set("Target", posixpath.relpath(cloned_part, posixpath.dirname(sheet_path)))
+            cloned_relationship_parts.append((source_part, cloned_part))
         if len(relationships):
             notice_rels = posixpath.join(posixpath.dirname(sheet_path), "_rels", posixpath.basename(sheet_path) + ".rels")
             parts[notice_rels] = xml_bytes(relationships, parts[source_rels])
@@ -1429,6 +1507,12 @@ def append_notice_summary_parts(parts, book, config, summary):
     for override in list(types):
         if override.get("PartName") == "/xl/calcChain.xml":
             types.remove(override)
+    for source_part, cloned_part in cloned_relationship_parts:
+        source_override = next((item for item in types if item.get("PartName") == "/" + source_part), None)
+        if source_override is not None:
+            cloned_override = copy.deepcopy(source_override)
+            cloned_override.set("PartName", "/" + cloned_part)
+            types.append(cloned_override)
     ET.SubElement(types, f"{{{CT}}}Override", {"PartName": "/" + sheet_path,
         "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"})
     parts["[Content_Types].xml"] = xml_bytes(types, parts["[Content_Types].xml"])

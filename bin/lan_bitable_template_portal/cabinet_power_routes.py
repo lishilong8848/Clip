@@ -25,6 +25,13 @@ def install_cabinet_power_routes(app,controller,runtime):
             allowed=[s for s in TOTALS if admin or runtime.auth_manager.scope_allowed(session,s)]
             query=dict(request.query_params)
             if path.startswith("batches"):
+                if path=="batches/retry-handoffs" and request.method=="POST":
+                    if not admin: raise CabinetError("仅管理员可重试通告联动",403)
+                    primary=runtime.state_store.requeue_failed_outbox_events(
+                        runtime.cabinet_notice_queue_channel,max_attempts=runtime.cabinet_notice_max_attempts+1)
+                    fallback=service.batches.store.requeue_failed_notice_handoffs()
+                    runtime.ensure_cabinet_notice_worker(); runtime.cabinet_notice_queue_event.set()
+                    return controller._json_ok(request,session,{"requeued":primary+fallback})
                 if path=="batches/reconcile-notices" and request.method=="POST":
                     if not admin: raise CabinetError("仅管理员可核对旧通告结束时间",403)
                     return controller._json_ok(request,session,{"started":runtime.start_cabinet_notice_history_reconcile(force=True)})
@@ -61,10 +68,30 @@ def install_cabinet_power_routes(app,controller,runtime):
                         data=service.batches.visible(data,owner,allowed,admin)
                     else:
                         data=await asyncio.to_thread(service.batches.list,owner,allowed,admin,str(query.get("scope") or ""),str(query.get("status") or ""),str(query.get("from") or ""),str(query.get("to") or ""),query.get("page",1),query.get("page_size",20))
+                        if admin:
+                            primary=runtime.state_store.list_outbox_events(
+                                runtime.cabinet_notice_queue_channel,status="failed",limit=100)
+                            fallback=service.batches.store.failed_notice_handoffs()
+                            data["handoff_errors"]=[
+                                {"source":"主队列","event_id":item["id"],"attempts":item["attempts"],
+                                 "error":item["last_error"],"updated_at":item["updated_at"],**{
+                                     key:(item.get("payload") or {}).get(key,"") for key in
+                                     ("target_record_id","notice_type","event_action")}}
+                                for item in primary
+                            ]+[
+                                {"source":"兜底队列","event_id":item["key"],"attempts":item["attempts"],
+                                 "error":item["error"],"updated_at":item["updated_at"],**{
+                                     key:(item.get("payload") or {}).get(key,"") for key in
+                                     ("target_record_id","notice_type","event_action")}}
+                                for item in fallback
+                            ]
                     return controller._json_ok(request,session,data)
                 parts=path.split("/")
                 if len(parts)<2: raise CabinetError("接口不存在",404)
                 batch_id=parts[1]
+                if len(parts)==3 and parts[2]=="status" and request.method=="GET":
+                    data=await asyncio.to_thread(service.batches.status,batch_id,owner,allowed,admin)
+                    return controller._json_ok(request,session,data)
                 if len(parts)==3 and parts[2]=="images" and request.method=="POST":
                     try:
                         form=await request.form(max_files=10,max_fields=20,max_part_size=MAX_FILE_BYTES)
@@ -161,7 +188,7 @@ def install_cabinet_power_routes(app,controller,runtime):
                 if path.endswith("/resume"): data=await asyncio.to_thread(service.resume_write,scope,oid,owner,admin,defer=query.get('defer')=='1')
                 elif path.endswith("/reconcile"): data=await asyncio.to_thread(service.reconcile_write,scope,oid,owner,admin)
                 else: data=await asyncio.to_thread(service.write_status,scope,oid,owner,admin,details=query.get('details')=='1')
-            elif path=="export-history": data=await asyncio.to_thread(service.export_history,scope)
+            elif path=="export-history": data=await asyncio.to_thread(service.export_history,scope,query.get("page",1),query.get("page_size",20))
             elif resource is not None: data=resource
             elif path in ("overview","rooms"): data=await asyncio.to_thread(service.overview,scope,query.get("summary")!="1")
             elif path=="racks": data=await asyncio.to_thread(service.racks,scope)
@@ -184,7 +211,8 @@ def install_cabinet_power_routes(app,controller,runtime):
         except Exception as exc: return controller._portal_error_response(exc,default_status=400)
 
     for path,methods in {
-        "batches/reconcile-notices":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
+        "batches/retry-handoffs":["POST"],"batches/reconcile-notices":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
+        "batches/{batch_id}/status":["GET"],
         "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],"batches/{batch_id}/rollback":["POST"],
         "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/restore-rows":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
         "batches/{batch_id}/images":["POST"],"batches/{batch_id}/images/{image_id}":["GET","DELETE"],

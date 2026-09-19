@@ -23,6 +23,7 @@ from .cabinet_power_excel import (
     STATES,
     completed_state_event,
     digest,
+    notice_summary_baseline_date,
 )
 
 
@@ -31,6 +32,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 30 * 1024 * 1024
 MAX_PAGES = 100
 MAX_ROWS = 2000
+MAX_IMAGES = 200
 SCOPES = frozenset("ABCDE")
 DATE_RE = re.compile(r"20\d{2}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?")
 ROW_RE = re.compile(
@@ -57,6 +59,8 @@ EDITABLE_FIELDS = {
 }
 ACTIVE_ROW_STATUSES = {"ready", "failed", "rolled_back"}
 LOCKED_ROW_STATUSES = {"queued", "writing", "completed", "rollback_queued", "rolling_back", "rollback_failed", "rollback_blocked"}
+_NOTICE_CUTOFFS = {}
+_NOTICE_CUTOFFS_LOCK = threading.Lock()
 
 
 def now():
@@ -73,6 +77,7 @@ class CabinetBatchStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS batches(
                     batch_id TEXT PRIMARY KEY,
@@ -95,22 +100,104 @@ class CabinetBatchStore:
                     error TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS batch_meta(
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS notice_summary_rows(
+                    batch_id TEXT NOT NULL,
+                    row_id TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    room TEXT NOT NULL,
+                    rack TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    notice_type TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    rack_type TEXT NOT NULL,
+                    eligible INTEGER NOT NULL,
+                    PRIMARY KEY(batch_id,row_id)
+                );
+                CREATE INDEX IF NOT EXISTS notice_summary_scope_time
+                    ON notice_summary_rows(scope,sent_at,batch_id,row_id);
+                CREATE TABLE IF NOT EXISTS notice_summary_baselines(
+                    scope TEXT NOT NULL,
+                    template_hash TEXT NOT NULL,
+                    cutoff_date TEXT NOT NULL,
+                    frozen_keys_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(scope,template_hash)
+                );
+                CREATE TABLE IF NOT EXISTS batch_runtime_status(
+                    batch_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS batch_rows(
+                    batch_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(batch_id,item_id)
+                );
+                CREATE INDEX IF NOT EXISTS batch_rows_order ON batch_rows(batch_id,ordinal);
+                CREATE TABLE IF NOT EXISTS batch_images(
+                    batch_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(batch_id,item_id)
+                );
+                CREATE INDEX IF NOT EXISTS batch_images_order ON batch_images(batch_id,ordinal);
             """)
+            conn.execute("BEGIN IMMEDIATE")
+            normalized = conn.execute(
+                "SELECT value FROM batch_meta WHERE key='batch_payload_normalization_version'"
+            ).fetchone()
+            if not normalized or normalized[0] != "1":
+                for row in conn.execute("SELECT batch_id,payload_json FROM batches"):
+                    payload = json.loads(row["payload_json"])
+                    self._sync_children(conn, "batch_rows", row["batch_id"], payload.pop("rows", []), "row_id")
+                    self._sync_children(conn, "batch_images", row["batch_id"], payload.pop("images", []), "image_id")
+                    conn.execute("UPDATE batches SET payload_json=? WHERE batch_id=?", (_json(payload), row["batch_id"]))
+                conn.execute(
+                    "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('batch_payload_normalization_version','1')"
+                )
+            marker = conn.execute(
+                "SELECT value FROM batch_meta WHERE key='notice_summary_projection_version'"
+            ).fetchone()
+            if not marker or marker[0] != "2":
+                conn.execute("DELETE FROM notice_summary_rows")
+                conn.execute("DELETE FROM batch_runtime_status")
+                for row in conn.execute("SELECT * FROM batches"):
+                    batch = self._decode(row, conn)
+                    self._sync_notice_summary_rows(conn, batch)
+                    self._sync_runtime_status(conn, batch)
+                conn.execute(
+                    "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('notice_summary_projection_version','2')"
+                )
+            conn.commit()
 
     @contextmanager
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=3)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=3000")
+        conn.execute("PRAGMA synchronous=FULL")
         try:
             yield conn
         finally:
             conn.close()
 
-    @staticmethod
-    def _decode(row):
+    def _decode(self, row, conn=None):
         if row is None:
             return None
         payload = json.loads(row["payload_json"])
+        if conn is None:
+            with self._connect() as child_conn:
+                return self._decode(row, child_conn)
+        payload["rows"] = [json.loads(item[0]) for item in conn.execute(
+            "SELECT payload_json FROM batch_rows WHERE batch_id=? ORDER BY ordinal", (row["batch_id"],))]
+        payload["images"] = [json.loads(item[0]) for item in conn.execute(
+            "SELECT payload_json FROM batch_images WHERE batch_id=? ORDER BY ordinal", (row["batch_id"],))]
         payload.update(
             batch_id=row["batch_id"], owner_id=row["owner_id"], status=row["status"],
             source_hash=row["source_hash"] or "", scopes=json.loads(row["scopes_json"]),
@@ -120,18 +207,116 @@ class CabinetBatchStore:
 
     def get(self, batch_id):
         with self._connect() as conn:
-            return self._decode(conn.execute("SELECT * FROM batches WHERE batch_id=?", (batch_id,)).fetchone())
+            return self._decode(conn.execute("SELECT * FROM batches WHERE batch_id=?", (batch_id,)).fetchone(), conn)
 
     def by_hash(self, source_hash):
         if not source_hash:
             return None
         with self._connect() as conn:
-            return self._decode(conn.execute("SELECT * FROM batches WHERE source_hash=?", (source_hash,)).fetchone())
+            return self._decode(conn.execute("SELECT * FROM batches WHERE source_hash=?", (source_hash,)).fetchone(), conn)
 
     def notice_batches(self):
         with self._connect() as conn:
-            return [self._decode(row) for row in conn.execute(
+            return [self._decode(row, conn) for row in conn.execute(
                 "SELECT * FROM batches WHERE json_extract(payload_json, '$.source')='notice' ORDER BY rowid"
+            )]
+
+    @staticmethod
+    def _sync_notice_summary_rows(conn, batch):
+        batch_id = str(batch.get("batch_id") or "")
+        if not batch_id:
+            return
+        conn.execute("DELETE FROM notice_summary_rows WHERE batch_id=?", (batch_id,))
+        if batch.get("source") != "notice":
+            return
+        source = batch.get("source_notice") or {}
+        sent_at = str(source.get("sent_at") or "")
+        notice_type = str(source.get("notice_type") or "")
+        deleted = bool(source.get("deleted_at"))
+        invalid_codes = {"scope", "room", "rack", "inventory", "notice_scope"}
+        seen = set()
+        rows = []
+        for row in batch.get("rows", []):
+            key = (str(row.get("scope") or ""), str(row.get("room") or ""), str(row.get("rack") or ""))
+            issues = {str(issue.get("code") or "") for issue in row.get("issues", []) if isinstance(issue, dict)}
+            eligible = not (
+                deleted or row.get("notice_removed") or row.get("exclude_notice_summary")
+                or not sent_at or notice_type not in ("上电通告", "下电通告")
+                or key in seen or bool(issues & invalid_codes)
+            )
+            seen.add(key)
+            rows.append((
+                batch_id, str(row.get("row_id") or ""), *key, sent_at, notice_type,
+                str(row.get("action") or ""), str(row.get("rack_type") or ""), int(eligible),
+            ))
+        conn.executemany(
+            "INSERT OR REPLACE INTO notice_summary_rows"
+            "(batch_id,row_id,scope,room,rack,sent_at,notice_type,action,rack_type,eligible)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+
+    def notice_summary_items(self, scope):
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT batch_id,row_id,scope,room,rack,sent_at,notice_type,action,rack_type "
+                "FROM notice_summary_rows WHERE scope=? AND eligible=1 ORDER BY sent_at,batch_id,row_id",
+                (scope,),
+            )]
+
+    @staticmethod
+    def _sync_runtime_status(conn, batch):
+        source = batch.get("source_notice") or {}
+        compact = {
+            "batch_id": batch.get("batch_id", ""), "owner_id": batch.get("owner_id", ""),
+            "scopes": batch.get("scopes", []), "version": batch.get("version", 0),
+            "status": batch.get("status", ""), "error": batch.get("error", ""),
+            "progress": batch.get("progress") or {},
+            "source_notice": {key: copy.deepcopy(source.get(key)) for key in
+                              ("sent_at", "ended_at", "deleted_at", "end_time_check", "rollback_error")},
+            "images": [{"image_id": item.get("image_id", ""), "status": item.get("status", ""),
+                        "error": item.get("error", ""), "deleted_at": item.get("deleted_at", "")}
+                       for item in batch.get("images", [])],
+        }
+        conn.execute("INSERT OR REPLACE INTO batch_runtime_status(batch_id,payload_json) VALUES(?,?)",
+                     (compact["batch_id"], _json(compact)))
+
+    def runtime_status(self, batch_id):
+        with self._connect() as conn:
+            row = conn.execute("SELECT payload_json FROM batch_runtime_status WHERE batch_id=?", (batch_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def notice_summary_baseline(self, scope, template_hash, cutoff_date, item_keys):
+        if not template_hash:
+            return set()
+        with self._lock, self._connect() as conn, conn:
+            row = conn.execute(
+                "SELECT frozen_keys_json FROM notice_summary_baselines WHERE scope=? AND template_hash=?",
+                (scope, template_hash),
+            ).fetchone()
+            if row:
+                try:
+                    return set(json.loads(row[0]))
+                except (TypeError, ValueError):
+                    return set()
+            frozen = sorted(set(item_keys)) if cutoff_date else []
+            conn.execute(
+                "INSERT OR IGNORE INTO notice_summary_baselines(scope,template_hash,cutoff_date,frozen_keys_json,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (scope, template_hash, cutoff_date, _json(frozen), now()),
+            )
+            stored = conn.execute(
+                "SELECT frozen_keys_json FROM notice_summary_baselines WHERE scope=? AND template_hash=?",
+                (scope, template_hash),
+            ).fetchone()
+            return set(json.loads(stored[0])) if stored else set(frozen)
+
+    def failed_notice_handoffs(self, limit=100):
+        with self._connect() as conn:
+            return [{"key": row[0], "payload": json.loads(row[1]), "attempts": row[2],
+                     "error": row[3], "updated_at": row[4]} for row in conn.execute(
+                "SELECT event_key,payload_json,attempts,error,updated_at FROM notice_handoffs "
+                "WHERE status='failed' ORDER BY updated_at DESC LIMIT ?", (max(1, min(int(limit), 500)),)
             )]
 
     def notice_by_target(self, record_id):
@@ -140,7 +325,7 @@ class CabinetBatchStore:
                 "SELECT * FROM batches WHERE json_extract(payload_json, '$.source')='notice' "
                 "AND json_extract(payload_json, '$.source_notice.target_record_id')=? LIMIT 1",
                 (record_id,),
-            ).fetchone())
+            ).fetchone(), conn)
 
     def queue_notice_handoff(self, payload):
         event_key = str(payload.get("idempotency_key") or "")
@@ -158,7 +343,8 @@ class CabinetBatchStore:
 
     def requeue_failed_notice_handoffs(self):
         with self._lock, self._connect() as conn, conn:
-            conn.execute("UPDATE notice_handoffs SET status='pending',attempts=0 WHERE status='failed'")
+            cursor = conn.execute("UPDATE notice_handoffs SET status='pending',attempts=0 WHERE status='failed'")
+            return max(0, int(cursor.rowcount or 0))
 
     def finish_notice_handoff(self, event_key, error=""):
         with self._lock, self._connect() as conn, conn:
@@ -180,27 +366,49 @@ class CabinetBatchStore:
                 (batch["batch_id"], batch["owner_id"], batch["status"], batch.get("source_hash") or None,
                  _json(batch.get("scopes", [])), _json(self._payload(batch)), 1, created, created),
             )
+            self._sync_children(conn, "batch_rows", batch["batch_id"], batch.get("rows", []), "row_id")
+            self._sync_children(conn, "batch_images", batch["batch_id"], batch.get("images", []), "image_id")
+            self._sync_notice_summary_rows(conn, {**batch, "version": 1})
+            self._sync_runtime_status(conn, {**batch, "version": 1})
         return self.get(batch["batch_id"])
 
     @staticmethod
     def _payload(batch):
-        columns = {"batch_id", "owner_id", "status", "source_hash", "scopes", "version", "created_at", "updated_at"}
+        columns = {"batch_id", "owner_id", "status", "source_hash", "scopes", "version", "created_at", "updated_at", "rows", "images"}
         return {key: value for key, value in batch.items() if key not in columns}
+
+    @staticmethod
+    def _sync_children(conn, table, batch_id, items, id_field):
+        normalized = [(str(item.get(id_field) or ""), index, _json(item))
+                      for index, item in enumerate(items) if isinstance(item, dict) and item.get(id_field)]
+        existing = {row[0] for row in conn.execute(f"SELECT item_id FROM {table} WHERE batch_id=?", (batch_id,))}
+        current = {item_id for item_id, _index, _payload in normalized}
+        conn.executemany(
+            f"INSERT INTO {table}(batch_id,item_id,ordinal,payload_json) VALUES(?,?,?,?) "
+            "ON CONFLICT(batch_id,item_id) DO UPDATE SET ordinal=excluded.ordinal,payload_json=excluded.payload_json "
+            f"WHERE {table}.ordinal<>excluded.ordinal OR {table}.payload_json<>excluded.payload_json",
+            [(batch_id, item_id, index, payload) for item_id, index, payload in normalized],
+        )
+        conn.executemany(f"DELETE FROM {table} WHERE batch_id=? AND item_id=?",
+                         [(batch_id, item_id) for item_id in existing - current])
 
     def save(self, batch, expected_version):
         updated = now()
         with self._lock, self._connect() as conn, conn:
-            row = conn.execute("SELECT version FROM batches WHERE batch_id=?", (batch["batch_id"],)).fetchone()
-            if row is None:
-                raise CabinetError("批次不存在", 404)
-            if int(row[0]) != int(expected_version):
-                raise CabinetError("批次已被其他操作更新，请重新载入", 409)
-            version = int(row[0]) + 1
-            conn.execute(
-                "UPDATE batches SET status=?,scopes_json=?,payload_json=?,version=?,updated_at=? WHERE batch_id=?",
+            version = int(expected_version) + 1
+            cursor = conn.execute(
+                "UPDATE batches SET status=?,scopes_json=?,payload_json=?,version=?,updated_at=? "
+                "WHERE batch_id=? AND version=?",
                 (batch["status"], _json(batch.get("scopes", [])), _json(self._payload(batch)),
-                 version, updated, batch["batch_id"]),
+                 version, updated, batch["batch_id"], int(expected_version)),
             )
+            if cursor.rowcount != 1:
+                exists = conn.execute("SELECT 1 FROM batches WHERE batch_id=?", (batch["batch_id"],)).fetchone()
+                raise CabinetError("批次已被其他操作更新，请重新载入" if exists else "批次不存在", 409 if exists else 404)
+            self._sync_children(conn, "batch_rows", batch["batch_id"], batch.get("rows", []), "row_id")
+            self._sync_children(conn, "batch_images", batch["batch_id"], batch.get("images", []), "image_id")
+            self._sync_notice_summary_rows(conn, batch)
+            self._sync_runtime_status(conn, {**batch, "version": version})
         return self.get(batch["batch_id"])
 
     def list(self, limit=200):
@@ -210,18 +418,19 @@ class CabinetBatchStore:
             else:
                 rows = conn.execute("SELECT * FROM batches ORDER BY updated_at DESC LIMIT ?",
                                     (max(1, min(int(limit), 1000)),))
-            return [self._decode(row) for row in rows]
+            return [self._decode(row, conn) for row in rows]
 
     def later_completed(self, batch_id, scope, room, rack):
         with self._connect() as conn:
             rows=conn.execute(
-                "SELECT payload_json FROM batches WHERE rowid>(SELECT rowid FROM batches WHERE batch_id=?)",
+                "SELECT child.payload_json FROM batch_rows child JOIN batches parent ON parent.batch_id=child.batch_id "
+                "WHERE parent.rowid>(SELECT rowid FROM batches WHERE batch_id=?) ORDER BY parent.rowid,child.ordinal",
                 (batch_id,),
             )
             for item in rows:
-                for row in json.loads(item[0]).get("rows", []):
-                    if (row.get("scope"), row.get("room"), row.get("rack")) == (scope,room,rack) and row.get("wrote_record") is not False and row.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}:
-                        return True
+                row=json.loads(item[0])
+                if (row.get("scope"), row.get("room"), row.get("rack")) == (scope,room,rack) and row.get("wrote_record") is not False and row.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}:
+                    return True
         return False
 
 
@@ -253,6 +462,7 @@ class CabinetBatchService:
             raise CabinetError("已完成记录不可修改截图；请先回退需要更正的记录",409)
         if not files or len(files) > 10 or sum(len(content) for _name, content in files) > MAX_TOTAL_BYTES:
             raise CabinetError("每次须选择1至10张图片，合计不超过30MiB", 413)
+        active_ids = {item.get("image_id") for item in batch.get("images", []) if not item.get("deleted_at")}
         accepted = []
         for name, content in files:
             if not content or len(content) > MAX_FILE_BYTES:
@@ -274,6 +484,8 @@ class CabinetBatchService:
                 self._atomic_write(path, content)
             accepted.append({"image_id": image_id, "name": Path(name).name[:200], "extension": extension,
                              "size": len(content), "status": "recognizing", "suggestions": [], "error": ""})
+        if len(active_ids | {item["image_id"] for item in accepted}) > MAX_IMAGES:
+            raise CabinetError(f"每批最多保留{MAX_IMAGES}张确认截图，请删除无用图片后重试", 413)
 
         existing_status = {item["image_id"]: item.get("status") for item in batch.get("images", [])}
         def add(current):
@@ -293,11 +505,11 @@ class CabinetBatchService:
         return updated
 
     def _recognize_image(self, batch_id, image):
-        from .cabinet_power_evidence import recognize_image
+        from .cabinet_power_evidence import recognize_image_with_timeout
 
         try:
             path = self.root / "evidence" / (image["image_id"] + image["extension"])
-            suggestions = recognize_image(path.read_bytes())
+            suggestions = recognize_image_with_timeout(path.read_bytes())
             error = "" if suggestions else "未识别到完整的机柜表格，请手动核对截图"
         except Exception as exc:
             suggestions, error = [], f"截图识别失败：{exc}"
@@ -832,6 +1044,14 @@ class CabinetBatchService:
         self._parse_pool.submit(self._parse_batch, batch_id)
         return batch
 
+    def status(self, batch_id, owner, allowed, admin=False):
+        batch = self.store.runtime_status(batch_id)
+        if batch is None:
+            raise CabinetError("批次不存在", 404)
+        if not admin and batch["owner_id"] != owner and not set(batch.get("scopes", [])) & set(allowed):
+            raise CabinetError("无权查看该批次", 403)
+        return {key: copy.deepcopy(value) for key, value in batch.items() if key not in {"owner_id", "scopes"}}
+
     @staticmethod
     def _pdf_reader(path):
         try:
@@ -1206,7 +1426,7 @@ class CabinetBatchService:
             "declared_quantity": self._notice_quantity(source.get("quantity")),
             "sender_open_id": str(source.get("sender_open_id") or ""),
             "sender_name": str(source.get("sender_name") or ""),
-            "sent_at": self._notice_datetime(source.get("sent_at")) or now(),
+            "sent_at": self._notice_datetime(source.get("sent_at")),
             "last_event_at": float(source.get("event_at") or 0),
             "ended_at": "",
             "deleted_at": "",
@@ -1307,16 +1527,24 @@ class CabinetBatchService:
         if batch is None and source.get("prior_record_id"):
             batch = self.store.notice_by_target(str(source["prior_record_id"]))
         if action == "start":
-            return batch or self.create_from_notice(source)
+            if batch is None:
+                return self.create_from_notice(source)
+            sent_at = self._notice_datetime(source.get("sent_at"))
+            if sent_at and not (batch.get("source_notice") or {}).get("sent_at"):
+                batch = self._change(batch["batch_id"], lambda current: current["source_notice"].update(sent_at=sent_at))
+            return batch
         if batch is None:
             if action in {"update", "end"} and source.get("cabinet"):
-                batch = self.create_from_notice(source)
+                batch = self.create_from_notice({**source, "sent_at": self._notice_datetime(source.get("start_sent_at"))})
             else:
                 raise CabinetError("来源通告待办尚未创建，请稍后重试", 409)
         event_at = float(source.get("event_at") or 0)
         if event_at and event_at < float((batch.get("source_notice") or {}).get("last_event_at") or 0):
             return batch
         batch_id = batch["batch_id"]
+        start_sent_at = self._notice_datetime(source.get("start_sent_at"))
+        if start_sent_at and not (batch.get("source_notice") or {}).get("sent_at"):
+            batch = self._change(batch_id, lambda current: current["source_notice"].update(sent_at=start_sent_at))
         if action == "end" and not self._notice_datetime(source.get("sent_at")):
             raise CabinetError("结束通告缺少实际发送时间", 409)
         if action == "update" or action == "end" and source.get("cabinet_verified"):
@@ -1387,37 +1615,37 @@ class CabinetBatchService:
     def notice_summary(self, scope, config):
         known = {(item["room"], item["rack"]): item for item in config["inventory"]}
         items = []
-        for batch in self.store.notice_batches():
-            rows = [row for row in batch.get("rows", []) if row.get("scope") == scope]
-            if not rows:
+        projected = self.store.notice_summary_items(scope)
+        template_hash = str((config.get("template_data") or {}).get("hash") or "")
+        with _NOTICE_CUTOFFS_LOCK:
+            cutoff = _NOTICE_CUTOFFS.get(template_hash)
+        if cutoff is None:
+            template_path = Path(config.get("path") or Path(__file__).with_name("templates") / "cabinet_power" / f"{scope}.xlsm")
+            cutoff = notice_summary_baseline_date(template_path.read_bytes())
+            with _NOTICE_CUTOFFS_LOCK:
+                _NOTICE_CUTOFFS[template_hash] = cutoff
+        frozen = self.store.notice_summary_baseline(
+            scope, template_hash, cutoff,
+            [f"{row['batch_id']}:{row['row_id']}" for row in projected if cutoff and row["sent_at"][:10] <= cutoff],
+        )
+        for row in projected:
+            key = (row.get("room"), row.get("rack"))
+            event_key = f"{row['batch_id']}:{row['row_id']}"
+            if key not in known or event_key in frozen:
                 continue
-            source = batch.get("source_notice") or {}
-            source_scope = str(source.get("scope") or "").upper().replace("楼", "")
-            if source_scope in SCOPES and source_scope != scope:
+            sent_at = self._notice_datetime(row.get("sent_at"))
+            if not sent_at:
                 continue
-            sent_at = self._notice_datetime(source.get("sent_at"))
-            if not sent_at or source.get("deleted_at"):
-                continue
-            if source.get("notice_type") not in ("上电通告", "下电通告"):
-                continue
-            direction = "up" if source.get("notice_type") == "上电通告" else "down"
-            seen = set()
-            for row in rows:
-                key = (row.get("room"), row.get("rack"))
-                if (row.get("notice_removed") or row.get("exclude_notice_summary")
-                        or key not in known or key in seen
-                        or {str(issue.get("code")) for issue in row.get("issues", [])}
-                        & {"scope", "room", "rack", "inventory", "notice_scope"}):
-                    continue
-                seen.add(key)
-                items.append({
-                    "batch_id": batch["batch_id"], "row_id": row.get("row_id", ""),
-                    "room": key[0], "rack": key[1], "date": sent_at[:10], "sent_at": sent_at,
-                    "direction": direction, "action": str(row.get("action") or ""),
-                    "rack_type": str(known[key].get("rack_type") or row.get("rack_type") or ""),
-                })
+            items.append({
+                "batch_id": row["batch_id"], "row_id": row.get("row_id", ""),
+                "room": key[0], "rack": key[1], "date": sent_at[:10], "sent_at": sent_at,
+                "direction": "up" if row.get("notice_type") == "上电通告" else "down",
+                "action": str(row.get("action") or ""),
+                "rack_type": str(known[key].get("rack_type") or row.get("rack_type") or ""),
+            })
         items.sort(key=lambda item: (item["sent_at"], item["batch_id"], item["row_id"]))
-        return {"scope": scope, "version": digest(items), "items": items}
+        return {"scope": scope, "version": digest([template_hash, cutoff, items]), "items": items,
+                "template_hash": template_hash, "baseline_date": cutoff}
 
     def reconcile_legacy_notice_end_times(self, fetch_record, force=False):
         checked = 0

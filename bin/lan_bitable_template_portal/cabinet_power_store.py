@@ -109,6 +109,27 @@ class CabinetStore:
             condition=" AND COALESCE(json_extract(payload,'$.status'),'') NOT IN ('completed','cancelled')" if pending_only else ""
             return [json.loads(r[0]) for r in conn.execute("SELECT payload FROM documents WHERE key LIKE ?"+condition, (prefix + "%",))]
 
+    def latest_document(self, scope, prefix):
+        with self.connect(scope) as conn:
+            row=conn.execute(
+                "SELECT payload FROM documents WHERE key LIKE ? "
+                "ORDER BY COALESCE(json_extract(payload,'$.created_at'),'') DESC LIMIT 1",
+                (prefix+"%",),
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def documents_page(self, scope, prefix, page=1, page_size=20):
+        page_size=max(1,min(int(page_size),100)); page=max(1,int(page))
+        with self.connect(scope) as conn:
+            total=int(conn.execute("SELECT COUNT(*) FROM documents WHERE key LIKE ?",(prefix+"%",)).fetchone()[0])
+            pages=max(1,(total+page_size-1)//page_size); page=min(page,pages)
+            rows=conn.execute(
+                "SELECT payload FROM documents WHERE key LIKE ? "
+                "ORDER BY COALESCE(json_extract(payload,'$.created_at'),'') DESC LIMIT ? OFFSET ?",
+                (prefix+"%",page_size,(page-1)*page_size),
+            )
+            return [json.loads(row[0]) for row in rows],total,page,page_size
+
     def version(self, scope):
         with self.connect(scope) as conn:
             row = conn.execute("SELECT payload FROM meta WHERE key='version'").fetchone()

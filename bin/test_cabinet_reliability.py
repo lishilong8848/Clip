@@ -354,13 +354,13 @@ class CabinetReliabilityTests(unittest.TestCase):
         group={'id':'summary_new_event','action':'上正式电','actual':'2026-09-09 12:00:00','expected':'','result':'成功'}
         self.service.save_operation('D',self.payload(old,groups=[group,*old['groups']]),'owner',old['record_id'])
         snap=self.service.snapshot('D'); original=Path(snap['config']['path']).read_bytes(); before=Workbook(original)
-        after=Workbook(export_workbook(original,snap['config'],snap['operations'])); name='机柜上电汇总表'; cells=after.cells(name)
+        after=Workbook(export_workbook(original,snap['config'],snap['operations'])); source_name='机柜上电汇总表'; name='机柜上电汇总表（邮件）'; cells=after.cells(name)
         self.assertEqual(after.value(cells['C10']),674)
         self.assertEqual(after.value(cells['C10']),sum(after.value(cells['C'+str(i)]) for i in range(4,10)))
         self.assertIsNotNone(cells['C10'].find(T('f')))
-        self.assertEqual(cells['C10'].find(T('f')).attrib,before.cells(name)['C10'].find(T('f')).attrib)
+        self.assertEqual(cells['C10'].find(T('f')).attrib,before.cells(source_name)['C10'].find(T('f')).attrib)
         self.assertEqual(after.value(after.cells('201-M2机柜平面图 ')['F39']),145)
-        for ref,c in before.cells(name).items():
+        for ref,c in before.cells(source_name).items():
             if int(''.join(filter(str.isdigit,ref)))>=12: self.assertEqual(before.value(c),after.value(cells[ref]),ref)
         self.assertTrue(any(row.get(1)=='2026-09-09' and row.get(2)==1 for _,row in after.rows(name)))
         new=copy.deepcopy(snap['operations'][0]); new.update(record_id='recStyleNew',meta={},source_row=None)
