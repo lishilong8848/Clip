@@ -1175,26 +1175,40 @@ class CabinetPowerService:
         if scope not in TOTALS or kind not in ("refresh","export"): raise CabinetError("任务类型无效")
         if kind=="export": self.ensure_loaded(scope)
         version=self.local.version(scope)
-        if kind=="export":
-            snapshot=self.snapshot(scope); version=snapshot["version"]
-            notice_summary=self.batches.notice_summary(scope,snapshot["config"])
-            payload={**payload,"snapshot":snapshot,"notice_summary":notice_summary}
+        payload=copy.deepcopy(payload)
+        completed=[]
         with self.local.locked([scope]):
             for existing in self.local.documents(scope,"job:"):
-                if (kind=="export" and payload.get("batch_id") and existing.get("kind")=="export"
-                        and (existing.get("payload") or {}).get("batch_id")==payload["batch_id"]
-                        and existing.get("status")=="succeeded"):
-                    old_payload=existing.get("payload") or {}
-                    if (old_payload.get("snapshot") or {}).get("version")==version and \
-                            (old_payload.get("notice_summary") or {}).get("version")==payload["notice_summary"]["version"]:
-                        return {k:v for k,v in existing.items() if k!="payload"}
+                old_payload=existing.get("payload") or {}
+                same_request=(kind=="export" and bool(payload.get("batch_id"))
+                              and existing.get("kind")=="export"
+                              and old_payload.get("batch_id")==payload["batch_id"])
+                if same_request and existing.get("status")=="succeeded": completed.append(existing)
                 if existing.get("kind")!=kind or existing.get("status") not in ("pending","running"):
                     continue
-                same_batch=not payload.get("batch_id") or (existing.get("payload") or {}).get("batch_id")==payload.get("batch_id")
-                same_notice=(existing.get("payload") or {}).get("notice_summary",{}).get("version")==payload.get("notice_summary",{}).get("version")
+                same_batch=not payload.get("batch_id") or old_payload.get("batch_id")==payload.get("batch_id")
                 alive=process_alive(existing.get("pid")) and (existing.get("pid")!=os.getpid() or existing.get("job_id") in self._running)
-                same_request=kind=="export" and bool(payload.get("batch_id")) and same_batch
-                if alive and (same_request or kind=="refresh" or existing.get("version")==version and same_batch and same_notice): return {k:v for k,v in existing.items() if k!="payload"}
+                if alive and (same_request or kind=="refresh" or existing.get("version")==version and same_batch):
+                    return {k:v for k,v in existing.items() if k!="payload"}
+        if completed:
+            snapshot=self.snapshot(scope)
+            notice_summary=self.batches.notice_summary(scope,snapshot["config"])
+            for existing in completed:
+                old_payload=existing.get("payload") or {}
+                if (old_payload.get("snapshot") or {}).get("version")==snapshot["version"] and \
+                        (old_payload.get("notice_summary") or {}).get("version")==notice_summary["version"]:
+                    return {k:v for k,v in existing.items() if k!="payload"}
+            version=snapshot["version"]
+            payload.update(snapshot=snapshot,notice_summary=notice_summary)
+        with self.local.locked([scope]):
+            for existing in self.local.documents(scope,"job:"):
+                old_payload=existing.get("payload") or {}
+                same_request=(kind=="export" and bool(payload.get("batch_id"))
+                              and existing.get("kind")=="export"
+                              and old_payload.get("batch_id")==payload["batch_id"])
+                alive=process_alive(existing.get("pid")) and (existing.get("pid")!=os.getpid() or existing.get("job_id") in self._running)
+                if same_request and existing.get("status") in ("pending","running") and alive:
+                    return {k:v for k,v in existing.items() if k!="payload"}
             jid=uuid.uuid4().hex; job={"job_id":jid,"scope":scope,"kind":kind,"owner":owner,"payload":payload,"status":"pending","created_at":stamp(),"pid":os.getpid(),"version":version}
             self.write("job:"+jid,job)
             response={k:v for k,v in job.items() if k!="payload"}
@@ -1208,6 +1222,11 @@ class CabinetPowerService:
     def _run_job(self,job):
         try:
             job.update(status="running",started_at=stamp()); self.write("job:"+job["job_id"],job)
+            if job["kind"]=="export" and not (job["payload"].get("snapshot") and job["payload"].get("notice_summary")):
+                snapshot=self.snapshot(job["scope"])
+                job["payload"].update(snapshot=snapshot,notice_summary=self.batches.notice_summary(job["scope"],snapshot["config"]))
+                job["version"]=snapshot["version"]
+                self.write("job:"+job["job_id"],job)
             result=getattr(self,"do_"+job["kind"])(job["scope"],job["payload"],job)
             job.update(status="succeeded",result=result)
         except Exception as exc: job.update(status="failed",error=str(exc))

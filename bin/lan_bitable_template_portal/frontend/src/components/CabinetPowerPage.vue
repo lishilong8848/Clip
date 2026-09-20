@@ -674,7 +674,11 @@ onMounted(async () => {
   if (uploadId && /^[A-Za-z0-9_-]{16,128}$/.test(uploadId)) { saving.value = true; saveStatus.value = {operation_id:uploadId,status:'queued'}; await pollSave(uploadId); if (disposed) return; }
   try { const savedDraft = draftStorage.getItem(draftKey); if (savedDraft && !saving.value) { draft = JSON.parse(savedDraft); if (draft?.scope === props.scope && Array.isArray(draft.form?.groups)) { restoreDialogOpen.value = true; void focusModal(); } } } catch { clearDraft(); }
   const saved = taskStorage.getItem(storageKey);
-  if (saved && /^[a-f0-9]{32}$/.test(saved)) { job.value = { job_id: saved }; void pollJob(); } else if (saved) taskStorage.removeItem(storageKey);
+  if (saved && /^[a-f0-9]{32}$/.test(saved)) { job.value = { job_id: saved }; void pollJob(); }
+  else {
+    if (saved) taskStorage.removeItem(storageKey);
+    if (pendingExportRequest.value) void startJob('exports');
+  }
 });
 onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); mapAbort?.abort(); historyAbort?.abort(); removeNavigationGuard?.(); window.removeEventListener('pagehide', flushDraft); window.removeEventListener('keydown', keyboard); window.clearTimeout(pollTimer); window.clearTimeout(bootstrapTimer); window.clearTimeout(savePollTimer); window.clearTimeout(draftTimer); });
 </script>

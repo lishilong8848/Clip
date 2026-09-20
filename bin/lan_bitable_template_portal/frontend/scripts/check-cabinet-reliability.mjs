@@ -124,10 +124,9 @@ try {
   assert(lostSingleResponse, "single-building response loss was not simulated");
   await page.getByText("导出启动响应未确认，后台可能仍在执行。请点击“继续上次导出”核验原任务。", { exact: true }).waitFor();
   await page.screenshot({ path: path.join(output, "single-building-export-retry.png") });
-  await page.reload();
-  await page.getByRole("button", { name: "继续上次导出" }).waitFor({ timeout: 30000 });
   await page.unroute("**/api/cabinet-power/exports");
-  await page.getByRole("button", { name: "继续上次导出" }).click();
+  await page.goto(base + "/cabinet-power");
+  await page.goto(base + "/cabinet-power?scope=B");
   await page.getByText("已上传多维", { exact: true }).waitFor({ timeout: 120000 });
   const bHistory = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=B")).json();
   assert.equal(bHistory.data.items.length, 2, "single-building retry must not create a duplicate export");
