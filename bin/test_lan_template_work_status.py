@@ -18223,6 +18223,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIn('[hidden] { display:none !important; }', html)
+        self.assertIn('.target-candidate-list { min-height:0;', html)
+        self.assertIn('.target-candidate-dialog > .end-check-actions { min-height:66px;', html)
+        self.assertIn('height:clamp(360px,70vh,760px);', html)
+        self.assertIn('#lite-manual-source-candidates .target-candidate-list { grid-row:4; }', html)
+        self.assertIn('#lite-manual-source-candidates .end-check-actions { grid-row:5; }', html)
         self.assertIn('id="lite-manual-source-confirm" disabled>确认绑定</button>', html)
         self.assertIn('id="lite-manual-source-unbound-confirm" hidden>', html)
 

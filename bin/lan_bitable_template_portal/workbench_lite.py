@@ -3305,10 +3305,16 @@ def render_workbench_lite(
     .polling-work-order-select[hidden] {{ display:none; }}
     @media (max-width:760px) {{ .change-confirmation-summary {{ grid-template-columns:1fr; }} .change-confirmation-row {{ grid-template-columns:1fr; }} .change-confirmation-actions {{ justify-content:flex-start; }} }}
     @media (max-width:760px) {{ .polling-sop-body {{ grid-template-columns:1fr; overflow:auto; }} .polling-sop-list,.polling-sop-editor {{ overflow:visible; }} .polling-people-grid {{ grid-template-columns:1fr; }} }}
-    .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
+    .target-candidate-dialog {{ width:min(760px,100%); height:clamp(360px,70vh,760px); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
     #lite-manual-source-candidates .target-candidate-dialog {{ grid-template-rows:auto auto auto minmax(0,1fr) auto; }}
-    .repair-event-candidate-dialog {{ width:min(980px,100%); }}
-    .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
+    #lite-manual-source-candidates .end-check-head {{ grid-row:1; }}
+    #lite-manual-source-candidates .manual-source-tools {{ grid-row:2; }}
+    #lite-manual-source-candidates .manual-source-warning {{ grid-row:3; }}
+    #lite-manual-source-candidates .target-candidate-list {{ grid-row:4; }}
+    #lite-manual-source-candidates .end-check-actions {{ grid-row:5; }}
+    .repair-event-candidate-dialog {{ width:min(980px,100%); grid-template-rows:auto auto minmax(0,1fr) auto; }}
+    .target-candidate-list {{ min-height:0; display:grid; align-content:start; gap:9px; overflow:auto; padding:16px 20px; }}
+    .target-candidate-dialog > .end-check-actions {{ min-height:66px; align-items:center; }}
     .target-candidate-row {{ border:1px solid #dce8f8; border-radius:16px; padding:12px; background:#fff; text-align:left; cursor:pointer; display:grid; gap:7px; color:#0c244d; }}
     .target-candidate-row:hover,.target-candidate-row.active {{ border-color:#1f63ff; box-shadow:0 0 0 3px rgba(31,99,255,.12); background:#f7fbff; }}
     .target-candidate-row strong {{ font-size:14px; line-height:1.35; }}
@@ -3378,7 +3384,7 @@ def render_workbench_lite(
       .refresh-menu {{ right:0; left:auto; }}
       .polling-sop-dialog {{ width:100%; max-height:calc(100dvh - 12px); }}
       .end-check-backdrop {{ padding:6px; }}
-      .target-candidate-dialog {{ width:100%; max-height:calc(100dvh - 12px); border-radius:16px; }}
+      .target-candidate-dialog {{ width:100%; height:calc(100dvh - 12px); max-height:calc(100dvh - 12px); border-radius:16px; }}
       .target-candidate-list {{ padding:12px; }}
       .target-candidate-row strong,.target-candidate-row span,.target-candidate-row small {{ min-width:0; overflow-wrap:anywhere; }}
       .manual-source-tools {{ padding:10px 12px 0; }}
