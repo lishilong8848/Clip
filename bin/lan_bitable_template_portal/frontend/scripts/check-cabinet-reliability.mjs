@@ -76,6 +76,9 @@ try {
     await context.close();
   }
   const exportContext = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+  await exportContext.addInitScript(() => {
+    Object.defineProperty(Crypto.prototype, "randomUUID", { value: undefined, configurable: true });
+  });
   page = await exportContext.newPage();
   const exportErrors = [];
   page.on("pageerror", error => exportErrors.push(error.message));

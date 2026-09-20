@@ -193,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { resilientStorage } from "../browserStorage";
+import { randomHexId, resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, ExternalLink, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
@@ -316,9 +316,13 @@ function allExportLabel(item: Dict): string {
 }
 async function startJob(path: string): Promise<void> {
   if (busy.value) return; startingJob.value = true; startingKind.value = path; error.value = '';
-  const requestId = path === 'exports' ? pendingExportRequest.value || 'single_' + crypto.randomUUID().replace(/-/g,'') : '';
-  if (requestId) { pendingExportRequest.value = requestId; taskStorage.setItem(exportRequestKey,JSON.stringify({id:requestId,at:Date.now()})); }
-  try { job.value = await write(path,requestId ? {batch_id:requestId} : {}); taskStorage.setItem(storageKey, job.value.job_id); void pollJob(); } catch (exc: any) { if (requestId && (!exc?.status || exc.status >= 500)) error.value = '导出启动响应未确认，后台可能仍在执行。请点击“继续上次导出”核验原任务。'; else fail(exc); } finally { startingJob.value = false; startingKind.value = ''; }
+  let requestId = '';
+  try {
+    requestId = path === 'exports' ? pendingExportRequest.value || 'single_' + randomHexId() : '';
+    if (requestId) { pendingExportRequest.value = requestId; taskStorage.setItem(exportRequestKey,JSON.stringify({id:requestId,at:Date.now()})); }
+    job.value = await write(path,requestId ? {batch_id:requestId} : {}); taskStorage.setItem(storageKey, job.value.job_id); void pollJob();
+  } catch (exc: any) { if (requestId && (!exc?.status || exc.status >= 500)) error.value = '导出启动响应未确认，后台可能仍在执行。请点击“继续上次导出”核验原任务。'; else fail(exc); }
+  finally { startingJob.value = false; startingKind.value = ''; }
 }
 async function pollJob(): Promise<void> {
   if (disposed) return;
@@ -400,7 +404,7 @@ function restoreAllExports(): void {
 }
 async function startAllExports(): Promise<void> {
   if (allExportBusy.value || !allExportReady.value || allExportItems.value.some(item => ['pending','running','checking','unknown'].includes(item.status))) return;
-  allExportBatchId.value = 'all_' + crypto.randomUUID().replace(/-/g,'');
+  allExportBatchId.value = 'all_' + randomHexId();
   allExportItems.value = buildings.value.map(item => ({ scope:item.scope,status:'pending',error:'',result:{} }));
   allExportBusy.value = true; error.value = ''; message.value = ''; saveAllExportState();
   try { await Promise.all(allExportItems.value.map(startAllExportItem)); }

@@ -146,7 +146,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardList, ClipboardPaste, Eye, FileText, Files, Loader2, Pencil, Plus, RefreshCw, Save, ScanText, Search, Trash2, Upload, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
-import { resilientStorage } from '../browserStorage';
+import { randomHexId, resilientStorage } from '../browserStorage';
 import { navigate, registerNavigationGuard } from '../navigation';
 import type { ScopeOption } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -396,7 +396,7 @@ async function loadDirectory(): Promise<void> {
 }
 function makeManual(room: string,rack: string): Dict {
   const found=directory.value.find(item=>item.room===room&&item.rack===rack);
-  return {_id:crypto.randomUUID(),scope:manualScope.value,room,rack,rack_type:found?.rack_type || '',supplier_rack:'',type_detail:'',action:common.action,expected:common.expected || common.actual,actual:common.actual,result:common.result,failure_reason:common.failure_reason};
+  return {_id:randomHexId(),scope:manualScope.value,room,rack,rack_type:found?.rack_type || '',supplier_rack:'',type_detail:'',action:common.action,expected:common.expected || common.actual,actual:common.actual,result:common.result,failure_reason:common.failure_reason};
 }
 function addPicked(): void { const existing=new Set(manualRows.value.map(row=>`${row.scope}/${row.room}/${row.rack}`)); for (const value of pickedRacks.value) { const [room,rack]=value.split('/'); if (!existing.has(`${manualScope.value}/${room}/${rack}`)) manualRows.value.push(makeManual(room,rack)); } pickedRacks.value=[]; }
 function normalizeRoom(value: string): string { const text=value.trim().toUpperCase(); const match=text.match(/(?:EA118[-_.])?([A-E])([1-4])[-_](\d{1,2})/); return match ? `${match[2]}${String(Number(match[3])).padStart(2,'0')}` : text; }
