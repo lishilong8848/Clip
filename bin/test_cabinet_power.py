@@ -529,6 +529,31 @@ class CabinetPowerTests(unittest.TestCase):
             "上电状态":"结束","实际结束时间":1790000000000}}),force=True),1)
         self.assertEqual(service.get(batch["batch_id"])["source_notice"]["ended_at"],service._notice_datetime(1790000000000))
 
+    def test_missing_notice_record_is_deleted_and_removed_from_summary(self):
+        service=self.service.batches
+        batch=service.create_from_notice({"target_record_id":"rec-deleted-notice","notice_type":"上电通告",
+            "scope":"B","cabinet":"B-216运营商机房B04","quantity":"1","owner_id":"owner",
+            "sent_at":"2026-09-19 10:00:00"})
+        self.assertEqual(len(service.notice_summary("B",self.configs["B"])["items"]),1)
+        service.reconcile_legacy_notice_end_times(
+            lambda _id,_type:(False,"1254043 - RecordIdNotFound"),force=True)
+        deleted=service.get(batch["batch_id"])
+        self.assertTrue(deleted["source_notice"]["deleted_at"])
+        self.assertEqual(deleted["source_notice"]["end_time_check"]["status"],"deleted")
+        self.assertEqual(deleted["source_notice"]["lifecycle_audit"][-1]["action"],"remote_record_missing")
+        self.assertEqual(service.notice_summary("B",self.configs["B"])["items"],[])
+
+        legacy=service.create_from_notice({"target_record_id":"rec-already-missing","notice_type":"上电通告",
+            "scope":"B","cabinet":"B-247运营商机房B05","quantity":"1","owner_id":"owner",
+            "sent_at":"2026-09-19 11:00:00"})
+        service._change(legacy["batch_id"],lambda current:current["source_notice"].update(
+            end_time_check={"status":"failed","error":"1254043 - RecordIdNotFound",
+                            "checked_at":dt.datetime.now().timestamp()}))
+        service.reconcile_legacy_notice_end_times(
+            lambda *_args: (_ for _ in ()).throw(AssertionError("saved missing record must not be fetched")))
+        self.assertTrue(service.get(legacy["batch_id"])["source_notice"]["deleted_at"])
+        self.assertEqual(service.notice_summary("B",self.configs["B"])["items"],[])
+
     def test_deleted_notice_rollback_failure_stays_visible_as_exception(self):
         service=self.service.batches
         source={"target_record_id":"rec-notice-delete","notice_type":"上电通告","scope":"B",

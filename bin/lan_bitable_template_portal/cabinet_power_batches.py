@@ -1752,25 +1752,41 @@ class CabinetBatchService:
         return {"scope": scope, "version": digest([template_hash, cutoff, items]), "items": items,
                 "template_hash": template_hash, "baseline_date": cutoff}
 
+    @staticmethod
+    def _notice_record_missing(error):
+        normalized = re.sub(r"[\s_\-:：]+", "", str(error or "")).lower()
+        return any(token in normalized for token in (
+            "1254043", "recordidnotfound", "recordldnotfound", "记录id不存在",
+        ))
+
     def reconcile_legacy_notice_end_times(self, fetch_record, force=False):
         checked = 0
         for batch in self.store.notice_batches():
             source = batch.get("source_notice") or {}
             if source.get("ended_at") or source.get("deleted_at") or not source.get("target_record_id"):
                 continue
-            if not force and dt.datetime.now().timestamp() - float((source.get("end_time_check") or {}).get("checked_at") or 0) < 3600:
+            prior_check = source.get("end_time_check") or {}
+            prior_missing = self._notice_record_missing(prior_check.get("error"))
+            if not prior_missing and not force and dt.datetime.now().timestamp() - float(prior_check.get("checked_at") or 0) < 3600:
                 continue
-            try:
-                ok, record = fetch_record(source["target_record_id"], source["notice_type"])
-                if not ok or not isinstance(record, dict):
-                    raise CabinetError(str(record or "目标多维读取失败"))
-                fields = record.get("fields") if isinstance(record.get("fields"), dict) else record
-                status = str(fields.get("上电状态", ""))
-                ended_at = self._notice_datetime(fields.get("实际结束时间"))
-                state = "resolved" if "结束" in status and ended_at else "pending"
-                error = "" if state == "resolved" else ("结束状态缺少实际结束时间" if "结束" in status else "目标通告尚未结束")
-            except Exception as exc:
-                state, error, ended_at = "failed", str(exc)[:200], ""
+            if prior_missing:
+                state, error, ended_at = "deleted", "目标多维记录不存在，已按来源通告删除处理", ""
+            else:
+                try:
+                    ok, record = fetch_record(source["target_record_id"], source["notice_type"])
+                    if not ok or not isinstance(record, dict):
+                        raise CabinetError(str(record or "目标多维读取失败"))
+                    fields = record.get("fields") if isinstance(record.get("fields"), dict) else record
+                    status = str(fields.get("上电状态", ""))
+                    ended_at = self._notice_datetime(fields.get("实际结束时间"))
+                    state = "resolved" if "结束" in status and ended_at else "pending"
+                    error = "" if state == "resolved" else ("结束状态缺少实际结束时间" if "结束" in status else "目标通告尚未结束")
+                except Exception as exc:
+                    missing = self._notice_record_missing(exc)
+                    state, error, ended_at = (
+                        ("deleted", "目标多维记录不存在，已按来源通告删除处理", "")
+                        if missing else ("failed", str(exc)[:200], "")
+                    )
             def save(current):
                 notice = current["source_notice"]
                 if notice.get("ended_at") or notice.get("deleted_at"):
@@ -1780,6 +1796,12 @@ class CabinetBatchService:
                 if state == "resolved":
                     notice["ended_at"] = ended_at
                     notice.setdefault("lifecycle_audit", []).append({"action": "legacy_end_reconciled", "at": now()})
+                elif state == "deleted":
+                    notice["deleted_at"] = now()
+                    notice.setdefault("lifecycle_audit", []).append({
+                        "action": "remote_record_missing", "at": now(),
+                        "record_id": str(notice.get("target_record_id") or ""),
+                    })
             try:
                 self._change(batch["batch_id"], save)
                 checked += state == "resolved"
