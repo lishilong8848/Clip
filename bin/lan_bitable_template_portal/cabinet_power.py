@@ -560,7 +560,7 @@ class CabinetPowerService:
                 state['latest_success']={k:latest[k] for k in ('id','record_id','action','actual','expected','result') if k in latest}
         return {"items":items,"total":len(ops),"page":page,"page_size":size,"version":snap["version"],"rack_state":state}
 
-    def evidence_path(self,scope,record_id,image_id):
+    def evidence_path(self,scope,record_id,image_id,thumbnail=False):
         import io
         from PIL import Image
         if not re.fullmatch(r"[a-f0-9]{64}",str(image_id or "")):
@@ -586,6 +586,10 @@ class CabinetPowerService:
                     raise CabinetError("飞书确认截图格式与记录不一致",409)
                 image.verify()
             self.batches._atomic_write(path,content)
+        if thumbnail:
+            from .cabinet_power_evidence import ensure_thumbnail
+            path=ensure_thumbnail(path,self.root/"evidence_thumbnails"/(image_id+".png"))
+            return path,"image/png"
         return path, {".jpg":"image/jpeg",".png":"image/png",".webp":"image/webp"}[extension]
 
     def validate_op(self,scope,payload,old=None):
@@ -1111,7 +1115,10 @@ class CabinetPowerService:
             return True
 
     def _find_export_archive_record(self,eid):
-        for record in self.export_remote.list_all():
+        records=self.export_remote.list_all(
+            filters="CurrentValue.[导出标识]="+json.dumps(eid,ensure_ascii=False)
+        )
+        for record in records:
             if text_value((record.get("fields") or {}).get("导出标识"))==eid: return record
         return None
 

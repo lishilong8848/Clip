@@ -53,8 +53,9 @@ class CabinetBatchRecognitionTests(unittest.TestCase):
         batch._set_file_progress=lambda *_args,**_kwargs:None
         rows=batch._parse_pdf("batch",{"file_id":"file","sha256":"hash","name":"机柜下测试电确认单.pdf"})
         self.assertEqual(len(rows),2)
-        self.assertEqual((rows[0]["scope"],rows[0]["room"],rows[0]["actual"],rows[0]["result"],rows[0]["order_time"]),("B","402","","","2026-08-31 15:03:55"))
-        self.assertEqual((rows[1]["actual"],rows[1]["result"],rows[1]["order_time"]),("2026-09-03 10:12:20","成功","2026-08-31 14:48:26"))
+        self.assertEqual((rows[0]["scope"],rows[0]["room"],rows[0]["actual"],rows[0]["result"]),("B","402","",""))
+        self.assertEqual((rows[1]["actual"],rows[1]["result"]),("2026-09-03 10:12:20","成功"))
+        self.assertTrue(all("order_time" not in row and "application_time" not in row for row in rows))
 
     def test_pdf_action_validation_uses_latest_successful_state(self):
         inventory=[{"room":"201","rack":rack,"rack_type":"服务器机柜"} for rack in ("A01","A02","A03")]
@@ -89,7 +90,7 @@ class FakeFeishu:
         self.records={r["record_id"]:copy.deepcopy(r) for r in records}; self.creates=0; self.fail_after_create=False; self.fail_after_delete=False; self.list_calls=0
         self.batch_create_calls=0; self.batch_update_calls=0; self.fail_after_batch_create=False; self.fail_after_batch_update=False
         self.attachments={}
-    def list_all(self,path="records"): self.list_calls+=1; return copy.deepcopy(list(self.records.values()))
+    def list_all(self,path="records",filters=None): self.list_calls+=1; return copy.deepcopy(list(self.records.values()))
     def ensure_fields(self): return True
     def get(self,rid): return copy.deepcopy(self.records[rid])
     def create(self,fields,operation_id):
@@ -124,8 +125,13 @@ class FakeExportFeishu:
     def __init__(self):
         self.fields={"自动编号":{"field_name":"自动编号","type":1005}}
         self.records={}; self.upload_calls=0; self.creates=0; self.fail_after_create=False; self.lock=threading.RLock()
-    def list_all(self,path="records"):
-        with self.lock: return copy.deepcopy(list(self.fields.values()) if path=="fields" else list(self.records.values()))
+    def list_all(self,path="records",filters=None):
+        with self.lock:
+            items=list(self.fields.values()) if path=="fields" else list(self.records.values())
+            if filters and path=="records":
+                value=json.loads(filters.split("=",1)[1])
+                items=[item for item in items if item.get("fields",{}).get("导出标识")==value]
+            return copy.deepcopy(items)
     def request(self,method,path,body=None,params=None):
         if method=="POST" and path=="fields":
             with self.lock:
@@ -1012,8 +1018,15 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(saved["失败原因"],"现场核验未通过")
         self.assertEqual(len(saved["上下电确认截图"]),1)
         self.assertEqual(self.service.evidence_path("A",record_id,image_id)[0].read_bytes(),output.getvalue())
+        thumbnail=self.service.evidence_path("A",record_id,image_id,True)[0]
+        self.assertTrue(thumbnail.is_file())
+        self.assertLess(thumbnail.stat().st_size,len(output.getvalue())+1024)
         local_image=self.service.evidence_path("A",record_id,image_id)[0]
         local_image.unlink()
+        self.assertEqual(self.service.evidence_path("A",record_id,image_id)[0].read_bytes(),output.getvalue())
+        self.assertEqual(self.service.batches.storage_status()["cloud_backed_files"],1)
+        cleaned=self.service.batches.cleanup_evidence_cache()
+        self.assertGreaterEqual(cleaned["deleted"],1)
         self.assertEqual(self.service.evidence_path("A",record_id,image_id)[0].read_bytes(),output.getvalue())
         self.service.batches.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A"])
         undone=self._wait_batch(batch["batch_id"])
@@ -1023,6 +1036,36 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(again["stats"]["completed"],1,again["rows"])
         self.assertEqual(len(self.remote.attachments),1)
         self.assertEqual(self.remote.get(again["rows"][0]["record_id"])["fields"]["上下电确认截图"],saved["上下电确认截图"])
+
+    def test_cross_scope_image_is_hidden_until_viewer_has_every_scope(self):
+        from PIL import Image
+        rows=[self._manual_batch_row(scope,"2026-09-14 01:02:03") for scope in ("A","B")]
+        batch=self.service.batches.create_manual(rows,"owner")
+        output=io.BytesIO();Image.new("RGB",(80,60),"white").save(output,format="PNG")
+        candidates=[{"scope":row["scope"],"room":row["room"],"rack":row["rack"],"supplier_rack":"",
+                     "action":row["action"],"expected":row["expected"],"actual":row["actual"]} for row in rows]
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=candidates):
+            self.service.batches.add_images(batch["batch_id"],[("mixed.png",output.getvalue())],"owner",["A","B"])
+            deadline=time.time()+5
+            while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing":time.sleep(.01)
+        batch=self.service.batches.get(batch["batch_id"]);image_id=batch["images"][0]["image_id"]
+        limited=self.service.batches.visible(batch,"viewer",["A"])
+        self.assertEqual(([row["scope"] for row in limited["rows"]],limited["images"],limited["files"]),(["A"],[],[]))
+        with self.assertRaisesRegex(CabinetError,"无权查看截图"):
+            self.service.batches.image_path(batch["batch_id"],image_id,"viewer",["A"])
+        self.assertTrue(self.service.batches.image_path(batch["batch_id"],image_id,"viewer",["A","B"])[0].is_file())
+
+    def test_batch_patch_delta_returns_only_changed_rows(self):
+        rows=[self._manual_batch_row("A",f"2026-09-14 01:0{index}:03") for index in (2,3)]
+        batch=self.service.batches.create_manual(rows,"owner")
+        target=batch["rows"][0]
+        changed=self.service.batches.update(batch["batch_id"],{
+            "version":batch["version"],"response_mode":"delta",
+            "rows":[{"row_id":target["row_id"],"expected":"2026-09-14 01:01:03"}],
+        },"owner",["A"])
+        self.assertTrue(changed["partial_rows"])
+        self.assertEqual([row["row_id"] for row in changed["rows"]],[target["row_id"]])
+        self.assertEqual(changed["rows"][0]["expected"],"2026-09-14 01:01:03")
 
     def test_existing_cloud_attachment_is_preserved_on_group_update(self):
         rack=self.configs["D"]["inventory"][0]
@@ -1274,7 +1317,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             current=self.service.batches.get(batch["batch_id"])
             cancelled=self.service.batches.cancel(batch["batch_id"],"owner",expected_version=current["version"])
             release.set()
-            self.service.batches._parse_pool.shutdown(wait=True)
+            self.service.batches._ocr_pool.shutdown(wait=True)
         final=self.service.batches.get(batch["batch_id"])
         self.assertEqual((cancelled["status"],final["status"],final["rows"],final["images"][0]["status"]),
                          ("cancelled","cancelled",[],"cancelled"))

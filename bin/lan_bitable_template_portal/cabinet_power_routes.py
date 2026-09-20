@@ -111,9 +111,10 @@ def install_cabinet_power_routes(app,controller,runtime):
                     response.status_code=202
                     return response
                 if len(parts)==4 and parts[2]=="images" and request.method=="GET":
-                    file_path,image=await asyncio.to_thread(service.batches.image_path,batch_id,parts[3],owner,allowed,admin)
-                    media_type={".jpg":"image/jpeg",".png":"image/png",".webp":"image/webp"}.get(image["extension"],"application/octet-stream")
-                    return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=3600", "X-Content-Type-Options":"nosniff"})
+                    thumbnail=query.get("thumbnail")=="1"
+                    file_path,image=await asyncio.to_thread(service.batches.image_path,batch_id,parts[3],owner,allowed,admin,thumbnail)
+                    media_type="image/png" if thumbnail else {".jpg":"image/jpeg",".png":"image/png",".webp":"image/webp"}.get(image["extension"],"application/octet-stream")
+                    return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=86400", "X-Content-Type-Options":"nosniff"})
                 if len(parts)==4 and parts[2]=="images" and request.method=="DELETE":
                     data=await asyncio.to_thread(service.batches.delete_image,batch_id,parts[3],query.get("version"),owner,allowed,admin)
                     return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
@@ -161,6 +162,12 @@ def install_cabinet_power_routes(app,controller,runtime):
                         items.append({"scope":scope_code,"counts":{"total":0,"formal":0,"test":0,"off":0,"unknown":0},"updated_at":"","record_count":0,"inventory_only":0,"source":"local","bootstrap_status":current["status"],"bootstrap_error":current.get("error","")})
                     return {"buildings":items}
                 return controller._json_ok(request,session,await asyncio.to_thread(buildings))
+            if path=="storage":
+                if not admin: raise CabinetError("仅管理员可管理机柜本地缓存",403)
+                data=await asyncio.to_thread(
+                    service.batches.cleanup_evidence_cache if request.method=="POST" else service.batches.storage_status
+                )
+                return controller._json_ok(request,session,data)
             payload=await controller._read_json_request(request,max_bytes=512*1024) if request.method in ("POST","PATCH") else {}
             scope=str(payload.get("scope") or query.get("scope") or "")
             if path=="bootstrap":
@@ -196,8 +203,8 @@ def install_cabinet_power_routes(app,controller,runtime):
             elif path=="operations" and request.method=="GET": data=await asyncio.to_thread(service.operations,scope,query)
             elif path.startswith("operations/") and path.count("/")==3 and "/evidence/" in path and request.method=="GET":
                 _,record_id,_,image_id=path.split("/")
-                file_path,media_type=await asyncio.to_thread(service.evidence_path,scope,record_id,image_id)
-                return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=3600","X-Content-Type-Options":"nosniff"})
+                file_path,media_type=await asyncio.to_thread(service.evidence_path,scope,record_id,image_id,query.get("thumbnail")=="1")
+                return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=86400","X-Content-Type-Options":"nosniff"})
             elif (path=="operations" and request.method=="POST") or (path.startswith("operations/") and request.method=="PATCH"):
                 rid=path.split("/")[1] if "/" in path else ""
                 data=await asyncio.to_thread(service.save_operation,scope,payload,owner,rid,can_move_scope=bool(admin and payload.get("confirm_scope_move") is True),defer=query.get('defer')=='1')
@@ -227,6 +234,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         "writes/{operation_id}/reconcile":["POST"],
         "export-history":["GET"],"exports/{export_id}/upload":["POST"],"exports/{export_id}/cleanup":["POST"],
         "bootstrap":["GET","POST"],
+        "storage":["GET","POST"],
     }.items():
         app.add_api_route("/api/cabinet-power/"+path,endpoint,methods=methods,name="cabinet_"+path.replace("/","_"))
     def shutdown():

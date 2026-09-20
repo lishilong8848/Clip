@@ -5,8 +5,9 @@
       <div class="heading-title"><h1>{{ scope ? scope + '楼机柜上下电' : '机柜上下电' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>
       <div class="actions">
         <button :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
+        <button v-if="isAdmin" :disabled="serverStorageLoading" @click="loadServerStorage"><HardDrive :size="16" />{{ serverStorageLoading ? '读取缓存中' : '本地缓存' }}</button>
         <button @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
-        <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount" class="count-badge">{{ batchPendingCount }}</span></button>
+        <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
         <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || allExportItems.some(item => ['pending','running','checking','unknown'].includes(item.status))" :title="allExportItems.some(item => ['checking','unknown'].includes(item.status)) ? '请先核对未确认的导出任务' : ''" @click="startAllExports"><CloudUpload :size="16" />{{ allExportBusy ? '各楼正在导出' : '一键导出/上传所有楼栋' }}</button>
         <template v-if="scope">
           <a v-if="overview.table_url" :href="overview.table_url" target="_blank" rel="noopener"><ExternalLink :size="16" />多维表</a>
@@ -17,6 +18,7 @@
       </div>
     </header>
     <div v-if="error" class="notice danger" role="alert">{{ error }}<button @click="error = ''" aria-label="关闭错误"><X :size="16" /></button></div>
+    <div v-if="batchStatusError || pendingWritesError" class="notice danger" role="alert"><span>{{ [batchStatusError,pendingWritesError].filter(Boolean).join('；') }}</span><button @click="loadBatchCount(); loadPending()">重试读取</button></div>
     <div v-if="bootstrapVisible" class="notice bootstrap-notice" :class="{ danger: bootstrapFailed }" role="status" aria-live="polite">
       <Loader2 v-if="bootstrapActive" class="spin" :size="18" />
       <div class="bootstrap-copy">
@@ -32,6 +34,7 @@
     <div v-if="exported.export_id" class="notice" :class="exported.cloud_upload_status === 'failed' ? 'danger' : 'success'"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a><a v-if="exported.archive_url && exported.cloud_upload_status === 'succeeded'" :href="exported.archive_url" target="_blank" rel="noopener"><ExternalLink :size="16" />归档表</a><button v-if="!['succeeded','skipped'].includes(String(exported.cloud_upload_status || ''))" :disabled="exported._retrying" @click="retryExportUpload(exported)"><CloudUpload :size="16" />{{ exported._retrying ? '上传中' : '重试上传' }}</button></div>
     <div v-if="scope && overview.export_state?.is_stale" class="notice danger" role="status"><TriangleAlert :size="18" /><span>最近导出已过期：{{ overview.export_state.stale_reason }}。请重新导出。</span></div>
     <div v-if="storageWarning" class="notice danger" role="status">{{ storageWarning }}</div>
+    <div v-if="serverStorage.evidence_bytes !== undefined" class="notice" role="status"><HardDrive :size="18" /><span>确认截图 {{ formatBytes(serverStorage.evidence_bytes) }} · 缩略图 {{ formatBytes(serverStorage.thumbnail_bytes) }} · 原确认单 {{ formatBytes(serverStorage.import_bytes) }} · 导出文件 {{ formatBytes(serverStorage.export_bytes) }}</span><button :disabled="serverStorageLoading || !serverStorage.cloud_backed_files" @click="cacheCleanupOpen = true">清理已上云图片缓存</button></div>
     <div v-if="message" class="notice success" role="status">{{ message }}</div>
     <div v-if="saving && !editorOpen" class="notice" role="status"><Loader2 class="spin" :size="16" /><span>{{ saveStepLabel }}</span><button v-if="saveStatus.operation_id" @click="showSubmission(saveStatus.operation_id)">查看提交内容</button></div>
     <div v-for="pending in pendingWrites.filter(p => !saving || p.operation_id !== saveStatus.operation_id)" :key="pending.operation_id" class="notice danger" role="alert"><span>{{ pending.status === 'conflict' ? '上传存在冲突' : '上传待完成' }}：{{ pending.error || pending.error_stage }}</span><button @click="showSubmission(pending.operation_id)">查看提交内容</button><button :disabled="saving" @click="resumePending(pending.operation_id)">继续核验</button><button :disabled="saving" @click="reconcilePending(pending.operation_id)">载入云端版本</button></div>
@@ -91,7 +94,7 @@
           <div v-else-if="layout.layout" ref="viewport" class="map-viewport">
             <div :style="{ width: layout.layout.width * zoom + 'px', height: layout.layout.height * zoom + 'px', position: 'relative' }">
               <div class="map-canvas" :style="{ width: layout.layout.width + 'px', height: layout.layout.height + 'px', transform: 'scale(' + zoom + ')' }">
-                <component :is="cell.rack || cell.metric && !cell.metric_building ? 'button' : 'div'" v-for="cell in layout.layout.cells" :key="cell.ref" class="map-cell" :class="{ found: cell.rack && mapSearch.toUpperCase() === cell.rack }" :style="cellStyle(cell)" :title="cell.rack ? cell.rack + ' ' + stateLabels[cell.state] : cell.metric && !cell.metric_building ? '查看' + (cell.metric === 'total' ? '全部机柜' : cell.metric === 'powered' ? '已上电机柜' : stateLabels[cell.metric] + '机柜') : cell.text" @click="cell.rack ? openHistory(currentRoom, cell.rack) : cell.metric && !cell.metric_building && showStateRacks(cell.metric,currentRoom)">{{ cell.text }}</component>
+                <component :is="cell.rack || cell.metric && !cell.metric_building ? 'button' : 'div'" v-for="cell in layout.layout.cells" :key="cell.ref" class="map-cell" :class="{ found: cell.rack && mapSearch.toUpperCase() === cell.rack }" :style="cellStyle(cell)" :aria-hidden="cell.rack || cell.metric && !cell.metric_building ? undefined : true" :aria-label="cell.rack ? cell.rack + ' ' + stateLabels[cell.state] : cell.metric && !cell.metric_building ? '查看' + (cell.metric === 'total' ? '全部机柜' : cell.metric === 'powered' ? '已上电机柜' : stateLabels[cell.metric] + '机柜') : undefined" :title="cell.rack ? cell.rack + ' ' + stateLabels[cell.state] : cell.metric && !cell.metric_building ? '查看' + (cell.metric === 'total' ? '全部机柜' : cell.metric === 'powered' ? '已上电机柜' : stateLabels[cell.metric] + '机柜') : cell.text" @click="cell.rack ? openHistory(currentRoom, cell.rack) : cell.metric && !cell.metric_building && showStateRacks(cell.metric,currentRoom)">{{ cell.text }}</component>
               </div>
             </div>
           </div>
@@ -131,7 +134,7 @@
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
             <div class="section-title"><strong>{{ op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="openEditor(op)">编辑</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
-            <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></li></ol>
+            <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
             <details v-if="op.issues.length"><summary>原始操作内容</summary><div v-for="(group, i) in op.groups" :key="i" class="raw-group"><div><small>操作类型</small><pre>{{ group.action }}</pre></div><div><small>期望完成时间</small><pre>{{ group.expected || '未填写' }}</pre><small>实际完成时间</small><pre>{{ group.actual || '未填写' }}</pre></div></div></details>
           </article>
@@ -161,7 +164,7 @@
               <label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label>
               <label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label>
               <button type="button" title="移除此组" aria-label="移除此组" :disabled="!!form.target_state && group._editing" @click="removeGroup(group)"><Trash2 :size="16" /></button>
-              <div v-if="group.result === '失败' || imagesWithIds(group).length" class="group-evidence"><label v-if="group.result === '失败'">失败原因<input v-model="group.failure_reason" maxlength="1000" required placeholder="填写本次操作失败原因" /></label><div v-if="imagesWithIds(group).length" class="history-images"><button v-for="image in imagesWithIds(group)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + image.image_id.slice(0,8)" @click="previewEvidence = evidenceUrl(editingId,image.image_id)"><img :src="evidenceUrl(editingId,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></div>
+              <div v-if="group.result === '失败' || imagesWithIds(group).length" class="group-evidence"><label v-if="group.result === '失败'">失败原因<input v-model="group.failure_reason" maxlength="1000" required placeholder="填写本次操作失败原因" /></label><div v-if="imagesWithIds(group).length" class="history-images"><button v-for="image in imagesWithIds(group)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + image.image_id.slice(0,8)" @click="previewEvidence = evidenceUrl(editingId,image.image_id,true)"><img :src="evidenceUrl(editingId,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></div>
             </div>
             <label v-if="form.original_scope && form.original_scope !== (form.scope || scope)" class="checkbox"><input v-model="form.confirm_scope_move" type="checkbox" required />将原 {{ form.original_scope }} 楼记录调整到 {{ form.scope }} 楼</label>
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
@@ -184,6 +187,7 @@
     />
     <ConfirmDialog :open="Boolean(cleanupTarget)" tone="danger" title="清理导出文件？" message="清理后无法再次从本机下载此文件；机柜台账和已上传的云端归档不受影响。" confirm-label="清理文件" cancel-label="保留文件" @resolve="resolveExportCleanup" />
     <ConfirmDialog :open="restoreDialogOpen" title="恢复未保存的机柜记录？" message="检测到上次未完成的填写。" confirm-label="恢复编辑" cancel-label="丢弃草稿" @resolve="restoreDraft" />
+    <ConfirmDialog :open="cacheCleanupOpen" tone="warning" title="清理本地图片缓存？" message="仅清理已成功上传飞书的本地原图和缩略图；机柜记录、云端附件及再次查看时的自动回填不受影响。" confirm-label="清理缓存" cancel-label="取消" @resolve="resolveCacheCleanup" />
     <div v-if="previewEvidence" class="evidence-preview" role="dialog" aria-modal="true" aria-label="上下电确认截图原图" @click.self="previewEvidence = ''"><button aria-label="关闭原图" @click="previewEvidence = ''"><X :size="20" /></button><img :src="previewEvidence" alt="上下电确认截图原图" /></div>
   </main>
 </template>
@@ -191,7 +195,7 @@
 <script setup lang="ts">
 import { resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, ExternalLink, FileCheck2, FileSpreadsheet, Files, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, ExternalLink, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { navigate, registerNavigationGuard } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -201,11 +205,16 @@ const api = '/api/cabinet-power';
 const read = (path: string, params: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs, signal });
 const write = (path: string, data: Dict, method = 'POST') => requestJson(api + '/' + path, { method, body: JSON.stringify({ ...data, scope: data.scope || props.scope }), timeoutMs: 90000 });
 const storageWarning = ref('');
+const serverStorage = ref<Dict>({}), serverStorageLoading = ref(false), cacheCleanupOpen = ref(false);
+const formatBytes = (value:unknown) => { const bytes=Number(value||0); return bytes<1024*1024 ? `${Math.ceil(bytes/1024)} KiB` : `${(bytes/1024/1024).toFixed(1)} MiB`; };
+async function loadServerStorage():Promise<void>{serverStorageLoading.value=true;try{serverStorage.value=await read('storage');}catch(exc){fail(exc);}finally{serverStorageLoading.value=false;}}
+async function resolveCacheCleanup(confirmed:boolean):Promise<void>{cacheCleanupOpen.value=false;if(!confirmed)return;serverStorageLoading.value=true;try{serverStorage.value=await write('storage',{});message.value=`已清理 ${serverStorage.value.deleted||0} 个本地图片文件，释放 ${formatBytes(serverStorage.value.bytes_removed)}`;}catch(exc){fail(exc);}finally{serverStorageLoading.value=false;}}
 const storageFailed = () => { storageWarning.value = '浏览器无法保存恢复信息，请保持页面打开直到任务完成；未保存草稿在关闭页面后可能丢失。'; };
 const taskStorage = resilientStorage('localStorage', storageFailed);
 const draftStorage = resilientStorage('sessionStorage', storageFailed);
 const overview = ref<Dict>({}), buildings = ref<Dict[]>([]), loading = ref(false), error = ref(''), message = ref(''), bootstrap = ref<Dict>({});
 const batchPendingCount = ref(0);
+const batchStatusError = ref(''), pendingWritesError = ref('');
 const batchCreateUrl = computed(() => `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? { scope:props.scope } : {}), mode:'new' })}`);
 function openTodoBatches():void{navigate(`/cabinet-power/batches?${new URLSearchParams({...(props.scope?{scope:props.scope}:{}),status:'todo'})}`);}
 const bootstrapActive = computed(() => ['starting','pending','running'].includes(String(bootstrap.value.status || '')));
@@ -275,11 +284,17 @@ async function startBootstrap(retryFailed = false): Promise<void> {
 }
 async function load(): Promise<void> {
   loading.value = true;
-  try { if (props.scope) { overview.value = await read('overview',{summary:'1'}); if (!query.sheet) query.sheet = overview.value.sheet_formats?.[0]?.sheet || ''; racksLoading.value = true; const racks = await read('racks'); if (racks.version === overview.value.version) overview.value.racks = racks.items || []; } else buildings.value = (await read('buildings')).buildings; error.value = ''; }
-  catch (exc) { fail(exc); } finally { loading.value = false; }
-  racksLoading.value = false;
+  try {
+    if (!props.scope) { buildings.value = (await read('buildings')).buildings; error.value = ''; return; }
+    overview.value = await read('overview',{summary:'1'});
+    if (!query.sheet) query.sheet = overview.value.sheet_formats?.[0]?.sheet || '';
+    error.value = ''; loading.value = false; racksLoading.value = true;
+    const racks = await read('racks');
+    if (racks.version === overview.value.version) overview.value.racks = racks.items || [];
+  } catch (exc) { fail(exc); }
+  finally { loading.value = false; racksLoading.value = false; }
 }
-async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1',...(props.scope?{scope:props.scope}:{})})).pending_count || 0); } catch {} }
+async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1',status:'todo',...(props.scope?{scope:props.scope}:{})})).pending_count || 0); batchStatusError.value=''; } catch { batchPendingCount.value=-1; batchStatusError.value='上下电待办数量读取失败，当前数量未知'; } }
 const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false), startingKind = ref(''), pendingExportRequest = ref('');
 const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false), exportHistoryLoading = ref(false), exportPage = ref(1), exportTotal = ref(0), cleanupTarget = ref<Dict | null>(null);
 const exportPageCount = computed(() => Math.max(1,Math.ceil(exportTotal.value/20)));
@@ -493,7 +508,7 @@ async function editIssue(id: string): Promise<void> {
 const editorOpen = ref(false), discardDialogOpen = ref(false), editingId = ref(''), saving = ref(false), saveError = ref(''), form = reactive<Dict>({});
 const previewEvidence = ref('');
 function imagesWithIds(value:Dict):Dict[] { return (value.evidence_images || []).filter((item:Dict)=>item && item.image_id); }
-function evidenceUrl(recordId:string,imageId:string):string { return `/api/cabinet-power/operations/${encodeURIComponent(recordId)}/evidence/${encodeURIComponent(imageId)}?scope=${encodeURIComponent(props.scope)}`; }
+function evidenceUrl(recordId:string,imageId:string,original=false):string { return `/api/cabinet-power/operations/${encodeURIComponent(recordId)}/evidence/${encodeURIComponent(imageId)}?scope=${encodeURIComponent(props.scope)}${original?'':'&thumbnail=1'}`; }
 const saveStatus = ref<Dict>({}), saveQueryError = ref(false);
 const saveStorageKey = 'cabinet-upload:' + (props.userId || 'session') + ':' + props.scope;
 let savePollTimer: number | undefined;
@@ -606,7 +621,7 @@ async function showSubmission(id: string): Promise<void> {
     void focusModal();
   } catch (e) { fail(e); }
 }
-async function loadPending(): Promise<void> { if (props.scope) try { pendingWrites.value = (await read('writes')).items || []; } catch {} }
+async function loadPending(): Promise<void> { if (props.scope) try { pendingWrites.value = (await read('writes')).items || []; pendingWritesError.value=''; } catch { pendingWritesError.value='未完成多维写入状态读取失败，请重试核验'; } }
 async function resumePending(id: string): Promise<void> { if (saving.value) return; saving.value = true; saveQueryError.value = false; try { saveStatus.value = await write('writes/' + id + '/resume?defer=1', {}); taskStorage.setItem(saveStorageKey,id); void pollSave(id); } catch (e) { saving.value = false; fail(e); await loadPending(); } }
 function reconcilePending(id: string): void {
   askDiscard(() => { saving.value = true; saveStatus.value = {status:'checking',error_stage:'main'}; window.clearTimeout(savePollTimer);
@@ -713,4 +728,8 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 .evidence-preview{position:fixed;inset:0;z-index:300;display:grid;place-items:center;padding:52px 24px 24px;background:rgba(15,28,43,.86)}
 .evidence-preview img{max-width:100%;max-height:100%;object-fit:contain}
 .evidence-preview>button{position:absolute;right:20px;top:12px;width:38px;padding:0}
+.heading{display:grid;grid-template-columns:auto minmax(260px,1fr);align-items:center}
+.heading-title{min-width:0}
+.heading>.actions{grid-column:1/-1;width:100%}
+.map-canvas{contain:layout paint style}
 </style>

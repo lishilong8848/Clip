@@ -16,6 +16,13 @@ sys.path.insert(0,str(ROOT/'bin'))
 from bin.test_cabinet_power import fixtures,MemoryStore,FakeExportFeishu,FakeFeishu
 from bin.lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
 
+class FixtureStateStore(MemoryStore):
+    def list_outbox_events(self, _channel, *, status="pending", limit=100):
+        return []
+
+    def requeue_failed_outbox_events(self, _channel, *, max_attempts):
+        return 0
+
 class Controller:
     def _current_session(self,request): return {"open_id":"fixture-user"}
     def _auth_required_response(self): return JSONResponse({},status_code=401)
@@ -25,7 +32,12 @@ class Controller:
 
 app=FastAPI(); controller=Controller(); temporary=tempfile.TemporaryDirectory()
 models,records,directory,configs=fixtures(with_power_baseline=True)
-runtime=SimpleNamespace(state_store=MemoryStore(),auth_manager=SimpleNamespace(is_admin=lambda s:True,scope_allowed=lambda s,scope:True))
+runtime=SimpleNamespace(
+    state_store=FixtureStateStore(),
+    auth_manager=SimpleNamespace(is_admin=lambda s:True,scope_allowed=lambda s,scope:True),
+    cabinet_notice_queue_channel="cabinet_power_notice",
+    cabinet_notice_max_attempts=5,
+)
 install_cabinet_power_routes(app,controller,runtime)
 controller._cabinet_power.root=Path(temporary.name)
 from bin.lan_bitable_template_portal.cabinet_power_store import CabinetStore

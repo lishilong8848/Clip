@@ -5,6 +5,8 @@ import io
 import multiprocessing
 import os
 import re
+import tempfile
+from pathlib import Path
 from PIL import Image
 
 
@@ -12,6 +14,25 @@ DATE = re.compile(r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})(\d{2}):(\d{2})(?::?(\d
 RACK = re.compile(r"(?<![A-Z0-9])([A-Z]\d{2})(?!\d)")
 ROOM = re.compile(r"([A-E])([1-4])[.\-_](\d{1,2})")
 ACTIONS = ("上正式电", "上测试电", "测试电转正式电", "正式电转测试电", "下正式电", "下测试电")
+
+
+def ensure_thumbnail(source, destination, size=(320, 240)):
+    source, destination = Path(source), Path(destination)
+    if destination.is_file() and destination.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as image:
+        image.thumbnail(size, Image.Resampling.LANCZOS)
+        rendered = image.convert("RGBA") if image.mode in ("RGBA", "LA") else image.convert("RGB")
+        fd, temporary = tempfile.mkstemp(prefix=".thumb-", suffix=".png", dir=destination.parent)
+        os.close(fd)
+        try:
+            rendered.save(temporary, "PNG", optimize=True)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    return destination
 
 
 def _compact(value):
