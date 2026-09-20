@@ -2071,7 +2071,6 @@ def _source_link_select(
     current_source_id: str,
     options: list[dict[str, str]],
 ) -> str:
-    _ = ongoing_item
     if current_source_id:
         return (
             "<label class=\"source-link-field readonly\"><span>源表</span>"
@@ -2079,6 +2078,8 @@ def _source_link_select(
             f"<input type=\"hidden\" name=\"source_record_id\" value=\"{_e(current_source_id)}\">"
             "</label>"
         )
+    if ongoing_item and _item_work_type(ongoing_item) in BINDABLE_TARGET_WORK_TYPES:
+        return _manual_source_binding_panel(options, required=False)
     if not options:
         return (
             "<label class=\"source-link-field readonly\"><span>源表</span>"

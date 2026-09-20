@@ -18262,6 +18262,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("绑定源表事项", html)
         self.assertNotIn("不绑定，作为独立通告", html)
 
+        empty_html = _detail_form(
+            record=None,
+            ongoing_item=ongoing,
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+            source_link_options=[],
+        )
+        self.assertIn("源表事项关联（更新前可选）", empty_html)
+        self.assertIn("绑定源表事项", empty_html)
+        self.assertNotIn('<div class="source-link-title">未关联</div>', empty_html)
+
         event_html = _detail_form(
             record=None,
             ongoing_item={
