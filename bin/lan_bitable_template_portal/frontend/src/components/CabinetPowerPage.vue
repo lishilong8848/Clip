@@ -605,7 +605,9 @@ async function saveRecord(confirmedDelete = false): Promise<void> {
   }
 }
 async function refreshSavedViews(): Promise<void> {
-  await Promise.all([load(),loadPending(),...(tab.value === 'records' ? [loadRecords(records.value.page || 1)] : []),...(tab.value === 'layout' ? [selectRoom(currentRoom.value)] : []),...(historyOpen.value ? [openHistory(historyRoom.value,historyRack.value)] : [])]);
+  await load();
+  layoutCache.clear();
+  await Promise.all([loadPending(),...(tab.value === 'records' ? [loadRecords(records.value.page || 1)] : []),...(tab.value === 'layout' ? [selectRoom(currentRoom.value)] : []),...(historyOpen.value ? [openHistory(historyRoom.value,historyRack.value)] : [])]);
 }
 async function pollSave(id: string): Promise<void> {
   if (disposed) return;
