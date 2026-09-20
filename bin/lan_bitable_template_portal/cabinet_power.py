@@ -482,7 +482,8 @@ class CabinetPowerService:
             result=copy.deepcopy(snap["overview"] if include_racks else {k:v for k,v in snap["overview"].items() if k!="racks"})
             result["export_state"]=self._export_state(scope,snap)
             return result
-        derived=derive_records(config,snap["operations"]); issues=derived["issues"]
+        business_ops=[op for op in snap["operations"] if op.get("events") or op.get("source_row")]
+        derived=derive_records(config,business_ops); issues=derived["issues"]
         rooms=[]
         for room in config["rooms"]:
             rr=[r for r in derived["racks"] if r["room"]==room["id"]]
@@ -494,12 +495,12 @@ class CabinetPowerService:
             rooms.append({**room,"counts":counts,"types":types,"carrier":carrier,"unlocated":gap["total"],"unlocated_counts":gap})
         formats=[]
         for original in config.get("template_data",{}).get("formats",[]):
-            f=copy.deepcopy(original); selected=[o for o in snap["operations"] if o["display_sheet"]==f["sheet"]]
+            f=copy.deepcopy(original); selected=[o for o in business_ops if o["display_sheet"]==f["sheet"]]
             count=max((len(o["groups"]) for o in selected),default=0)
             while len(f["groups"])<count:
                 col=max(c["column"] for c in table_columns(f,scope)); f["groups"].append({"action":col+1,"expected":col+2,"actual":col+3})
             formats.append({**f,"columns":table_columns(f,scope),"count":len(selected)})
-        result={"scope":scope,"configured":True,"activated":True,"history_ready":True,"source":"local","counts":derived["counts"],"rooms":rooms,"racks":derived["racks"],"issues":issues,"version":snap["version"],"updated_at":snap["updated_at"],"error":snap.get("error",""),"daily":derived["daily"],"record_count":len(snap["operations"]),"inventory_only":sum(o["empty"] for o in snap["operations"]),"sheet_formats":formats,"table_url":f"https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}"}
+        result={"scope":scope,"configured":True,"activated":True,"history_ready":True,"source":"local","counts":derived["counts"],"rooms":rooms,"racks":derived["racks"],"issues":issues,"version":snap["version"],"updated_at":snap["updated_at"],"error":snap.get("error",""),"daily":derived["daily"],"record_count":len(business_ops),"inventory_only":sum(o["empty"] for o in business_ops),"sheet_formats":formats,"table_url":f"https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}"}
         snap["overview"]=result
         response=copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
         response["export_state"]=self._export_state(scope,snap)
@@ -552,7 +553,8 @@ class CabinetPowerService:
         for op in items: op["current_rack_type"]=inventory.get((op["room"],op["rack"]),{}).get("rack_type","")
         state=None
         if query.get("room") and query.get("rack"):
-            derived=derive_records(snap["config"],snap["operations"])
+            business_ops=[op for op in snap["operations"] if op.get("events") or op.get("source_row")]
+            derived=derive_records(snap["config"],business_ops)
             state=next((r for r in derived["racks"] if (r["room"],r["rack"])==(query["room"],query["rack"])),None)
             if state is not None:
                 events=[{**o,**e} for o in snap['operations'] if (o['room'],o['rack'])==(query['room'],query['rack']) for e in o['events']]
@@ -723,12 +725,26 @@ class CabinetPowerService:
             if prior:
                 if prior.get("owner")!=owner or prior.get("request_hash")!=fingerprint: raise CabinetError("操作标识已用于其他内容或用户",409)
                 if defer: return self._queue_write(prior)
-                if prior.get("status")=="completed" and old_scope==scope: return from_feishu(prior["record"])
+                if prior.get("status")=="completed" and old_scope==scope:
+                    return {"deleted":True,"record_id":prior["record_id"]} if prior.get("delete") else from_feishu(prior["record"])
                 return self._resume_write(prior)
             if self.pending_writes(scope) or self.pending_rollbacks(scope) or old_scope!=scope and (self.pending_writes(old_scope) or self.pending_rollbacks(old_scope)): raise CabinetError("该楼有待完成的上传或回退，请先继续处理",409)
             old=next((o for o in self._snapshot(old_scope)["operations"] if o["record_id"]==record_id),None) if record_id else None
             if record_id and not old: raise CabinetError("本地记录不存在，请刷新对应楼栋",404)
             if old and old["version"]!=payload.get("expected_version"): raise CabinetError("记录已被修改，请重新打开后保存",409)
+            delete_requested=bool(old and isinstance(payload.get("groups"),list) and not any(
+                any(text_value(group.get(key)) for key in ("action","actual","expected"))
+                for group in payload["groups"] if isinstance(group,dict)
+            ))
+            if delete_requested:
+                if old_scope!=scope: raise CabinetError("删除记录时不能同时调整楼栋",409)
+                journal={"operation_id":oid,"scope":scope,"old_scope":scope,"owner":owner,
+                         "request_hash":fingerprint,"request":copy.deepcopy(payload),"record_id":record_id,
+                         "delete":True,"stages":[{"kind":"main","record_id":record_id,
+                         "before":old["raw_fields"],"verified":False}],"status":"intent",
+                         "created_at":time.time(),"error":""}
+                self.write("write:"+oid,journal)
+                return self._queue_write(journal) if defer else self._resume_write(journal)
             op=self.validate_op(scope,payload,old)
             if scope in ("D","E") and any(o["record_id"]!=record_id and (o["room"],o["rack"])==(op["room"],op["rack"]) for o in self._snapshot(scope)["operations"]):
                 raise CabinetError("该机柜已有台账，请编辑原记录；D/E楼每柜仅保留一条",409)
@@ -993,7 +1009,34 @@ class CabinetPowerService:
                 self.local.document(scope,key,rollback)
                 raise
 
+    def _resume_delete(self,journal):
+        scope=journal["scope"]; key="write:"+journal["operation_id"]; stage=journal["stages"][0]
+        try:
+            remote=self.remote_for(scope); before=stage.get("before") or {}; data_id=text_value(before.get("数据标识"))
+            if not data_id: raise CabinetError("待删除记录缺少数据标识，不能安全核验",409)
+            journal.update(status="checking",error_stage="main",error=""); self.write(key,journal)
+            matches=self.list_remote(remote,data_id=data_id)
+            if len(matches)>1: raise CabinetError("云端存在重复机柜记录，不能自动删除",409)
+            current=next((item for item in matches if item["record_id"]==journal["record_id"]),None)
+            if current is not None:
+                if digest(current["fields"])!=digest(before): raise CabinetError("云端机柜记录已被修改，不能删除",409)
+                journal.update(status="writing",error_stage="main"); stage["attempted"]=True; self.write(key,journal)
+                remote.delete(journal["record_id"])
+            journal.update(status="readback",error_stage="main"); self.write(key,journal)
+            if any(item["record_id"]==journal["record_id"] for item in self.list_remote(remote,data_id=data_id)):
+                raise CabinetError("云端删除结果尚未核验成功，请继续核验",409)
+            stage["verified"]=True; journal.update(status="local_pending",error_stage="local_commit"); self.write(key,journal)
+            final=self.local.commit_operation(scope,journal,remove_id=journal["record_id"],complete=True)
+            return {"deleted":True,"record_id":journal["record_id"],"operation_id":journal["operation_id"],"status":final["status"]}
+        except Exception as exc:
+            journal.update(error=str(exc),error_stage=journal.get("error_stage") or "main",
+                           status="conflict" if isinstance(exc,CabinetError) and exc.status_code==409 and "修改" in str(exc) else "pending")
+            try: self.write(key,journal)
+            except Exception: pass
+            raise
+
     def _resume_write(self,journal):
+        if journal.get("delete"): return self._resume_delete(journal)
         scope=journal["scope"]; key="write:"+journal["operation_id"]; stage_name="prepare"
         try:
             main=self.remote_for(scope)
@@ -1047,7 +1090,7 @@ class CabinetPowerService:
         if not journal: raise CabinetError("上传操作不存在",404)
         if journal.get("owner")!=owner and not admin: raise CabinetError("无权查看该上传",403)
         if journal['scope']!=scope: journal=self.local.document(journal['scope'],'write:'+oid) or journal
-        result={k:v for k,v in journal.items() if k in ("operation_id","scope","old_scope","status","error","error_stage","created_at","completed_at","record_id")}
+        result={k:v for k,v in journal.items() if k in ("operation_id","scope","old_scope","status","error","error_stage","created_at","completed_at","record_id","delete")}
         if journal['status']=='completed' and not self._write_finished(journal): result.update(status='pending',error='跨楼提交尚未全部完成，请继续核验')
         if journal.get('worker_pid') and journal['status'] in ('queued','checking','writing','readback','local_pending') and not self._write_active(journal): result.update(status='pending',error='上传已中断，请继续核验')
         result.update(retryable=result['status'] in ('pending','conflict'),elapsed_ms=max(0,int(((journal.get('completed_at') or time.time())-journal['created_at'])*1000)),stages=[{'kind':s['kind'],'verified':bool(s.get('verified'))} for s in journal['stages']])
@@ -1060,7 +1103,8 @@ class CabinetPowerService:
         if journal["old_scope"]!=journal["scope"] and not admin: raise CabinetError("跨楼操作需要管理员",403)
         scope=journal['scope']; journal=self.local.document(scope,'write:'+oid)
         if defer and (self._write_active(journal) or self._write_finished(journal)): return self._write_receipt(journal)
-        if journal["status"]=="completed" and journal["old_scope"]==journal["scope"]: return from_feishu(journal["record"])
+        if journal["status"]=="completed" and journal["old_scope"]==journal["scope"]:
+            return {"deleted":True,"record_id":journal["record_id"]} if journal.get("delete") else from_feishu(journal["record"])
         with self.local.locked([scope,journal["old_scope"]]):
             journal=self.local.document(scope,'write:'+oid)
             return self._queue_write(journal) if defer else self._resume_write(journal)
@@ -1071,6 +1115,14 @@ class CabinetPowerService:
         if journal["old_scope"]!=journal["scope"] and not admin: raise CabinetError("跨楼操作需要管理员",403)
         scope=journal['scope']; journal=self.local.document(scope,'write:'+oid)
         with self.local.locked([scope,journal["old_scope"]]):
+            if journal.get("delete"):
+                stage=journal["stages"][0]; data_id=text_value((stage.get("before") or {}).get("数据标识"))
+                matches=self.list_remote(self.remote_for(scope),data_id=data_id)
+                current=next((item for item in matches if item["record_id"]==journal["record_id"]),None)
+                if current is None: return self._resume_delete(journal)
+                journal.update(status="cancelled",error="已保留云端记录，原删除请求保留在操作日志中")
+                self.local.commit_operation(scope,journal,record=current)
+                return {"status":"cancelled","operation_id":oid}
             main=journal["stages"][0]; remote=self.remote_for(scope)
             current=remote.get(main["record_id"]) if main["record_id"] else None
             if current is None:

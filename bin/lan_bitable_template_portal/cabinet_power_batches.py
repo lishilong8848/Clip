@@ -2119,6 +2119,21 @@ class CabinetBatchService:
             state = self._current_state(snap, row["room"], row["rack"])
             if row["action"] not in POWER_ACTIONS_BY_STATE.get(state, ()):
                 raise CabinetError(f"该机柜当前为{POWER_STATE_LABELS.get(state, '状态待核实')}，与确认单操作不匹配，请重新核对",409)
+        current = max(
+            ((event, operation) for operation in snap["operations"]
+             if (operation["room"], operation["rack"]) == (row["room"], row["rack"])
+             for event in operation["events"] if completed_state_event(event)),
+            key=lambda item: (item[0]["actual"], item[0]["id"]),
+            default=None,
+        )
+        if scope in ("A", "B", "C") and current and not row["action"].startswith("上"):
+            old = current[1]
+            history = [copy.deepcopy(item) for item in old["groups"] if any(item.get(key) for key in ("action", "actual", "expected"))]
+            payload["groups"] = [*history, group]
+            if not row["action"].startswith("下"):
+                payload["expected_version"] = old["version"]
+                payload["source"] = old["source"]
+                return (payload, old["record_id"]), ""
         if scope in ("D", "E"):
             old = next((operation for operation in snap["operations"] if (operation["room"], operation["rack"]) == (row["room"], row["rack"])), None)
             if old:

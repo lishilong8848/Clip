@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
-from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, _notice_period_dates, calculate, export_workbook, dates, digest, map_state_baseline, room_code, system_name
+from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, _notice_period_dates, calculate, completed_state_event, derive_records, export_workbook, dates, digest, map_state_baseline, room_code, system_name
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
@@ -1580,6 +1580,136 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     for col,value in row.items():
                         self.assertEqual(actual[rn].get(col,""),value,(scope,name,rn,col))
             checked=load_workbook(io.BytesIO(result),keep_vba=True,data_only=True); checked.close()
+
+    def test_new_cycle_rows_use_real_table_end_and_fill_mail_periods(self):
+        scope="B"; snapshot=self.service._snapshot(scope); config=snapshot["config"]
+        rack=next(item for item in derive_records(config,snapshot["operations"])["racks"] if item["state"]=="off")
+        group={"id":"event_new_floorplan_up","action":"上正式电","expected":"2026-09-20 11:00:00",
+               "actual":"2026-09-20 10:00:00","result":"成功"}
+        created=self.service.validate_op(scope,{"operation_id":"floorplan_new_up_1234","room":rack["room"],
+            "rack":rack["rack"],"rack_type":rack["rack_type"],"groups":[group],"result":"成功","category":"up"})
+        fields=to_fields(created); fields.update({"来源工作表":created["source"],"数据标识":"manual_floorplan_new_up"})
+        operation=from_feishu({"record_id":"recFloorplanNewUp","fields":fields})
+        workbook=Workbook(export_workbook((TEMPLATES/"B.xlsm").read_bytes(),config,[*snapshot["operations"],operation]))
+        rows=dict(workbook.rows("机柜上电时间统计"))
+        added=[(rn,row) for rn,row in rows.items() if dates(row.get(7))==["2026-09-20 10:00:00"]]
+        self.assertEqual(len(added),1)
+        self.assertEqual(added[0][0],1024)
+        self.assertEqual(added[0][1][1],1023.0)
+        self.assertEqual(max(rows),1024)
+        mail=dict(workbook.rows("机柜上电汇总表（邮件）"))
+        day=next(row for row in mail.values() if str(row.get(13))=="2026.9.20")
+        self.assertEqual(day[14],1.0)
+        self.assertFalse(any(str(value).startswith("系统新增上下电") for row in mail.values() for value in row.values()))
+        notice=dict(workbook.rows("机柜上电汇总表（通告）"))
+        notice_day=next(row for row in notice.values() if str(row.get(13))=="2026.9.20")
+        self.assertEqual(notice_day[14],1.0)
+
+        notice_operation=copy.deepcopy(operation)
+        notice_operation["meta"]["batch_rows"]=[{"source":"notice","source_notice":{"target_record_id":"recNotice"}}]
+        notice_summary={"items":[{"room":rack["room"],"rack":rack["rack"],"action":"上正式电",
+            "date":"2026-09-20","sent_at":"2026-09-20 10:00:00","direction":"up"}]}
+        deduplicated=Workbook(export_workbook((TEMPLATES/"B.xlsm").read_bytes(),config,
+            [*snapshot["operations"],notice_operation],notice_summary))
+        notice_day=next(row for row in dict(deduplicated.rows("机柜上电汇总表（通告）")).values()
+                        if str(row.get(13))=="2026.9.20")
+        self.assertEqual(notice_day[14],1.0)
+
+    def test_manual_conversion_updates_both_sheet_stock_without_counting_an_event(self):
+        scope="C"; snapshot=self.service._snapshot(scope); config=snapshot["config"]
+        config=copy.deepcopy(config)
+        config["power_baseline"]=map_state_baseline((TEMPLATES/"C.xlsm").read_bytes(),config,snapshot["operations"])[0]
+        baseline=config["power_baseline"]
+        current={(item["room"],item["rack"]):item["state"] for item in derive_records(config,snapshot["operations"])["racks"]}
+        room_rack=next(tuple(key.split("/",1)) for key,value in baseline.items()
+                       if value.get("state")=="formal" and current.get(tuple(key.split("/",1)))=="formal")
+        rack=next(item for item in config["inventory"] if (item["room"],item["rack"])==room_rack)
+        original=Workbook(export_workbook((TEMPLATES/"C.xlsm").read_bytes(),config,snapshot["operations"]))
+        item=self.service.validate_op(scope,{"operation_id":"manual_transition_1234","room":rack["room"],
+            "rack":rack["rack"],"rack_type":rack["rack_type"],"groups":[{"id":"transition_event",
+            "action":"正式电转测试电","expected":"2026-09-20 12:00:00","actual":"2026-09-20 12:01:00",
+            "result":"成功"}],"result":"成功","category":"up"})
+        fields=to_fields(item); fields.update({"来源工作表":item["source"],"数据标识":"manual_transition_record"})
+        operation=from_feishu({"record_id":"recManualTransition","fields":fields})
+        workbook=Workbook(export_workbook((TEMPLATES/"C.xlsm").read_bytes(),config,[*snapshot["operations"],operation]))
+
+        def metric(book,sheet,label):
+            rows=dict(book.rows(sheet))
+            row=next(value for value in rows.values() if any(label in str(cell) for cell in value.values()))
+            column=next(column for column,value in row.items() if label in str(value))
+            return next(float(row[index]) for index in range(column+1,column+5) if isinstance(row.get(index),(int,float)))
+
+        for sheet in ("机柜上电汇总表（邮件）","机柜上电汇总表（通告）"):
+            self.assertEqual(metric(workbook,sheet,"测试电总数"),metric(original,sheet,"测试电总数")+1)
+            self.assertEqual(metric(workbook,sheet,"正式电总数"),metric(original,sheet,"正式电总数")-1)
+            before=sum("2026.9.20" in str(value) for row in original.rows(sheet) for value in row[1].values())
+            after=sum("2026.9.20" in str(value) for row in workbook.rows(sheet) for value in row[1].values())
+            self.assertEqual(after,before)
+
+    def test_abc_cycle_history_fits_original_up_and_down_columns(self):
+        scope="A"; snapshot=self.service._snapshot(scope); config=snapshot["config"]
+        rack=next(item for item in derive_records(config,snapshot["operations"])["racks"] if item["state"]=="off")
+        groups=[
+            {"id":"cycle_up","action":"上正式电","expected":"2026-09-20 09:00:00","actual":"2026-09-20 09:01:00","result":"成功"},
+            {"id":"cycle_to_test","action":"正式电转测试电","expected":"2026-09-20 10:00:00","actual":"2026-09-20 10:01:00","result":"成功"},
+            {"id":"cycle_to_formal","action":"测试电转正式电","expected":"2026-09-20 11:00:00","actual":"2026-09-20 11:01:00","result":"成功"},
+        ]
+        def operation(record_id,category,items):
+            payload={"operation_id":record_id+"_operation","room":rack["room"],"rack":rack["rack"],
+                     "rack_type":rack["rack_type"],"groups":items,"result":"成功","category":category}
+            item=self.service.validate_op(scope,payload); fields=to_fields(item)
+            fields.update({"来源工作表":item["source"],"数据标识":"manual_"+record_id})
+            return from_feishu({"record_id":record_id,"fields":fields})
+        up=operation("recCycleUp","up",groups)
+        down_group={"id":"cycle_down","action":"下正式电","expected":"2026-09-20 12:00:00","actual":"2026-09-20 12:01:00","result":"成功"}
+        down=operation("recCycleDown","down",[*groups,down_group])
+        workbook=Workbook(export_workbook((TEMPLATES/"A.xlsm").read_bytes(),config,[*snapshot["operations"],up,down]))
+        up_row=next(row for row in dict(workbook.rows("机柜上电时间统计")).values() if dates(row.get(7))==["2026-09-20 09:01:00"])
+        self.assertEqual(up_row[5],"上正式电")
+        self.assertIn("正式电转测试电",str(up_row[8])); self.assertIn("测试电转正式电",str(up_row[8]))
+        down_row=next(row for row in dict(workbook.rows("机柜下电时间统计")).values() if dates(row.get(7))==["2026-09-20 09:01:00"])
+        self.assertEqual(down_row[5],"上正式电")
+        self.assertIn("正式电转测试电",str(down_row[8])); self.assertIn("测试电转正式电",str(down_row[8]))
+        self.assertEqual(down_row[10],"下正式电")
+
+    def test_saving_an_empty_existing_record_deletes_cloud_and_local_rows(self):
+        rack=self.configs["A"]["inventory"][0]
+        created=self.service.save_operation("A",{"operation_id":"create_then_delete_01","room":rack["room"],
+            "rack":rack["rack"],"rack_type":rack["rack_type"],"result":"成功","groups":[{
+            "id":"created_event","action":"上正式电","expected":"2026-09-20 09:00:00",
+            "actual":"2026-09-20 09:01:00","result":"成功"}]},"owner")
+        record_id=created["record_id"]
+        deleted=self.service.save_operation("A",{"operation_id":"delete_existing_record_01",
+            "expected_version":created["version"],"groups":[{"id":"created_event","action":"","expected":"","actual":"","result":"成功"}]},
+            "owner",record_id)
+        self.assertTrue(deleted["deleted"])
+        self.assertNotIn(record_id,self.remote.records)
+        self.assertFalse(any(item["record_id"]==record_id for item in self.service._snapshot("A")["operations"]))
+
+    def test_abc_batch_conversion_updates_active_row_and_down_copies_cycle(self):
+        snapshot=self.service._snapshot("A"); state=derive_records(snapshot["config"],snapshot["operations"])
+        rack=next(item for item in state["racks"] if item["state"] in ("formal","test") and item["last_operation"])
+        latest=max(((event,operation) for operation in snapshot["operations"]
+                    if (operation["room"],operation["rack"])==(rack["room"],rack["rack"])
+                    for event in operation["events"] if completed_state_event(event)),
+                   key=lambda item:(item[0]["actual"],item[0]["id"]))
+        batch={"batch_id":"batch_cycle_test","source":"manual","images":[]}
+        base={"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
+              "supplier_rack":"","type_resolution":"keep_current","expected":"2026-09-20 20:00:00",
+              "actual":"2026-09-20 20:01:00","result":"成功","failure_reason":"","attempts":[],
+              "file_name":"","file_sha256":"","application_ids":[],"page":0,"source_row":1,"edits":[]}
+        conversion={**base,"row_id":"row_conversion","operation_id":"operation_conversion_01",
+                    "action":"正式电转测试电" if rack["state"]=="formal" else "测试电转正式电"}
+        (request,record_id),duplicate=self.service.batches._row_payload(batch,conversion)
+        self.assertEqual(duplicate,"")
+        self.assertEqual(record_id,latest[1]["record_id"])
+        self.assertEqual(request["groups"][-1]["action"],conversion["action"])
+        down={**base,"row_id":"row_down","operation_id":"operation_down_cycle_01",
+              "action":"下正式电" if rack["state"]=="formal" else "下测试电"}
+        (request,record_id),duplicate=self.service.batches._row_payload(batch,down)
+        self.assertEqual((record_id,duplicate),("",""))
+        self.assertEqual(request["groups"][-1]["action"],down["action"])
+        self.assertGreater(len(request["groups"]),1)
 
     def test_exported_summary_formula_inputs_keep_empty_counts_numeric_blank(self):
         scope="A"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()

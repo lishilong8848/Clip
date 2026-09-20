@@ -116,7 +116,7 @@
           <thead><tr><th v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4 }" :style="frozenStyle(column)">{{ column.label }}<small v-if="column.group !== undefined">{{ groupLabel(column.group, activeFormat) }}</small></th><th class="row-actions">操作</th></tr></thead>
           <tbody><tr v-for="op in records.items || []" :key="op.record_id" :class="{ 'source-issue': op.issues.length }">
             <td v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4, 'empty-cell': !sourceCell(op, column) }" :data-label="column.group === undefined ? column.label : groupLabel(column.group, activeFormat) + ' · ' + column.label" :style="frozenStyle(column)"><button v-if="column.field === 'rack'" :disabled="recordsLoading" class="link" @click="openHistory(op.room, op.rack)">{{ op.rack }}</button><span v-else>{{ sourceCell(op, column) }}</span></td>
-            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button :disabled="recordsLoading" class="icon-button" title="编辑记录" aria-label="编辑记录" @click="openEditor(op)"><Pencil :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
+            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button :disabled="recordsLoading" class="icon-button" :title="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" :aria-label="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)"><Trash2 v-if="isResidualEmptyRecord(op)" :size="16" /><Pencil v-else :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
           </tr></tbody>
         </table><p v-if="!recordsLoading && !records.total" class="empty">没有符合条件的记录</p></div>
         <footer class="pagination"><span>共 {{ records.total || 0 }} 条记录</span><button :disabled="recordsLoading || records.page <= 1" aria-label="上一页" @click="loadRecords(records.page - 1)"><ChevronLeft :size="16" /></button><template v-for="(pageNumber, index) in pageNumbers" :key="pageNumber"><span v-if="index && pageNumber - pageNumbers[index - 1] > 1" class="ellipsis">…</span><button class="page-number" :class="{ active: pageNumber === records.page }" :disabled="recordsLoading" :aria-label="'第 ' + pageNumber + ' 页'" :aria-current="pageNumber === records.page ? 'page' : undefined" @click="loadRecords(pageNumber)">{{ pageNumber }}</button></template><button :disabled="recordsLoading || records.page >= totalPages" aria-label="下一页" @click="loadRecords(records.page + 1)"><ChevronRight :size="16" /></button></footer>
@@ -132,7 +132,7 @@
           <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading">正在读取完整历史…</p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
-            <div class="section-title"><strong>{{ op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="openEditor(op)">编辑</button></div>
+            <div class="section-title"><strong>{{ op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
             <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
@@ -142,10 +142,10 @@
         </div>
       </section>
     </div>
-    <div v-if="editorOpen" class="scrim editor-layer" :inert="discardDialogOpen || restoreDialogOpen">
+    <div v-if="editorOpen" class="scrim editor-layer" :inert="discardDialogOpen || restoreDialogOpen || deleteRecordConfirmOpen">
       <section class="editor modal" role="dialog" aria-modal="true" aria-label="编辑机柜记录" tabindex="-1">
         <header><h2>{{ editingId ? '编辑机柜记录' : '新增机柜记录' }}</h2><button :disabled="saving" @click="closeEditor" aria-label="关闭编辑"><X :size="20" /></button></header>
-        <form @submit.prevent="saveRecord">
+        <form @submit.prevent="saveRecord(false)">
           <div class="editor-body"><fieldset class="editor-fields" :disabled="saving || moveLoading">
             <div class="form-grid">
               <label v-if="isAdmin && editingId">楼栋<select :value="form.scope || scope" :disabled="!!form.target_state" @change="changeRecordScope(($event.target as HTMLSelectElement).value)"><option v-for="s in ['A','B','C','D','E']" :key="s" :value="s">{{ s }}楼</option></select></label>
@@ -170,7 +170,7 @@
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
             <div v-if="pendingWrites.some(p => p.operation_id === writeId)" class="actions"><button type="button" @click="resumePending(writeId)">继续核验</button><button type="button" @click="reconcilePending(writeId)">载入云端版本</button></div>
           </fieldset></div>
-          <footer><span v-if="saving || moveLoading" role="status"><Loader2 :size="16" class="spin" />{{ moveLoading ? '正在读取目标楼栋…' : saveStepLabel }}</span><button v-if="saving && saveStatus.operation_id && saveStatus.status !== 'unknown'" type="button" @click="editorOpen = false; historyOpen = false">后台继续</button><button type="button" :disabled="saving" @click="closeEditor">取消</button><button class="primary" :disabled="saving || moveLoading"><Save :size="16" />保存</button></footer>
+          <footer><span v-if="saving || moveLoading" role="status"><Loader2 :size="16" class="spin" />{{ moveLoading ? '正在读取目标楼栋…' : saveStepLabel }}</span><button v-if="saving && saveStatus.operation_id && saveStatus.status !== 'unknown'" type="button" @click="editorOpen = false; historyOpen = false">后台继续</button><button type="button" :disabled="saving" @click="closeEditor">取消</button><button class="primary" :disabled="saving || moveLoading"><Trash2 v-if="editingId && !(form.groups || []).some(groupHasBusinessData)" :size="16" /><Save v-else :size="16" />{{ editingId && !(form.groups || []).some(groupHasBusinessData) ? '删除记录' : '保存' }}</button></footer>
         </form>
       </section>
     </div>
@@ -185,6 +185,7 @@
       confirm-class="danger"
       @resolve="resolveDiscardConfirmation"
     />
+    <ConfirmDialog :open="deleteRecordConfirmOpen" tone="danger" title="删除这条上下电统计？" message="确认后将从多维表和本地台账彻底删除；后续导出也不会再生成该记录。" confirm-label="删除记录" cancel-label="取消" @resolve="resolveRecordDelete" />
     <ConfirmDialog :open="Boolean(cleanupTarget)" tone="danger" title="清理导出文件？" message="清理后无法再次从本机下载此文件；机柜台账和已上传的云端归档不受影响。" confirm-label="清理文件" cancel-label="保留文件" @resolve="resolveExportCleanup" />
     <ConfirmDialog :open="restoreDialogOpen" title="恢复未保存的机柜记录？" message="检测到上次未完成的填写。" confirm-label="恢复编辑" cancel-label="丢弃草稿" @resolve="restoreDraft" />
     <ConfirmDialog :open="cacheCleanupOpen" tone="warning" title="清理本地图片缓存？" message="仅清理已成功上传飞书的本地原图和缩略图；机柜记录、云端附件及再次查看时的自动回填不受影响。" confirm-label="清理缓存" cancel-label="取消" @resolve="resolveCacheCleanup" />
@@ -509,7 +510,7 @@ async function editIssue(id: string): Promise<void> {
   const record = history.value.items?.find((o: Dict) => o.record_id === id);
   if (record) openEditor(record);
 }
-const editorOpen = ref(false), discardDialogOpen = ref(false), editingId = ref(''), saving = ref(false), saveError = ref(''), form = reactive<Dict>({});
+const editorOpen = ref(false), discardDialogOpen = ref(false), deleteRecordConfirmOpen = ref(false), editingId = ref(''), saving = ref(false), saveError = ref(''), form = reactive<Dict>({});
 const previewEvidence = ref('');
 function imagesWithIds(value:Dict):Dict[] { return (value.evidence_images || []).filter((item:Dict)=>item && item.image_id); }
 function evidenceUrl(recordId:string,imageId:string,original=false):string { return `/api/cabinet-power/operations/${encodeURIComponent(recordId)}/evidence/${encodeURIComponent(imageId)}?scope=${encodeURIComponent(props.scope)}${original?'':'&thumbnail=1'}`; }
@@ -555,6 +556,8 @@ function openEditor(op?: Dict): void {
   if (!form.groups.length) form.groups = [newGroup()];
   writeId = ''; writeHash = ''; saveError.value = ''; editBaseline = JSON.stringify(form); discardDialogOpen.value = false; editorOpen.value = true; void focusModal();
 }
+const isResidualEmptyRecord = (op: Dict): boolean => !op.events?.length && !op.source_row;
+function requestDeleteEmptyRecord(op: Dict): void { openEditor(op); deleteRecordConfirmOpen.value = true; void focusModal(); }
 function changeEditorSheet(): void {
   const format = overview.value.sheet_formats?.find((f: Dict) => f.sheet === form.source);
   form.groups = (format?.groups || [{}]).map(() => newGroup(false));
@@ -566,19 +569,27 @@ function resolveDiscardConfirmation(confirmed: boolean): void { discardDialogOpe
 async function openStateSwitch(target: string): Promise<void> {
   const rack = selectedRack.value; if (!rack || rack.state === 'unknown') return;
   const actions: Dict = { 'off:formal': '上正式电', 'off:test': '上测试电', 'formal:test': '正式电转测试电', 'test:formal': '测试电转正式电', 'formal:off': '下正式电', 'test:off': '下测试电' };
-  let existing: Dict | undefined;
-  if (['D','E'].includes(props.scope)) { const rows = await read('operations', { room: rack.room, rack: rack.rack }); existing = rows.items[0]; }
+  const rows = await read('operations', { room: rack.room, rack: rack.rack, page_size: '100' });
+  const activeRecord = (rows.items || []).find((item: Dict) => item.record_id === rack.latest_success?.record_id);
+  if (rack.state !== 'off' && !activeRecord) { fail(new Error('找不到当前上电周期对应的台账记录，请刷新本楼资料后重试。')); return; }
+  const existing = ['D','E'].includes(props.scope) ? rows.items?.[0] : (target !== 'off' ? activeRecord : undefined);
   openEditor(existing);
   Object.assign(form, { room: rack.room, rack: rack.rack, rack_type: rack.rack_type, category: target === 'off' ? 'down' : 'up', target_state: target, expected_state: rack.state, expected_latest_time: rack.last_operation });
   const group = { ...newGroup(), action: actions[rack.state + ':' + target] };
-  if (existing) { form.primary_index = 0; form.groups = [group, ...(existing.groups || []).filter((g: Dict) => g.action || g.actual || g.expected)]; }
+  if (existing && ['D','E'].includes(props.scope)) { form.primary_index = 0; form.groups = [group, ...(existing.groups || []).filter(groupHasBusinessData)]; }
+  else if (existing) { form.primary_index = 0; form.groups = [...(existing.groups || []).filter(groupHasBusinessData), group]; }
   else {
     const format = overview.value.sheet_formats.find((f: Dict) => (f.sheet.includes('下电') && !f.sheet.includes('上下电')) === (target === 'off'));
-    form.source = format.sheet; changeEditorSheet(); const index = target === 'off' ? form.groups.length - 1 : 0; form.groups[index] = group; form.primary_index = index;
+    form.source = format.sheet; changeEditorSheet();
+    form.groups = target === 'off'
+      ? [...(activeRecord?.groups || []).filter(groupHasBusinessData), group]
+      : [group];
+    form.primary_index = target === 'off' ? form.groups.length - 1 : 0;
   }
 }
-async function saveRecord(): Promise<void> {
+async function saveRecord(confirmedDelete = false): Promise<void> {
   if (saving.value || moveLoading.value) return;
+  if (editingId.value && !(form.groups || []).some(groupHasBusinessData) && !confirmedDelete) { deleteRecordConfirmOpen.value = true; void focusModal(); return; }
   const hash = JSON.stringify(form);
   if (writeId && hash === writeHash && pendingWrites.value.some(p=>p.operation_id === writeId)) { await resumePending(writeId); return; }
   saving.value = true; saveError.value = ''; saveStatus.value = {}; saveQueryError.value = false; message.value = '';
@@ -605,7 +616,7 @@ async function pollSave(id: string): Promise<void> {
       if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey);
       try { if (JSON.parse(draftStorage.getItem(draftKey) || '{}').writeId === id) clearDraft(); } catch {}
       if (writeId === id) editorOpen.value = false;
-      saving.value = false; saveError.value = ''; message.value = '已保存到飞书，回读核验成功。'; await refreshSavedViews(); return;
+      saving.value = false; saveError.value = ''; message.value = state.delete ? '统计记录已从飞书和本地台账删除。' : '已保存到飞书，回读核验成功。'; await refreshSavedViews(); return;
     }
     if (state.status === 'cancelled') { if (taskStorage.getItem(saveStorageKey) === id) taskStorage.removeItem(saveStorageKey); saving.value = false; await loadPending(); return; }
     if (['pending','conflict'].includes(state.status)) { saving.value = false; saveError.value = state.error || '上传尚未完成，输入已保留'; await loadPending(); return; }
@@ -616,6 +627,7 @@ async function pollSave(id: string): Promise<void> {
     saveQueryError.value = true; savePollTimer = scheduleVisible(() => void pollSave(id),4000);
   }
 }
+function resolveRecordDelete(confirmed: boolean): void { deleteRecordConfirmOpen.value = false; if (confirmed) void saveRecord(true); else void focusModal(); }
 async function showSubmission(id: string): Promise<void> {
   try {
     const saved = await read('writes/' + id,{details:'1'}), payload = {...saved.request}; delete payload.operation_id;
