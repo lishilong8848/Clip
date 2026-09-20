@@ -64,7 +64,7 @@ def main() -> int:
         (workbench_lite_py, "isPreviewDateField(key) ? previewDate(rawValue) : rawValue", "通告预览普通文本不得按时间字段清理 T"),
         (server_py, 'extra_images = payload.get("site_photos")', "Qt 现场照片兼容 site_photos"),
         (server_py, 'data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)', "Qt 现场照片上传后回写计数"),
-        (workbench_lite_py, "appliedOngoingLocally = isRow && navLink.matches('.ongoing-row')", "进行中通告本地切换"),
+        (workbench_lite_py, "const appliedLocally = isRow && navLink.matches('.notice-row')", "计划通告本地切换"),
         (workbench_lite_py, "现场照片", "通告结束现场照片提示"),
         (workbench_lite_py, '<img class="brand-logo" src="/assets/vnet-logo.png"', "通告工作台使用主页官方 Logo"),
         (workbench_lite_py, "mop-action-panel", "维保 MOP 后续动作入口"),
@@ -79,6 +79,9 @@ def main() -> int:
             failures.append(f"{label}: 文件不存在 {path.relative_to(PROJECT_ROOT)}")
             continue
         _require_marker(path, marker, label, failures)
+
+    if "applyOngoingRowToDetail" in _read(workbench_lite_py):
+        failures.append("未结束通告不得复用旧表单，必须加载对应详情片段")
 
     if failures:
         print("[NoticeFlowSmoke] FAIL")

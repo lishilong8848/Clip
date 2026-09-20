@@ -102,8 +102,10 @@ class PollingWorkOrderTests(unittest.TestCase):
                 "scope": "A", "title": "A楼测试通告", "sop_name": "测试 SOP",
                 "version": 1, "current_index": 0, "selected_run_index": 1,
                 "runs": [{"label": "作业"}],
-                "operator": {"open_id": "ou_operator", "name": "操作人"},
-                "reviewer": {"open_id": "ou_reviewer", "name": "审核人"},
+                 "operator": {"open_id": "ou_operator", "name": "操作人"},
+                 "reviewer": {"open_id": "ou_reviewer", "name": "审核人"},
+                 "operator_link": "http://127.0.0.1:8787/work-order/operator-token",
+                 "reviewer_link": "http://127.0.0.1:8787/work-order/reviewer-token",
                 "token_hashes": {
                     "operator": hashlib.sha256(operator.encode()).hexdigest(),
                     "reviewer": hashlib.sha256(reviewer.encode()).hexdigest(),
@@ -132,6 +134,14 @@ class PollingWorkOrderTests(unittest.TestCase):
             result = service.process_due_reminders(started_at=due - 90, now=due + 1, send_text=send)
             self.assertEqual(result["sent"], 3)
             self.assertEqual(len({item[1] for item in calls}), 3)
+            messages = {open_id: text for text, open_id, _message_uuid in calls}
+            self.assertIn("操作人工单：http://127.0.0.1:8787/work-order/operator-token", messages["ou_operator"])
+            self.assertNotIn("reviewer-token", messages["ou_operator"])
+            self.assertIn("现场审核人工单：http://127.0.0.1:8787/work-order/reviewer-token", messages["ou_reviewer"])
+            self.assertNotIn("operator-token", messages["ou_reviewer"])
+            duty_message = next(text for text, open_id, _ in calls if open_id not in {"ou_operator", "ou_reviewer"})
+            self.assertNotIn("operator-token", duty_message)
+            self.assertNotIn("reviewer-token", duty_message)
             self.assertEqual(service.get_group(target)["steps"][0]["delay_reminder"]["state"], "sent")
             service.process_due_reminders(started_at=due - 90, now=due + 2, send_text=send)
             self.assertEqual(len(calls), 3)

@@ -18274,6 +18274,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("绑定源表事项", empty_html)
         self.assertNotIn('<div class="source-link-title">未关联</div>', empty_html)
 
+        bound_html = _detail_form(
+            record=None,
+            ongoing_item={**ongoing, "source_record_id": "rec-source-maintenance"},
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+            source_link_options=[candidate],
+        )
+        self.assertIn('<div class="source-link-title">已关联</div>', bound_html)
+        self.assertIn('data-manual-binding-mode="bind">重新绑定</button>', bound_html)
+        self.assertNotIn("源表事项关联（更新前可选）", bound_html)
+        self.assertNotIn("同楼栋、同类型的可绑定记录", bound_html)
+
         event_html = _detail_form(
             record=None,
             ongoing_item={
@@ -18289,6 +18302,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertNotIn("data-manual-source-binding", event_html)
         self.assertNotIn("源表事项关联", event_html)
+        self.assertNotIn("重新绑定", event_html)
 
     def test_workbench_lite_ongoing_rows_hide_ids_and_normalize_status(self):
         notice_specs = [

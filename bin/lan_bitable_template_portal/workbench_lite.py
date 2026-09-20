@@ -2072,11 +2072,18 @@ def _source_link_select(
     options: list[dict[str, str]],
 ) -> str:
     if current_source_id:
+        rebind_button = (
+            '<button class="btn ghost" type="button" '
+            'data-manual-binding-mode="bind">重新绑定</button>'
+            if ongoing_item and _item_work_type(ongoing_item) in BINDABLE_TARGET_WORK_TYPES
+            else ""
+        )
         return (
-            "<label class=\"source-link-field readonly\"><span>源表</span>"
+            "<section class=\"source-link-field readonly\"><span>源表</span>"
             "<div class=\"source-link-title\">已关联</div>"
+            f"{rebind_button}"
             f"<input type=\"hidden\" name=\"source_record_id\" value=\"{_e(current_source_id)}\">"
-            "</label>"
+            "</section>"
         )
     if ongoing_item and _item_work_type(ongoing_item) in BINDABLE_TARGET_WORK_TYPES:
         return _manual_source_binding_panel(options, required=False)
@@ -3121,6 +3128,7 @@ def render_workbench_lite(
     .source-link-title {{ color:#0c244d; font-size:11px; font-weight:950; line-height:1.2; }}
     .source-link-field select {{ flex:1 1 220px; min-width:160px; min-height:28px; border-radius:999px; padding:3px 9px; font-size:12px; }}
     .source-link-field.readonly {{ padding-right:9px; }}
+    .source-link-field .btn {{ min-height:26px; padding:3px 9px; border-radius:999px; font-size:11px; }}
     .manual-source-binding {{ display:grid; gap:8px; border:1px solid #bfdbfe; border-radius:14px; padding:9px 10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
     .manual-source-binding-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }}
     .manual-source-binding-head strong {{ color:#0c244d; font-size:12px; }}
@@ -7333,81 +7341,6 @@ def render_workbench_lite(
       restoreLiteDraft(form).catch(() => null);
       return true;
     }}
-    function applyOngoingRowToDetail(link) {{
-      const form = document.getElementById('lite-notice-form');
-      if (!form || !link || !link.matches('.ongoing-row')) return false;
-      const workType = link.getAttribute('data-work-type') || '';
-      if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
-      const draft = draftFromRow(link);
-      const title = link.getAttribute('data-title') || draft.title || '未结束通告';
-      const localOnly = link.getAttribute('data-local-only') === '1';
-      const sourceId = link.getAttribute('data-source-record-id') || '';
-      const rowRecordId = link.getAttribute('data-record-id') || '';
-      const targetId = link.getAttribute('data-target-record-id') || '';
-      const unuploaded = !localOnly && !targetId;
-      const sourceOnly = Boolean(sourceId) && unuploaded;
-      form.dataset.action = unuploaded ? 'start' : 'update';
-      form.dataset.detailMode = 'ongoing';
-      form.dataset.localOnly = localOnly ? '1' : '';
-      form.dataset.targetEnded = '';
-      delete form.dataset.submitOperationId;
-      setFormValue(form, 'manual', '');
-      setFormValue(form, 'manual_id', '');
-      resetSourceTypeFields(form);
-      setFormValue(form, 'execution_party', draft.execution_party || '');
-      const sourceEventId = link.getAttribute('data-source-event-id') || '';
-      const sourceEventTitle = link.getAttribute('data-source-event-title') || '';
-      resetRepairEventSelection(form, workType === 'repair', sourceId);
-      setFormValue(form, 'record_id', targetId || sourceId || rowRecordId);
-      setFormValue(form, 'source_record_id', sourceId);
-      setFormValue(form, 'repair_management_record_id', sourceId);
-      setFormValue(form, 'related_event_record_id', sourceEventId);
-      const repairEventStatus = form.querySelector('#lite-repair-event-link-status');
-      if (repairEventStatus && workType === 'repair') {{
-        repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
-      }}
-      setSourceLinkDisplay(form, sourceId, '已关联');
-      setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
-      setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
-      for (const [key, value] of Object.entries(draft)) {{
-        setFormValue(form, key, value);
-      }}
-      // Row identity is canonical. Apply it after the editable draft so stale
-      // cached fields cannot erase the ID restored by an undo operation.
-      setFormValue(form, 'record_id', targetId || sourceId || rowRecordId);
-      setFormValue(form, 'source_record_id', sourceId);
-      setFormValue(form, 'target_record_id', targetId);
-      setFormValue(
-        form,
-        'active_item_id',
-        link.getAttribute('data-active-item-id') || targetId || rowRecordId || sourceId
-      );
-      form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
-      const hint = form.querySelector('.detail-head em');
-      if (hint) hint.textContent = '';
-      setDetailModeNote(localOnly
-        ? '未上传'
-        : (sourceOnly ? '待发送开始' : (sourceId && targetId ? '' : (targetId ? '' : '需绑定目标')))
-      );
-      syncImagePanelsFromRow(form, link);
-      resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
-      resetAliConfirmationState(form);
-      if (unuploaded) setUnuploadedSubmitButtons(form);
-      else setOngoingSubmitButtons(form);
-      updateNoticePreview(form);
-      setLiteStatus(sourceOnly
-        ? '源表仍在进行中，但尚无目标通告记录；请先发送开始'
-        : unuploaded
-        ? '纯手填通告尚未上传；可发送开始或删除'
-        : localOnly
-        ? '该事件尚未上传，可直接删除本地记录'
-        : '已选择未结束通告，可发送更新或结束'
-      );
-      openNoticeDrawer(title, link);
-      resetLiteDraftTracking(form);
-      restoreLiteDraft(form).catch(() => null);
-      return true;
-    }}
     async function navigateLite(url, options = {{}}) {{
       const useWorkspaceSwitch = Boolean(options.workspaceSwitch);
       const silent = Boolean(options.silent);
@@ -8187,8 +8120,7 @@ def render_workbench_lite(
         }}
         const detailNeedsReload = noticeDrawerOverlay()?.dataset.detailNeedsReload === '1';
         const appliedLocally = isRow && navLink.matches('.notice-row') && !detailNeedsReload && applySourceRowToDetail(navLink);
-        const appliedOngoingLocally = isRow && navLink.matches('.ongoing-row') && !detailNeedsReload && applyOngoingRowToDetail(navLink);
-        if (appliedLocally || appliedOngoingLocally) {{
+        if (appliedLocally) {{
           const selectingOngoing = navLink.matches('.ongoing-row');
           document.querySelectorAll('.notice-row').forEach(node => {{
             node.classList.toggle('active', !selectingOngoing && node === navLink);

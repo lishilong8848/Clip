@@ -1588,9 +1588,11 @@ class PollingWorkOrderService:
                         continue
                     if float(reminder.get("next_retry_at_ts") or 0) > now:
                         continue
+                    operator_open_id = str((group.get("operator") or {}).get("open_id") or "").strip()
+                    reviewer_open_id = str((group.get("reviewer") or {}).get("open_id") or "").strip()
                     recipients = list(dict.fromkeys(filter(None, (
-                        str((group.get("operator") or {}).get("open_id") or "").strip(),
-                        str((group.get("reviewer") or {}).get("open_id") or "").strip(),
+                        operator_open_id,
+                        reviewer_open_id,
                         str(BUILDING_OPEN_ID_MAP.get(str(group.get("scope") or "").upper()) or "").strip(),
                     ))))
                     if not recipients:
@@ -1603,7 +1605,7 @@ class PollingWorkOrderService:
                         changed = True
                     completed_at = dt.datetime.fromtimestamp(float(reminder.get("completed_at_ts") or 0)).strftime("%Y-%m-%d %H:%M:%S")
                     due_text = dt.datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
-                    message = "\n".join((
+                    message_lines = (
                         "【SOP 步骤延时到点提醒】",
                         f"通告：{group.get('title') or '-'}",
                         f"楼栋：{group.get('scope') or '-'}",
@@ -1612,12 +1614,23 @@ class PollingWorkOrderService:
                         f"步骤 {step.get('step_index') or '-'}：{str(step.get('content') or '')[:500]}",
                         f"完成时间：{completed_at}",
                         f"延时终点：{due_text}",
-                        "该步骤的延时时间已到，请核对后续操作。",
-                    ))
+                    )
                     sent = set(reminder.get("sent_open_ids") or [])
                     failed_ids = set(reminder.get("failed_open_ids") or [])
                     for open_id in recipients:
                         if open_id not in sent and open_id not in failed_ids:
+                            role_link = (
+                                f"操作人工单：{group.get('operator_link') or '工单链接尚未生成。'}"
+                                if open_id == operator_open_id
+                                else f"现场审核人工单：{group.get('reviewer_link') or '工单链接尚未生成。'}"
+                                if open_id == reviewer_open_id
+                                else ""
+                            )
+                            message = "\n".join(filter(None, (
+                                *message_lines,
+                                role_link,
+                                "该步骤的延时时间已到，请核对后续操作。",
+                            )))
                             message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"clipflow:sop-delay:{reminder.get('reminder_id')}:{open_id}"))
                             jobs.append((group_id, str(step.get("step_key") or ""), str(reminder.get("reminder_id") or ""), open_id, message_uuid, message))
                 if changed:
