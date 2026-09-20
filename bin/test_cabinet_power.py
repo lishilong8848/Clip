@@ -1794,6 +1794,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         def start_immediately(_func,job):
             job.update(status="running",started_at="2026-09-18 20:00:00")
         with patch.object(self.service,"snapshot",side_effect=AssertionError("export preparation must run in the worker")), \
+                patch.object(self.service.local,"documents",side_effect=AssertionError("export start must not scan historical jobs")), \
                 patch.object(self.service._pools["D"],"submit",side_effect=start_immediately):
             response=self.service.job("D","export","owner",{"batch_id":"all_"+"c"*32})
         self.assertEqual(response["status"],"pending")
