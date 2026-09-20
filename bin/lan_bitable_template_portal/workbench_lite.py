@@ -2007,7 +2007,11 @@ def _source_link_options(
     return options
 
 
-def _manual_source_binding_panel(options: list[dict[str, str]] | None = None) -> str:
+def _manual_source_binding_panel(
+    options: list[dict[str, str]] | None = None,
+    *,
+    required: bool = True,
+) -> str:
     recommendations: list[str] = []
     for item in (options or [])[:3]:
         candidate = {
@@ -2028,7 +2032,20 @@ def _manual_source_binding_panel(options: list[dict[str, str]] | None = None) ->
         + "".join(recommendations)
         + '</div><button class="btn ghost" type="button" data-manual-binding-mode="bind">查看全部计划通告</button>'
         if recommendations
-        else '<p class="manual-source-empty">当前筛选范围没有可绑定记录，可选择不绑定。</p>'
+        else (
+            '<p class="manual-source-empty">当前筛选范围没有可绑定记录，可选择不绑定。</p>'
+            if required
+            else '<p class="manual-source-empty">当前筛选范围没有可绑定的源表事项。</p>'
+        )
+    )
+    heading = "计划通告关联（必须选择一种）" if required else "源表事项关联（更新前可选）"
+    status = "请选择绑定方式" if required else "尚未绑定源表事项"
+    bind_label = "绑定已有计划通告（推荐）" if required else "绑定源表事项"
+    unbound_button = (
+        '<button class="btn ghost" type="button" data-manual-binding-mode="unbound" '
+        'aria-pressed="false">不绑定，作为独立通告</button>'
+        if required
+        else ""
     )
     return f"""
         <section class="manual-source-binding" data-manual-source-binding>
@@ -2036,12 +2053,12 @@ def _manual_source_binding_panel(options: list[dict[str, str]] | None = None) ->
           <input type="hidden" name="manual_binding_choice" value="">
           <input type="hidden" name="source_record_id" value="">
           <div class="manual-source-binding-head">
-            <strong>计划通告关联（必须选择一种）</strong>
-            <span id="lite-manual-binding-status">请选择绑定方式</span>
+            <strong>{_e(heading)}</strong>
+            <span id="lite-manual-binding-status">{_e(status)}</span>
           </div>
           <div class="manual-source-binding-actions">
-            <button class="btn ghost" type="button" data-manual-binding-mode="bind" aria-pressed="false">绑定已有计划通告（推荐）</button>
-            <button class="btn ghost" type="button" data-manual-binding-mode="unbound" aria-pressed="false">不绑定，作为独立通告</button>
+            <button class="btn ghost" type="button" data-manual-binding-mode="bind" aria-pressed="false">{_e(bind_label)}</button>
+            {unbound_button}
           </div>
           <div class="manual-source-recommendations"><span>同楼栋、同类型的可绑定记录</span>{recommendation_html}</div>
         </section>
@@ -2393,7 +2410,7 @@ def _detail_form(
         )
     )
     source_link_html = (
-        _manual_source_binding_panel(source_link_options)
+        _manual_source_binding_panel(source_link_options, required=action == "start")
         if require_manual_binding
         else _source_link_select(
             ongoing_item=ongoing_item,
@@ -2890,6 +2907,7 @@ def render_workbench_lite(
     .btn.danger {{ color:#fff; background:#e04d5f; }}
     .btn.danger-ghost {{ color:#b42318; border:1px solid #ffc7bf; background:#fff1f0; }}
     .btn.danger-ghost:hover {{ border-color:#f58b88; background:#ffe9e7; }}
+    [hidden] {{ display:none !important; }}
     .btn.is-busy,.btn[aria-busy="true"] {{ position:relative; color:transparent !important; pointer-events:none; }}
     .btn.is-busy::after,.btn[aria-busy="true"]::after {{ content:""; width:16px; height:16px; border-radius:999px; border:2px solid rgba(255,255,255,.55); border-top-color:#fff; animation:liteSpin .8s linear infinite; position:absolute; inset:auto; }}
     .btn.ghost.is-busy::after,.btn.ghost[aria-busy="true"]::after {{ border-color:rgba(10,79,196,.25); border-top-color:#0a4fc4; }}
@@ -6095,9 +6113,10 @@ def render_workbench_lite(
       const status = panel?.querySelector('#lite-manual-binding-status');
       if (status) {{
         const bindingReady = choice === 'unbound' || (choice === 'bind' && Boolean(selectedSourceId));
+        const optionalUpdate = String(activeForm.dataset.action || '') === 'update';
         status.textContent = choice === 'bind'
           ? (selectedSourceId ? (boundTitle || '已绑定计划通告') : '请选择要绑定的计划通告')
-          : (choice === 'unbound' ? '不绑定计划通告' : '请选择绑定方式');
+          : (choice === 'unbound' ? '不绑定计划通告' : (optionalUpdate ? '尚未绑定源表事项' : '请选择绑定方式'));
         status.classList.toggle('ready', bindingReady);
       }}
       document.querySelectorAll('[data-bind-current-manual]').forEach(button => {{

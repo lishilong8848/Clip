@@ -18210,6 +18210,69 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("任务收件箱", html)
         self.assertNotIn("已开始未结束", html)
 
+    def test_workbench_manual_source_picker_keeps_confirm_action_visible(self):
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+
+        html = render_workbench_lite(
+            payload={"records": [], "ongoing": []},
+            session={"user": {"name": "测试"}},
+            scope="E",
+            work_type="maintenance",
+            manual=True,
+            scope_options=[{"value": "E", "label": "E楼"}],
+        )
+
+        self.assertIn('[hidden] { display:none !important; }', html)
+        self.assertIn('id="lite-manual-source-confirm" disabled>确认绑定</button>', html)
+        self.assertIn('id="lite-manual-source-unbound-confirm" hidden>', html)
+
+    def test_workbench_update_can_bind_source_without_changing_event_notice(self):
+        from lan_bitable_template_portal.workbench_lite import _detail_form
+
+        ongoing = {
+            "active_item_id": "active-maintenance-update",
+            "target_record_id": "rec-target-maintenance",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "title": "E楼未绑定源表维保",
+            "building": "E楼",
+        }
+        candidate = {
+            "source_record_id": "rec-source-maintenance",
+            "title": "E楼计划维保",
+            "building": "E楼",
+            "specialty": "暖通",
+            "progress": "未开始",
+        }
+        html = _detail_form(
+            record=None,
+            ongoing_item=ongoing,
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+            source_link_options=[candidate],
+        )
+        self.assertIn('data-action="update"', html)
+        self.assertIn("源表事项关联（更新前可选）", html)
+        self.assertIn("绑定源表事项", html)
+        self.assertNotIn("不绑定，作为独立通告", html)
+
+        event_html = _detail_form(
+            record=None,
+            ongoing_item={
+                "active_item_id": "active-local-event",
+                "work_type": "event",
+                "notice_type": "事件通告",
+                "title": "E楼事件通告",
+            },
+            scope="E",
+            work_type="event",
+            manual=False,
+            source_link_options=[candidate],
+        )
+        self.assertNotIn("data-manual-source-binding", event_html)
+        self.assertNotIn("源表事项关联", event_html)
+
     def test_workbench_lite_ongoing_rows_hide_ids_and_normalize_status(self):
         notice_specs = [
             ("maintenance", "维保通告", "未命名维保通告", "开始"),
