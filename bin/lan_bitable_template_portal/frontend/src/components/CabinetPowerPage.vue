@@ -659,26 +659,26 @@ onMounted(async () => {
   window.addEventListener('keydown', keyboard);
   window.addEventListener('pagehide', flushDraft);
   removeNavigationGuard = registerNavigationGuard((_target, proceed) => { if (saving.value && editorOpen.value) return false; if (!editorOpen.value || JSON.stringify(form) === editBaseline) return true; askDiscard(() => { clearDraft(); editorOpen.value = false; proceed(); }); return false; });
-  await startBootstrap(); if (disposed) return;
   if (props.scope) {
     try {
       const savedRequest = JSON.parse(taskStorage.getItem(exportRequestKey) || '{}');
       if (/^single_[a-f0-9]{32}$/.test(savedRequest.id) && Date.now() - Number(savedRequest.at) < 24*60*60*1000) pendingExportRequest.value = savedRequest.id;
       else taskStorage.removeItem(exportRequestKey);
     } catch { taskStorage.removeItem(exportRequestKey); }
+    const savedJob = taskStorage.getItem(storageKey);
+    if (savedJob && /^[a-f0-9]{32}$/.test(savedJob)) { job.value = { job_id:savedJob,status:'pending',kind:'export' }; void pollJob(); }
+    else {
+      if (savedJob) taskStorage.removeItem(storageKey);
+      if (pendingExportRequest.value) void startJob('exports');
+    }
   }
   if (!props.scope) restoreAllExports();
+  await startBootstrap(); if (disposed) return;
   void loadBatchCount();
   await loadPending(); if (disposed) return;
   const uploadId = taskStorage.getItem(saveStorageKey);
   if (uploadId && /^[A-Za-z0-9_-]{16,128}$/.test(uploadId)) { saving.value = true; saveStatus.value = {operation_id:uploadId,status:'queued'}; await pollSave(uploadId); if (disposed) return; }
   try { const savedDraft = draftStorage.getItem(draftKey); if (savedDraft && !saving.value) { draft = JSON.parse(savedDraft); if (draft?.scope === props.scope && Array.isArray(draft.form?.groups)) { restoreDialogOpen.value = true; void focusModal(); } } } catch { clearDraft(); }
-  const saved = taskStorage.getItem(storageKey);
-  if (saved && /^[a-f0-9]{32}$/.test(saved)) { job.value = { job_id: saved }; void pollJob(); }
-  else {
-    if (saved) taskStorage.removeItem(storageKey);
-    if (pendingExportRequest.value) void startJob('exports');
-  }
 });
 onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); mapAbort?.abort(); historyAbort?.abort(); removeNavigationGuard?.(); window.removeEventListener('pagehide', flushDraft); window.removeEventListener('keydown', keyboard); window.clearTimeout(pollTimer); window.clearTimeout(bootstrapTimer); window.clearTimeout(savePollTimer); window.clearTimeout(draftTimer); });
 </script>

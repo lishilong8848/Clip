@@ -126,7 +126,17 @@ try {
   await page.screenshot({ path: path.join(output, "single-building-export-retry.png") });
   await page.unroute("**/api/cabinet-power/exports");
   await page.goto(base + "/cabinet-power");
+  await page.route("**/api/cabinet-power/bootstrap", async route => {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    await route.continue();
+  });
+  await page.route("**/api/cabinet-power/exports", async route => {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    await route.continue();
+  });
   await page.goto(base + "/cabinet-power?scope=B");
+  await page.getByText("正在准备导出数据…", { exact: true }).waitFor({ timeout: 1500 });
+  assert.equal(await page.getByRole("button", { name: "继续上次导出", exact: true }).isEnabled(), false, "restored export button must stay disabled");
   await page.getByText("已上传多维", { exact: true }).waitFor({ timeout: 120000 });
   const bHistory = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=B")).json();
   assert.equal(bHistory.data.items.length, 2, "single-building retry must not create a duplicate export");
