@@ -457,7 +457,8 @@ def notice_summary_baseline_date(content):
     return max(found, default="")
 
 
-def calculate(inventory, operations, issues=()):
+def calculate(inventory, operations, issues=(), baseline=None):
+    baseline=baseline or {}
     grouped = defaultdict(list)
     for record in operations:
         for event in record.get("events") or [record]:
@@ -467,19 +468,26 @@ def calculate(inventory, operations, issues=()):
     for item in inventory:
         rack = copy.deepcopy(item)
         history = grouped[(item["room"],item["rack"])]
-        valid=[op for op in history if completed_state_event(op) and len(dates(op.get('actual')))==1]
-        state, last = "off", ""
+        all_valid=[op for op in history if completed_state_event(op) and len(dates(op.get('actual')))==1]
+        saved=baseline.get(item["room"]+"/"+item["rack"],{})
+        frozen=set(saved.get("event_hashes",()))
+        valid=[op for op in all_valid if state_event_hash(op) not in frozen] if saved else all_valid
+        state=saved.get("state") if saved.get("state") in COLORS else "off"
+        last=saved.get("last_operation","")
+        daily_by_time=defaultdict(list)
+        for op in all_valid: daily_by_time[op["actual"]].append(op)
+        for stamp in sorted(daily_by_time):
+            actions={op["action"] for op in daily_by_time[stamp]}
+            if len(actions)==1: daily[stamp[:10]][next(iter(actions))]+=1
         by_time = defaultdict(list)
         for op in valid: by_time[op["actual"]].append(op)
         for stamp in sorted(by_time):
             actions = {o["action"] for o in by_time[stamp]}
             states={STATES[action] for action in actions}
             state=next(iter(states)) if len(states)==1 else 'unknown'; last=stamp
-            if len(actions)==1:
-                action=next(iter(actions))
-                daily[stamp[:10]][action]+=1
-        if not valid and any(op.get('result')!='失败' for op in history): state='unknown'
-        rack.update(state=state,color=COLORS[state],last_operation=last,operation_count=len(history),state_source='operation' if valid else 'unconfirmed' if state=='unknown' else 'empty')
+        if not valid and not saved and any(op.get('result')!='失败' for op in history): state='unknown'
+        source='operation' if valid else 'baseline' if saved else 'unconfirmed' if state=='unknown' else 'empty'
+        rack.update(state=state,color=COLORS[state],last_operation=last,operation_count=len(history),state_source=source)
         racks.append(rack)
     counts=Counter(r["state"] for r in racks)
     return {"racks":racks,"counts":{"total":len(racks),"formal":counts["formal"],"test":counts["test"],"off":counts["off"],"unknown":counts["unknown"],"powered":counts["formal"]+counts["test"]},"daily":dict(daily)}
@@ -526,6 +534,50 @@ def map_state_baseline(content,config,operations):
     return baseline,dict(counts)
 
 
+def baseline_correction_operations(config,operations):
+    baseline=config.get("power_baseline") or {}
+    if not baseline:
+        return []
+    events=defaultdict(list)
+    for op in operations:
+        for event in op.get("events",[]):
+            events[(op["room"],op["rack"])].append({**op,**event,"events":[]})
+    frozen=[]
+    for key,items in events.items():
+        saved=baseline.get(key[0]+"/"+key[1],{})
+        hashes=set(saved.get("event_hashes",()))
+        frozen.extend(event for event in items if state_event_hash(event) in hashes)
+    prior={(rack["room"],rack["rack"]):rack["state"] for rack in calculate(config["inventory"],frozen)["racks"]}
+    actions={("off","formal"):"上正式电",("off","test"):"上测试电",
+             ("formal","test"):"正式电转测试电",("test","formal"):"测试电转正式电",
+             ("formal","off"):"下正式电",("test","off"):"下测试电"}
+    inventory={(rack["room"],rack["rack"]):rack for rack in config["inventory"]}
+    formats=config.get("template_data",{}).get("formats",[]); result=[]
+    for key,saved in baseline.items():
+        room,rack=key.split("/",1); target=saved.get("state"); before=prior.get((room,rack),"off")
+        action=actions.get((before,target))
+        if not action:
+            continue
+        hashes=set(saved.get("event_hashes",())); history=events[(room,rack)]
+        if any(completed_state_event(event) and state_event_hash(event) not in hashes for event in history):
+            continue
+        if any(event.get("result")=="成功" and not event.get("actual") and STATES.get(event.get("action"))==target for event in history):
+            continue
+        category="down" if action.startswith("下") else "up"
+        source=next((fmt["sheet"] for fmt in formats if ("下电" in fmt["sheet"] and "上下电" not in fmt["sheet"])==(category=="down")),formats[0]["sheet"] if formats else "")
+        event_id="baseline_"+digest([config.get("scope"),room,rack,target])[:24]
+        group={"id":event_id,"action":action,"actual":"","expected":"","result":"成功"}
+        item=inventory[(room,rack)]
+        result.append({"record_id":event_id,"version":digest(group),"scope":config["scope"],"room":room,
+            "system_name":system_name(config["scope"],room),"rack":rack,"rack_type":item.get("rack_type",""),
+            "power":"","result":"成功","action":action,"actual":"","expected":"","action_note":"",
+            "completion_time":"","groups":[group],"events":[{**group,"group":0,"id":event_id+":0",
+            "failure_reason":"","evidence_images":[]}],"issues":[],"empty":False,"source":source,
+            "source_row":None,"category":category,"meta":{"schema":3,"baseline_correction":True,
+            "groups":[group],"primary":0},"raw_fields":{},"last_operation":""})
+    return result
+
+
 def derive_records(config,operations):
     events=[]; issues=[]; known={(r["room"],r["rack"]) for r in config["inventory"]}
     for op in operations:
@@ -537,7 +589,7 @@ def derive_records(config,operations):
             if not event.get("actual") and text_value(group.get("actual")) in ("/","－","-","未完成"): continue
             events.append({**op,**event,"events":[]})
     blocking=[issue for issue in issues if not (config["scope"]=="B" and issue["room"] in ("216","247") and "未配对" in issue["message"])]
-    derived=calculate(config["inventory"],events,blocking)
+    derived=calculate(config["inventory"],events,blocking,config.get("power_baseline"))
     unlocated={}
     for room in config["rooms"]:
         missing=max(0,room["total"]-sum(r["room"]==room["id"] for r in config["inventory"]))

@@ -15,7 +15,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
-from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, TOTALS, calculate, derive_records, dates, digest, export_workbook, operation_key, system_name, text_value, project_layout,completed_state_event
+from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, TOTALS, baseline_correction_operations, calculate, derive_records, dates, digest, export_workbook, operation_key, system_name, text_value, project_layout,completed_state_event
 from .cabinet_power_data import from_feishu, to_fields, group_events, source_sheet, table_columns, normalized_actions
 from .cabinet_power_store import CabinetStore
 
@@ -400,8 +400,9 @@ class CabinetPowerService:
             config["version"]=digest([config["rooms"],config["inventory"],config.get("template_data"),config.get("map_values")])
             ops=[]
             for record in saved["records"]:
-                op=from_feishu(record); op["ordinal"]=record["ordinal"]
-                op["display_sheet"]=source_sheet(op,config.get("template_data",{}).get("formats",[])); ops.append(op)
+                op=from_feishu(record); op["ordinal"]=record["ordinal"]; ops.append(op)
+            ops.extend(baseline_correction_operations(config,ops))
+            for op in ops: op["display_sheet"]=source_sheet(op,config.get("template_data",{}).get("formats",[]))
             snapshot={"config":config,"operations":ops,"version":saved["version"],"updated_at":saved["updated_at"],"source":"local","error":""}
             self._cache[scope]=snapshot
             return snapshot

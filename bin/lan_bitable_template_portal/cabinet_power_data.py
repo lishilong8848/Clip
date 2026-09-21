@@ -43,12 +43,13 @@ def millis(value):
     return int(dt.datetime.strptime(found[0],"%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone(dt.timedelta(hours=8))).timestamp()*1000)
 
 
-def group_events(groups):
+def group_events(groups, allow_success_without_actual=False):
     events=[]; issues=[]
     for index,g in enumerate(groups):
         actions=normalized_actions(g.get("action")); actual=dates(g.get("actual")); expected=dates(g.get("expected"))
         if not any(text_value(g.get(k)) for k in ("action","actual","expected")): continue
-        if not actions or len(actions)!=len(actual):
+        missing_historical_time=allow_success_without_actual and actions and not actual and g.get("result")=="成功"
+        if not missing_historical_time and (not actions or len(actions)!=len(actual)):
             issues.append(f"第{index+1}组操作与实际时间未配对")
         for i,action in enumerate(actions):
             events.append({"action":action,"actual":actual[i] if len(actions)==len(actual) else "", "expected":expected[i] if len(expected)==len(actions) else "", "group":index,
@@ -164,7 +165,7 @@ def from_feishu(record):
         groups[primary if isinstance(primary,int) and 0<=primary<len(groups) else 0]["result"]=text_value(f.get("结果"))
     if groups and meta.get("schema",0)>=3 and "失败原因" in original and f.get("失败原因")!=original.get("失败原因"):
         groups[primary if isinstance(primary,int) and 0<=primary<len(groups) else 0]["failure_reason"]=text_value(f.get("失败原因"))
-    events,issues=group_events(groups)
+    events,issues=group_events(groups,scope in "ABCDE" and meta.get("schema")==2 and bool(meta.get("sheet")))
     if mismatch or scope not in "ABCDE" or not room: issues.append("包间与楼栋不一致")
     power=f.get("机柜功率（W）","")
     try: power=float(power) if power not in (None,"") else ""

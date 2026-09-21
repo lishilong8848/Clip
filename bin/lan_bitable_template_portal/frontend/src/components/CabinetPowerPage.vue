@@ -132,7 +132,7 @@
           <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading">正在读取完整历史…</p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
-            <div class="section-title"><strong>{{ op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
+            <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
             <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
@@ -549,7 +549,7 @@ async function changeRecordScope(scope: string): Promise<void> {
 let editBaseline = '', writeId = '', writeHash = '';
 function openEditor(op?: Dict): void {
   if (saving.value) { if (saveStatus.value.operation_id) void showSubmission(saveStatus.value.operation_id); return; }
-  editingId.value = op?.record_id || ''; Object.keys(form).forEach(k => delete form[k]);
+  editingId.value = op?.meta?.baseline_correction ? '' : op?.record_id || ''; Object.keys(form).forEach(k => delete form[k]);
   form.scope = props.scope;
   Object.assign(form, { room: op?.room || historyRoom.value || currentRoom.value || '', rack: op?.rack || historyRack.value || '', rack_type: op?.rack_type || '', current_rack_type: op?.current_rack_type || '', power: op?.power ?? '', groups: op ? JSON.parse(JSON.stringify(op.groups)) : [newGroup()], source: op?.source || op?.display_sheet || query.sheet, category: op?.category || (['D','E'].includes(props.scope) ? 'mixed' : 'up'), expected_version: op?.version || '', original_scope: op?.scope || '', confirm_scope_move: false });
   if (!op) changeEditorSheet();

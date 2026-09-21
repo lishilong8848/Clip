@@ -10,12 +10,13 @@ import threading
 import time
 import unittest
 import uuid
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
-from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, _notice_period_dates, calculate, completed_state_event, derive_records, export_workbook, dates, digest, map_state_baseline, room_code, system_name
+from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, _notice_period_dates, baseline_correction_operations, calculate, completed_state_event, derive_records, export_workbook, dates, digest, map_state_baseline, room_code, system_name
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
@@ -216,6 +217,48 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual(rooms[room]["total"], 10)
         self.assertEqual(rooms["201"]["name"], "EA118-B2-1")
         self.assertFalse(rooms["201"]["carrier"])
+
+    def test_current_state_uses_each_floorplan_baseline_then_new_operations(self):
+        for scope in "ABCDE":
+            content=(TEMPLATES/(scope+".xlsm")).read_bytes()
+            operations=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
+            config=copy.deepcopy(self.configs[scope])
+            config["power_baseline"]=map_state_baseline(content,config,operations)[0]
+            expected=Counter(value["state"] for value in config["power_baseline"].values())
+            actual=Counter(rack["state"] for rack in derive_records(config,operations)["racks"])
+            self.assertEqual((actual["formal"],actual["test"],actual["off"]),
+                             (expected["formal"],expected["test"],expected["off"]),scope)
+        content=(TEMPLATES/"C.xlsm").read_bytes(); model,rows=source_rows(content,"C")
+        evidence=source_evidence(content,model); records=[]
+        for index,row in enumerate(rows):
+            record={**row,"record_id":f"recCBaseline{index}"}
+            records.append(complete_source_record(record,evidence) or record)
+        operations=[from_feishu(record) for record in records]
+        config={**model,"template_data":{"hash":model["template_hash"],"formats":model["formats"]}}
+        config["power_baseline"]=map_state_baseline(content,config,operations)[0]
+        corrections=baseline_correction_operations(config,operations)
+        self.assertEqual((len(corrections),Counter(item["action"] for item in corrections)),
+                         (25,Counter({"测试电转正式电":1,"上测试电":12,"下测试电":12})))
+        self.service.local.replace("C",config,records,[]); self.service._cache.pop("C",None)
+        snapshot=self.service._snapshot("C")
+        self.assertEqual(sum(bool(item.get("meta",{}).get("baseline_correction")) for item in snapshot["operations"]),25)
+        first=corrections[0]; visible=self.service.operations("C",{"room":first["room"],"rack":first["rack"],"page_size":100})
+        self.assertTrue(any(item.get("meta",{}).get("baseline_correction") for item in visible["items"]))
+        exported=Workbook(export_workbook(content,snapshot["config"],snapshot["operations"]))
+        fmt=next(item for item in model["formats"] if item["sheet"]==first["source"])
+        action_column=fmt["groups"][-1 if first["category"]=="down" else 0]["action"]
+        self.assertTrue(any(row.get(fmt["rack"])==first["rack"] and row.get(action_column)==first["action"]
+                            for _number,row in exported.rows(first["source"])))
+        self.assertEqual(derive_records(config,operations)["counts"],{
+            "total":998,"formal":939,"test":31,"off":28,"unknown":0,"powered":970})
+        no_time=next(op for op in operations if any(event["result"]=="成功" and not event["actual"] for event in op["events"]))
+        self.assertFalse(any("未配对" in issue for issue in no_time["issues"]))
+        room,rack=next(key.split("/") for key,value in config["power_baseline"].items() if value["state"]=="formal")
+        operations.append({"record_id":"recCNewConversion","scope":"C","room":room,"rack":rack,
+            "issues":[],"groups":[{}],"events":[{"id":"new_conversion:0","action":"正式电转测试电",
+            "actual":"2026-09-21 10:00:00","expected":"","result":"成功","group":0}]})
+        changed=derive_records(config,operations)["counts"]
+        self.assertEqual((changed["formal"],changed["test"]),(938,32))
 
     def test_export_attachment_uses_archive_base_parent(self):
         path=Path(self.tmp.name)/"sample.xlsm"; path.write_bytes(b"export")
