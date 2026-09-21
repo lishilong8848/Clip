@@ -88,6 +88,7 @@
         </div><footer v-if="imagePageCount > 1" class="pagination evidence-pagination"><span>截图 {{ imagePage }}/{{ imagePageCount }}</span><button :disabled="imagePage <= 1" @click="imagePage--"><ChevronLeft :size="16" /></button><button :disabled="imagePage >= imagePageCount" @click="imagePage++"><ChevronRight :size="16" /></button></footer>
         <div v-if="deletedImages.length" class="deleted-images"><h4>已删除截图</h4><div v-for="image in deletedImages" :key="image.image_id"><img :src="imageUrl(image.image_id)" :alt="image.name" loading="lazy" /><span>{{ image.name }}</span><button :disabled="saving || !batch.can_download_files || !batch.can_confirm_all || batch.status === 'cancelled'" @click="restoreEvidence(image.image_id)">撤回删除</button></div></div>
       </section>
+      <div v-if="batch.source === 'image' && !batch.rows?.length" class="notice warning"><span>该图片批次尚未生成机柜记录，可继续上传截图或删除空批次。</span><button class="danger-ghost" :disabled="saving" @click="confirmDialog = 'delete_empty'">删除空批次</button></div>
 
       <section v-if="batch.rows?.length" class="batch-actions">
         <div class="filter-bar"><strong>记录筛选</strong><label><span>楼栋</span><select v-model="rowScopeFilter"><option value="">全部楼栋</option><option v-for="item in batch.scopes || []" :key="item" :value="item">{{ item }}楼</option></select></label><label><span>状态</span><select v-model="rowStatusFilter"><option value="">全部状态</option><option value="ready">可确认</option><option value="rolled_back">已回退</option><option value="duplicate">重复</option><option value="conflict">冲突</option><option value="invalid">无效</option><option value="failed">失败</option><option value="completed">已完成</option><option value="excluded">已排除</option></select></label><label><span>快速核对</span><select v-model="rowQuickFilter"><option value="">全部记录</option><option value="missing_actual">未填写实际时间</option><option value="evidence_pending">截图待匹配</option><option value="issues">仅异常记录</option></select></label><span class="filter-count">当前 {{ filteredRows.length }} 条</span></div>
@@ -226,9 +227,9 @@ const warningsPending = computed(() => Boolean(batch.value.blocking_warnings?.le
 const showRackColumn = computed(() => (batch.value.rows || []).some((row: Dict) => hasCabinetValue(row.rack)));
 const showSupplierRackColumn = computed(() => (batch.value.rows || []).some((row: Dict) => hasCabinetValue(row.supplier_rack)));
 const detailColumnCount = computed(() => 9 + Number(showRackColumn.value) + Number(showSupplierRackColumn.value));
-const confirmTitle = computed(() => confirmDialog.value === 'image' ? '删除这张确认截图？' : confirmDialog.value === 'rollback' ? '回退已写入的机柜记录？' : confirmDialog.value === 'overlap' ? '清空完全重叠的待办行？' : confirmDialog.value === 'all' ? '确认整批有效记录？' : confirmDialog.value === 'file' ? '清理原确认单？' : confirmDialog.value === 'warnings' ? '确认以当前机柜明细为准？' : '作废尚未提交的记录？');
-const confirmMessage = computed(() => confirmDialog.value === 'image' ? '将从当前待办移除截图，并解除尚未提交的机柜关联。共享的本地图片缓存不会清理，其他批次或已确认记录不受影响。' : confirmDialog.value === 'rollback' ? '将逐柜核验云端并恢复到本批写入前。存在后续操作或云端冲突的机柜会跳过，其他机柜继续回退。' : confirmDialog.value === 'overlap' ? '只排除当前批次中的重复行，既有台账和多维表不会被修改；排除记录仍保留审计并可恢复。' : confirmDialog.value === 'all' ? `将并行确认各楼共 ${batch.value.stats?.confirmable || 0} 条有效记录，异常行会留在待办。` : confirmDialog.value === 'file' ? '清理后无法再次下载原PDF，已保存的识别值、更正审计和正式台账不受影响。' : confirmDialog.value === 'warnings' ? '数量、重复或目录匹配存在异常。确认后将允许对当前有效行正式提交，后续修改机柜明细会自动取消本次确认。' : '已完成记录保留，其他尚未提交行将标记为已作废；之后仍可选择未提交行恢复。');
-const confirmLabel = computed(() => confirmDialog.value === 'image' ? '删除截图' : confirmDialog.value === 'rollback' ? '确认回退' : confirmDialog.value === 'overlap' ? '清空重叠数据' : confirmDialog.value === 'all' ? '确认整批' : confirmDialog.value === 'file' ? '清理原确认单' : confirmDialog.value === 'warnings' ? '确认已核对' : '作废未提交行');
+const confirmTitle = computed(() => confirmDialog.value === 'delete_empty' ? '删除这个空批次？' : confirmDialog.value === 'image' ? '删除这张确认截图？' : confirmDialog.value === 'rollback' ? '回退已写入的机柜记录？' : confirmDialog.value === 'overlap' ? '清空完全重叠的待办行？' : confirmDialog.value === 'all' ? '确认整批有效记录？' : confirmDialog.value === 'file' ? '清理原确认单？' : confirmDialog.value === 'warnings' ? '确认以当前机柜明细为准？' : '作废尚未提交的记录？');
+const confirmMessage = computed(() => confirmDialog.value === 'delete_empty' ? '该批次没有机柜记录。删除后会从待办列表移除，原截图共享缓存不会影响其他批次。' : confirmDialog.value === 'image' ? '将从当前待办移除截图，并解除尚未提交的机柜关联。共享的本地图片缓存不会清理，其他批次或已确认记录不受影响。' : confirmDialog.value === 'rollback' ? '将逐柜核验云端并恢复到本批写入前。存在后续操作或云端冲突的机柜会跳过，其他机柜继续回退。' : confirmDialog.value === 'overlap' ? '只排除当前批次中的重复行，既有台账和多维表不会被修改；排除记录仍保留审计并可恢复。' : confirmDialog.value === 'all' ? `将并行确认各楼共 ${batch.value.stats?.confirmable || 0} 条有效记录，异常行会留在待办。` : confirmDialog.value === 'file' ? '清理后无法再次下载原PDF，已保存的识别值、更正审计和正式台账不受影响。' : confirmDialog.value === 'warnings' ? '数量、重复或目录匹配存在异常。确认后将允许对当前有效行正式提交，后续修改机柜明细会自动取消本次确认。' : '已完成记录保留，其他尚未提交行将标记为已作废；之后仍可选择未提交行恢复。');
+const confirmLabel = computed(() => confirmDialog.value === 'delete_empty' ? '删除空批次' : confirmDialog.value === 'image' ? '删除截图' : confirmDialog.value === 'rollback' ? '确认回退' : confirmDialog.value === 'overlap' ? '清空重叠数据' : confirmDialog.value === 'all' ? '确认整批' : confirmDialog.value === 'file' ? '清理原确认单' : confirmDialog.value === 'warnings' ? '确认已核对' : '作废未提交行');
 
 function pageNumbers(current: number,total: number): number[] { return [...new Set([1,total,...Array.from({length:5},(_,index)=>current+index-2)])].filter(value=>value>=1&&value<=total).sort((a,b)=>a-b); }
 function statusLabel(status: string): string { return ({ waiting:'等待',parsing:'解析中',recognizing:'识别中',pending:'待处理',ready:'可确认',duplicate:'重复',conflict:'冲突',invalid:'无效',queued:'排队中',writing:'写入中',running:'处理中',partial:'部分完成',completed:'已完成',failed:'失败',rolled_back:'已回退',rollback_queued:'回退排队中',rolling_back:'回退中',rollback_failed:'回退失败',rollback_blocked:'无法回退',cancelled:'已作废',excluded_duplicate:'已排除重复',excluded_manual:'已排除',excluded_image:'截图已删除',excluded_cancelled:'已作废' } as Dict)[status] || status || '未知'; }
@@ -524,6 +525,13 @@ async function resolveConfirm(confirmed:boolean):Promise<void>{
   if(action==='rollback'){await rollbackRows(rowId);return;}
   if(action==='all'){await confirmRows({all:true});return;}
   if(action==='cancel'){await cancelPending();return;}
+  if(action==='delete_empty'){
+    saving.value=true;
+    try{await requestJson(`${api}/batches/${batchId}?version=${batch.value.version}`,{method:'DELETE',timeoutMs:90000});openList();}
+    catch(exc:any){error.value=exc.message||'删除空批次失败';}
+    finally{saving.value=false;}
+    return;
+  }
   if(!await saveChanges())return;
   saving.value=true;
   try{

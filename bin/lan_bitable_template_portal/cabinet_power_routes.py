@@ -131,7 +131,9 @@ def install_cabinet_power_routes(app,controller,runtime):
                     data=await asyncio.to_thread(service.batches.cleanup_file,batch_id,parts[3],owner,admin)
                     return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
                 if len(parts)==2:
-                    if request.method=="PATCH":
+                    if request.method=="DELETE":
+                        data=await asyncio.to_thread(service.batches.delete_empty,batch_id,owner,admin,query.get("version"))
+                    elif request.method=="PATCH":
                         data=await asyncio.to_thread(service.batches.update,batch_id,payload,owner,allowed,admin)
                     else: data=await asyncio.to_thread(service.batches.get,batch_id)
                 elif len(parts)==3 and parts[2]=="clear-overlaps":

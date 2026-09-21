@@ -209,6 +209,15 @@ class CabinetBatchStore:
         with self._connect() as conn:
             return self._decode(conn.execute("SELECT * FROM batches WHERE batch_id=?", (batch_id,)).fetchone(), conn)
 
+    def delete(self,batch_id,expected_version):
+        with self._lock,self._connect() as conn,conn:
+            cursor=conn.execute("DELETE FROM batches WHERE batch_id=? AND version=?",(batch_id,int(expected_version)))
+            if cursor.rowcount!=1:
+                exists=conn.execute("SELECT 1 FROM batches WHERE batch_id=?",(batch_id,)).fetchone()
+                raise CabinetError("批次已被其他操作更新，请重新载入" if exists else "批次不存在",409 if exists else 404)
+            for table in ("batch_rows","batch_images","notice_summary_rows","batch_runtime_status"):
+                conn.execute(f"DELETE FROM {table} WHERE batch_id=?",(batch_id,))
+
     def by_hash(self, source_hash):
         if not source_hash:
             return None
@@ -2351,6 +2360,17 @@ class CabinetBatchService:
                     image.update(status="cancelled", error="批次已作废，识别已停止")
             current["status"] = "cancelled"
         return self._change(batch_id, cancel_rows, expected_version=expected_version)
+
+    def delete_empty(self,batch_id,owner,admin=False,expected_version=None):
+        batch=self.get(batch_id)
+        if not admin and batch["owner_id"]!=owner:
+            raise CabinetError("仅上传者或管理员可删除空批次",403)
+        if batch.get("source")!="image" or batch.get("rows"):
+            raise CabinetError("仅可删除没有机柜记录的图片识别批次",409)
+        try: version=int(expected_version)
+        except (TypeError,ValueError) as exc: raise CabinetError("缺少有效批次版本",400) from exc
+        self.store.delete(batch_id,version)
+        return {"deleted":True,"batch_id":batch_id}
 
     def restore_rows(self, batch_id, payload, owner, allowed, admin=False):
         batch = self.get(batch_id)

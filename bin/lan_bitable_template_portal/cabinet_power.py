@@ -31,6 +31,13 @@ INITIAL_TEMPLATES=Path(__file__).with_name("templates")/"cabinet_power"
 LAYOUT_CACHE=INITIAL_TEMPLATES/"layouts.json.gz"
 SNAPSHOT_KEY="feishu_snapshot_v1:"
 
+def layout_identity(config):
+    rooms=sorted((room["id"],int(room.get("total") or 0),room.get("sheet","").strip()) for room in config.get("rooms",[]))
+    racks=sorted((rack["room"],rack["rack"],rack.get("template_color",""),
+                  sorted((item.get("sheet","").strip(),item.get("range","")) for item in rack.get("positions",[])))
+                 for rack in config.get("inventory",[]))
+    return digest([rooms,racks])
+
 def export_snapshot(config,operations,notice_summary=None):
     return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations,notice_summary)
 
@@ -394,14 +401,16 @@ class CabinetPowerService:
         with self._scope_locks[scope]:
             version=self.local.version(scope)
             if self._cache.get(scope,{}).get("version")==version: return self._cache[scope]
-            saved=self.local.load(scope); config=saved["config"]
+            saved=self.local.load(scope); config=self._packaged_config(scope,saved["config"])
             config["path"]=str(INITIAL_TEMPLATES/(scope+".xlsm"))
             config["baseline_event_ids"]=saved["baseline"]
             config["version"]=digest([config["rooms"],config["inventory"],config.get("template_data"),config.get("map_values")])
             ops=[]
             for record in saved["records"]:
                 op=from_feishu(record); op["ordinal"]=record["ordinal"]; ops.append(op)
-            ops.extend(baseline_correction_operations(config,ops))
+            ordinal=max((op["ordinal"] for op in ops),default=0)
+            for correction in baseline_correction_operations(config,ops):
+                ordinal+=1; correction["ordinal"]=ordinal; ops.append(correction)
             for op in ops: op["display_sheet"]=source_sheet(op,config.get("template_data",{}).get("formats",[]))
             snapshot={"config":config,"operations":ops,"version":saved["version"],"updated_at":saved["updated_at"],"source":"local","error":""}
             self._cache[scope]=snapshot
@@ -460,16 +469,34 @@ class CabinetPowerService:
             self.local.replace(scope,configs[scope],records,[e["id"] for op in ops for e in op["events"]])
             return {"updated_at":now,"count":len(records)}
 
-    def local_layout(self,scope,room_id):
-        config=self._snapshot(scope)["config"]; version=config.get("template_data",{}).get("hash","")
+    def _layout_data(self,scope):
         with self._scope_locks[scope]:
             if scope not in self._layouts:
                 path=INITIAL_TEMPLATES/(scope+".layouts.json.gz")
                 if not path.exists(): raise CabinetError("该楼平面图资源缺失，请重新构建布局缓存")
                 with gzip.open(path,"rt",encoding="utf-8") as source: data=json.load(source)
-                if data.get("hash")!=version: raise CabinetError("平面图资源与数据模板版本不一致")
+                actual=hashlib.sha256((INITIAL_TEMPLATES/(scope+".xlsm")).read_bytes()).hexdigest()
+                if data.get("hash")!=actual: raise CabinetError("平面图资源与当前模板版本不一致")
                 self._layouts[scope]=data
-            return copy.deepcopy(self._layouts[scope]["rooms"].get(room_id))
+            return self._layouts[scope]
+
+    def _packaged_config(self,scope,config):
+        data=self._layout_data(scope)
+        if config.get("template_data",{}).get("hash")==data.get("hash"):
+            return config
+        if not data.get("template_data") or data.get("layout_identity")!=layout_identity(config):
+            raise CabinetError("飞书布局与当前模板结构不一致，请重新同步模板资料")
+        current=copy.deepcopy(config); current["template_data"]=copy.deepcopy(data["template_data"])
+        current["map_values"]=copy.deepcopy(data.get("map_values",{}))
+        room_meta={room["id"]:room for room in data.get("rooms_meta",[])}
+        for room in current.get("rooms",[]):
+            if room["id"] in room_meta:
+                room.update({key:value for key,value in room_meta[room["id"]].items() if key not in ("id","record_id")})
+        return current
+
+    def local_layout(self,scope,room_id):
+        self._snapshot(scope)
+        return copy.deepcopy(self._layout_data(scope)["rooms"].get(room_id))
 
     def config(self,scope):
         return copy.deepcopy(self._snapshot(scope)["config"])
@@ -545,7 +572,7 @@ class CabinetPowerService:
             def match(e):
                 return (query.get("direction") not in ("up","down") or e["action"].startswith("下")== (query["direction"]=="down")) and (not query.get("action") or e["action"]==query["action"]) and (not query.get("from") or bool(e["actual"]) and e["actual"][:10]>=query["from"]) and (not query.get("to") or bool(e["actual"]) and e["actual"][:10]<=query["to"])
             ops=[o for o in ops if any(match(e) for e in o["events"])]
-        if query.get("sheet"): ops.sort(key=lambda o:(o.get("source_row") or o["ordinal"],o["record_id"]))
+        if query.get("sheet"): ops.sort(key=lambda o:(o.get("source_row") or o.get("ordinal",0),o["record_id"]))
         else: ops.sort(key=lambda o:(o["last_operation"],o["record_id"]),reverse=True)
         try: page=max(1,int(query.get("page",1))); size=min(100,max(1,int(query.get("page_size",50))))
         except (ValueError,TypeError): raise CabinetError("分页参数无效")

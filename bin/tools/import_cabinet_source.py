@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from lan_bitable_template_portal.cabinet_power import CabinetFeishu, INITIAL_TEMPLATES
+from lan_bitable_template_portal.cabinet_power import CabinetFeishu, INITIAL_TEMPLATES, layout_identity
 from lan_bitable_template_portal.cabinet_power_data import EXTRA_FIELDS, source_rows, source_evidence
 from lan_bitable_template_portal.cabinet_power_excel import OPS,RACK_TYPES,digest,text_value,Workbook
 
@@ -95,7 +95,13 @@ def main():
         for scope,rooms in layouts.items():
             content=(INITIAL_TEMPLATES/(scope+".xlsm")).read_bytes()
             model,_=source_rows(content,scope)
-            (INITIAL_TEMPLATES/(scope+".layouts.json.gz")).write_bytes(gzip.compress(json.dumps({"hash":hashlib.sha256(content).hexdigest(),"rooms":rooms,"source_rows":source_evidence(content,model)},ensure_ascii=False,separators=(",",":")).encode(),mtime=0))
+            book=Workbook(content)
+            template_data={"hash":model["template_hash"],"formats":model["formats"],"summary_cells":{name:{ref:book.value(cell) for ref,cell in book.cells(name).items()} for name in book.sheets if "汇总" in name}}
+            map_values={name:{ref:book.value(cell) for ref,cell in book.cells(name).items() if book.value(cell) not in (None,"")} for name in book.sheets if "平面图" in name}
+            rooms_meta=[{key:value for key,value in room.items() if key!="layout"} for room in model["rooms"]]
+            payload={"hash":hashlib.sha256(content).hexdigest(),"layout_identity":layout_identity(model),"rooms":rooms,
+                     "rooms_meta":rooms_meta,"template_data":template_data,"map_values":map_values,"source_rows":source_evidence(content,model)}
+            (INITIAL_TEMPLATES/(scope+".layouts.json.gz")).write_bytes(gzip.compress(json.dumps(payload,ensure_ascii=False,separators=(",",":")).encode(),mtime=0))
     if not args.commit: return
     main_remote=CabinetFeishu(); base=CabinetFeishu(""); tables=base.list_all("tables")
     matches=[t for t in tables if t["name"]==DIRECTORY_NAME]

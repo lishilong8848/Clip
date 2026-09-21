@@ -19,9 +19,27 @@ from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_fe
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, _notice_period_dates, baseline_correction_operations, calculate, completed_state_event, derive_records, export_workbook, dates, digest, map_state_baseline, room_code, system_name
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
+from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_split_ocr_cells_produce_a_complete_batch_row(self):
+        lines=[
+            ("包间",[("包",245,45),("间",262,45)]),("包间系统名",[("包",350,34)]),
+            ("操作类型",[("操作类型",521,45)]),("期望完成时间",[("期望完成时间",649,45)]),
+            ("实际完成时间",[("实际完成时间",808,45)]),("营商机柜编",[("营商机柜编",983,34)]),
+            ("E2-1EAI1",[("E2",246,112),("一",265,120),("1",272,112),("EAI",285,112),("1",316,112)]),
+            ("8",[("8",280,131)]),("EAI18-E2-",[("EAI",354,112),("1",386,112),("8",394,112),("一",403,120),("E2",409,112),("一",428,120)]),
+            ("AI6",[("AI",464,122),("6",485,122)]),("正式电转丬则试",[("正式电转丬则试",522,108)]),("电",[("电",565,131)]),
+            ("2026-04-0420℃",[("2026",656,112),("04",697,112),("04",721,112),("20",743,112),("℃",762,112)]),
+            ("0.22",[("0",700,131),("22",713,131)]),("2026-04-0320℃",[("2026",815,112),("04",856,112),("03",880,112),("20",902,112),("℃",921,112)]),
+            ("0.41",[("0",859,131),("41",872,131)]),("AI6",[("AI",1002,122),("6",1023,122)]),("SUCCES",[("SUCCES",1097,112)]),
+        ]
+        rows=_rows_from_ocr(lines,1176)
+        self.assertEqual(rows,[{"scope":"E","room":"201","rack":"A16","supplier_rack":"A16",
+            "action":"正式电转测试电","expected":"2026-04-04 20:00:22","actual":"2026-04-03 20:00:41",
+            "result":"成功","raw":rows[0]["raw"]}])
+
     def test_notice_period_range_uses_the_real_end_date(self):
         self.assertEqual(_notice_period_dates("2026.3.23-25"),["2026-03-23","2026-03-25"])
         self.assertEqual(_notice_period_dates("2026.3.27-4.1"),["2026-03-27","2026-04-01"])
@@ -244,6 +262,7 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual(sum(bool(item.get("meta",{}).get("baseline_correction")) for item in snapshot["operations"]),25)
         first=corrections[0]; visible=self.service.operations("C",{"room":first["room"],"rack":first["rack"],"page_size":100})
         self.assertTrue(any(item.get("meta",{}).get("baseline_correction") for item in visible["items"]))
+        self.assertTrue(self.service.operations("C",{"sheet":first["source"],"page_size":100})["items"])
         exported=Workbook(export_workbook(content,snapshot["config"],snapshot["operations"]))
         fmt=next(item for item in model["formats"] if item["sheet"]==first["source"])
         action_column=fmt["groups"][-1 if first["category"]=="down" else 0]["action"]
@@ -392,6 +411,15 @@ class CabinetPowerTests(unittest.TestCase):
         layout=self.service.layout("D","201")
         self.assertEqual(layout["layout"]["sheet"],layout["room"]["sheet"])
         self.assertTrue(layout["layout"]["cells"])
+
+    def test_packaged_template_replaces_compatible_old_feishu_hash_only(self):
+        legacy=copy.deepcopy(self.configs["A"]); legacy["template_data"]["hash"]="0"*64
+        current=self.service._packaged_config("A",legacy)
+        self.assertNotEqual(current["template_data"]["hash"],legacy["template_data"]["hash"])
+        self.assertTrue(current["map_values"])
+        incompatible=copy.deepcopy(legacy); incompatible["inventory"][0]["positions"][0]["range"]="Z999:Z999"
+        with self.assertRaisesRegex(CabinetError,"结构不一致"):
+            self.service._packaged_config("A",incompatible)
 
     def test_down_filter_includes_embedded_history_without_duplicate_records(self):
         down=self.service.operations("D",{"direction":"down","page_size":100})
@@ -1284,6 +1312,13 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(len(self.remote.attachments),1)
         for row in done["rows"]:
             self.assertEqual(len(self.remote.get(row["record_id"])["fields"]["上下电确认截图"]),1)
+
+    def test_empty_image_batch_can_be_permanently_deleted(self):
+        batch=self.service.batches.create_image_batch("owner",["A"],"A")
+        result=self.service.batches.delete_empty(batch["batch_id"],"owner",expected_version=batch["version"])
+        self.assertTrue(result["deleted"])
+        with self.assertRaisesRegex(CabinetError,"批次不存在"):
+            self.service.batches.get(batch["batch_id"])
 
     def test_image_registration_keeps_out_of_scope_candidates_unsubmitted(self):
         from PIL import Image
