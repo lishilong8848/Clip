@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, QTimer
 from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
 )
-from ..core.parser import extract_event_info
+from ..core.parser import extract_event_info, is_notice_confirmed_ended
 from ..utils import ACTIVE_CACHE_FILE
 from .display_state import normalize_active_item_data, persistent_active_item_data
 
@@ -86,8 +86,7 @@ class ActiveCacheMixin:
             return False
         if bool(data.get("_ended_moved")):
             return True
-        info = extract_event_info(str(data.get("text") or ""))
-        return bool(info and info.get("status") == "结束")
+        return is_notice_confirmed_ended(data)
 
     def _history_contains_record(self, data):
         return False

@@ -32,9 +32,6 @@ def install_cabinet_power_routes(app,controller,runtime):
                     fallback=service.batches.store.requeue_failed_notice_handoffs()
                     runtime.ensure_cabinet_notice_worker(); runtime.cabinet_notice_queue_event.set()
                     return controller._json_ok(request,session,{"requeued":primary+fallback})
-                if path=="batches/reconcile-notices" and request.method=="POST":
-                    if not admin: raise CabinetError("仅管理员可核对旧通告结束时间",403)
-                    return controller._json_ok(request,session,{"started":runtime.start_cabinet_notice_history_reconcile(force=True)})
                 if path=="batches/recognize" and request.method=="POST":
                     try:
                         form=await request.form(max_files=10,max_fields=20,max_part_size=10*1024*1024)
@@ -220,7 +217,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         except Exception as exc: return controller._portal_error_response(exc,default_status=400)
 
     for path,methods in {
-        "batches/retry-handoffs":["POST"],"batches/reconcile-notices":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH","DELETE"],
+        "batches/retry-handoffs":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH","DELETE"],
         "batches/{batch_id}/status":["GET"],
         "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],"batches/{batch_id}/rollback":["POST"],
         "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/restore-rows":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],

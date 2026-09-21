@@ -2250,6 +2250,61 @@ class QtShellBackendEventTests(unittest.TestCase):
                             self.assertEqual(result["item"]["payload"]["status"], status)
                             self.assertEqual(len(store.list_visible_qt_active_items()), 1)
 
+    def test_event_clipboard_repeated_updates_refresh_progress_and_same_row(self):
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房A楼I3级事件通报\n"
+            "【来源】轮巡\n【时间】2026-09-21 16：35\n"
+            "【概述】轮巡发现A-127-2#冷水机组故障\n"
+            "【影响】IT业务暂无影响\n【进展】工程师现场检查中"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            with patch.object(PortalRuntime, "state_store", store):
+                base = {
+                    "notice_type": "事件通告", "work_type": "event", "text": text,
+                    "title": "EA118机房A楼I3级事件通报", "building": "A楼",
+                    "time_str": "2026-09-21 16：35", "event_source": "轮巡", "level": "I3",
+                    "progress": "工程师现场检查中",
+                }
+                store.upsert_qt_active_item({
+                    **base, "active_item_id": "rec-current", "record_id": "rec-current",
+                    "target_record_id": "rec-current", "_is_placeholder_record": False,
+                }, section="event", origin="qt_upload")
+                self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+                for status, progress in (("更新", "第6条进展"), ("更新", "第7条进展"), ("结束", "处理完成")):
+                    with self.subTest(status=status, progress=progress):
+                        entry = FastAPIPortalController._clipboard_entry_from_content(
+                            text.replace("状态：新增", "状态：" + status).replace("工程师现场检查中", progress)
+                        )
+                        result = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+                        self.assertFalse(result.get("ignored"), result)
+                        self.assertEqual(result["record_id"], "rec-current")
+                        visible = store.list_visible_qt_active_items()
+                        self.assertEqual(len(visible), 1)
+                        self.assertIn(progress, visible[0]["payload"]["text"])
+                        self.assertEqual(visible[0]["payload"]["progress"], progress)
+
+    def test_event_detail_refresh_uses_incoming_text_not_stale_cache(self):
+        old = {
+            "active_item_id": "active-event", "record_id": "rec-event",
+            "notice_type": "事件通告", "text": "【事件通告】状态：更新\n【进展】第6条进展",
+        }
+        current = {**old, "text": "【事件通告】状态：结束\n【进展】第7条进展"}
+        harness = _RecordsHarness()
+        displayed = []
+        harness.detail_dialog = type("Dialog", (), {
+            "update_content": lambda _self, data, *args, **kwargs: displayed.append(data),
+        })()
+        harness._load_record_from_cache = lambda _record_id: dict(old)
+        harness._ensure_active_item_identity = lambda data: dict(data)
+        harness._is_placeholder_record = lambda _data: False
+        harness._detail_dialog_matches_active_item = lambda _active_id: True
+        harness._is_active_view = lambda: True
+        harness._log_detail_preview_update = lambda *args, **kwargs: None
+        harness._maybe_update_detail_dialog(current, "rec-event")
+        self.assertEqual(displayed[0]["text"], current["text"])
+
     def test_event_clipboard_update_reuses_target_snapshot_for_exact_user_sample(self):
         update_text = (
             "【事件通告】状态：更新\n"

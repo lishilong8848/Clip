@@ -22,8 +22,6 @@ from .drill_management import _cell_style_catalog, _shared_strings
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
-CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 T = lambda name: f"{{{NS}}}{name}"
 OPS = ("上正式电", "上测试电", "测试电转正式电", "正式电转测试电", "下正式电", "下测试电")
 STATES = dict(zip(OPS, ("formal", "test", "formal", "test", "off", "off")))
@@ -400,63 +398,6 @@ def parse_template(content, scope):
     return result
 
 
-def _notice_period_dates(value):
-    result = [date[:10] for date in dates(value)]
-    match = re.search(
-        r"(20\d{2})\D+(\d{1,2})\D+(\d{1,2})\s*[-~至]\s*(?:(\d{1,2})\D+)?(\d{1,2})",
-        str(value or ""),
-    )
-    if match:
-        year, month, _day, end_month, end_day = (int(item or 0) for item in match.groups())
-        try:
-            result.append(dt.date(year, end_month or month, end_day).isoformat())
-        except ValueError:
-            pass
-    return result
-
-
-def notice_summary_baseline_date(content):
-    """Return the last real daily-statistics date, ignoring update timestamps and month tables."""
-    book = Workbook(content)
-    summary = next((name for name in book.sheets if "汇总" in name), "")
-    if not summary:
-        return ""
-    rows = list(book.rows(summary))
-    found = []
-    for index, (_row_number, row) in enumerate(rows):
-        for start, label in row.items():
-            if str(label).strip() != "序号":
-                continue
-            next_label = str(row.get(start + 1, "")).strip()
-            if "月份" in next_label:
-                continue
-            if "上电日期" in next_label and "下电日期" in str(row.get(start + 3, "")):
-                offsets, width = (1, 3), 6
-            elif "日期" in next_label and "上电数量" in str(row.get(start + 2, "")):
-                offsets, width = (1,), 5
-            else:
-                continue
-            started = False
-            blank_rows = 0
-            for _number, values in rows[index + 1:]:
-                parsed = []
-                for offset in offsets:
-                    parsed.extend(_notice_period_dates(values.get(start + offset)))
-                if parsed:
-                    found.extend(parsed)
-                    started = True
-                    blank_rows = 0
-                    continue
-                section_values = [values.get(column) for column in range(start, start + width)]
-                if started and not any(value not in (None, "") for value in section_values):
-                    blank_rows += 1
-                    if blank_rows >= 2:
-                        break
-                elif started and str(values.get(start, "")).strip() and not isinstance(values.get(start), (int, float)):
-                    break
-    return max(found, default="")
-
-
 def calculate(inventory, operations, issues=(), baseline=None):
     baseline=baseline or {}
     grouped = defaultdict(list)
@@ -813,7 +754,7 @@ def refresh_formula_caches(book,cell_maps,config,write):
             if cell.find(T("f")) is not None: value(name,ref)
 
 
-def export_workbook(content, config, operations, notice_summary=None):
+def export_workbook(content, config, operations):
     """Fill the original template from a local snapshot and preserve layout and VBA."""
     operations=[op for op in operations if op.get("events") or op.get("source_row")]
     if not config.get("power_baseline"):
@@ -1161,12 +1102,8 @@ def export_workbook(content, config, operations, notice_summary=None):
         parts[book.sheets[name]]=xml_bytes(root,parts[book.sheets[name]])
     parts["xl/styles.xml"]=xml_bytes(styles,parts["xl/styles.xml"])
     baseline=set(config.get("baseline_event_ids",()))
-    baseline_keys=set(); mail_items={}; manual_items={}
+    baseline_keys=set(); mail_items={}
     for op in operations:
-        from_notice=any(
-            isinstance(item,dict) and (item.get("source")=="notice" or item.get("source_notice"))
-            for item in (op.get("meta",{}).get("batch_rows") or [])
-        )
         for event in op.get("events",[]):
             key=(op["room"],op["rack"],event.get("action",""),event.get("actual",""))
             if event.get("id") in baseline:
@@ -1176,17 +1113,14 @@ def export_workbook(content, config, operations, notice_summary=None):
                 item={"room":op["room"],"rack":op["rack"],"action":event["action"],
                       "date":event["actual"][:10],"sent_at":event["actual"],"direction":direction}
                 if direction in ("up","down"): mail_items[key]=item
-                if not from_notice: manual_items[key]=item
-    summary_payload=copy.deepcopy(notice_summary or {})
-    summary_payload["mail_items"]=[item for key,item in mail_items.items() if key not in baseline_keys]
-    summary_payload["manual_items"]=[item for key,item in manual_items.items() if key not in baseline_keys]
-    parts=append_notice_summary_parts(parts,book,config,summary_payload)
+    mail_items=[item for key,item in mail_items.items() if key not in baseline_keys]
+    parts=finalize_mail_summary(parts,book,config,mail_items)
     out=io.BytesIO()
     with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as archive:
         for name,data in parts.items(): archive.writestr(name,data)
     verified=Workbook(out.getvalue())
-    expected=["机柜上电汇总表（邮件）","机柜上电汇总表（每月阿里统计）",*(name for name in book.sheets if name!="机柜上电汇总表")]
-    if list(verified.sheets)!=expected: raise CabinetError("通告汇总工作表关系校验失败")
+    expected=["机柜上电汇总表（邮件）" if name=="机柜上电汇总表" else name for name in book.sheets]
+    if list(verified.sheets)!=expected: raise CabinetError("邮件汇总工作表关系校验失败")
     error_values={"#VALUE!","#REF!","#NAME?","#DIV/0!","#N/A","#NUM!","#NULL!","#SPILL!","#CALC!"}
     formula_errors=[(name,ref,verified.value(cell)) for name in verified.sheets
                     for ref,cell in verified.cells(name).items()
@@ -1383,456 +1317,31 @@ def _apply_period_summary(root,book,config,daily,monthly):
         positions=[coord(ref) for ref in current]; dimension.set("ref",f"A1:{col_name(max(x for x,_ in positions))}{max(y for _,y in positions)}")
 
 
-def append_notice_summary_parts(parts, book, config, summary):
+def finalize_mail_summary(parts, book, config, items):
     old_name = "机柜上电汇总表"
     mail_name = "机柜上电汇总表（邮件）"
-    notice_name = "机柜上电汇总表（每月阿里统计）"
     if old_name not in book.sheets:
         raise CabinetError("原模板缺少机柜上电汇总表")
     workbook = ET.fromstring(parts["xl/workbook.xml"])
-    sheets = workbook.find(T("sheets"))
-    old_sheet = next(sheet for sheet in sheets if sheet.get("name") == old_name)
-    old_sheet.set("name", mail_name)
-    new_id = max(int(sheet.get("sheetId", 0)) for sheet in sheets) + 1
-    rels = ET.fromstring(parts["xl/_rels/workbook.xml.rels"])
-    used_rels = {rel.get("Id") for rel in rels}
-    rel_id = next(f"rId{index}" for index in range(1, len(used_rels) + 2) if f"rId{index}" not in used_rels)
-    paths = set(parts)
-    sheet_path = next(f"xl/worksheets/sheet{index}.xml" for index in range(1, len(paths) + 2)
-                      if f"xl/worksheets/sheet{index}.xml" not in paths)
-    insert_at = list(sheets).index(old_sheet) + 1
-    sheets.insert(insert_at, ET.Element(T("sheet"), {"name": notice_name, "sheetId": str(new_id), f"{{{REL}}}id": rel_id}))
-    defined_names = workbook.find(T("definedNames"))
-    old_index = list(sheets).index(old_sheet)
-    notice_names = []
-    for name in list(defined_names) if defined_names is not None else []:
-        if name.get("localSheetId") == str(old_index):
-            cloned = copy.deepcopy(name)
-            cloned.set("localSheetId", str(insert_at))
-            if cloned.text:
-                cloned.text = cloned.text.replace(f"'{old_name}'!", f"'{notice_name}'!").replace(
-                    f"{old_name}!", f"'{notice_name}'!")
-            notice_names.append(cloned)
-        local_id = name.get("localSheetId")
-        if local_id is not None and int(local_id) >= insert_at:
-            name.set("localSheetId", str(int(local_id) + 1))
-    for view in workbook.findall(f"{T('bookViews')}/{T('workbookView')}"):
-        for attr in ("activeTab", "firstSheet"):
-            if view.get(attr) is not None and int(view.get(attr)) >= insert_at:
-                view.set(attr, str(int(view.get(attr)) + 1))
-    ET.SubElement(rels, f"{{{PKG}}}Relationship", {
-        "Id": rel_id, "Type": f"{REL}/worksheet", "Target": sheet_path.removeprefix("xl/"),
-    })
+    for sheet in workbook.find(T("sheets")):
+        if sheet.get("name") == old_name:
+            sheet.set("name", mail_name)
+
+    def rename_reference(formula):
+        if formula.text:
+            formula.text = formula.text.replace(f"'{old_name}'!", f"'{mail_name}'!").replace(
+                f"{old_name}!", f"'{mail_name}'!")
+
     for name in workbook.findall(f"{T('definedNames')}/{T('definedName')}"):
-        if name.text:
-            name.text = name.text.replace(f"'{old_name}'!", f"'{mail_name}'!").replace(f"{old_name}!", f"'{mail_name}'!")
-    if defined_names is not None:
-        defined_names.extend(notice_names)
-
-    source_path = book.sheets[old_name]
-    baseline_root = ET.fromstring(book.archive.read(source_path))
-    baseline_cells = {cell.get("r"): cell for cell in baseline_root.iter(T("c"))}
-    root = ET.fromstring(parts[source_path])
-    mail_root = copy.deepcopy(root)
-    for view in root.findall(f"{T('sheetViews')}/{T('sheetView')}"):
-        view.attrib.pop("tabSelected", None)
-
-    # The mail sheet keeps its post-baseline audit blocks. The notice sheet uses
-    # the same template table and folds successfully sent start notices into its dated rows.
-    sheet_data = root.find(T("sheetData"))
-    generated_start = next((int(row.get("r")) for row in sheet_data
-                            if any(str(book.value(cell)).startswith("系统新增上下电") for cell in row if cell.tag == T("c"))), None)
-    if generated_start is not None:
-        for row in list(sheet_data):
-            if int(row.get("r")) >= generated_start:
-                sheet_data.remove(row)
-
-    combined={}
-    for item in [*(summary.get("items",[]) or []),*(summary.get("manual_items",[]) or [])]:
-        if not isinstance(item,dict): continue
-        key=(str(item.get("room") or ""),str(item.get("rack") or ""),str(item.get("direction") or ""),
-             str(item.get("date") or ""),str(item.get("action") or "") if item.get("direction")=="transition" else "")
-        combined.setdefault(key,item)
-    items = sorted(combined.values(),key=lambda item: (str(item.get("sent_at") or ""), str(item.get("batch_id") or ""), str(item.get("row_id") or "")))
-    daily = defaultdict(Counter)
-    monthly = defaultdict(Counter)
-    inventory = {(item["room"], item["rack"]): item for item in config.get("inventory", [])}
-    baseline = config.get("power_baseline") or {}
-    states = {}
-    for key, rack in inventory.items():
-        saved = baseline.get(key[0] + "/" + key[1]) or {}
-        state = saved.get("state")
-        if state not in {"formal", "test", "off"}:
-            state = {"#FF0000": "formal", "#FFC000": "test", "#00B050": "off", "#92D050": "off"}.get(
-                str(rack.get("template_color") or "").upper(), "off")
-        states[key] = state
-    initial_states = copy.deepcopy(states)
-    onsite_delta = 0
-    for item in items:
-        direction = item.get("direction")
-        date = str(item.get("date") or "")
-        key = (str(item.get("room") or ""), str(item.get("rack") or ""))
-        if direction not in {"up", "down", "transition"} or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or key not in states:
-            continue
-        if direction in {"up","down"}:
-            daily[date][direction] += 1
-            monthly[date[:7]][direction] += 1
-        before = states[key]
-        if direction == "down":
-            after = "off"
-        else:
-            after = STATES.get(str(item.get("action") or ""))
-            if after not in {"formal", "test"}:
-                after = "powered_unknown"
-        onsite_delta += int(after != "off") - int(before != "off")
-        states[key] = after
-        if direction in {"up","down"}:
-            daily[date]["onsite_delta"] = onsite_delta
-            monthly[date[:7]]["onsite_delta"] = onsite_delta
-
-    def cells():
-        return {cell.get("r"): cell for cell in root.iter(T("c"))}
-
-    def value(ref, mapping=None):
-        return book.value((mapping or cells()).get(ref))
-
-    def number(raw):
-        try:
-            return float(raw) if raw not in (None, "") else 0.0
-        except (TypeError, ValueError):
-            return 0.0
-
-    def period_key(raw, monthly_period=False):
-        if isinstance(raw, (int, float)) and 30000 < raw < 100000:
-            date = (dt.datetime(1899, 12, 30) + dt.timedelta(days=raw)).date()
-            return date.strftime("%Y-%m" if monthly_period else "%Y-%m-%d")
-        match = re.search(r"(20\d{2})\D+(\d{1,2})(?:\D+(\d{1,2}))?", str(raw or ""))
-        if not match:
-            return ""
-        year, month, day = int(match[1]), int(match[2]), int(match[3] or 1)
-        try:
-            date = dt.date(year, month, day)
-        except ValueError:
-            return ""
-        return date.strftime("%Y-%m" if monthly_period else "%Y-%m-%d")
-
-    mapping = cells()
-
-    def put_ref(ref, raw, style=0, formula=None):
-        cell = mapping.get(ref)
-        if cell is None:
-            cell = put_cell(root, ref, raw, int(style or 0), formula=formula)
-            mapping[ref] = cell
-        else:
-            put_cell(root, ref, raw, formula=formula, cell=cell)
-        return cell
-
-    # Rebuild the visible stock table from the frozen states.  Some original
-    # workbooks cache their VBA colour formulas as literal #NAME? values.
-    source_cells = baseline_cells
-    total_row = 0
-    for row in sheet_data:
-        rn = int(row.get("r"))
-        if str(value(f"A{rn}", mapping)).strip() in {"总计", "合计"}:
-            total_row = rn
-            break
-
-    building_delta = Counter()
-    for key, after in states.items():
-        before = initial_states[key]
-        rack = inventory[key]
-        rack_type = str(rack.get("rack_type") or "")
-        changes = Counter({
-            "powered": int(after != "off") - int(before != "off"),
-            "off": int(after == "off") - int(before == "off"),
-            "formal": int(after == "formal") - int(before == "formal"),
-            "test": int(after == "test") - int(before == "test"),
-            "unknown": int(after == "powered_unknown") - int(before == "powered_unknown"),
-        })
-        for metric, change in changes.items():
-            building_delta[metric] += change
-        prefix = "network" if rack_type == RACK_TYPES[0] else "server" if rack_type == RACK_TYPES[1] else ""
-        if prefix:
-            building_delta[prefix + "_powered"] += changes["powered"]
-            building_delta[prefix + "_off"] += changes["off"]
-
-    stock_rows=[]
-    for room in config.get("rooms", []):
-        row = int(room.get("summary_row") or 0)
-        if not row: continue
-        rr=[(key,rack) for key,rack in inventory.items() if key[0]==room["id"]]
-        network=[item for item in rr if item[1].get("rack_type")==RACK_TYPES[0]]
-        servers=[item for item in rr if item[1].get("rack_type")==RACK_TYPES[1]]
-        powered=lambda items:sum(states[key]!="off" for key,_rack in items)
-        off=lambda items:sum(states[key]=="off" for key,_rack in items)
-        gap=max(0,int(room.get("total") or 0)-len(rr)); carrier=config.get("scope")=="B" and room["id"] in ("216","247")
-        metrics=[int(room.get("total") or 0),powered(rr),off(rr)+gap,
-                 len(network)+(gap if carrier else 0),powered(network),off(network)+(gap if carrier else 0),
-                 len(servers),powered(servers),off(servers)]
-        stock_rows.append(metrics)
-        for column,raw in enumerate(metrics,2): put_ref(f"{col_name(column)}{row}",raw,mapping[f"{col_name(column)}{row}"].get("s","0"))
-    if total_row and stock_rows:
-        totals=list(map(sum,zip(*stock_rows)))
-        for column,raw in enumerate(totals,2): put_ref(f"{col_name(column)}{total_row}",raw,mapping[f"{col_name(column)}{total_row}"].get("s","0"))
-        for cell in list(next(row for row in sheet_data if int(row.get("r")) == total_row)):
-            formula = cell.find(T("f"))
-            if formula is not None and re.fullmatch(rf"F{total_row}\+I{total_row}", formula.text or "", re.I):
-                put_cell(root, cell.get("r"), totals[1],
-                         formula=copy.deepcopy(formula), cell=cell)
-
-    special_metrics = (("测试电总数", "test"), ("正式电总数", "formal"),
-                       ("未上电机柜总数", "off"), ("已上电机柜总数", "powered"))
-    for cell in list(root.iter(T("c"))):
-        label = str(book.value(cell)).replace("：", "")
-        metric = next((key for text, key in special_metrics if text in label), "")
-        if not metric:
-            continue
-        x, y = coord(cell.get("r"))
-        target = next((mapping.get(f"{col_name(column)}{y}") for column in range(x + 1, min(x + 5, 16385))
-                       if mapping.get(f"{col_name(column)}{y}") is not None and isinstance(value(f"{col_name(column)}{y}", mapping), (int, float))), None)
-        if target is not None:
-            ref = target.get("r")
-            source = source_cells.get(ref)
-            base = number(book.value(source)) if source is not None else number(value(ref, mapping))
-            put_ref(ref, base + building_delta[metric], target.get("s", "0"))
-    unknown_count = sum(state == "powered_unknown" for state in states.values())
-    for cell in list(root.iter(T("c"))):
-        if str(book.value(cell)).strip() == "未确认状态机柜":
-            x, y = coord(cell.get("r")); put_ref(f"{col_name(x + 1)}{y}", unknown_count)
-
-    sections = []
-    for row in sheet_data:
-        header_row = int(row.get("r"))
-        row_values = {coord(cell.get("r"))[0]: str(book.value(cell)).strip() for cell in row if cell.tag == T("c")}
-        for start, label in row_values.items():
-            if label != "序号":
-                continue
-            following = [row_values.get(start + offset, "") for offset in range(1, 6)]
-            if "上电日期" in following[0] and "上电数量" in following[1] and "下电日期" in following[2]:
-                sections.append({"kind": "split", "start": start, "header": header_row, "width": 6})
-            elif ("日期" in following[0] or "月份" in following[0]) and "上电数量" in following[1] and "下电数量" in following[2] and "现场上电" in following[3]:
-                kind = "month" if "月份" in following[0] else "day"
-                title = str(value(f"{col_name(start)}{header_row - 1}", mapping))
-                year_match = re.search(r"20\d{2}", title)
-                sections.append({"kind": kind, "start": start, "header": header_row, "width": 5,
-                                 "title_year": year_match.group() if year_match else ""})
-
-    def data_rows(section, current):
-        start, width = section["start"], section["width"]
-        return [int(row.get("r")) for row in sheet_data if int(row.get("r")) > section["header"]
-                and any(value(f"{col_name(column)}{int(row.get('r'))}", current) not in (None, "")
-                        for column in range(start, start + width))]
-
-    def row_attrs(row_number):
-        row = next((item for item in sheet_data if int(item.get("r")) == row_number), None)
-        return {key: val for key, val in (row.attrib.items() if row is not None else ()) if key != "r"}
-
-    def ensure_row(target, attrs=None):
-        row = next((item for item in sheet_data if int(item.get("r")) == target), None)
-        if row is None:
-            row = ET.SubElement(sheet_data, T("row"), {"r": str(target), **(attrs or {})})
-        return row
-
-    def prepare(section):
-        rows = data_rows(section, mapping)
-        sample = rows[-1] if rows else section["header"] + 1
-        section["styles"] = []
-        for offset in range(section["width"]):
-            cell = mapping.get(f"{col_name(section['start'] + offset)}{sample}")
-            if cell is None:
-                cell = mapping.get(f"{col_name(section['start'] + offset)}{section['header']}")
-            section["styles"].append(int(cell.get("s", "0")) if cell is not None else 0)
-        section["row_attrs"] = row_attrs(sample)
-        return section
-
-    for section in sections:
-        prepare(section)
-
-    def write(section, row, offset, raw, current):
-        ensure_row(row, section.get("row_attrs"))
-        ref = f"{col_name(section['start'] + offset)}{row}"
-        cell = current.get(ref)
-        if cell is None:
-            cell = put_cell(root, ref, raw, section["styles"][offset])
-            current[ref] = cell
-        else:
-            put_cell(root, ref, raw, cell=cell)
-
-    def historical_months(day_sections):
-        result = defaultdict(Counter)
-        for section in day_sections:
-            for rn in data_rows(section, mapping):
-                cumulative_offset = 5 if section["kind"] == "split" else 4
-                if section["kind"] == "split":
-                    up_date = period_key(value(f"{col_name(section['start'] + 1)}{rn}", mapping), True)
-                    down_date = period_key(value(f"{col_name(section['start'] + 3)}{rn}", mapping), True)
-                    fallback = up_date or down_date
-                    up = number(value(f"{col_name(section['start'] + 2)}{rn}", mapping))
-                    down = number(value(f"{col_name(section['start'] + 4)}{rn}", mapping))
-                    if up and (up_date or fallback): result[up_date or fallback]["up"] += up
-                    if down and (down_date or fallback): result[down_date or fallback]["down"] += down
-                    period = max(filter(None, (up_date, down_date)), default="")
-                else:
-                    period = period_key(value(f"{col_name(section['start'] + 1)}{rn}", mapping), True)
-                    if period:
-                        result[period]["up"] += number(value(f"{col_name(section['start'] + 2)}{rn}", mapping))
-                        result[period]["down"] += number(value(f"{col_name(section['start'] + 3)}{rn}", mapping))
-                if period:
-                    result[period]["onsite"] = number(value(f"{col_name(section['start'] + cumulative_offset)}{rn}", mapping))
-        return result
-
-    day_sections = [section for section in sections if section["kind"] in ("day", "split")]
-    history_months = historical_months(day_sections)
-    base_total = history_months[sorted(history_months)[-1]]["onsite"] if history_months else 0
-
-    def add_merge(ref):
-        merges = root.find(T("mergeCells"))
-        if merges is None:
-            merges = ET.Element(T("mergeCells")); root.insert(list(root).index(sheet_data) + 1, merges)
-        if not any(item.get("ref") == ref for item in merges):
-            ET.SubElement(merges, T("mergeCell"), ref=ref); merges.set("count", str(len(merges)))
-
-    def create_section(kind, start, title_row, header_row, source, title, headers):
-        ensure_row(title_row, row_attrs(source["header"] - 1)); ensure_row(header_row, row_attrs(source["header"]))
-        source_offsets = [0, 1, 2, 4, 5] if source["kind"] == "split" else [0, 1, 2, 3, 4]
-        styles = [source["styles"][offset] for offset in source_offsets]
-        put_ref(f"{col_name(start)}{title_row}", title, mapping.get(f"{col_name(source['start'])}{source['header'] - 1}", ET.Element("c")).get("s", "0"))
-        add_merge(f"{col_name(start)}{title_row}:{col_name(start + 4)}{title_row}")
-        for offset, label in enumerate(headers): put_ref(f"{col_name(start + offset)}{header_row}", label, styles[offset])
-        section = {"kind": kind, "start": start, "header": header_row, "width": 5,
-                   "styles": styles, "row_attrs": source.get("row_attrs", {})}
-        sections.append(section)
-        cols = root.find(T("cols"))
-        if cols is not None:
-            for offset, source_offset in enumerate(source_offsets):
-                source_column = source["start"] + source_offset
-                width = next((item.get("width") for item in cols
-                              if int(item.get("min")) <= source_column <= int(item.get("max"))), "12")
-                ET.SubElement(cols, T("col"), min=str(start + offset), max=str(start + offset), width=width, customWidth="1")
-        return section
-
-    month_sections = [section for section in sections if section["kind"] == "month"]
-    if not month_sections:
-        placement = {"A": (8, 12, 13), "B": (18, 1, 2), "C": (32, 12, 13)}.get(config["scope"])
-        if placement and day_sections:
-            start, title_row, header_row = placement
-            month = create_section("month", start, title_row, header_row, day_sections[-1],
-                                   f"{config['scope']}栋上、下电月度统计",
-                                   ("序号", "月份", "上电数量（个）", "下电数量（个）", "现场上电总数量（个）"))
-            month["month_text"] = True
-            for index, (period, counts) in enumerate(sorted(history_months.items()), 1):
-                row = header_row + index; year, month_number = map(int, period.split("-"))
-                values = (index, f"{year}年{month_number}月",
-                          counts["up"] or "", counts["down"] or "", counts["onsite"])
-                for offset, raw in enumerate(values): write(month, row, offset, raw, mapping)
-            month_sections = [month]
-
-    def create_year_section(year):
-        source = max(day_sections, key=lambda item: item.get("title_year") or "")
-        last_row = max((int(row.get("r")) for row in sheet_data), default=source["header"]) + 3
-        section = create_section("day", 1, last_row, last_row + 1, source,
-                                 f"{config['scope']}栋{year}年上、下电总数量统计",
-                                 ("序号", "日期", "上电数量（个）", "下电数量（个）", "现场上电总数量（个）"))
-        section["title_year"] = year; day_sections.append(section)
-        return section
-
-    def apply(section, stats):
-        if not stats:
-            return
-        current = cells(); rows = data_rows(section, current)
-        sequence = max((int(number(value(f"{col_name(section['start'])}{rn}", current))) for rn in rows), default=0)
-        cumulative_offset = 5 if section["kind"] == "split" else 4
-        existing = {}
-        for rn in rows:
-            for offset in ((1, 3) if section["kind"] == "split" else (1,)):
-                key = period_key(value(f"{col_name(section['start'] + offset)}{rn}", current), section["kind"] == "month")
-                if key: existing.setdefault(key, rn)
-        for period, counts in sorted(stats.items()):
-            up, down = counts["up"], counts["down"]
-            target = existing.get(period)
-            if target is None:
-                target = max(rows, default=section["header"]) + 1; sequence += 1
-                write(section, target, 0, sequence, current)
-                if section["kind"] == "split":
-                    display = f"{int(period[:4])}.{int(period[5:7])}.{int(period[8:10])}"
-                    for offset, raw in ((1, display if up else ""), (2, up or ""),
-                                        (3, display if down else ""), (4, down or "")): write(section, target, offset, raw, current)
-                else:
-                    if section["kind"] == "month":
-                        year, month_number = map(int, period.split("-"))
-                        display = f"{year}年{month_number}月" if section.get("month_text") else (dt.date(year, month_number, 1) - dt.date(1899, 12, 30)).days
-                    else:
-                        year, month_number, day = map(int, period.split("-")); display = f"{year}.{month_number}.{day}"
-                    for offset, raw in ((1, display), (2, up or ""), (3, down or "")): write(section, target, offset, raw, current)
-                rows.append(target); existing[period] = target
-            else:
-                if section["kind"] == "split":
-                    display = f"{int(period[:4])}.{int(period[5:7])}.{int(period[8:10])}"
-                    if up:
-                        if not period_key(value(f"{col_name(section['start'] + 1)}{target}", current)): write(section, target, 1, display, current)
-                        write(section, target, 2, number(value(f"{col_name(section['start'] + 2)}{target}", current)) + up, current)
-                    if down:
-                        if not period_key(value(f"{col_name(section['start'] + 3)}{target}", current)): write(section, target, 3, display, current)
-                        write(section, target, 4, number(value(f"{col_name(section['start'] + 4)}{target}", current)) + down, current)
-                else:
-                    if up: write(section, target, 2, number(value(f"{col_name(section['start'] + 2)}{target}", current)) + up, current)
-                    if down: write(section, target, 3, number(value(f"{col_name(section['start'] + 3)}{target}", current)) + down, current)
-            desired_total = base_total + counts["onsite_delta"]
-            prior_total = number(value(f"{col_name(section['start'] + cumulative_offset)}{target}", current))
-            change = desired_total - prior_total
-            write(section, target, cumulative_offset, desired_total, current)
-            for rn in rows:
-                if rn > target:
-                    ref = f"{col_name(section['start'] + cumulative_offset)}{rn}"
-                    write(section, rn, cumulative_offset, number(value(ref, current)) + change, current)
-
-    if len(day_sections) <= 1:
-        if day_sections: apply(day_sections[0], daily)
-    else:
-        for year in sorted({period[:4] for period in daily}):
-            section = next((item for item in day_sections if item.get("title_year") == year), None)
-            if section is None: section = create_year_section(year)
-            apply(section, {period: counts for period, counts in daily.items() if period.startswith(year + "-")})
-    if month_sections: apply(month_sections[0], monthly)
-
-    sheet_data[:] = sorted(sheet_data, key=lambda row: int(row.get("r")))
-    for row in sheet_data:
-        row[:] = sorted(row, key=lambda cell: coord(cell.get("r"))[0] if cell.tag == T("c") else 0)
-    mapping = cells()
-    dimension = root.find(T("dimension"))
-    if dimension is not None and mapping:
-        coordinates = [coord(ref) for ref in mapping]
-        dimension.set("ref", f"A1:{col_name(max(x for x, _ in coordinates))}{max(y for _, y in coordinates)}")
-    parts[sheet_path] = xml_bytes(root, parts[source_path])
-
-    source_rels = posixpath.join(posixpath.dirname(source_path), "_rels", posixpath.basename(source_path) + ".rels")
-    cloned_relationship_parts = []
-    if source_rels in parts:
-        relationships = ET.fromstring(parts[source_rels])
-        for relationship in list(relationships):
-            kind = relationship.get("Type", "").rsplit("/", 1)[-1]
-            if kind == "printerSettings":
-                continue
-            if kind not in {"comments", "vmlDrawing"} or relationship.get("TargetMode") == "External":
-                relationships.remove(relationship)
-                continue
-            source_part = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), relationship.get("Target", "")))
-            if source_part not in parts:
-                relationships.remove(relationship)
-                continue
-            parent, filename = posixpath.split(source_part)
-            stem, suffix = posixpath.splitext(filename)
-            index = 2
-            cloned_part = posixpath.join(parent, f"{stem}{index}{suffix}")
-            while cloned_part in parts:
-                index += 1
-                cloned_part = posixpath.join(parent, f"{stem}{index}{suffix}")
-            parts[cloned_part] = parts[source_part]
-            relationship.set("Target", posixpath.relpath(cloned_part, posixpath.dirname(sheet_path)))
-            cloned_relationship_parts.append((source_part, cloned_part))
-        if len(relationships):
-            notice_rels = posixpath.join(posixpath.dirname(sheet_path), "_rels", posixpath.basename(sheet_path) + ".rels")
-            parts[notice_rels] = xml_bytes(relationships, parts[source_rels])
+        rename_reference(name)
+    for name, path in book.sheets.items():
+        root = ET.fromstring(parts[path])
+        for formula in root.iter(T("f")):
+            rename_reference(formula)
+        if name == old_name:
+            daily, monthly = _summary_period_counts(config, items)
+            _apply_period_summary(root, book, config, daily, monthly)
+        parts[path] = xml_bytes(root, parts[path])
 
     calc = workbook.find(T("calcPr"))
     if calc is None:
@@ -1840,6 +1349,7 @@ def append_notice_summary_parts(parts, book, config, summary):
     calc.set("calcMode", "auto")
     calc.set("fullCalcOnLoad", "1")
     calc.set("forceFullCalc", "1")
+    rels = ET.fromstring(parts["xl/_rels/workbook.xml.rels"])
     for relationship in list(rels):
         if relationship.get("Type", "").endswith("/calcChain"):
             rels.remove(relationship)
@@ -1850,37 +1360,11 @@ def append_notice_summary_parts(parts, book, config, summary):
     for override in list(types):
         if override.get("PartName") == "/xl/calcChain.xml":
             types.remove(override)
-    for source_part, cloned_part in cloned_relationship_parts:
-        source_override = next((item for item in types if item.get("PartName") == "/" + source_part), None)
-        if source_override is not None:
-            cloned_override = copy.deepcopy(source_override)
-            cloned_override.set("PartName", "/" + cloned_part)
-            types.append(cloned_override)
-    ET.SubElement(types, f"{{{CT}}}Override", {"PartName": "/" + sheet_path,
-        "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"})
     parts["[Content_Types].xml"] = xml_bytes(types, parts["[Content_Types].xml"])
     if "docProps/app.xml" in parts:
         app = ET.fromstring(parts["docProps/app.xml"])
-        app_ns = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
-        vt_ns = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
-        titles = app.find(f"{{{app_ns}}}TitlesOfParts/{{{vt_ns}}}vector")
-        if titles is not None:
-            old_title = next((item for item in titles if item.text == old_name), None)
-            if old_title is not None:
-                index = list(titles).index(old_title)
-                old_title.text = mail_name
-                titles.insert(index + 1, ET.Element(f"{{{vt_ns}}}lpstr"))
-                titles[index + 1].text = notice_name
-                titles.set("size", str(len(titles)))
-                heading = app.find(f"{{{app_ns}}}HeadingPairs/{{{vt_ns}}}vector")
-                if heading is not None:
-                    count = heading.find(f"{{{vt_ns}}}variant/{{{vt_ns}}}i4")
-                    if count is None:
-                        count = heading.find(f"{{{vt_ns}}}variant[2]/{{{vt_ns}}}i4")
-                    if count is not None:
-                        count.text = str(int(count.text or "0") + 1)
-                parts["docProps/app.xml"] = xml_bytes(app, parts["docProps/app.xml"])
-    mail_daily,mail_monthly=_summary_period_counts(config,summary.get("mail_items",[]))
-    _apply_period_summary(mail_root,book,config,mail_daily,mail_monthly)
-    parts[source_path]=xml_bytes(mail_root,parts[source_path])
+        for title in app.iter("{http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes}lpstr"):
+            if title.text == old_name:
+                title.text = mail_name
+        parts["docProps/app.xml"] = xml_bytes(app, parts["docProps/app.xml"])
     return parts

@@ -94,7 +94,7 @@ from upload_event_module.services.service_registry import (
     update_bitable_record_by_payload,
 )
 from upload_event_module.services.feishu_service import BitableWriteUncertainError
-from upload_event_module.core.parser import extract_event_info, extract_notice_info
+from upload_event_module.core.parser import extract_event_info, extract_notice_info, is_notice_confirmed_ended
 from upload_event_module.logger import log_warning
 from upload_event_module.time_parser import parse_time_range
 
@@ -694,7 +694,7 @@ class PortalRuntime:
     cabinet_notice_queue_lock = threading.RLock()
     cabinet_notice_queue_event = threading.Event()
     cabinet_notice_worker_thread: threading.Thread | None = None
-    cabinet_notice_history_thread: threading.Thread | None = None
+    cabinet_notice_rollback_thread: threading.Thread | None = None
     cabinet_notice_worker_stop = False
     cabinet_notice_queue_channel = "cabinet_power_notice"
     cabinet_notice_max_attempts = 5
@@ -5563,14 +5563,7 @@ class PortalRuntime:
 
     def _get_ongoing(self, scope: str) -> list[dict]:
         def _is_ended(item: dict) -> bool:
-            status = str(item.get("status") or "").strip()
-            if status == "结束":
-                return True
-            text = str(item.get("text") or item.get("content") or "").strip()
-            if not text:
-                return False
-            info = extract_event_info(text) or {}
-            return str(info.get("status") or "").strip() == "结束"
+            return is_notice_confirmed_ended(item)
 
         def _qt_active_payloads(
             *, include_deleted: bool = False
@@ -6272,7 +6265,7 @@ class PortalRuntime:
                 daemon=True,
             )
             cls.cabinet_notice_worker_thread.start()
-            cls.start_cabinet_notice_history_reconcile()
+            cls.start_cabinet_notice_rollback_recovery()
             pending = False
             try:
                 pending = bool(cls.state_store.list_outbox_events(
@@ -6288,29 +6281,28 @@ class PortalRuntime:
                 cls.cabinet_notice_queue_event.set()
 
     @classmethod
-    def start_cabinet_notice_history_reconcile(cls, force: bool = False) -> bool:
+    def start_cabinet_notice_rollback_recovery(cls) -> bool:
         if cls.cabinet_power_service is None:
             return False
         with cls.cabinet_notice_queue_lock:
-            if cls.cabinet_notice_history_thread is not None and cls.cabinet_notice_history_thread.is_alive():
+            if cls.cabinet_notice_rollback_thread is not None and cls.cabinet_notice_rollback_thread.is_alive():
                 return False
-            cls.cabinet_notice_history_thread = threading.Thread(
-                target=cls._reconcile_cabinet_notice_history,
-                args=(force,), name="LANCabinetNoticeHistory", daemon=True,
+            cls.cabinet_notice_rollback_thread = threading.Thread(
+                target=cls._recover_cabinet_notice_rollbacks,
+                name="LANCabinetNoticeRollback", daemon=True,
             )
-            cls.cabinet_notice_history_thread.start()
+            cls.cabinet_notice_rollback_thread.start()
             return True
 
     @classmethod
-    def _reconcile_cabinet_notice_history(cls, force: bool = False) -> None:
+    def _recover_cabinet_notice_rollbacks(cls) -> None:
         try:
             batches = cls.cabinet_power_service.batches
             for batch in batches.store.notice_batches():
                 if (batch.get("source_notice") or {}).get("rollback_error"):
                     batches._resume_notice_rollback_after_confirm(batch["batch_id"])
-            batches.reconcile_legacy_notice_end_times(query_record_by_id, force=force)
         except Exception as exc:
-            log_warning(f"核对旧上下电通告结束时间失败: {exc}")
+            log_warning(f"恢复上下电通告待办回退失败: {exc}")
 
     @classmethod
     def stop_cabinet_notice_worker(cls) -> None:
@@ -11389,23 +11381,9 @@ class PortalRuntime:
                 "failed",
                 error=str(result or "多维更新失败。"),
             )
-        if ok and bool(prepared.get("expected_record_version")):
-            try:
-                ok_updated, updated_result = query_record_by_id(record_id, notice_type)
-            except Exception as exc:
-                # The write succeeded; a version refresh must not cause a resend.
-                log_warning(f"多维已更新，版本回读暂不可用: record_id={record_id}, error={exc}")
-                ok_updated, updated_result = False, {}
-            if ok_updated and isinstance(updated_result, dict):
-                cls._rebase_remote_record_version(
-                    prepared,
-                    updated_result.get("record_version"),
-                )
-                prepared["remote_last_modified_time"] = str(
-                    updated_result.get("last_modified_time") or ""
-                ).strip()
-            else:
-                cls._rebase_remote_record_version(prepared, "")
+        if ok:
+            # The next write reads a fresh version; no extra GET is needed here.
+            cls._rebase_remote_record_version(prepared, "")
         return bool(ok), str(result or ""), record_id
 
     @classmethod
@@ -13453,21 +13431,7 @@ class PortalRuntime:
                         "；本次未发送群消息。"
                     )
             else:
-                try:
-                    ok_updated, updated_query = query_record_by_id(
-                        target_record_id,
-                        notice_type,
-                    )
-                except Exception as exc:
-                    log_warning(f"多维已更新，Qt版本回读暂不可用: record_id={target_record_id}, error={exc}")
-                    ok_updated, updated_query = False, {}
-                if ok_updated and isinstance(updated_query, dict):
-                    updated_record_version = str(
-                        updated_query.get("record_version") or ""
-                    ).strip()
-                    cls._rebase_remote_record_version(data, updated_record_version)
-                else:
-                    cls._rebase_remote_record_version(data, "")
+                cls._rebase_remote_record_version(data, "")
                 cls._mark_notice_remote_operation(
                     operation_id,
                     status="completed",
@@ -13623,6 +13587,7 @@ class PortalRuntime:
                                 notice_type=notice_type,
                                 target_record_id=target_record_id,
                                 action="update",
+                                skip_remote_read=True,
                             )
                     else:
                         lifecycle = cls.service._target_record_lifecycle(
@@ -13705,7 +13670,7 @@ class PortalRuntime:
                                     notice_type=notice_type,
                                     target_record_id=target_record_id,
                                     action="update",
-                                    skip_remote_read=direct_event_update,
+                                    skip_remote_read=True,
                                 )
                         else:
                             active_projection_warning = (

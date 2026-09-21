@@ -7295,7 +7295,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(update_record.call_args.args[2].file_tokens, ["event-update-token"])
         create_record.assert_not_called()
 
-    def test_local_qt_notice_update_syncs_active_item_after_version_read_timeout(self):
+    def test_local_qt_notice_update_reads_only_for_validation_and_projection(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -7350,21 +7350,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "recover_selected": False,
                 "robot_group_choice": "auto",
             }
-            query_count = 0
-
-            def query_with_version_timeout(*_args):
-                nonlocal query_count
-                query_count += 1
-                if query_count == 2:
-                    raise RuntimeError("查询飞书记录超时")
-                return True, {"fields": {}}
-
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    side_effect=query_with_version_timeout,
-                ), patch.object(
+                    return_value=(True, {"fields": {}}),
+                ) as query_record, patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
                     return_value=(True, "change-update-token"),
@@ -7380,6 +7371,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = old_store
 
         self.assertTrue(result["ok"])
+        self.assertEqual(query_record.call_count, 2)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["record_id"], "rec-change-b")
         self.assertIn("状态：更新", items[0]["payload"]["text"])
@@ -11676,6 +11668,93 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual([item["active_item_id"] for item in result], ["active-a"])
 
+    def test_qt_and_both_web_readers_keep_unsent_end_until_confirmed(self):
+        from upload_event_module.core.parser import is_notice_confirmed_ended
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            store = service._state_store
+            for suffix, dirty in (("draft", True), ("sent", False)):
+                store.upsert_qt_active_item({
+                    "active_item_id": suffix, "record_id": "rec-" + suffix,
+                    "target_record_id": "rec-" + suffix, "notice_type": "维保通告",
+                    "work_type": "maintenance", "building_codes": ["A"],
+                    "status": "结束", "_has_unuploaded_changes": dirty,
+                    "text": "【维保通告】状态：结束\n【名称】" + suffix,
+                }, section="other", origin="clipboard")
+            with patch.object(PortalRuntime, "state_store", store), patch.object(PortalRuntime, "service", service):
+                qt = [row["active_item_id"] for row in store.list_visible_qt_active_items()
+                      if not is_notice_confirmed_ended(row["payload"])]
+                web = FastAPIPortalController._get_ongoing("A")
+                previous_web = PortalRuntime._get_ongoing(SimpleNamespace(service=service), "A")
+                live_ids = FastAPIPortalController._scoped_qt_active_identities("A")
+                _, live_count = FastAPIPortalController._scoped_qt_active_signature("A")
+            self.assertEqual(qt, ["draft"])
+            self.assertEqual([item["active_item_id"] for item in web], qt)
+            self.assertEqual([item["active_item_id"] for item in previous_web], qt)
+            self.assertEqual([item["active_item_id"] for item in live_ids], qt)
+            self.assertEqual(live_count, len(qt))
+
+    def test_notice_target_search_reads_all_pages_and_rejects_partial_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            pages = [
+                {"code": 0, "data": {"items": [{"record_id": "rec-first", "fields": {}}], "has_more": True, "page_token": "next"}},
+                {"code": 0, "data": {"items": [{"record_id": "rec-last", "fields": {}}], "has_more": False}},
+            ]
+            with patch.object(service, "_auth_headers", return_value={}), patch.object(service, "_request_payload", side_effect=pages) as request:
+                result = service._search_table_records(
+                    app_token="test", table_id="test", meta_by_name={}, field_names=[],
+                    work_type="maintenance", notice_type="维保通告", limit=None,
+                )
+            self.assertEqual([row["record_id"] for row in result], ["rec-first", "rec-last"])
+            self.assertEqual(request.call_args_list[1].kwargs["params"]["page_token"], "next")
+            with patch.object(service, "_auth_headers", return_value={}), patch.object(service, "_request_payload", side_effect=[pages[0], RuntimeError("page failed")]):
+                with self.assertRaisesRegex(RuntimeError, "page failed"):
+                    service._search_table_records(
+                        app_token="test", table_id="test", meta_by_name={}, field_names=[],
+                        work_type="maintenance", notice_type="维保通告", limit=None,
+                    )
+
+    def test_portal_point_read_uses_batch_and_distinguishes_missing_from_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            record = {"record_id": "rec-known", "fields": {"进度": "保留历史"}}
+            for data, error in (
+                ({"records": [record]}, ""),
+                ({"absent_record_ids": ["rec-known"]}, "1254043"),
+                ({"forbidden_record_ids": ["rec-known"]}, "1254302"),
+                ({"records": []}, "暂不能确认"),
+            ):
+                with self.subTest(error=error), patch.object(service, "_auth_headers", return_value={}), patch.object(
+                    service, "_request_payload", return_value={"code": 0, "data": data},
+                ) as request:
+                    if error:
+                        with self.assertRaisesRegex(PortalError, error):
+                            service._request_json("records/rec-known", app_token="test", table_id="test")
+                    else:
+                        result = service._request_json("records/rec-known", app_token="test", table_id="test")
+                        self.assertEqual(result["data"]["record"], record)
+                self.assertEqual(request.call_args.args[0], "POST")
+                self.assertTrue(request.call_args.args[1].endswith("/records/batch_get"))
+                self.assertEqual(request.call_args.kwargs["json_payload"]["record_ids"], ["rec-known"])
+
+    def test_maintenance_source_failure_still_refreshes_target_notices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_snapshots_enabled = True
+            with (
+                patch.object(service, "_load_fields", side_effect=PortalError("source unavailable")),
+                patch.object(service, "_refresh_notice_target_replica", return_value={"remote_count": 5, "restored": 1}) as refresh,
+                patch.object(service, "_save_source_scope_snapshots") as save_source,
+            ):
+                result = service.refresh_maintenance_source()
+            refresh.assert_called_once_with(work_type="maintenance", notice_type="维保通告")
+            save_source.assert_not_called()
+            self.assertTrue(result["maintenance_target_refreshed"])
+            self.assertEqual(result["maintenance_target_count"], 5)
+            self.assertTrue(any("source unavailable" in value for value in service._load_warnings))
+
     def test_server_get_ongoing_filters_ended_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -13555,7 +13634,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     patch.object(portal_server_module, "query_record_by_id", side_effect=[
                         (True, {"fields": {}, "record_version": "v1"}),
                         RuntimeError("查询飞书记录超时"),
-                    ]),
+                    ]) as query_record,
                     patch.object(portal_server_module, "create_bitable_record_by_payload") as create,
                     patch.object(portal_server_module, "update_bitable_record_by_payload", return_value=(True, "rec-existing")) as update,
                 ):
@@ -13571,6 +13650,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     update.assert_called_once()
                     self.assertEqual(update.call_args.args[0], "rec-existing")
                     self.assertFalse(prepared.get("expected_record_version"))
+                    query_record.assert_called_once_with("rec-existing", notice_type)
 
     def test_backend_end_upload_creates_undo_checkpoint_before_update(self):
         original_service = PortalRuntime.service

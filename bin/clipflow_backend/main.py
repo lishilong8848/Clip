@@ -195,7 +195,7 @@ from lan_bitable_template_portal.drill_management import (
     normalize_drill_signature_png,
 )
 from upload_event_module.config import config
-from upload_event_module.core.parser import extract_event_info
+from upload_event_module.core.parser import extract_event_info, is_notice_confirmed_ended
 from upload_event_module.services.service_registry import check_token_status
 from upload_event_module.services.process_lifetime import start_parent_exit_watchdog
 
@@ -8358,12 +8358,7 @@ class FastAPIPortalController:
                 return payload if isinstance(payload, dict) else item
 
             def _is_ended(item: dict) -> bool:
-                payload = _active_payload(item)
-                info = extract_event_info(str(payload.get("text") or "")) or {}
-                return not bool(payload.get("_has_unuploaded_changes")) and (
-                    str(payload.get("status") or "").strip() == "结束"
-                    or str(info.get("status") or "").strip() == "结束"
-                )
+                return is_notice_confirmed_ended(_active_payload(item))
 
             ended_rows: list[dict] = []
             event_lifecycle_rows: list[dict] = []
@@ -9471,6 +9466,8 @@ class FastAPIPortalController:
         for item in items or []:
             if not isinstance(item, dict):
                 continue
+            if is_notice_confirmed_ended(item):
+                continue
             try:
                 if not PortalRuntime.service._scope_matches_item(normalized_scope, item):
                     continue
@@ -9532,14 +9529,8 @@ class FastAPIPortalController:
             if not str(item.get("record_id") or "").strip():
                 item["record_id"] = str(row.get("record_id") or "")
             item.setdefault("notice_type", str(row.get("notice_type") or ""))
-            status = str(item.get("status") or "").strip()
-            if status == "结束":
+            if is_notice_confirmed_ended(item):
                 continue
-            text = str(item.get("text") or item.get("content") or "").strip()
-            if text:
-                info = extract_event_info(text) or {}
-                if str(info.get("status") or "").strip() == "结束":
-                    continue
             try:
                 if not PortalRuntime.service._scope_matches_item(scope, item):
                     continue
@@ -11505,9 +11496,7 @@ class FastAPIPortalController:
         errors: list[str] = []
 
         def _is_ended(payload: dict) -> bool:
-            status = str(payload.get("status") or "").strip()
-            text = str(payload.get("text") or payload.get("content") or "").strip()
-            return status == "结束" or "状态：结束" in text or "状态:结束" in text
+            return is_notice_confirmed_ended(payload)
 
         def _scope_matches(payload: dict) -> bool:
             if normalized_scope in {"ALL", "*"}:
@@ -11683,14 +11672,7 @@ class FastAPIPortalController:
             return bool(_identity_keys(item) & deleted_qt_identity_keys)
 
         def _item_is_ended(item: dict) -> bool:
-            status = str(item.get("status") or "").strip()
-            if status == "结束":
-                return True
-            text = str(item.get("text") or item.get("content") or "").strip()
-            if not text:
-                return False
-            info = extract_event_info(text) or {}
-            return str(info.get("status") or "").strip() == "结束"
+            return is_notice_confirmed_ended(item)
 
         def _item_is_event(item: dict) -> bool:
             return str(item.get("work_type") or "").strip() == "event" or str(
@@ -11735,7 +11717,7 @@ class FastAPIPortalController:
                     continue
                 text = str(payload.get("text") or "").strip()
                 info = extract_event_info(text) or {}
-                if str(info.get("status") or "").strip() == "结束":
+                if is_notice_confirmed_ended(payload):
                     continue
                 item = FastAPIPortalController._merge_projected_notice_fields(
                     dict(payload),
@@ -12260,6 +12242,7 @@ class FastAPIPortalController:
             "quantity": value(["数量"]),
         }
         if work_type == "event" or notice_type == "事件通告":
+            projected["progress"] = value(["进展", "进度", "完成情况"])
             event_building_key = PortalRuntime._event_notice_building_key(
                 {
                     "text": text,

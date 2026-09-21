@@ -39,8 +39,11 @@ def layout_identity(config):
                  for rack in config.get("inventory",[]))
     return digest([rooms,racks])
 
-def export_snapshot(config,operations,notice_summary=None):
-    return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations,notice_summary)
+EXPORT_FORMAT_VERSION = 1
+
+
+def export_snapshot(config,operations):
+    return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations)
 
 def lower_export_priority():
     if os.name != "nt":
@@ -1294,14 +1297,12 @@ class CabinetPowerService:
                 if kind=="export" and request_id and existing.get("status")=="succeeded": completed=existing
         if completed is not None:
             snapshot=self.snapshot(scope)
-            notice_summary=self.batches.notice_summary(scope,snapshot["config"])
             old_payload=completed.get("payload") or {}
             old_snapshot_version=completed.get("snapshot_version") or (old_payload.get("snapshot") or {}).get("version")
-            old_notice_version=completed.get("notice_summary_version") or (old_payload.get("notice_summary") or {}).get("version")
-            if old_snapshot_version==snapshot["version"] and old_notice_version==notice_summary["version"]:
+            if old_snapshot_version==snapshot["version"] and completed.get("export_format_version")==EXPORT_FORMAT_VERSION:
                 return {k:v for k,v in completed.items() if k!="payload"}
             version=snapshot["version"]
-            payload.update(snapshot=snapshot,notice_summary=notice_summary)
+            payload.update(snapshot=snapshot)
         else: version=0
         with self._lock:
             request=self.local.document(scope,request_key) or {}
@@ -1324,9 +1325,9 @@ class CabinetPowerService:
     def _run_job(self,job):
         try:
             job.update(status="running",started_at=stamp()); self.write("job:"+job["job_id"],job)
-            if job["kind"]=="export" and not (job["payload"].get("snapshot") and job["payload"].get("notice_summary")):
+            if job["kind"]=="export" and not job["payload"].get("snapshot"):
                 snapshot=self.snapshot(job["scope"])
-                job["payload"].update(snapshot=snapshot,notice_summary=self.batches.notice_summary(job["scope"],snapshot["config"]))
+                job["payload"].update(snapshot=snapshot)
                 job["version"]=snapshot["version"]
                 self.write("job:"+job["job_id"],job)
             result=getattr(self,"do_"+job["kind"])(job["scope"],job["payload"],job)
@@ -1337,7 +1338,7 @@ class CabinetPowerService:
                 payload=job.get("payload") or {}
                 if job.get("kind")=="export":
                     job["snapshot_version"]=(payload.get("snapshot") or {}).get("version") or job.get("version",0)
-                    job["notice_summary_version"]=(payload.get("notice_summary") or {}).get("version","")
+                    job["export_format_version"]=EXPORT_FORMAT_VERSION
                     job["payload"]={"batch_id":str(payload.get("batch_id") or job.get("batch_id") or "")}
                 job["finished_at"]=stamp(); self.write("job:"+job["job_id"],job)
             finally:
@@ -1357,12 +1358,12 @@ class CabinetPowerService:
         with self._lock:
             if self._exports is None: self._exports=ProcessPoolExecutor(
                 max_workers=5,mp_context=multiprocessing.get_context("spawn"),initializer=lower_export_priority)
-        content=self._exports.submit(export_snapshot,config,snap["operations"],payload.get("notice_summary")).result()
+        content=self._exports.submit(export_snapshot,config,snap["operations"]).result()
         batch_id=str(payload.get("batch_id") or "").strip()
         if batch_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}",batch_id): raise CabinetError("一键导出批次标识无效")
         eid=uuid.uuid4().hex; filename=f"南通{scope}栋机柜平面图及上下电数量汇总表_{dt.datetime.now():%Y%m%d_%H%M%S}.xlsm"
         path=self.atomic_file(Path("exports")/eid/filename,content)
-        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"notice_summary_version":(payload.get("notice_summary") or {}).get("version",""),"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
+        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"export_format_version":EXPORT_FORMAT_VERSION,"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
         self.write("export:"+eid,result)
         return self.upload_export(scope,eid,result["owner"])
 
@@ -1381,17 +1382,14 @@ class CabinetPowerService:
 
     def _export_state(self,scope,snapshot=None):
         snap=snapshot or self._snapshot(scope)
-        current_notice=self.batches.notice_summary(scope,snap["config"])["version"]
         latest=self.local.latest_document(scope,"export:")
         if latest is None:
-            return {"has_export":False,"is_stale":False,"current_version":snap["version"],
-                    "current_notice_summary_version":current_notice}
+            return {"has_export":False,"is_stale":False,"current_version":snap["version"]}
         reasons=[]
         if str(latest.get("version"))!=str(snap["version"]): reasons.append("机柜台账已变化")
-        if str(latest.get("notice_summary_version") or "")!=current_notice: reasons.append("通告汇总已变化")
+        if latest.get("export_format_version")!=EXPORT_FORMAT_VERSION: reasons.append("导出格式已更新")
         return {"has_export":True,"export_id":latest.get("export_id","") ,"created_at":latest.get("created_at",""),
-                "is_stale":bool(reasons),"stale_reason":"；".join(reasons),"current_version":snap["version"],
-                "current_notice_summary_version":current_notice}
+                "is_stale":bool(reasons),"stale_reason":"；".join(reasons),"current_version":snap["version"]}
 
     def export_history(self,scope,page=1,page_size=20):
         state=self._export_state(scope)
@@ -1402,7 +1400,7 @@ class CabinetPowerService:
             public["file_available"]=not item.get("deleted") and Path(item.get("path") or "").is_file()
             reasons=[]
             if str(item.get("version"))!=str(state["current_version"]): reasons.append("机柜台账已变化")
-            if str(item.get("notice_summary_version") or "")!=state["current_notice_summary_version"]: reasons.append("通告汇总已变化")
+            if item.get("export_format_version")!=EXPORT_FORMAT_VERSION: reasons.append("导出格式已更新")
             public.update(is_stale=bool(reasons),stale_reason="；".join(reasons))
             items.append(public)
         return {"items":items,"total":total,"page":page,"page_size":page_size,"current":state}

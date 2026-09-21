@@ -209,3 +209,11 @@ def clean_key(key):
 def extract_event_info(content):
     """兼容旧接口，内部调用新函数"""
     return extract_notice_info(content)
+
+
+def is_notice_confirmed_ended(payload: dict) -> bool:
+    """An unsent end draft is still an active notice on both clients."""
+    if payload.get("_has_unuploaded_changes"):
+        return False
+    info = extract_notice_info(str(payload.get("text") or payload.get("content") or "")) or {}
+    return str(payload.get("status") or "").strip() in {"结束", "已结束"} or info.get("status") == "结束"

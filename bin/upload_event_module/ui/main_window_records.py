@@ -3089,9 +3089,8 @@ class MainWindowRecordsMixin:
             return
         rid = record_id or data_dict.get("record_id", "")
         active_item_id = str(data_dict.get("active_item_id") or "").strip()
-        display_data = self._load_record_from_cache(rid) or normalize_active_item_data(
-            data_dict
-        )
+        # Callers pass the updated row; an asynchronous cache may still hold the old text.
+        display_data = normalize_active_item_data(data_dict)
         display_data = self._ensure_active_item_identity(display_data)
         if self._is_placeholder_record(data_dict):
             display_data["record_id"] = ""

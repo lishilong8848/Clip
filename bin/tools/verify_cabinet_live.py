@@ -23,11 +23,9 @@ def main():
             assert len(imported)==expected,(scope,len(imported))
             assert len({o['raw_fields']['数据标识'] for o in imported})==expected
             original=(INITIAL_TEMPLATES/(scope+'.xlsm')).read_bytes()
-            notice_summary=service.batches.notice_summary(scope,config)
-            generated=export_workbook(original,config,ops,notice_summary)
+            generated=export_workbook(original,config,ops)
             before=Workbook(original); after=Workbook(generated)
-            expected_sheets=['机柜上电汇总表（邮件）','机柜上电汇总表（每月阿里统计）',
-                             *(name for name in before.sheets if name!='机柜上电汇总表')]
+            expected_sheets=['机柜上电汇总表（邮件）' if name=='机柜上电汇总表' else name for name in before.sheets]
             assert list(after.sheets)==expected_sheets,(scope,list(after.sheets))
             assert before.archive.read('xl/vbaProject.bin')==after.archive.read('xl/vbaProject.bin')
             for name in before.sheets:
@@ -52,7 +50,7 @@ def main():
                 assert row.get(fmt['rack'])==operation['rack'],(scope,name,row_number,'rack')
             path=service.atomic_file(Path('exports')/folder/(scope+'.xlsm'),generated)
             report[scope]={'imported':expected,'records':len(ops),'counts':service.overview(scope)['counts'],
-                           'notice_items':len(notice_summary.get('items',[])),'idle_cabinets':sum(o['empty'] for o in ops),
+                           'idle_cabinets':sum(o['empty'] for o in ops),
                            'source':'local_committed' if args.local else 'feishu_readback_and_local',
                            'sheets':list(after.sheets),'export':path,'verified':True}
             print(json.dumps({scope:report[scope]},ensure_ascii=False),flush=True)

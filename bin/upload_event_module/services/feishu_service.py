@@ -234,16 +234,11 @@ def _notice_create_client_token(payload: NoticePayload, notice_type: str, table_
     )
 
 
-def _query_with_transport_retry(
-    request_fn: Callable[[str], object],
-    fallback_request_fn: Callable[[str], object] | None = None,
-):
-    """One bounded retry is safe for a record GET, never shared with writes."""
+def _query_with_transport_retry(request_fn: Callable[[str], object]):
+    """One bounded transport retry for reads, never shared with writes."""
     for attempt in range(2):
         try:
-            return _with_bitable_data_ready_retry(
-                fallback_request_fn if attempt and fallback_request_fn else request_fn
-            )
+            return _with_bitable_data_ready_retry(request_fn)
         except (RequestsTimeout, RequestsConnectionError) as exc:
             if attempt:
                 raise RuntimeError("查询飞书记录超时，有限重试仍未成功。请稍后刷新核验，当前页面与程序连接正常时不需要重新新增通告。") from exc
@@ -965,29 +960,12 @@ def query_record_by_id(record_id, notice_type):
     if err:
         return False, err
 
-    client = _build_client(timeout=12.0)
-    request = (
-        GetAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .record_id(record_id)
-        .build()
-    )
-
-    def do_query(token: str):
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.get(request, option)
-
-    used_batch_read = False
-
     def do_batch_query(token: str):
-        nonlocal used_batch_read
         from lark_oapi.api.bitable.v1 import (
             BatchGetAppTableRecordRequest,
             BatchGetAppTableRecordRequestBody,
         )
 
-        used_batch_read = True
         batch_request = (
             BatchGetAppTableRecordRequest.builder()
             .app_token(config.app_token)
@@ -1005,28 +983,34 @@ def query_record_by_id(record_id, notice_type):
             batch_request, option
         )
 
-    response = _query_with_transport_retry(do_query, do_batch_query)
+    started_at = time.perf_counter()
+    try:
+        response = _query_with_transport_retry(do_batch_query)
+    finally:
+        elapsed = time.perf_counter() - started_at
+        if elapsed >= 2.0:
+            log_warning(
+                f"NoticeTiming read: type={notice_type}, record_id={record_id}, "
+                f"elapsed_s={elapsed:.2f}, method=batch_get"
+            )
 
     if not response.success():
         error_msg = f"查询记录失败: {response.code} - {response.msg}"
         log_error(f"飞书查询记录: {error_msg}")
         return False, error_msg
 
-    if used_batch_read:
-        data = response.data
-        if record_id in (getattr(data, "forbidden_record_ids", None) or []):
-            return False, "查询记录失败: 1254302 - 目标记录无访问权限"
-        if record_id in (getattr(data, "absent_record_ids", None) or []):
-            return False, "查询记录失败: 1254043 - RecordIdNotFound"
-        record = next(
-            (item for item in (getattr(data, "records", None) or [])
-             if item.record_id == record_id),
-            None,
-        )
-        if record is None:
-            return False, "备用查询未返回目标记录，暂不能确认记录状态。"
-    else:
-        record = response.data.record
+    data = response.data
+    if record_id in (getattr(data, "forbidden_record_ids", None) or []):
+        return False, "查询记录失败: 1254302 - 目标记录无访问权限"
+    if record_id in (getattr(data, "absent_record_ids", None) or []):
+        return False, "查询记录失败: 1254043 - RecordIdNotFound"
+    record = next(
+        (item for item in (getattr(data, "records", None) or [])
+         if item.record_id == record_id),
+        None,
+    )
+    if record is None:
+        return False, "查询未返回目标记录，暂不能确认记录状态。"
     fields = record.fields if isinstance(record.fields, dict) else {}
     stable_fields = json.dumps(
         fields,
@@ -1164,7 +1148,15 @@ def update_bitable_record(
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.update(request, option)
 
-    response = _execute_bitable_write(do_update, notice_type)
+    started_at = time.perf_counter()
+    try:
+        response = _execute_bitable_write(do_update, notice_type)
+    finally:
+        elapsed = time.perf_counter() - started_at
+        if elapsed >= 2.0:
+            log_warning(
+                f"NoticeTiming update: type={notice_type}, record_id={record_id}, elapsed_s={elapsed:.2f}"
+            )
 
     if not response.success():
         error_msg = f"更新记录失败: {_parse_field_error(response, notice_type, fields)}"

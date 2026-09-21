@@ -148,19 +148,19 @@ try {
   assert(singleRecord, "single-building export is missing from history");
   await page.route("**/api/cabinet-power/overview**", async route => {
     const response = await route.fetch(); const body = await response.json();
-    body.data.export_state = { has_export:true,is_stale:true,stale_reason:"通告汇总已变化" };
+    body.data.export_state = { has_export:true,is_stale:true,stale_reason:"机柜台账已变化" };
     await route.fulfill({ response, json:body });
   });
   await page.route("**/api/cabinet-power/export-history**", async route => {
     const response = await route.fetch(); const body = await response.json();
-    body.data.items = (body.data.items || []).map(item => ({ ...item,is_stale:true,stale_reason:"通告汇总已变化" }));
+    body.data.items = (body.data.items || []).map(item => ({ ...item,is_stale:true,stale_reason:"机柜台账已变化" }));
     await route.fulfill({ response, json:body });
   });
   await page.reload();
-  await page.getByText("最近导出已过期：通告汇总已变化。请重新导出。", { exact:true }).waitFor();
+  await page.getByText("最近导出已过期：机柜台账已变化。请重新导出。", { exact:true }).waitFor();
   await page.getByRole("button", { name: "导出历史" }).click();
   await page.getByText("已过期", { exact:true }).first().waitFor();
-  await page.getByText("通告汇总已变化", { exact:true }).first().waitFor();
+  await page.getByText("机柜台账已变化", { exact:true }).first().waitFor();
   const singleRow = page.locator(".mobile-card-table tr").filter({ has: page.locator(`a[href*="/exports/${singleRecord.export_id}/download"]`) });
   await singleRow.getByRole("button", { name: "清理导出文件" }).click();
   await page.getByRole("dialog", { name: "清理导出文件？" }).waitFor();
@@ -202,9 +202,9 @@ try {
   assert.equal(new URL(page.url()).searchParams.get("status"),"todo","return must restore the todo filter");
   const rows = Array.from({ length: 60 }, (_, index) => ({
     row_id:`row-${index + 1}`, scope:"E", room:"202", rack:`B${String(index + 1).padStart(2,"0")}`,
-    rack_type:"服务器机柜", action:"上正式电", expected:"2026-09-19 10:00:00", actual:"",
+    rack_type:"服务器机柜", action:"上正式电", expected:"", actual:"",
     result:"成功", status:"ready", issues:[], edits:[], evidence_images:[], editable:true,
-    confirmable:true, rollbackable:false, restorable:false, can_edit_notice_summary:true,
+    confirmable:true, rollbackable:false, restorable:false,
   }));
   const images = Array.from({ length: 25 }, (_, index) => ({
     image_id:`image-${index + 1}`, name:`确认截图-${index + 1}.png`, extension:".png",
@@ -233,7 +233,13 @@ try {
   await page.getByRole("heading", { name:"上下电待办详情" }).waitFor();
   assert.equal(await page.locator(".evidence-item").count(),12,"evidence gallery must paginate");
   assert((await page.locator(".evidence-match select").first().locator("option").count()) <= 51,"cabinet matcher must cap options");
+  assert.equal(await page.getByText("不计入通告汇总", { exact:true }).count(),0);
+  assert.equal(await page.getByRole("columnheader", { name:"期望完成",exact:true }).count(),0);
+  assert.equal(await page.locator(".source-details").first().getAttribute("open"),null);
+  assert(await page.locator(".batch-summary").evaluate(node => node.getBoundingClientRect().height < 100));
+  await page.locator(".source-details > summary").first().click();
   assert(await page.getByText("开始通告实际发送", { exact:true }).isVisible());
+  await page.locator(".source-details > summary").first().click();
   await page.screenshot({ path:path.join(output,"batch-detail-1366.png"),fullPage:true });
   await page.getByRole("button", { name:"编辑记录",exact:true }).first().click();
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").fill("2026-09-19T12:34:56");

@@ -23,7 +23,6 @@ from .cabinet_power_excel import (
     STATES,
     completed_state_event,
     digest,
-    notice_summary_baseline_date,
 )
 
 
@@ -59,8 +58,6 @@ EDITABLE_FIELDS = {
 }
 ACTIVE_ROW_STATUSES = {"ready", "failed", "rolled_back"}
 LOCKED_ROW_STATUSES = {"queued", "writing", "completed", "rollback_queued", "rolling_back", "rollback_failed", "rollback_blocked"}
-_NOTICE_CUTOFFS = {}
-_NOTICE_CUTOFFS_LOCK = threading.Lock()
 
 
 def now():
@@ -104,29 +101,6 @@ class CabinetBatchStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS notice_summary_rows(
-                    batch_id TEXT NOT NULL,
-                    row_id TEXT NOT NULL,
-                    scope TEXT NOT NULL,
-                    room TEXT NOT NULL,
-                    rack TEXT NOT NULL,
-                    sent_at TEXT NOT NULL,
-                    notice_type TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    rack_type TEXT NOT NULL,
-                    eligible INTEGER NOT NULL,
-                    PRIMARY KEY(batch_id,row_id)
-                );
-                CREATE INDEX IF NOT EXISTS notice_summary_scope_time
-                    ON notice_summary_rows(scope,sent_at,batch_id,row_id);
-                CREATE TABLE IF NOT EXISTS notice_summary_baselines(
-                    scope TEXT NOT NULL,
-                    template_hash TEXT NOT NULL,
-                    cutoff_date TEXT NOT NULL,
-                    frozen_keys_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(scope,template_hash)
-                );
                 CREATE TABLE IF NOT EXISTS batch_runtime_status(
                     batch_id TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL
@@ -162,17 +136,18 @@ class CabinetBatchStore:
                     "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('batch_payload_normalization_version','1')"
                 )
             marker = conn.execute(
-                "SELECT value FROM batch_meta WHERE key='notice_summary_projection_version'"
+                "SELECT value FROM batch_meta WHERE key='batch_runtime_projection_version'"
             ).fetchone()
-            if not marker or marker[0] != "3":
-                conn.execute("DELETE FROM notice_summary_rows")
+            if not marker or marker[0] != "1":
+                conn.execute("DROP TABLE IF EXISTS notice_summary_rows")
+                conn.execute("DROP TABLE IF EXISTS notice_summary_baselines")
+                conn.execute("DELETE FROM batch_meta WHERE key='notice_summary_projection_version'")
                 conn.execute("DELETE FROM batch_runtime_status")
                 for row in conn.execute("SELECT * FROM batches"):
                     batch = self._decode(row, conn)
-                    self._sync_notice_summary_rows(conn, batch)
                     self._sync_runtime_status(conn, batch)
                 conn.execute(
-                    "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('notice_summary_projection_version','3')"
+                    "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('batch_runtime_projection_version','1')"
                 )
             conn.commit()
 
@@ -215,7 +190,7 @@ class CabinetBatchStore:
             if cursor.rowcount!=1:
                 exists=conn.execute("SELECT 1 FROM batches WHERE batch_id=?",(batch_id,)).fetchone()
                 raise CabinetError("批次已被其他操作更新，请重新载入" if exists else "批次不存在",409 if exists else 404)
-            for table in ("batch_rows","batch_images","notice_summary_rows","batch_runtime_status"):
+            for table in ("batch_rows","batch_images","batch_runtime_status"):
                 conn.execute(f"DELETE FROM {table} WHERE batch_id=?",(batch_id,))
 
     def by_hash(self, source_hash):
@@ -231,49 +206,6 @@ class CabinetBatchStore:
             )]
 
     @staticmethod
-    def _sync_notice_summary_rows(conn, batch):
-        batch_id = str(batch.get("batch_id") or "")
-        if not batch_id:
-            return
-        conn.execute("DELETE FROM notice_summary_rows WHERE batch_id=?", (batch_id,))
-        if batch.get("source") != "notice":
-            return
-        source = batch.get("source_notice") or {}
-        sent_at = str(source.get("sent_at") or "")
-        notice_type = str(source.get("notice_type") or "")
-        deleted = bool(source.get("deleted_at"))
-        invalid_codes = {"scope", "room", "rack", "inventory", "notice_scope"}
-        seen = set()
-        rows = []
-        for row in batch.get("rows", []):
-            key = (str(row.get("scope") or ""), str(row.get("room") or ""), str(row.get("rack") or ""))
-            issues = {str(issue.get("code") or "") for issue in row.get("issues", []) if isinstance(issue, dict)}
-            eligible = not (
-                deleted or row.get("notice_removed") or row.get("exclude_notice_summary")
-                or not sent_at or notice_type not in ("上电通告", "下电通告")
-                or key in seen or bool(issues & invalid_codes)
-            )
-            seen.add(key)
-            rows.append((
-                batch_id, str(row.get("row_id") or ""), *key, sent_at, notice_type,
-                str(row.get("action") or ""), str(row.get("rack_type") or ""), int(eligible),
-            ))
-        conn.executemany(
-            "INSERT OR REPLACE INTO notice_summary_rows"
-            "(batch_id,row_id,scope,room,rack,sent_at,notice_type,action,rack_type,eligible)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
-
-    def notice_summary_items(self, scope):
-        with self._connect() as conn:
-            return [dict(row) for row in conn.execute(
-                "SELECT batch_id,row_id,scope,room,rack,sent_at,notice_type,action,rack_type "
-                "FROM notice_summary_rows WHERE scope=? AND eligible=1 ORDER BY sent_at,batch_id,row_id",
-                (scope,),
-            )]
-
-    @staticmethod
     def _sync_runtime_status(conn, batch):
         source = batch.get("source_notice") or {}
         compact = {
@@ -285,7 +217,7 @@ class CabinetBatchStore:
             "created_at": batch.get("created_at", ""), "updated_at": batch.get("updated_at", ""),
             "progress": batch.get("progress") or {},
             "source_notice": {key: copy.deepcopy(source.get(key)) for key in
-                              ("sent_at", "ended_at", "deleted_at", "end_time_check", "rollback_error")},
+                              ("sent_at", "ended_at", "deleted_at", "rollback_error")},
             "images": [{"image_id": item.get("image_id", ""), "status": item.get("status", ""),
                         "error": item.get("error", ""), "deleted_at": item.get("deleted_at", "")}
                        for item in batch.get("images", [])],
@@ -321,31 +253,6 @@ class CabinetBatchStore:
     def all_images(self):
         with self._connect() as conn:
             return [json.loads(row[0]) for row in conn.execute("SELECT payload_json FROM batch_images")]
-
-    def notice_summary_baseline(self, scope, template_hash, cutoff_date, item_keys):
-        if not template_hash:
-            return set()
-        with self._lock, self._connect() as conn, conn:
-            row = conn.execute(
-                "SELECT frozen_keys_json FROM notice_summary_baselines WHERE scope=? AND template_hash=?",
-                (scope, template_hash),
-            ).fetchone()
-            if row:
-                try:
-                    return set(json.loads(row[0]))
-                except (TypeError, ValueError):
-                    return set()
-            frozen = sorted(set(item_keys)) if cutoff_date else []
-            conn.execute(
-                "INSERT OR IGNORE INTO notice_summary_baselines(scope,template_hash,cutoff_date,frozen_keys_json,created_at) "
-                "VALUES(?,?,?,?,?)",
-                (scope, template_hash, cutoff_date, _json(frozen), now()),
-            )
-            stored = conn.execute(
-                "SELECT frozen_keys_json FROM notice_summary_baselines WHERE scope=? AND template_hash=?",
-                (scope, template_hash),
-            ).fetchone()
-            return set(json.loads(stored[0])) if stored else set(frozen)
 
     def failed_notice_handoffs(self, limit=100):
         with self._connect() as conn:
@@ -404,7 +311,6 @@ class CabinetBatchStore:
             )
             self._sync_children(conn, "batch_rows", batch["batch_id"], batch.get("rows", []), "row_id")
             self._sync_children(conn, "batch_images", batch["batch_id"], batch.get("images", []), "image_id")
-            self._sync_notice_summary_rows(conn, {**batch, "version": 1})
             self._sync_runtime_status(conn, {**batch, "version": 1, "created_at": created, "updated_at": created})
         return self.get(batch["batch_id"])
 
@@ -452,7 +358,6 @@ class CabinetBatchStore:
                      for index, row in enumerate(batch.get("rows", [])) if row.get("row_id") in changed_row_ids],
                 )
             self._sync_children(conn, "batch_images", batch["batch_id"], batch.get("images", []), "image_id")
-            self._sync_notice_summary_rows(conn, batch)
             self._sync_runtime_status(conn, {**batch, "version": version, "updated_at": updated})
         return self.get(batch["batch_id"])
 
@@ -1322,7 +1227,8 @@ class CabinetBatchService:
         if not DATE_RE.fullmatch(value):
             return False
         try:
-            return allow_future or dt.datetime.fromisoformat(value) <= dt.datetime.now()
+            parsed = dt.datetime.fromisoformat(value)
+            return allow_future or parsed <= dt.datetime.now()
         except ValueError:
             return False
 
@@ -1387,7 +1293,10 @@ class CabinetBatchService:
                 issues.append({"code": "rack", "message": "机柜编号格式无效"})
             if action not in OPS:
                 issues.append({"code": "action", "message": "操作类型无效"})
-            if not row["expected"] or not self._valid_date(row["expected"], allow_future=True):
+            if row["expected"]:
+                if not self._valid_date(row["expected"], allow_future=True):
+                    issues.append({"code": "expected", "message": "期望完成时间须为有效时间"})
+            elif batch.get("source") != "notice":
                 issues.append({"code": "expected", "message": "期望完成时间必填且须为有效时间"})
             if not actual or not self._valid_date(actual):
                 issues.append({"code": "actual", "message": "实际完成时间须为有效且不晚于当前的时间"})
@@ -1474,7 +1383,6 @@ class CabinetBatchService:
 
     def _notice_rows(self, source, source_hash, parsed):
         direction = "up" if source["notice_type"] == "上电通告" else "down"
-        expected = self._notice_datetime(source.get("end_time"))
         cutoff = self._notice_datetime(source.get("sent_at")) or self._notice_datetime(source.get("start_time"))
         snapshots = {scope: self.cabinet._snapshot(scope) for scope in {item["scope"] for item in parsed}}
         inventories = {
@@ -1489,7 +1397,7 @@ class CabinetBatchService:
             )
             current = {
                 **item, "supplier_rack": "", "rack_type": str((inventory or {}).get("rack_type") or ""),
-                "type_detail": "", "action": action, "expected": expected, "actual": "",
+                "type_detail": "", "action": action, "expected": "", "actual": "",
                 "result": "成功", "type_resolution": "",
                 "current_power_state": current_power_state,
             }
@@ -1499,7 +1407,7 @@ class CabinetBatchService:
                 "file_name": "上下电通告", "file_sha256": "", "page": 0, "source_row": index,
                 "application_ids": [],
                 "applicant": str(source.get("sender_name") or ""), "inference": inference,
-                "exclude_notice_summary": False, "notice_removed": False,
+                "notice_removed": False,
                 "original": copy.deepcopy(current), "edits": [], "status": "ready", "issues": [], "error": "",
                 "operation_id": "batch_" + digest([source_hash, row_id])[:32],
             })
@@ -1726,98 +1634,6 @@ class CabinetBatchService:
         except Exception:
             pass
 
-    def notice_summary(self, scope, config):
-        known = {(item["room"], item["rack"]): item for item in config["inventory"]}
-        items = []
-        projected = self.store.notice_summary_items(scope)
-        template_hash = str((config.get("template_data") or {}).get("hash") or "")
-        with _NOTICE_CUTOFFS_LOCK:
-            cutoff = _NOTICE_CUTOFFS.get(template_hash)
-        if cutoff is None:
-            template_path = Path(config.get("path") or Path(__file__).with_name("templates") / "cabinet_power" / f"{scope}.xlsm")
-            cutoff = notice_summary_baseline_date(template_path.read_bytes())
-            with _NOTICE_CUTOFFS_LOCK:
-                _NOTICE_CUTOFFS[template_hash] = cutoff
-        frozen = self.store.notice_summary_baseline(
-            scope, template_hash, cutoff,
-            [f"{row['batch_id']}:{row['row_id']}" for row in projected if cutoff and row["sent_at"][:10] <= cutoff],
-        )
-        for row in projected:
-            key = (row.get("room"), row.get("rack"))
-            event_key = f"{row['batch_id']}:{row['row_id']}"
-            if key not in known or event_key in frozen:
-                continue
-            sent_at = self._notice_datetime(row.get("sent_at"))
-            if not sent_at:
-                continue
-            items.append({
-                "batch_id": row["batch_id"], "row_id": row.get("row_id", ""),
-                "room": key[0], "rack": key[1], "date": sent_at[:10], "sent_at": sent_at,
-                "direction": "up" if row.get("notice_type") == "上电通告" else "down",
-                "action": str(row.get("action") or ""),
-                "rack_type": str(known[key].get("rack_type") or row.get("rack_type") or ""),
-            })
-        items.sort(key=lambda item: (item["sent_at"], item["batch_id"], item["row_id"]))
-        return {"scope": scope, "version": digest([template_hash, cutoff, items]), "items": items,
-                "template_hash": template_hash, "baseline_date": cutoff}
-
-    @staticmethod
-    def _notice_record_missing(error):
-        normalized = re.sub(r"[\s_\-:：]+", "", str(error or "")).lower()
-        return any(token in normalized for token in (
-            "1254043", "recordidnotfound", "recordldnotfound", "记录id不存在",
-        ))
-
-    def reconcile_legacy_notice_end_times(self, fetch_record, force=False):
-        checked = 0
-        for batch in self.store.notice_batches():
-            source = batch.get("source_notice") or {}
-            if source.get("ended_at") or source.get("deleted_at") or not source.get("target_record_id"):
-                continue
-            prior_check = source.get("end_time_check") or {}
-            prior_missing = self._notice_record_missing(prior_check.get("error"))
-            if not prior_missing and not force and dt.datetime.now().timestamp() - float(prior_check.get("checked_at") or 0) < 3600:
-                continue
-            if prior_missing:
-                state, error, ended_at = "deleted", "目标多维记录不存在，已按来源通告删除处理", ""
-            else:
-                try:
-                    ok, record = fetch_record(source["target_record_id"], source["notice_type"])
-                    if not ok or not isinstance(record, dict):
-                        raise CabinetError(str(record or "目标多维读取失败"))
-                    fields = record.get("fields") if isinstance(record.get("fields"), dict) else record
-                    status = str(fields.get("上电状态", ""))
-                    ended_at = self._notice_datetime(fields.get("实际结束时间"))
-                    state = "resolved" if "结束" in status and ended_at else "pending"
-                    error = "" if state == "resolved" else ("结束状态缺少实际结束时间" if "结束" in status else "目标通告尚未结束")
-                except Exception as exc:
-                    missing = self._notice_record_missing(exc)
-                    state, error, ended_at = (
-                        ("deleted", "目标多维记录不存在，已按来源通告删除处理", "")
-                        if missing else ("failed", str(exc)[:200], "")
-                    )
-            def save(current):
-                notice = current["source_notice"]
-                if notice.get("ended_at") or notice.get("deleted_at"):
-                    return
-                notice["end_time_check"] = {"status": state, "error": error,
-                                             "checked_at": dt.datetime.now().timestamp()}
-                if state == "resolved":
-                    notice["ended_at"] = ended_at
-                    notice.setdefault("lifecycle_audit", []).append({"action": "legacy_end_reconciled", "at": now()})
-                elif state == "deleted":
-                    notice["deleted_at"] = now()
-                    notice.setdefault("lifecycle_audit", []).append({
-                        "action": "remote_record_missing", "at": now(),
-                        "record_id": str(notice.get("target_record_id") or ""),
-                    })
-            try:
-                self._change(batch["batch_id"], save)
-                checked += state == "resolved"
-            except Exception:
-                continue
-        return checked
-
     def get(self, batch_id):
         batch = self.store.get(batch_id)
         if batch is None:
@@ -1836,6 +1652,13 @@ class CabinetBatchService:
                 if row.get("status") in LOCKED_ROW_STATUSES:
                     continue
                 patch = {}
+                # Clear only the previous notice-derived default, never entered or recognized evidence.
+                if (row.get("expected") and not row.get("operation_started") and not row.get("attempts")
+                        and not row.get("evidence_images")
+                        and row["expected"] == (row.get("original") or {}).get("expected")
+                        == self._notice_datetime(source.get("end_time"))
+                        and not any(edit.get("field") == "expected" for edit in row.get("edits", []))):
+                    patch["expected"] = ""
                 if not row.get("result"):
                     patch["result"] = "成功"
                 if not row.get("current_power_state") and row.get("scope") in SCOPES:
@@ -1858,7 +1681,11 @@ class CabinetBatchService:
             if updates:
                 def apply_defaults(current):
                     for row in current.get("rows", []):
-                        row.update(updates.get(row.get("row_id"), {}))
+                        patch = updates.get(row.get("row_id"), {})
+                        if "expected" in patch:
+                            row.setdefault("edits", []).append({"field": "expected", "before": row["expected"],
+                                "after": "", "owner": "system", "at": now(), "reason": "移除通告计划时间默认值"})
+                        row.update(patch)
                 batch = self._change(
                     batch_id,
                     apply_defaults,
@@ -1888,8 +1715,6 @@ class CabinetBatchService:
         else:
             result.pop("_visible_stats", None)
         for row in result.get("rows", []):
-            row["can_edit_notice_summary"] = bool(batch.get("source") == "notice" and
-                (admin or row.get("scope") in allowed) and not (batch.get("source_notice") or {}).get("deleted_at"))
             row["editable"] = not deleted_notice and not row.get("notice_removed") and bool(admin or row.get("scope") in allowed) and batch.get("status") != "cancelled" and row.get("status") not in LOCKED_ROW_STATUSES and row.get("status") != "excluded_image" and (not row.get("operation_started") or row.get("status") == "rolled_back")
             row["confirmable"] = not deleted_notice and bool(admin or row.get("scope") in allowed) and not row.get("notice_removed") and row.get("status") in ACTIVE_ROW_STATUSES and not row.get("issues")
             row["rollbackable"] = bool(admin or row.get("scope") in allowed) and row.get("wrote_record") is not False and row.get("status") in {"completed", "rollback_failed", "rollback_blocked"}
@@ -1957,11 +1782,7 @@ class CabinetBatchService:
         current = self.get(batch_id)
         if not admin and current["owner_id"] != owner and not set(current.get("scopes", [])) & set(allowed):
             raise CabinetError("无权查看该批次", 403)
-        flag_only = bool(payload.get("rows")) and not payload.get("common") and not payload.get("acknowledge_warnings") and all(
-            isinstance(patch, dict) and set(patch) == {"row_id", "exclude_notice_summary"}
-            for patch in payload.get("rows", [])
-        )
-        if current["status"] == "cancelled" and not flag_only: raise CabinetError("已作废批次不能再修改",409)
+        if current["status"] == "cancelled": raise CabinetError("已作废批次不能再修改",409)
         try:
             expected = int(payload.get("version"))
         except (TypeError, ValueError):
@@ -1989,19 +1810,6 @@ class CabinetBatchService:
                     raise CabinetError("批次行不存在", 404)
                 if not admin and row.get("scope") not in allowed:
                     raise CabinetError("无权修改该楼栋记录", 403)
-                if "exclude_notice_summary" in patch:
-                    if batch.get("source") != "notice" or (batch.get("source_notice") or {}).get("deleted_at"):
-                        raise CabinetError("仅有效的通告待办可修改汇总标记", 409)
-                    if type(patch["exclude_notice_summary"]) is not bool:
-                        raise CabinetError("汇总标记必须为布尔值", 400)
-                    before = bool(row.get("exclude_notice_summary"))
-                    after = patch["exclude_notice_summary"]
-                    if before != after:
-                        row["exclude_notice_summary"] = after
-                        row.setdefault("edits", []).append({"field": "exclude_notice_summary",
-                            "before": before, "after": after, "owner": owner, "at": now()})
-                    if set(patch) == {"row_id", "exclude_notice_summary"}:
-                        continue
                 if row.get("status") in LOCKED_ROW_STATUSES or row.get("operation_started") and row.get("status") != "rolled_back":
                     raise CabinetError("该行已开始正式提交，不能再修改内容", 409)
                 before_scope = row.get("scope")

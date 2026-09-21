@@ -3340,6 +3340,26 @@ class MaintenancePortalService:
         )
 
         def do_get() -> dict[str, Any]:
+            if path.startswith("records/") and path.count("/") == 1:
+                record_id = path.split("/", 1)[1]
+                result = self._request_payload(
+                    "POST", url.rsplit("/", 1)[0] + "/batch_get",
+                    context="飞书记录读取", headers=self._auth_headers(),
+                    json_payload={"record_ids": [record_id], "automatic_fields": True},
+                    http_client=http_client,
+                )
+                if int(result.get("code") or 0):
+                    return result
+                data = result.get("data") or {}
+                if record_id in (data.get("forbidden_record_ids") or []):
+                    return {"code": 1254302, "msg": "目标记录无访问权限"}
+                if record_id in (data.get("absent_record_ids") or []):
+                    return {"code": 1254043, "msg": "RecordIdNotFound"}
+                record = next((item for item in (data.get("records") or [])
+                               if item.get("record_id") == record_id), None)
+                if record is None:
+                    raise PortalError("查询未返回目标记录，暂不能确认记录状态。")
+                return {**result, "data": {"record": record}}
             return self._request_payload(
                 "GET",
                 url,
@@ -5086,10 +5106,11 @@ class MaintenancePortalService:
         notice_type: str,
         field_names: list[str] | tuple[str, ...],
         sort_field: str = "",
-        limit: int = 200,
+        limit: int | None = 200,
         filter_payload: dict[str, Any] | None = None,
+        http_client: FeishuHttpClient | None = None,
     ) -> list[dict[str, Any]]:
-        max_records = max(1, int(limit or 200))
+        max_records = max(1, int(limit or 200)) if limit is not None else None
         url = (
             f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
             f"{app_token}/tables/{table_id}/records/search"
@@ -5111,7 +5132,7 @@ class MaintenancePortalService:
                 # relation/formula field before their writable mirror is saved.
                 requested_field_names.append(logical_name)
         body: dict[str, Any] = {
-            "automatic_fields": False,
+            "automatic_fields": limit is None,
             "field_names": list(dict.fromkeys(requested_field_names)),
         }
         if sort_field and sort_field in meta_by_name:
@@ -5144,13 +5165,14 @@ class MaintenancePortalService:
                 headers={**self._auth_headers(), "Content-Type": "application/json"},
                 params=params,
                 json_payload=body,
+                **({"http_client": http_client} if http_client is not None else {}),
             )
 
         records: list[dict[str, Any]] = []
         page_token = ""
         seen_tokens: set[str] = set()
-        while len(records) < max_records:
-            page_size = min(500, max_records - len(records))
+        while max_records is None or len(records) < max_records:
+            page_size = 500 if max_records is None else min(500, max_records - len(records))
             payload: dict[str, Any] = {}
             for attempt, retry_delay in enumerate(
                 (*BITABLE_TRANSIENT_RETRY_DELAYS, 0.0)
@@ -5183,9 +5205,9 @@ class MaintenancePortalService:
                         source_table_id=table_id,
                     )
                 )
-                if len(records) >= max_records:
+                if max_records is not None and len(records) >= max_records:
                     break
-            if len(records) >= max_records:
+            if max_records is not None and len(records) >= max_records:
                 break
             next_token = self._next_record_page_token(
                 data,
@@ -6462,12 +6484,14 @@ class MaintenancePortalService:
                 app_token=app_token,
                 table_id=table_id,
             )
-            records = self._load_table_records(
+            records = self._search_table_records(
                 app_token=app_token,
                 table_id=table_id,
                 meta_by_name=meta_by_name,
                 work_type=WORK_TYPE_REPAIR,
                 notice_type=NOTICE_TYPE_REPAIR,
+                field_names=list(meta_by_name),
+                limit=None,
             )
             self._repair_management_target_cache = {
                 "loaded_at": time.monotonic(),
@@ -17918,6 +17942,7 @@ class MaintenancePortalService:
                 if not str(item or "").startswith("维保源表同步失败")
                 and not str(item or "").startswith("维保目标表同步失败")
             ]
+            source_refreshed = False
             previous_field_meta_list = list(self._field_meta_list)
             previous_field_meta_by_name = dict(self._field_meta_by_name)
             previous_records = list(self._records)
@@ -17925,6 +17950,7 @@ class MaintenancePortalService:
             try:
                 self._load_fields()
                 self._load_records()
+                source_refreshed = True
             except Exception as exc:
                 self._field_meta_list = previous_field_meta_list
                 self._field_meta_by_name = previous_field_meta_by_name
@@ -17939,15 +17965,22 @@ class MaintenancePortalService:
                     meta=self._snapshot_meta(),
                     error=warning,
                 )
-                raise PortalError(warning) from exc
+                self._source_refresh_status["maintenance"] = {
+                    **self._source_refresh_status.get("maintenance", {}),
+                    "status": "retained" if previous_loaded_once else "failed",
+                    "count": len(previous_records),
+                    "error": warning,
+                }
             target_result: dict[str, Any] = {}
             target_warning = ""
+            target_refreshed = False
             if self._repair_snapshots_enabled:
                 try:
                     target_result = self._refresh_notice_target_replica(
                         work_type=WORK_TYPE_MAINTENANCE,
                         notice_type=NOTICE_TYPE_MAINTENANCE,
                     )
+                    target_refreshed = True
                 except Exception as exc:
                     target_warning = self._source_sync_warning(
                         "维保目标表",
@@ -17955,17 +17988,20 @@ class MaintenancePortalService:
                     )
                     if target_warning not in warnings:
                         warnings.append(target_warning)
+            if not source_refreshed and not target_refreshed:
+                raise PortalError("；".join(warnings) or "维保源表和目标表刷新失败。")
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
-            self._source_refresh_status["maintenance"] = {
-                "status": "success",
-                "count": len(self._records),
-                "refreshed_at": self._last_loaded_ts,
-                "error": "",
-            }
-            self._save_source_scope_snapshots(["maintenance"])
+            if source_refreshed:
+                self._source_refresh_status["maintenance"] = {
+                    "status": "success",
+                    "count": len(self._records),
+                    "refreshed_at": self._last_loaded_ts,
+                    "error": "",
+                }
+                self._save_source_scope_snapshots(["maintenance"])
             self.clear_engineer_mop_cache()
             self._touch_state_cache_version()
             return {
@@ -17976,6 +18012,7 @@ class MaintenancePortalService:
                 ),
                 "maintenance_target_reconcile": target_result,
                 "maintenance_target_warning": target_warning,
+                "maintenance_target_refreshed": target_refreshed,
             }
 
     def refresh_repair_source(self) -> dict[str, Any]:
@@ -18463,12 +18500,14 @@ class MaintenancePortalService:
                 app_token=app_token,
                 table_id=table_id,
             )
-            all_records = self._load_table_records(
+            all_records = self._search_table_records(
                 app_token=app_token,
                 table_id=table_id,
                 meta_by_name=meta_by_name,
                 work_type=WORK_TYPE_EVENT,
                 notice_type=NOTICE_TYPE_EVENT,
+                field_names=list(meta_by_name),
+                limit=None,
                 http_client=self._event_http_client,
             )
             snapshot_records: list[dict[str, Any]] = []
@@ -32129,12 +32168,14 @@ class MaintenancePortalService:
                 app_token=app_token,
                 table_id=table_id,
             )
-            records = self._load_table_records(
+            records = self._search_table_records(
                 app_token=app_token,
                 table_id=table_id,
                 meta_by_name=meta_by_name,
                 work_type=work_type,
                 notice_type=notice_type,
+                field_names=list(meta_by_name),
+                limit=None,
             )
             return metas, records
 
