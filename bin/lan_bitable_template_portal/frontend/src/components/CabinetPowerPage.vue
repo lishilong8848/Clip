@@ -10,8 +10,6 @@
         <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
         <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || allExportItems.some(item => ['pending','running','checking','unknown'].includes(item.status))" :title="allExportItems.some(item => ['checking','unknown'].includes(item.status)) ? '请先核对未确认的导出任务' : ''" @click="startAllExports"><CloudUpload :size="16" />{{ allExportBusy ? '各楼正在导出' : '一键导出/上传所有楼栋' }}</button>
         <template v-if="scope">
-          <a v-if="overview.table_url" :href="overview.table_url" target="_blank" rel="noopener"><ExternalLink :size="16" />多维表</a>
-          <button :disabled="!overview.rooms || racksLoading || busy || saving" @click="['D','E'].includes(scope) ? changeTab('records') : openEditor()"><Plus :size="16" />{{ ['D','E'].includes(scope) ? '登记机柜操作' : '新增记录' }}</button>
           <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />{{ pendingExportRequest ? '继续上次导出' : '导出' }}</button>
       <button :disabled="exportHistoryLoading" @click="showExports()"><History :size="16" />{{ exportHistoryLoading ? '读取历史中' : '导出历史' }}</button>
         </template>
@@ -31,7 +29,7 @@
     <div v-if="loading && !bootstrapActive" class="notice" role="status"><Loader2 class="spin" :size="18" />正在读取台账…</div>
     <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ startingJob ? (startingKind === 'exports' ? '正在准备导出数据…' : '正在启动同步…') : job.kind === 'export' ? '正在生成原模板表格并上传多维…' : '正在同步飞书…' }}</div>
     <div v-if="job.status === 'failed'" class="notice danger">{{ job.error }}<button @click="startJob(job.kind === 'export' ? 'exports' : 'refresh')">重试</button></div>
-    <div v-if="exported.export_id" class="notice" :class="exported.cloud_upload_status === 'failed' ? 'danger' : 'success'"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a><a v-if="exported.archive_url && exported.cloud_upload_status === 'succeeded'" :href="exported.archive_url" target="_blank" rel="noopener"><ExternalLink :size="16" />归档表</a><button v-if="!['succeeded','skipped'].includes(String(exported.cloud_upload_status || ''))" :disabled="exported._retrying" @click="retryExportUpload(exported)"><CloudUpload :size="16" />{{ exported._retrying ? '上传中' : '重试上传' }}</button></div>
+    <div v-if="exported.export_id" class="notice" :class="exported.cloud_upload_status === 'failed' ? 'danger' : 'success'"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a><button v-if="!['succeeded','skipped'].includes(String(exported.cloud_upload_status || ''))" :disabled="exported._retrying" @click="retryExportUpload(exported)"><CloudUpload :size="16" />{{ exported._retrying ? '上传中' : '重试上传' }}</button></div>
     <div v-if="scope && overview.export_state?.is_stale" class="notice danger" role="status"><TriangleAlert :size="18" /><span>最近导出已过期：{{ overview.export_state.stale_reason }}。请重新导出。</span></div>
     <div v-if="storageWarning" class="notice danger" role="status">{{ storageWarning }}</div>
     <div v-if="serverStorage.evidence_bytes !== undefined" class="notice" role="status"><HardDrive :size="18" /><span>确认截图 {{ formatBytes(serverStorage.evidence_bytes) }} · 缩略图 {{ formatBytes(serverStorage.thumbnail_bytes) }} · 原确认单 {{ formatBytes(serverStorage.import_bytes) }} · 导出文件 {{ formatBytes(serverStorage.export_bytes) }}</span><button :disabled="serverStorageLoading || !serverStorage.cloud_backed_files" @click="cacheCleanupOpen = true">清理已上云图片缓存</button></div>
@@ -45,7 +43,6 @@
         <span>{{ allExportLabel(item) }}</span>
         <div class="export-item-actions">
           <a v-if="item.result?.export_id && !item.result?.deleted" :href="api + '/exports/' + item.result.export_id + '/download'"><Download :size="15" />下载</a>
-          <a v-if="item.result?.archive_url && item.result?.cloud_upload_status === 'succeeded'" :href="item.result.archive_url" target="_blank" rel="noopener"><ExternalLink :size="15" />归档表</a>
           <button v-if="item.status === 'checking'" :disabled="item._retrying" @click="retryAllExportStatus(item)"><RefreshCw :size="15" />{{ item._retrying ? '查询中' : '继续查询' }}</button>
           <button v-if="['failed','unknown'].includes(item.status)" :disabled="item._retrying" @click="retryAllExportItem(item)"><RefreshCw :size="15" />{{ item._retrying ? '核验中' : item.status === 'unknown' ? '核验并继续' : '重试导出' }}</button>
           <button v-if="item.result?.cloud_upload_status === 'failed' && !item.result?.deleted" :disabled="item.result._retrying" @click="retryExportUpload(item.result,item)"><CloudUpload :size="15" />{{ item.result._retrying ? '上传中' : '重试上传' }}</button>
@@ -196,7 +193,7 @@
 <script setup lang="ts">
 import { randomHexId, resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, ExternalLink, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { navigate, registerNavigationGuard } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -216,7 +213,7 @@ const draftStorage = resilientStorage('sessionStorage', storageFailed);
 const overview = ref<Dict>({}), buildings = ref<Dict[]>([]), loading = ref(false), error = ref(''), message = ref(''), bootstrap = ref<Dict>({});
 const batchPendingCount = ref(0);
 const batchStatusError = ref(''), pendingWritesError = ref('');
-const batchCreateUrl = computed(() => `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? { scope:props.scope } : {}), mode:'new' })}`);
+const batchCreateUrl = computed(() => `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? { scope:props.scope } : {}), mode:'new', status:'todo' })}`);
 function openTodoBatches():void{navigate(`/cabinet-power/batches?${new URLSearchParams({...(props.scope?{scope:props.scope}:{}),status:'todo'})}`);}
 const bootstrapActive = computed(() => ['starting','pending','running'].includes(String(bootstrap.value.status || '')));
 const bootstrapTarget = computed(() => props.scope ? (bootstrap.value.buildings || []).find((item: Dict) => item.scope === props.scope) : null);

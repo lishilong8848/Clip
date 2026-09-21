@@ -180,6 +180,19 @@ try {
   page = await batchContext.newPage();
   const batchErrors = [];
   page.on("pageerror", error => batchErrors.push(error.message));
+  await page.goto(base + "/cabinet-power?scope=E");
+  await page.getByRole("heading", { name:"E楼机柜上下电" }).waitFor();
+  for (const name of ["新增记录","登记机柜操作","多维表","归档表"])
+    assert.equal(await page.getByRole("button", { name,exact:true }).count() + await page.getByRole("link", { name,exact:true }).count(),0,`${name} must not be shown`);
+  await page.goto(base + "/cabinet-power/batches?scope=E&status=todo");
+  await page.getByRole("heading", { name:"上下电待办" }).waitFor();
+  await page.getByRole("button", { name:"批量登记",exact:true }).click();
+  await page.waitForURL(url => url.searchParams.get("mode") === "new");
+  assert.equal(new URL(page.url()).searchParams.get("status"),"todo","batch creation must retain the todo filter");
+  await page.getByRole("button", { name:"返回",exact:true }).click();
+  await page.waitForURL(url => url.pathname === "/cabinet-power/batches" && !url.searchParams.get("mode"));
+  assert.equal(new URL(page.url()).searchParams.get("scope"),"E");
+  assert.equal(new URL(page.url()).searchParams.get("status"),"todo","return must restore the todo filter");
   const rows = Array.from({ length: 60 }, (_, index) => ({
     row_id:`row-${index + 1}`, scope:"E", room:"202", rack:`B${String(index + 1).padStart(2,"0")}`,
     rack_type:"服务器机柜", action:"上正式电", expected:"2026-09-19 10:00:00", actual:"",

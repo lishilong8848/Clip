@@ -1187,9 +1187,10 @@ def export_workbook(content, config, operations, notice_summary=None):
     verified=Workbook(out.getvalue())
     expected=["机柜上电汇总表（邮件）","机柜上电汇总表（每月阿里统计）",*(name for name in book.sheets if name!="机柜上电汇总表")]
     if list(verified.sheets)!=expected: raise CabinetError("通告汇总工作表关系校验失败")
-    formula_errors=[(name,ref,cell.findtext(T("v"),"")) for name in verified.sheets
+    error_values={"#VALUE!","#REF!","#NAME?","#DIV/0!","#N/A","#NUM!","#NULL!","#SPILL!","#CALC!"}
+    formula_errors=[(name,ref,verified.value(cell)) for name in verified.sheets
                     for ref,cell in verified.cells(name).items()
-                    if cell.get("t")=="e" or cell.findtext(T("v"),"") in {"#VALUE!","#REF!","#NAME?","#DIV/0!","#N/A","#NUM!","#NULL!"}]
+                    if cell.get("t")=="e" or str(verified.value(cell)).strip().upper() in error_values]
     if formula_errors:
         raise CabinetError("导出文件存在公式错误："+"、".join(f"{name}!{ref}={value}" for name,ref,value in formula_errors[:10]))
     if "xl/vbaProject.bin" in parts and verified.archive.read("xl/vbaProject.bin")!=book.archive.read("xl/vbaProject.bin"): raise CabinetError("宏资源校验失败")
@@ -1526,35 +1527,20 @@ def append_notice_summary_parts(parts, book, config, summary):
             put_cell(root, ref, raw, formula=formula, cell=cell)
         return cell
 
-    # Reset the visible stock table to the frozen template, then replay notices.
+    # Rebuild the visible stock table from the frozen states.  Some original
+    # workbooks cache their VBA colour formulas as literal #NAME? values.
     source_cells = baseline_cells
     total_row = 0
-    for room in config.get("rooms", []):
-        row = int(room.get("summary_row") or 0)
-        if not row:
-            continue
-        for column in range(2, 11):
-            ref = f"{col_name(column)}{row}"
-            source = source_cells.get(ref)
-            if source is not None:
-                put_ref(ref, book.value(source), source.get("s", "0"))
     for row in sheet_data:
         rn = int(row.get("r"))
         if str(value(f"A{rn}", mapping)).strip() in {"总计", "合计"}:
             total_row = rn
-            for column in range(2, 11):
-                ref = f"{col_name(column)}{rn}"
-                source = source_cells.get(ref)
-                if source is not None:
-                    put_ref(ref, book.value(source), source.get("s", "0"))
             break
 
-    room_deltas = defaultdict(Counter)
     building_delta = Counter()
     for key, after in states.items():
         before = initial_states[key]
         rack = inventory[key]
-        room = key[0]
         rack_type = str(rack.get("rack_type") or "")
         changes = Counter({
             "powered": int(after != "off") - int(before != "off"),
@@ -1564,36 +1550,34 @@ def append_notice_summary_parts(parts, book, config, summary):
             "unknown": int(after == "powered_unknown") - int(before == "powered_unknown"),
         })
         for metric, change in changes.items():
-            room_deltas[room][metric] += change
             building_delta[metric] += change
         prefix = "network" if rack_type == RACK_TYPES[0] else "server" if rack_type == RACK_TYPES[1] else ""
         if prefix:
-            room_deltas[room][prefix + "_powered"] += changes["powered"]
-            room_deltas[room][prefix + "_off"] += changes["off"]
             building_delta[prefix + "_powered"] += changes["powered"]
             building_delta[prefix + "_off"] += changes["off"]
 
-    def add_numeric(ref, delta):
-        if not delta:
-            return
-        current = value(ref, mapping)
-        if isinstance(current, (int, float)):
-            put_ref(ref, number(current) + delta, mapping[ref].get("s", "0"))
-
+    stock_rows=[]
     for room in config.get("rooms", []):
         row = int(room.get("summary_row") or 0)
-        delta = room_deltas[room["id"]]
-        for column, metric in ((3, "powered"), (4, "off"), (6, "network_powered"),
-                               (7, "network_off"), (9, "server_powered"), (10, "server_off")):
-            add_numeric(f"{col_name(column)}{row}", delta[metric])
-    if total_row:
-        for column, metric in ((3, "powered"), (4, "off"), (6, "network_powered"),
-                               (7, "network_off"), (9, "server_powered"), (10, "server_off")):
-            add_numeric(f"{col_name(column)}{total_row}", building_delta[metric])
+        if not row: continue
+        rr=[(key,rack) for key,rack in inventory.items() if key[0]==room["id"]]
+        network=[item for item in rr if item[1].get("rack_type")==RACK_TYPES[0]]
+        servers=[item for item in rr if item[1].get("rack_type")==RACK_TYPES[1]]
+        powered=lambda items:sum(states[key]!="off" for key,_rack in items)
+        off=lambda items:sum(states[key]=="off" for key,_rack in items)
+        gap=max(0,int(room.get("total") or 0)-len(rr)); carrier=config.get("scope")=="B" and room["id"] in ("216","247")
+        metrics=[int(room.get("total") or 0),powered(rr),off(rr)+gap,
+                 len(network)+(gap if carrier else 0),powered(network),off(network)+(gap if carrier else 0),
+                 len(servers),powered(servers),off(servers)]
+        stock_rows.append(metrics)
+        for column,raw in enumerate(metrics,2): put_ref(f"{col_name(column)}{row}",raw,mapping[f"{col_name(column)}{row}"].get("s","0"))
+    if total_row and stock_rows:
+        totals=list(map(sum,zip(*stock_rows)))
+        for column,raw in enumerate(totals,2): put_ref(f"{col_name(column)}{total_row}",raw,mapping[f"{col_name(column)}{total_row}"].get("s","0"))
         for cell in list(next(row for row in sheet_data if int(row.get("r")) == total_row)):
             formula = cell.find(T("f"))
             if formula is not None and re.fullmatch(rf"F{total_row}\+I{total_row}", formula.text or "", re.I):
-                put_cell(root, cell.get("r"), number(value(f"F{total_row}", mapping)) + number(value(f"I{total_row}", mapping)),
+                put_cell(root, cell.get("r"), totals[1],
                          formula=copy.deepcopy(formula), cell=cell)
 
     special_metrics = (("测试电总数", "test"), ("正式电总数", "formal"),

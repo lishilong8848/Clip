@@ -1918,6 +1918,10 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                 for ref,style in mail_styles.items():
                     if ref in notice_styles:
                         self.assertEqual(notice_styles[ref],style,(scope,ref))
+                errors={"#VALUE!","#REF!","#NAME?","#DIV/0!","#N/A","#NUM!","#NULL!","#SPILL!","#CALC!"}
+                found=[(name,ref,filled.value(cell)) for name in filled.sheets for ref,cell in filled.cells(name).items()
+                       if cell.get("t")=="e" or str(filled.value(cell)).strip().upper() in errors]
+                self.assertFalse(found,(scope,found[:10]))
 
                 rows=dict(filled.rows("机柜上电汇总表（每月阿里统计）"))
                 columns={"A":(2,3,5,6),"B":(13,14,15,16),"C":(27,28,29,30),"D":(2,3,4,5),"E":(2,3,4,5)}[scope]

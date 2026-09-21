@@ -291,7 +291,7 @@ function candidateRows(key:string):Dict[]{
   const current=selected&&selectableImageRows.value.find(row=>row.row_id===selected);
   return current&&!matches.some(row=>row.row_id===selected)?[current,...matches]:matches;
 }
-function openNew(): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),mode:'new' })}`); }
+function openNew(): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...((listScope.value || props.scope) ? {scope:listScope.value || props.scope}:{}),mode:'new',...(listStatus.value==='todo'?{status:'todo'}:{}) })}`); }
 function openList(): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}), ...(params.get('status')==='todo'?{status:'todo'}:{}) })}`); }
 function openBatch(id: string): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),batch_id:id,...(listStatus.value==='todo'?{status:'todo'}:{}) })}`); }
 function addPdfFiles(input: FileList | File[]): void {
