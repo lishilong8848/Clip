@@ -131,7 +131,7 @@
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
             <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
-            <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></li></ol>
+            <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div><div v-if="documentsWithIds(event).length" class="history-documents"><a v-for="file in documentsWithIds(event)" :key="file.file_id" :href="documentUrl(op.record_id,file.file_id)">{{ file.name }}</a></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
             <details v-if="op.issues.length"><summary>原始操作内容</summary><div v-for="(group, i) in op.groups" :key="i" class="raw-group"><div><small>操作类型</small><pre>{{ group.action }}</pre></div><div><small>期望完成时间</small><pre>{{ group.expected || '未填写' }}</pre><small>实际完成时间</small><pre>{{ group.actual || '未填写' }}</pre></div></div></details>
           </article>
@@ -161,7 +161,7 @@
               <label>实际完成时间<input v-if="singleDate(group.actual)" v-model="group.actual" type="datetime-local" step="1" :required="Boolean(group.action)" /><textarea v-else v-model="group.actual" rows="2" :required="Boolean(group.action)" /></label>
               <label>操作结果<select v-model="group.result"><option value="">待核实</option><option>成功</option><option>失败</option></select></label>
               <button type="button" title="移除此组" aria-label="移除此组" :disabled="!!form.target_state && group._editing" @click="removeGroup(group)"><Trash2 :size="16" /></button>
-              <div v-if="group.result === '失败' || imagesWithIds(group).length" class="group-evidence"><label v-if="group.result === '失败'">失败原因<input v-model="group.failure_reason" maxlength="1000" required placeholder="填写本次操作失败原因" /></label><div v-if="imagesWithIds(group).length" class="history-images"><button v-for="image in imagesWithIds(group)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + image.image_id.slice(0,8)" @click="previewEvidence = evidenceUrl(editingId,image.image_id,true)"><img :src="evidenceUrl(editingId,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div></div>
+              <div v-if="group.result === '失败' || imagesWithIds(group).length || documentsWithIds(group).length" class="group-evidence"><label v-if="group.result === '失败'">失败原因<input v-model="group.failure_reason" maxlength="1000" required placeholder="填写本次操作失败原因" /></label><div v-if="imagesWithIds(group).length" class="history-images"><button v-for="image in imagesWithIds(group)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + image.image_id.slice(0,8)" @click="previewEvidence = evidenceUrl(editingId,image.image_id,true)"><img :src="evidenceUrl(editingId,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div><div v-if="documentsWithIds(group).length" class="history-documents"><a v-for="file in documentsWithIds(group)" :key="file.file_id" :href="documentUrl(editingId,file.file_id)">{{ file.name }}</a></div></div>
             </div>
             <label v-if="form.original_scope && form.original_scope !== (form.scope || scope)" class="checkbox"><input v-model="form.confirm_scope_move" type="checkbox" required />将原 {{ form.original_scope }} 楼记录调整到 {{ form.scope }} 楼</label>
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
@@ -514,6 +514,8 @@ async function editIssue(id: string): Promise<void> {
 const editorOpen = ref(false), discardDialogOpen = ref(false), deleteRecordConfirmOpen = ref(false), editingId = ref(''), saving = ref(false), saveError = ref(''), form = reactive<Dict>({});
 const previewEvidence = ref('');
 function imagesWithIds(value:Dict):Dict[] { return (value.evidence_images || []).filter((item:Dict)=>item && item.image_id); }
+function documentsWithIds(value:Dict):Dict[] { return (value.evidence_files || []).filter((item:Dict)=>item?.file_id && item.extension==='.pdf'); }
+function documentUrl(recordId:string,fileId:string):string { return `/api/cabinet-power/operations/${encodeURIComponent(recordId)}/documents/${encodeURIComponent(fileId)}?scope=${encodeURIComponent(props.scope)}`; }
 function evidenceUrl(recordId:string,imageId:string,original=false):string { return `/api/cabinet-power/operations/${encodeURIComponent(recordId)}/evidence/${encodeURIComponent(imageId)}?scope=${encodeURIComponent(props.scope)}${original?'':'&thumbnail=1'}`; }
 const saveStatus = ref<Dict>({}), saveQueryError = ref(false);
 const saveStorageKey = 'cabinet-upload:' + (props.userId || 'session') + ':' + props.scope;
@@ -525,7 +527,7 @@ const saveStepLabel = computed(() => {
   return label + (s.elapsed_ms ? ' · ' + Math.floor(s.elapsed_ms/1000) + '秒' : '…');
 });
 const restoreDialogOpen = ref(false), discardMessage = ref('继续后，当前机柜记录中的修改会丢失。');
-const newGroup = (editing = true) => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', failure_reason: '', evidence_images: [], _editing: editing });
+const newGroup = (editing = true) => ({ id: 'event_' + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''), action: '', expected: '', actual: '', result: '成功', failure_reason: '', evidence_images: [], evidence_files: [], _editing: editing });
 const groupHasBusinessData = (group: Dict) => Boolean(group?.action || group?.expected || group?.actual);
 const editableGroups = computed(() => {
   const populated = (form.groups || []).filter((group: Dict) => groupHasBusinessData(group) || group?._editing);
@@ -755,4 +757,6 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 .heading-title{min-width:0}
 .heading>.actions{grid-column:1/-1;width:100%}
 .map-canvas{contain:layout paint style}
+.history-documents{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:8px;min-width:0}
+.history-documents a{max-width:100%;color:#175ebd;font-size:12px;overflow-wrap:anywhere}
 </style>

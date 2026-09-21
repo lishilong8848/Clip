@@ -391,6 +391,7 @@ class CabinetBatchService:
         self.import_root = self.root / "imports"
         self.store = CabinetBatchStore(self.root / "batches.sqlite3")
         self._lock = threading.RLock()
+        self._proof_locks = {}
         self._pdf_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cabinet-pdf")
         self._ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cabinet-ocr")
         self._confirm_pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="cabinet-batch")
@@ -509,6 +510,73 @@ class CabinetBatchService:
                 submitted.add(item["image_id"])
         return updated
 
+    @staticmethod
+    def _proof_row_editable(row):
+        return (not row.get("notice_removed") and row.get("status") not in LOCKED_ROW_STATUSES
+                and not str(row.get("status", "")).startswith("excluded_")
+                and (not row.get("operation_started") or row.get("status") == "rolled_back"))
+
+    def _recognized_times(self, candidate):
+        values = {}
+        for key in ("expected", "actual"):
+            value = str(candidate.get(key) or "").strip().replace("T", " ")
+            if self._valid_date(value, allow_future=key == "expected"):
+                values[key] = dt.datetime.fromisoformat(value).isoformat(sep=" ", timespec="seconds")
+        return values
+
+    def _proof_time_entries(self, batch, row):
+        return [(image["image_id"], index, candidate, self._recognized_times(candidate))
+                for image in batch.get("images", [])
+                if not image.get("deleted_at") and image.get("status") == "done"
+                and image["image_id"] in row.get("evidence_images", [])
+                for index, candidate in enumerate(image.get("suggestions", []))
+                if candidate.get("row_id") == row["row_id"]]
+
+    def _proof_time_signature(self, batch, row):
+        return digest([(image_id, index, values) for image_id, index, _candidate, values
+                       in self._proof_time_entries(batch, row)])
+
+    def _refresh_proof_times(self, batch, rows, overwrite=False):
+        rows = list(rows)
+        links = {row["row_id"]: set(row.get("evidence_images", [])) for row in rows}
+        by_row = {}
+        for image in batch.get("images", []):
+            if image.get("deleted_at") or image.get("status") != "done":
+                continue
+            for index, candidate in enumerate(image.get("suggestions", [])):
+                row_id = candidate.get("row_id")
+                if image["image_id"] in links.get(row_id, ()):
+                    by_row.setdefault(row_id, []).append((image["image_id"], index, candidate, self._recognized_times(candidate)))
+        for row in rows:
+            if not self._proof_row_editable(row):
+                continue
+            entries = by_row.get(row["row_id"], [])
+            values = {key: {times[key] for _id, _index, _candidate, times in entries if key in times}
+                      for key in ("expected", "actual")}
+            signature = digest([(image_id, index, times) for image_id, index, _candidate, times in entries])
+            review = row.get("evidence_time_review") or {}
+            reviewed = (review.get("signature") == signature
+                        and all(review.get(key, "") == row.get(key, "") for key in values))
+            conflict = any(len(found) > 1 for found in values.values()) and not reviewed
+            row["evidence_time_conflict"] = conflict
+            if overwrite and not conflict and not reviewed:
+                for key, found in values.items():
+                    if len(found) != 1:
+                        continue
+                    value = next(iter(found))
+                    if value == row.get(key, ""):
+                        continue
+                    image_id, _index, candidate, _times = next(entry for entry in entries if entry[3].get(key) == value)
+                    row.setdefault("edits", []).append({"field": key, "before": row.get(key, ""), "after": value,
+                                                       "image_id": image_id, "owner": "ocr", "at": now()})
+                    row[key] = value
+                    candidate["applied_fields"] = list(dict.fromkeys([*candidate.get("applied_fields", []), key]))
+            for _id, _index, candidate, _times in entries:
+                candidate["attached"] = True
+                candidate["time_conflict"] = conflict
+                action_differs = candidate.get("action") and row.get("action") and candidate["action"] != row["action"]
+                candidate["status"] = "needs_review" if conflict or action_differs else "applied"
+
     def _recognize_image(self, batch_id, image):
         from .cabinet_power_evidence import recognize_image_with_timeout
 
@@ -521,7 +589,7 @@ class CabinetBatchService:
 
         inventories = {}
         try:
-            before = self.get(batch_id)
+            before = self.store.get(batch_id)
             if before.get("source") == "image":
                 for scope in {item.get("scope") for item in suggestions} & set(before.get("recognition_scopes", [])):
                     snap = self.cabinet._snapshot(scope)
@@ -537,61 +605,54 @@ class CabinetBatchService:
                 return
             target.update(status="done" if suggestions else "failed", error=error, suggestions=[])
             image_source = batch.get("source") == "image"
+            linked = {}
             for index, candidate in enumerate(suggestions, 1):
                 if image_source and candidate.get("scope") not in batch.get("recognition_scopes", []):
                     target["suggestions"].append({**candidate, "row_id": "", "status": "unauthorized", "applied_fields": []})
                     continue
-                if image_source:
+                matches = [row for row in batch.get("rows", [])
+                           if (row.get("scope"), row.get("room"), row.get("rack")) ==
+                           (candidate.get("scope"), candidate.get("room"), candidate.get("rack"))]
+                if not matches and not candidate.get("rack") and candidate.get("supplier_rack"):
                     matches = [row for row in batch.get("rows", [])
-                               if (row.get("scope"), row.get("room"), row.get("rack")) ==
-                               (candidate.get("scope"), candidate.get("room"), candidate.get("rack"))
-                               and (not candidate.get("action") or not row.get("action") or row["action"] == candidate["action"])
-                               and (not candidate.get("actual") or not row.get("actual") or row["actual"] == candidate["actual"])]
-                    if not matches and len(batch.get("rows", [])) < MAX_ROWS:
-                        current = {key: "" for key in EDITABLE_FIELDS}
-                        current.update({key: str(candidate.get(key) or "") for key in
-                                        ("scope", "room", "rack", "supplier_rack", "action", "expected", "actual", "result")})
-                        current["rack_type"] = str(inventories.get(candidate["scope"], {}).get(
-                            (candidate["room"], candidate["rack"]), {}).get("rack_type") or "")
-                        row_id = "row_" + digest([batch_id, image["image_id"], index, current])[:24]
-                        row = {**current, "row_id": row_id, "source_index": len(batch["rows"]) + 1,
-                               "file_id": image["image_id"], "file_name": image["name"],
-                               "file_sha256": image["image_id"], "page": 0, "source_row": index,
-                               "application_ids": [], "applicant": "",
-                               "original": copy.deepcopy(current), "edits": [], "status": "ready", "issues": [],
-                               "error": "", "operation_id": "batch_" + digest([batch_id, row_id])[:32]}
-                        batch["rows"].append(row)
-                        matches = [row]
-                else:
-                    matches = [row for row in batch.get("rows", [])
-                               if (row.get("scope"), row.get("room")) == (candidate["scope"], candidate["room"])
-                               and (row.get("rack") == candidate["rack"] or candidate.get("supplier_rack")
-                                    and row.get("supplier_rack") == candidate["supplier_rack"])]
-                if len(matches) > 1 and candidate["action"]:
+                               if (row.get("scope"), row.get("room"), row.get("supplier_rack")) ==
+                               (candidate.get("scope"), candidate.get("room"), candidate["supplier_rack"])]
+                if image_source and not matches and candidate.get("rack") and len(batch.get("rows", [])) < MAX_ROWS:
+                    current = {key: "" for key in EDITABLE_FIELDS}
+                    current.update({key: str(candidate.get(key) or "") for key in
+                                    ("scope", "room", "rack", "supplier_rack", "action", "result")})
+                    current.update(self._recognized_times(candidate))
+                    current["rack_type"] = str(inventories.get(candidate["scope"], {}).get(
+                        (candidate["room"], candidate["rack"]), {}).get("rack_type") or "")
+                    row_id = "row_" + digest([batch_id, image["image_id"], index, current])[:24]
+                    row = {**current, "row_id": row_id, "source_index": len(batch["rows"]) + 1,
+                           "file_id": image["image_id"], "file_name": image["name"],
+                           "file_sha256": image["image_id"], "page": 0, "source_row": index,
+                           "application_ids": [], "applicant": "",
+                           "original": copy.deepcopy(current), "edits": [], "status": "ready", "issues": [],
+                           "error": "", "operation_id": "batch_" + digest([batch_id, row_id])[:32]}
+                    batch["rows"].append(row)
+                    matches = [row]
+                if len(matches) > 1 and candidate.get("action"):
                     matches = [row for row in matches if row.get("action") == candidate["action"]]
                 suggestion = {**candidate, "row_id": matches[0]["row_id"] if len(matches) == 1 else "",
                               "status": "needs_review", "applied_fields": []}
                 target["suggestions"].append(suggestion)
-                if len(matches) != 1:
+                if len(matches) != 1 or not self._proof_row_editable(matches[0]):
                     continue
                 row = matches[0]
-                if row.get("status") in LOCKED_ROW_STATUSES or str(row.get("status", "")).startswith("excluded_") or row.get("operation_started") and row.get("status") != "rolled_back":
-                    continue
-                if candidate["action"] and row.get("action") and candidate["action"] != row["action"]:
-                    continue
-                if not image_source and (not candidate["expected"] or not candidate["actual"]):
-                    continue
-                if any(row.get(key) and row[key] != candidate[key] for key in ("expected", "actual")):
-                    continue
-                for key in ("expected", "actual", "action", "supplier_rack", "result"):
-                    if candidate.get(key) and not row.get(key):
-                        row[key] = candidate[key]
-                        suggestion["applied_fields"].append(key)
                 refs = row.setdefault("evidence_images", [])
                 if image["image_id"] not in refs:
                     refs.append(image["image_id"])
-                    row.setdefault("edits", []).append({"field": "evidence_images", "after": image["image_id"], "owner": "ocr", "at": now()})
-                suggestion["status"] = "applied"
+                    row.setdefault("edits", []).append({"field": "evidence_images", "before": "",
+                        "after": image["image_id"], "owner": "ocr", "at": now()})
+                if not (candidate.get("action") and row.get("action") and candidate["action"] != row["action"]):
+                    for key in ("action", "supplier_rack", "result"):
+                        if candidate.get(key) and not row.get(key):
+                            row[key] = candidate[key]
+                            suggestion["applied_fields"].append(key)
+                linked[row["row_id"]] = row
+            self._refresh_proof_times(batch, linked.values(), overwrite=True)
         try:
             self._change(batch_id, apply, validate=True)
         except Exception as exc:
@@ -656,8 +717,9 @@ class CabinetBatchService:
                     row["status"] = "excluded_image"
             image.update(deleted_at=now(), deleted_by=owner, removed_row_ids=[row["row_id"] for row in linked],
                          removed_row_statuses=removed_statuses)
+            self._refresh_proof_times(current, linked, overwrite=True)
 
-        return self._change(batch_id, remove, expected_version=expected_version)
+        return self._change(batch_id, remove, expected_version=expected_version, validate=True)
 
     def restore_image(self, batch_id, image_id, expected_version, owner, allowed, admin=False):
         batch = self.get(batch_id)
@@ -689,6 +751,7 @@ class CabinetBatchService:
                 if row.get("status") == "excluded_image" and row["row_id"] in image.get("removed_row_statuses", {}):
                     row["status"] = image["removed_row_statuses"][row["row_id"]]
             image.update(deleted_at="", deleted_by="", removed_row_ids=[], removed_row_statuses={})
+            self._refresh_proof_times(current, rows, overwrite=True)
 
         updated = self._change(batch_id, restore, expected_version=expected_version, validate=True)
         image = next(item for item in updated["images"] if item["image_id"] == image_id)
@@ -716,7 +779,7 @@ class CabinetBatchService:
                 raise CabinetError("截图已删除，请先撤回删除", 409)
             if not admin and row.get("scope") not in allowed:
                 raise CabinetError("无权修改该楼栋待办", 403)
-            if row.get("status") in LOCKED_ROW_STATUSES or row.get("operation_started") and row.get("status") != "rolled_back":
+            if batch.get("status") == "cancelled" or not self._proof_row_editable(row):
                 raise CabinetError("该机柜已开始正式提交", 409)
             if index >= 0 and index >= len(image.get("suggestions", [])):
                 raise CabinetError("识别候选行不存在", 404)
@@ -724,21 +787,35 @@ class CabinetBatchService:
                 raise CabinetError("无权使用其他楼栋的识别内容", 403)
             for key, raw in fields.items():
                 value = str(raw or "").strip().replace("T", " ")
+                if key in ("expected", "actual") and value:
+                    if not self._valid_date(value, allow_future=key == "expected"):
+                        raise CabinetError("识别时间无效，请手动核对", 400)
+                    value = dt.datetime.fromisoformat(value).isoformat(sep=" ", timespec="seconds")
                 if value != row.get(key, ""):
                     row.setdefault("edits", []).append({"field": key, "before": row.get(key, ""),
-                                                        "after": value, "owner": owner, "at": now()})
+                                                        "after": value, "owner": owner, "image_id": image_id, "at": now()})
                     row[key] = value
             refs = row.setdefault("evidence_images", [])
+            was_attached = image_id in refs
             if payload.get("attach", True):
                 if image_id not in refs:
                     refs.append(image_id)
             elif image_id in refs:
                 refs.remove(image_id)
+            if was_attached != (image_id in refs):
+                row.setdefault("edits", []).append({"field": "evidence_images", "before": image_id if was_attached else "",
+                    "after": image_id if image_id in refs else "", "owner": owner, "at": now()})
             if index >= 0:
                 image["suggestions"][index].update(
                     row_id=row_id, status="applied" if image_id in refs else "needs_review",
                     applied_fields=list(fields), reviewer=owner, reviewed_at=now(),
                 )
+            if image_id in refs and (index >= 0 or payload.get("review_times") is True):
+                row["evidence_time_review"] = {"signature": self._proof_time_signature(batch, row),
+                    "expected": row.get("expected", ""), "actual": row.get("actual", ""),
+                    "image_id": image_id, "owner": owner, "at": now()}
+                row.setdefault("edits", []).append({"field": "evidence_time_review", "before": "",
+                    "after": image_id, "owner": owner, "at": now()})
         return self._change(batch_id, apply, expected_version=expected_version, validate=True)
 
     def _recover_interrupted(self):
@@ -1253,6 +1330,7 @@ class CabinetBatchService:
 
     def _validate_rows(self, batch):
         rows = batch.get("rows", [])
+        self._refresh_proof_times(batch, rows)
         notice_scope = str((batch.get("source_notice") or {}).get("scope") or "").upper()
         scopes = {str(row.get("scope") or "").upper().replace("楼", "") for row in rows}
         valid_scopes = {scope for scope in scopes if scope in SCOPES}
@@ -1281,6 +1359,8 @@ class CabinetBatchService:
         seen = set()
         for row, key, slot in normalized:
             issues = []
+            if row.get("evidence_time_conflict"):
+                issues.append({"code": "evidence_time_conflict", "message": "同一机柜截图时间不一致，请在确认截图中核对"})
             rolled_back = row.get("status") == "rolled_back"
             scope, room, rack, action, actual = key
             if scope not in SCOPES:
@@ -1326,8 +1406,8 @@ class CabinetBatchService:
             duplicate = bool(all(key) and (key in existing_exact or key in seen))
             if rolled_back and self.store.later_completed(batch["batch_id"], scope, room, rack):
                 issues.append({"code": "later_batch", "message": "该机柜已有后续批次操作，不能再次确认"})
-            if conflict:
-                issues.append({"code": "time_conflict", "message": "同一机柜同一实际时间存在不同操作，须人工核对"})
+            if conflict or row.get("evidence_time_conflict"):
+                if conflict: issues.append({"code": "time_conflict", "message": "同一机柜同一实际时间存在不同操作，须人工核对"})
                 row["status"] = "rolled_back" if rolled_back else "conflict"
             elif duplicate:
                 row["status"] = "rolled_back" if rolled_back else "duplicate"
@@ -1714,7 +1794,12 @@ class CabinetBatchService:
             result["files"] = []
         else:
             result.pop("_visible_stats", None)
+        pdf_files = {item["file_id"]: item for item in batch.get("files", [])} if batch.get("source") == "pdf" else {}
         for row in result.get("rows", []):
+            document = pdf_files.get(row.get("file_id"))
+            row["proof_files"] = ([{"file_id": document["file_id"], "name": document["name"],
+                                   "available": not document.get("cleaned_at") or bool(document.get("cloud_file_token")),
+                                   "can_download": bool(admin or batch["owner_id"] == owner)}] if document else [])
             row["editable"] = not deleted_notice and not row.get("notice_removed") and bool(admin or row.get("scope") in allowed) and batch.get("status") != "cancelled" and row.get("status") not in LOCKED_ROW_STATUSES and row.get("status") != "excluded_image" and (not row.get("operation_started") or row.get("status") == "rolled_back")
             row["confirmable"] = not deleted_notice and bool(admin or row.get("scope") in allowed) and not row.get("notice_removed") and row.get("status") in ACTIVE_ROW_STATUSES and not row.get("issues")
             row["rollbackable"] = bool(admin or row.get("scope") in allowed) and row.get("wrote_record") is not False and row.get("status") in {"completed", "rollback_failed", "rollback_blocked"}
@@ -1856,7 +1941,9 @@ class CabinetBatchService:
         changed = [row for row in updated.get("rows", []) if before.get(row["row_id"]) != row]
         delta = {key: copy.deepcopy(value) for key, value in updated.items()
                  if key not in {"rows", "images", "files"}}
-        delta.update(rows=changed, images=[], files=[], partial_rows=True)
+        prior_images = {image["image_id"]: image for image in current.get("images", [])}
+        changed_images = [image for image in updated.get("images", []) if prior_images.get(image["image_id"]) != image]
+        delta.update(rows=changed, images=changed_images, files=copy.deepcopy(updated.get("files", [])), partial_rows=True)
         if not admin and updated["owner_id"] != owner:
             delta["_visible_stats"] = self._stats(
                 [row for row in updated.get("rows", []) if row.get("scope") in allowed]
@@ -1878,6 +1965,48 @@ class CabinetBatchService:
                 row.setdefault("edits", []).append({"field": "excluded", "before": False, "after": True, "owner": owner, "at": now(), "reason": "overlap"})
         return self._change(batch_id, clear, expected_version=int(expected_version), validate=True)
 
+    def _upload_proof(self, batch_id, collection, proof_id, scope):
+        key = "image_id" if collection == "images" else "file_id"
+        initial = self.store.get(batch_id) or {}
+        source = next((item for item in initial.get(collection, []) if item[key] == proof_id), None)
+        if source is None: raise CabinetError("证明文件引用不存在", 409)
+        checksum = proof_id if collection == "images" else source["sha256"]
+        with self._lock:
+            lock = self._proof_locks.setdefault((batch_id, collection, checksum), threading.Lock())
+        with lock:
+            batch = self.store.get(batch_id)
+            proof = next((item for item in batch.get(collection, []) if item[key] == proof_id), None)
+            if proof is None or proof.get("deleted_at"):
+                raise CabinetError("证明文件引用不存在", 409)
+            token = str(proof.get("cloud_file_token") or "")
+            if token:
+                return token
+            shared = next((item for item in batch.get(collection, []) if item.get("cloud_file_token")
+                           and (item.get("image_id") if collection == "images" else item.get("sha256")) == checksum), None)
+            if shared:
+                token = shared["cloud_file_token"]
+                def reuse(current):
+                    target = next(item for item in current[collection] if item[key] == proof_id)
+                    target.update(cloud_file_token=token, cloud_scope=shared.get("cloud_scope") or scope)
+                self._change(batch_id, reuse)
+                return token
+            path = (self.root / "evidence" / (proof_id + proof["extension"]) if collection == "images"
+                    else self.import_root / batch_id / (proof_id + ".pdf"))
+            if not path.is_file():
+                raise CabinetError("证明文件已丢失，不能确认", 409)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
+                raise CabinetError("证明文件与识别原件不一致，不能确认", 409)
+            remote = self.cabinet.remote_for(scope)
+            remote.ensure_fields()
+            token = remote.upload_attachment(path, proof["name"])
+            if not re.fullmatch(r"[A-Za-z0-9_-]{10,200}", str(token or "")):
+                raise CabinetError("证明文件上传未返回有效标识", 502)
+            def remember(current):
+                target = next(item for item in current[collection] if item[key] == proof_id)
+                target.update(cloud_file_token=token, cloud_scope=scope)
+            self._change(batch_id, remember)
+            return token
+
     def _row_payload(self, batch, row):
         scope = row["scope"]
         if row.get("attempts") and self.store.later_completed(batch["batch_id"],scope,row["room"],row["rack"]):
@@ -1886,25 +2015,37 @@ class CabinetBatchService:
         inventory = next((item for item in snap["config"]["inventory"] if (item["room"], item["rack"]) == (row["room"], row["rack"])),None)
         if inventory is None: raise CabinetError("机柜目录已变化，请刷新批次后核对",409)
         rack_type = inventory.get("rack_type", "") if row.get("type_resolution") == "keep_current" else row["rack_type"]
+        exact = None
+        for operation in snap["operations"]:
+            if (operation["room"], operation["rack"]) != (row["room"], row["rack"]):
+                continue
+            if any((event["action"], event["actual"]) == (row["action"], row["actual"]) for event in operation["events"]):
+                exact = operation
+                break
+        if exact:
+            return None, exact["record_id"]
+        if batch.get("source") in ("pdf", "image"):
+            state = self._current_state(snap, row["room"], row["rack"])
+            if row["action"] not in POWER_ACTIONS_BY_STATE.get(state, ()):
+                raise CabinetError(f"该机柜当前为{POWER_STATE_LABELS.get(state, '状态待核实')}，与确认单操作不匹配，请重新核对",409)
         image_refs = []
         for image_id in row.get("evidence_images", []):
             image = next((item for item in batch.get("images", []) if item["image_id"] == image_id), None)
             if image is None or image.get("deleted_at"):
                 raise CabinetError("待办截图引用不存在", 409)
-            token = str(image.get("cloud_file_token") or "")
-            if not token:
-                path = self.root / "evidence" / (image_id + image["extension"])
-                if not path.is_file():
-                    raise CabinetError("待办截图文件已丢失，不能确认", 409)
-                remote = self.cabinet.remote_for(scope)
-                remote.ensure_fields()
-                token = remote.upload_attachment(path, image["name"])
-                def remember(current):
-                    target = next(item for item in current.get("images", []) if item["image_id"] == image_id)
-                    target["cloud_file_token"] = token
-                self._change(batch["batch_id"], remember)
-                image["cloud_file_token"] = token
+            token = self._upload_proof(batch["batch_id"], "images", image_id, scope)
             image_refs.append({"image_id": image_id, "file_token": token, "extension": image["extension"]})
+        documents = []
+        if batch.get("source") == "pdf":
+            document = next((item for item in batch.get("files", []) if item["file_id"] == row.get("file_id")), None)
+            if document is None:
+                raise CabinetError("待办原PDF引用不存在，不能确认", 409)
+            token = self._upload_proof(batch["batch_id"], "files", document["file_id"], scope)
+            documents.append({"file_id": document["sha256"], "file_token": token, "name": document["name"],
+                              "extension": ".pdf", "scopes": sorted({value for item in batch["rows"]
+                                  if item.get("file_id") == document["file_id"]
+                                  for value in (item.get("scope"), (item.get("original") or {}).get("scope"))
+                                  if value in SCOPES})})
         evidence = {
             "batch_id": batch["batch_id"], "row_id": row["row_id"], "file_name": row.get("file_name", ""),
             "file_sha256": row.get("file_sha256", ""), "application_ids": row.get("application_ids", []),
@@ -1919,23 +2060,10 @@ class CabinetBatchService:
         group = {"id": "event_" + digest(group_key)[:24], "action": row["action"],
                  "expected": row["expected"], "actual": row["actual"], "result": row["result"],
                  "failure_reason": row.get("failure_reason", "") if row["result"] == "失败" else "",
-                 "evidence_images": image_refs}
+                 "evidence_images": image_refs, "evidence_files": documents}
         payload = {"room": row["room"], "rack": row["rack"], "rack_type": rack_type,
                    "result": row["result"], "groups": [group], "operation_id": row["operation_id"],
                    "category": "down" if row["action"].startswith("下") else "up", "batch_meta": evidence}
-        exact = None
-        for operation in snap["operations"]:
-            if (operation["room"], operation["rack"]) != (row["room"], row["rack"]):
-                continue
-            if any((event["action"], event["actual"]) == (row["action"], row["actual"]) for event in operation["events"]):
-                exact = operation
-                break
-        if exact:
-            return None, exact["record_id"]
-        if batch.get("source") in ("pdf", "image"):
-            state = self._current_state(snap, row["room"], row["rack"])
-            if row["action"] not in POWER_ACTIONS_BY_STATE.get(state, ()):
-                raise CabinetError(f"该机柜当前为{POWER_STATE_LABELS.get(state, '状态待核实')}，与确认单操作不匹配，请重新核对",409)
         current = max(
             ((event, operation) for operation in snap["operations"]
              if (operation["room"], operation["rack"]) == (row["room"], row["rack"])
@@ -2036,6 +2164,8 @@ class CabinetBatchService:
     def confirm(self, batch_id, payload, owner, allowed, admin=False):
         expected = payload.get("version")
         batch = self.get(batch_id)
+        if any(image.get("status") == "recognizing" and not image.get("deleted_at") for image in batch.get("images", [])):
+            raise CabinetError("截图仍在识别，请完成后再确认", 409)
         if (batch.get("source_notice") or {}).get("deleted_at"):
             raise CabinetError("来源通告已删除，不能继续确认机柜", 409)
         if expected is None: raise CabinetError("缺少有效批次版本")
@@ -2227,7 +2357,13 @@ class CabinetBatchService:
             raise CabinetError("原确认单不存在", 404)
         path = self.import_root / batch_id / f"{file_id}.pdf"
         if not path.is_file():
-            raise CabinetError("原确认单文件已清理", 410)
+            token = str(meta.get("cloud_file_token") or "")
+            if not token:
+                raise CabinetError("原确认单文件已清理", 410)
+            content = self.cabinet.remote_for(meta.get("cloud_scope") or batch["scopes"][0]).download_attachment(token)
+            if hashlib.sha256(content).hexdigest() != meta["sha256"] or not content.startswith(b"%PDF"):
+                raise CabinetError("飞书PDF与原确认单校验值不一致", 409)
+            self._atomic_write(path, content)
         return path, meta["name"]
 
     def cleanup_file(self,batch_id,file_id,owner,admin=False):

@@ -87,11 +87,11 @@
       <section class="evidence-section"><div class="evidence-upload" :class="{ dragging: evidenceDragging }" title="支持拖入截图或 Ctrl+V 粘贴" @dragover.prevent="evidenceDragging = true" @dragleave.prevent="evidenceDragging = false" @drop.prevent="dropEvidence"><div class="evidence-title"><h3>确认截图</h3><span>{{ activeImages.length }} 张</span></div><label class="file-command" title="选择、拖入或粘贴截图"><Upload :size="15" />选择图片<input ref="imageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple @change="selectEvidence" /></label><label class="file-command">选择文件夹<input type="file" accept="image/jpeg,image/png,image/webp" multiple webkitdirectory @change="selectEvidence" /></label><small v-if="uploadingEvidence">已上传 {{ imageUploadDone }}/{{ imageUploadTotal }} 张，正在识别…</small></div>
         <div v-if="activeImages.length" class="evidence-grid">
           <article v-for="image in pagedActiveImages" :key="image.image_id" class="evidence-item">
-            <button class="image-button" :aria-label="'查看原图 ' + image.name" @click="previewImage = imageUrl(image.image_id,true)"><img :src="imageUrl(image.image_id)" :alt="image.name" loading="lazy" /></button>
+            <button class="image-button" :aria-label="'查看原图 ' + image.name" @click="openImage(image.image_id)"><img :src="imageUrl(image.image_id)" :alt="image.name" loading="lazy" /></button>
             <div><div class="evidence-heading"><strong>{{ image.name }}</strong><button class="icon-button danger-icon" :disabled="saving || uploadingEvidence || batch.status === 'cancelled' || !batch.can_download_files || !batch.can_confirm_all || imageLocked(image)" :title="imageLocked(image) ? '已提交的机柜截图须先回退记录' : !batch.can_download_files || !batch.can_confirm_all ? '仅上传者或管理员可删除' : '删除截图'" :aria-label="'删除截图 ' + image.name" @click="requestImageDelete(image.image_id)"><Trash2 :size="16" /></button></div>
               <small>{{ image.status === 'recognizing' ? '识别中' : image.error || `${image.suggestions?.length || 0} 项识别结果` }}</small>
               <details v-if="image.suggestions?.length" class="recognition-details" :open="image.suggestions.some((item: Dict) => item.status !== 'applied')"><summary>识别明细</summary>
-              <div v-for="(candidate,index) in image.suggestions || []" :key="index" class="evidence-match"><span>{{ candidate.scope }}楼 {{ candidate.room }} / {{ candidate.rack }} · {{ candidate.action || '操作待核对' }}<br />期望 {{ candidate.expected || '未识别' }} · 实际 {{ candidate.actual || '未识别' }}</span><small>{{ candidate.status === 'applied' ? '已关联' : candidate.status === 'unauthorized' ? '无楼栋权限' : '待人工核对' }}</small><template v-if="!['applied','unauthorized'].includes(candidate.status)"><input v-model="imageSearches[image.image_id + ':' + index]" class="evidence-search" placeholder="搜索楼栋、包间或机柜" /><select v-model="imageSelections[image.image_id + ':' + index]" :aria-label="'选择截图对应机柜 ' + candidate.rack"><option value="">选择本批次机柜</option><option v-for="row in candidateRows(image.image_id + ':' + index)" :key="row.row_id" :value="row.row_id">{{ row.scope }}楼 {{ row.room }} / {{ row.rack }} · {{ row.action || '待选操作' }}</option></select><button :disabled="saving || !imageSelections[image.image_id + ':' + index]" @click="applyEvidence(image,imageSelections[image.image_id + ':' + index],candidate,index)">核对并关联</button></template></div>
+              <div v-for="(candidate,index) in image.suggestions || []" :key="index" class="evidence-match"><span>{{ candidate.scope }}楼 {{ candidate.room }} / {{ candidate.rack }} · {{ candidate.action || '操作待核对' }}<br />期望 {{ candidate.expected || '未识别' }} · 实际 {{ candidate.actual || '未识别' }}</span><small>{{ candidate.time_conflict ? '证明已关联，时间冲突待核对' : candidate.status === 'applied' ? '已关联' : candidate.status === 'unauthorized' ? '无楼栋权限' : candidate.attached ? '证明已关联，内容待核对' : '待人工核对' }}</small><template v-if="!['applied','unauthorized'].includes(candidate.status)"><input v-model="imageSearches[image.image_id + ':' + index]" class="evidence-search" placeholder="搜索楼栋、包间或机柜" /><select v-model="imageSelections[image.image_id + ':' + index]" :aria-label="'选择截图对应机柜 ' + candidate.rack"><option value="">选择本批次机柜</option><option v-for="row in candidateRows(image.image_id + ':' + index)" :key="row.row_id" :value="row.row_id">{{ row.scope }}楼 {{ row.room }} / {{ row.rack }} · {{ row.action || '待选操作' }}</option></select><button :disabled="saving || !imageSelections[image.image_id + ':' + index]" @click="applyEvidence(image,imageSelections[image.image_id + ':' + index],candidate,index)">{{ candidate.time_conflict ? '采用此截图时间' : '核对并关联' }}</button></template></div>
               </details>
               <div v-if="!image.suggestions?.length && image.status !== 'recognizing'" class="evidence-match"><input v-model="imageSearches[image.image_id]" class="evidence-search" placeholder="搜索楼栋、包间或机柜" /><select v-model="imageSelections[image.image_id]" aria-label="手动选择截图对应机柜"><option value="">选择本批次机柜</option><option v-for="row in candidateRows(image.image_id)" :key="row.row_id" :value="row.row_id">{{ row.scope }}楼 {{ row.room }} / {{ row.rack }}</option></select><button :disabled="saving || !imageSelections[image.image_id]" @click="applyEvidence(image,imageSelections[image.image_id],null,-1)">关联截图</button></div>
             </div>
@@ -104,10 +104,10 @@
       <section v-if="batch.rows?.length" class="batch-actions">
         <div class="filter-bar"><strong>机柜明细</strong><label v-if="batch.scopes?.length > 1"><span>楼栋</span><select v-model="rowScopeFilter"><option value="">全部楼栋</option><option v-for="item in batch.scopes || []" :key="item" :value="item">{{ item }}楼</option></select></label><label><span>状态</span><select v-model="rowStatusFilter"><option value="">全部状态</option><option value="ready">可确认</option><option value="rolled_back">已回退</option><option value="duplicate">重复</option><option value="conflict">冲突</option><option value="invalid">无效</option><option value="failed">失败</option><option value="completed">已完成</option><option value="excluded">已排除</option></select></label><label><span>快速核对</span><select v-model="rowQuickFilter"><option value="">全部记录</option><option value="missing_actual">未填写实际时间</option><option value="evidence_pending">截图待匹配</option><option value="issues">仅异常记录</option></select></label><span class="filter-count">当前 {{ filteredRows.length }} 条</span></div>
         <div v-if="selectedRows.length" class="selection-panel"><div class="selection-heading"><strong>已选 {{ selectedRows.length }} 条</strong><button class="link" type="button" @click="selectedRows = []">清除选择</button></div><div class="bulk-fields"><template v-if="batch.status !== 'cancelled'"><label><span>操作类型</span><select v-model="bulk.action"><option value="">不修改</option><option v-for="action in actions" :key="action">{{ action }}</option></select></label><label><span>期望完成时间</span><input v-model="bulk.expected" type="datetime-local" step="1" /></label><label><span>实际完成时间</span><input v-model="bulk.actual" type="datetime-local" step="1" /></label><label><span>结果</span><select v-model="bulk.result"><option value="">不修改</option><option>成功</option><option>失败</option></select></label><label v-if="bulk.result === '失败'"><span>失败原因</span><input v-model="bulk.failure_reason" maxlength="1000" /></label><label><span>类型处理</span><select v-model="bulk.type_resolution"><option value="">不修改</option><option value="keep_current">沿用当前机柜类型</option><option value="sync_current">同步修正当前机柜类型</option></select></label><button @click="applyBulk">应用更改</button><button class="danger-ghost" :disabled="saving || !excludableSelectedCount" @click="excludeSelected"><Trash2 :size="16" />排除已选</button></template><button :disabled="saving || !restorableSelectedCount" @click="restoreSelected">恢复已选 {{ restorableSelectedCount }} 条</button></div></div>
-        <div class="commit-actions"><span v-if="saving || dirtyCount" class="save-indicator">{{ saving ? '处理中…' : `待自动保存 ${dirtyCount} 条` }}</span><button v-if="saveFailed" @click="saveChanges">重试保存</button><button class="primary" :disabled="saving || batch.status === 'cancelled' || batch.source_notice?.deleted_at || !batch.stats?.confirmable || !batch.can_confirm_all || warningsPending" :title="warningsPending ? '请先核对通告明细异常' : batch.can_confirm_all ? '' : '当前账号无权确认本批次'" @click="confirmDialog = 'all'">确认整批</button><button :disabled="saving || !rollbackableCount || !batch.can_confirm_all" @click="requestRollback('')">回退本批已写入记录</button><button :disabled="saving || batch.status === 'completed' || batch.status === 'cancelled' || !cancellableCount" @click="confirmDialog = 'cancel'">{{ batch.status === 'cancelled' ? '已作废' : '作废未提交行' }}</button></div>
+        <div class="commit-actions"><span v-if="saving || dirtyCount" class="save-indicator">{{ saving ? '处理中…' : `待自动保存 ${dirtyCount} 条` }}</span><button v-if="saveFailed" @click="saveChanges">重试保存</button><button class="primary" :disabled="saving || uploadingEvidence || recognizingEvidence || batch.status === 'cancelled' || batch.source_notice?.deleted_at || !batch.stats?.confirmable || !batch.can_confirm_all || warningsPending" :title="recognizingEvidence ? '请等待截图识别完成' : warningsPending ? '请先核对通告明细异常' : batch.can_confirm_all ? '' : '当前账号无权确认本批次'" @click="confirmDialog = 'all'">确认整批</button><button :disabled="saving || !rollbackableCount || !batch.can_confirm_all" @click="requestRollback('')">回退本批已写入记录</button><button :disabled="saving || batch.status === 'completed' || batch.status === 'cancelled' || !cancellableCount" @click="confirmDialog = 'cancel'">{{ batch.status === 'cancelled' ? '已作废' : '作废未提交行' }}</button></div>
       </section>
 
-      <div v-if="batch.rows?.length" class="table-wrap detail-table"><table class="records-table"><thead><tr><th class="select-column"><input type="checkbox" :checked="allVisibleSelected" aria-label="选择本页" @change="toggleVisible" /></th><th class="validation-cell">状态</th><th class="location-summary">位置</th><th v-if="showRackColumn" class="rack-summary">机柜</th><th v-if="showSupplierRackColumn" class="supplier-summary">供应商机柜号</th><th class="operation-summary">当前状态 / 操作</th><th v-if="showExpectedColumn" class="time-cell">期望完成</th><th class="time-cell">实际完成</th><th class="result-summary">结果</th><th class="source-cell">确认截图</th><th class="action-column">操作</th></tr></thead><tbody>
+      <div v-if="batch.rows?.length" class="table-wrap detail-table"><table class="records-table"><thead><tr><th class="select-column"><input type="checkbox" :checked="allVisibleSelected" aria-label="选择本页" @change="toggleVisible" /></th><th class="validation-cell">状态</th><th class="location-summary">位置</th><th v-if="showRackColumn" class="rack-summary">机柜</th><th v-if="showSupplierRackColumn" class="supplier-summary">供应商机柜号</th><th class="operation-summary">当前状态 / 操作</th><th v-if="showExpectedColumn" class="time-cell">期望完成</th><th class="time-cell">实际完成</th><th class="result-summary">结果</th><th class="proof-cell">证明</th><th class="action-column">操作</th></tr></thead><tbody>
         <template v-for="row in pagedRows" :key="row.row_id">
           <tr :class="[row.status, { expanded: editingRowId === row.row_id }]">
             <td><input v-if="row.editable || row.confirmable || row.restorable" v-model="selectedRows" type="checkbox" :value="row.row_id" :aria-label="'选择' + row.rack" /></td>
@@ -119,18 +119,23 @@
             <td v-if="showExpectedColumn" class="time-cell">{{ row.expected ? tableDate(row.expected) : '—' }}</td>
             <td class="time-cell">{{ tableDate(row.actual) }}</td>
             <td class="result-summary"><span :class="['result-badge', row.result === '成功' ? 'success' : row.result === '失败' ? 'failed' : 'pending']">{{ row.result || '待选择' }}</span></td>
-            <td class="source-cell"><button v-if="row.evidence_images?.length" class="row-thumb" :aria-label="'查看 ' + row.rack + ' 的确认截图'" @click="previewImage = imageUrl(row.evidence_images[0],true)"><img :src="imageUrl(row.evidence_images[0])" alt="确认截图缩略图" loading="lazy" /></button><small v-if="row.evidence_images?.length > 1">共 {{ row.evidence_images.length }} 张</small><span v-else-if="!row.evidence_images?.length" class="muted">—</span></td>
+            <td class="proof-cell">
+              <div v-if="row.evidence_images?.length" class="proof-thumbs"><button v-for="(id,index) in row.evidence_images.slice(0,2)" :key="id" class="row-thumb" :aria-label="`查看 ${row.rack} 的证明截图 ${index+1}`" @click="openProofImages(row,index)"><img :src="imageUrl(id)" alt="证明截图" loading="lazy" /></button><button v-if="row.evidence_images.length > 2" class="proof-more" :aria-label="'查看全部 ' + row.evidence_images.length + ' 张证明'" @click="openProofImages(row,2)">+{{ row.evidence_images.length - 2 }}</button></div>
+              <template v-for="file in row.proof_files || []" :key="file.file_id"><a v-if="file.can_download && file.available" class="proof-file" :title="file.name" :href="proofFileUrl(file.file_id)"><FileText :size="14" /><span>{{ file.name }}</span></a><span v-else class="proof-file muted" :title="file.available ? '无原件下载权限' : '原件已清理'"><FileText :size="14" /><span>{{ file.name }}</span></span></template>
+              <span v-if="!row.evidence_images?.length && !row.proof_files?.length" class="muted">—</span>
+            </td>
             <td class="row-actions"><button class="icon-button" :title="row.editable ? '编辑记录' : '查看记录'" :aria-label="row.editable ? '编辑记录' : '查看记录'" @click="toggleRowEditor(row,$event)"><Pencil v-if="row.editable" :size="16" /><Eye v-else :size="16" /></button><button v-if="row.rollbackable" class="link" @click="requestRollback(row.row_id)">回退</button><button v-if="row.editable && !String(row.status).startsWith('excluded_')" class="icon-button danger-icon" title="从待办排除" aria-label="从待办排除" @click="toggleExcluded(row,true)"><Trash2 :size="16" /></button><button v-if="row.restorable" class="link" @click="restoreRows([row.row_id])">恢复</button></td>
           </tr>
           <Teleport to="body"><div v-if="editingRowId === row.row_id" class="row-editor-overlay" @click.self="closeRowEditor">
             <section class="row-editor" role="dialog" aria-modal="true" :aria-label="`编辑 ${row.scope}楼 ${row.room} ${row.rack}`" tabindex="-1">
               <header><div><span>机柜记录</span><strong>{{ row.scope || '-' }}楼 · {{ row.room || '-' }}包间 · {{ row.rack || '机柜未填写' }}</strong></div><button class="icon-button" title="关闭编辑" aria-label="关闭编辑" @click="closeRowEditor"><X :size="17" /></button></header>
+              <div v-if="row.evidence_time_conflict" class="notice warning"><span>证明截图时间不一致，待人工核对</span><button :disabled="saving || !row.editable || !row.actual || recognizingEvidence" @click="reviewProofTimes(row)">确认当前时间无误</button></div>
               <div class="editor-grid" @change="queueAutoSave">
                 <fieldset><legend>机柜定位</legend><label><span>楼栋</span><select v-model="row.scope" :disabled="!row.editable" :class="{ corrected: corrected(row,'scope') }"><option v-for="item in buildingOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label><span>包间</span><input v-model="row.room" :disabled="!row.editable" :class="{ corrected: corrected(row,'room') }" /></label><label><span>机柜</span><input v-model="row.rack" :disabled="!row.editable" :class="{ corrected: corrected(row,'rack') }" /></label><label><span>供应商机柜号</span><input v-model="row.supplier_rack" :disabled="!row.editable" :class="{ corrected: corrected(row,'supplier_rack') }" /></label></fieldset>
                 <fieldset><legend>机柜资料</legend><label><span>机柜类型</span><select v-model="row.rack_type" :disabled="!row.editable" :class="{ corrected: corrected(row,'rack_type') }"><option value="">请选择</option><option>网络机柜</option><option>服务器机柜</option></select></label><label><span>类型明细</span><input v-model="row.type_detail" :disabled="!row.editable" :class="{ corrected: corrected(row,'type_detail') }" /></label><label v-if="row.current_rack_type && row.rack_type !== row.current_rack_type" class="wide-field"><span>类型差异处理</span><select v-model="row.type_resolution" :disabled="!row.editable"><option value="">请选择</option><option value="keep_current">沿用当前类型 {{ row.current_rack_type }}</option><option value="sync_current">同步修正当前机柜类型</option></select></label></fieldset>
                 <fieldset><legend>操作信息</legend><div v-if="row.current_power_state" class="state-line"><span :class="'power-state ' + row.current_power_state">当前：{{ powerStateLabel(row.current_power_state) }}</span><small>{{ row.inference || '操作类型可人工调整' }}</small></div><label class="wide-field"><span>操作类型</span><select v-model="row.action" :disabled="!row.editable" :class="{ corrected: corrected(row,'action') }"><option value="">请选择</option><option v-if="row.action && !allowedRowActions(row).includes(row.action)" :value="row.action" disabled>{{ row.action }}（原文件值，当前状态不允许）</option><option v-for="action in allowedRowActions(row)" :key="action">{{ action }}</option></select></label><label><span>期望完成时间{{ batch.source === 'notice' ? '（选填）' : '' }}</span><input :value="localDate(row.expected)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'expected') }" @input="row.expected = inputDate($event)" /></label><label><span>实际完成时间</span><input :value="localDate(row.actual)" type="datetime-local" step="1" :disabled="!row.editable" :class="{ corrected: corrected(row,'actual') }" @input="row.actual = inputDate($event)" /></label><label><span>结果</span><select v-model="row.result" :disabled="!row.editable" :class="{ corrected: corrected(row,'result') }"><option value="">请选择</option><option>成功</option><option>失败</option></select></label><label v-if="row.result === '失败'" class="wide-field"><span>失败原因</span><input v-model="row.failure_reason" :disabled="!row.editable" maxlength="1000" required placeholder="填写本次操作失败原因" /></label></fieldset>
               </div>
-              <div v-if="row.evidence_images?.length || row.attempts?.length" class="row-evidence-content"><div v-if="row.evidence_images?.length" class="row-image-list"><button v-for="id in row.evidence_images" :key="id" class="image-button" :aria-label="'查看机柜截图 ' + id.slice(0,8)" @click="previewImage = imageUrl(id,true)"><img :src="imageUrl(id)" alt="机柜上下电确认截图" loading="lazy" /></button></div><small v-if="row.attempts?.length">已保留 {{ row.attempts.length }} 次历史确认及回退记录；再次确认将使用新操作标识。</small></div>
+              <div v-if="row.evidence_images?.length || row.proof_files?.length || row.attempts?.length" class="row-evidence-content"><div v-if="row.evidence_images?.length" class="row-image-list"><button v-for="(id,index) in row.evidence_images" :key="id" class="image-button" :aria-label="'查看机柜截图 ' + id.slice(0,8)" @click="openProofImages(row,index)"><img :src="imageUrl(id)" alt="机柜上下电确认截图" loading="lazy" /></button></div><div v-if="row.proof_files?.length" class="row-documents"><template v-for="file in row.proof_files" :key="file.file_id"><a v-if="file.can_download && file.available" class="proof-file" :href="proofFileUrl(file.file_id)"><FileText :size="15" /><span>{{ file.name }}</span></a><span v-else class="proof-file">{{ file.name }}</span></template></div><small v-if="row.attempts?.length">已保留 {{ row.attempts.length }} 次历史确认及回退记录；再次确认将使用新操作标识。</small></div>
               <div class="editor-footer"><div class="source-audit"><span>{{ row.file_name || '待办记录' }}</span><small v-if="row.application_ids?.length">申请单 {{ applicationSummary(row) }}</small><details v-if="visibleEdits(row).length" class="edit-audit"><summary>查看 {{ visibleEdits(row).length }} 项更正记录</summary><small v-for="(edit,index) in visibleEdits(row)" :key="index">{{ fieldLabels[edit.field] || edit.field }}：原值“{{ edit.before || '未填写' }}” → “{{ edit.after === '' ? '已清空' : edit.after }}”</small></details></div><div class="actions"><button @click="closeRowEditor">关闭</button><span class="save-indicator">{{ saving ? '正在保存…' : dirtyCount ? '修改后自动保存' : '已保存' }}</span></div></div>
             </section>
           </div></Teleport>
@@ -149,7 +154,7 @@
     <ConfirmDialog :open="Boolean(confirmDialog)" tone="warning" :title="confirmTitle" :message="confirmMessage" :confirm-label="confirmLabel" @resolve="resolveConfirm" />
     <ConfirmDialog :open="discardOpen" tone="warning" title="放弃未保存的批次修改？" message="继续后，本页尚未保存的字段修改会丢失。" confirm-label="放弃修改" cancel-label="继续编辑" @resolve="resolveDiscard" />
     <ConfirmDialog :open="draftRestoreOpen" title="恢复未保存的批次更正？" message="检测到上次页面关闭前尚未成功保存的机柜字段。恢复后会继续自动保存；也可以丢弃草稿并使用服务器版本。" confirm-label="恢复更正" cancel-label="丢弃草稿" @resolve="resolveBatchDraft" />
-    <div v-if="previewImage" class="image-preview" role="dialog" aria-modal="true" aria-label="确认截图原图" @click.self="previewImage = ''"><button class="image-close" aria-label="关闭原图" @click="previewImage = ''"><X :size="20" /></button><img :src="previewImage" alt="确认截图原图" /></div>
+    <div v-if="previewImage" class="image-preview" role="dialog" aria-modal="true" aria-label="确认截图原图" @click.self="previewImage = ''"><button class="image-close" aria-label="关闭原图" @click="previewImage = ''"><X :size="20" /></button><img :src="previewImage" alt="确认截图原图" /><div v-if="previewGallery.length > 1" class="preview-navigation"><button :disabled="previewIndex <= 0" aria-label="上一张证明" @click="moveProof(-1)"><ChevronLeft :size="20" /></button><span>{{ previewIndex + 1 }} / {{ previewGallery.length }}</span><button :disabled="previewIndex >= previewGallery.length - 1" aria-label="下一张证明" @click="moveProof(1)"><ChevronRight :size="20" /></button></div></div>
   </main>
 </template>
 
@@ -170,7 +175,7 @@ const batchId = String(params.get('batch_id') || '');
 const mode = String(params.get('mode') || '');
 const actions = ['上正式电','上测试电','测试电转正式电','正式电转测试电','下正式电','下测试电'];
 const editableFields = ['scope','room','rack','supplier_rack','rack_type','type_detail','action','expected','actual','result','failure_reason','type_resolution'];
-const fieldLabels: Dict = {scope:'楼栋',room:'包间',rack:'机柜',supplier_rack:'供应商机柜号',rack_type:'机柜类型',type_detail:'类型明细',action:'操作类型',expected:'期望完成时间',actual:'实际完成时间',result:'结果',failure_reason:'失败原因',type_resolution:'类型处理',excluded:'排除状态'};
+const fieldLabels: Dict = {scope:'楼栋',room:'包间',rack:'机柜',supplier_rack:'供应商机柜号',rack_type:'机柜类型',type_detail:'类型明细',action:'操作类型',expected:'期望完成时间',actual:'实际完成时间',result:'结果',failure_reason:'失败原因',type_resolution:'类型处理',excluded:'排除状态',evidence_images:'证明截图',evidence_time_review:'截图时间核对'};
 const read = (path: string, query: Dict = {}, timeoutMs = 90000) => requestJson(`${api}/${path}?${new URLSearchParams(query as Record<string,string>)}`, { timeoutMs });
 const write = (path: string, body: Dict, method = 'POST') => requestJson(`${api}/${path}`, { method, body: JSON.stringify(body), timeoutMs: 90000 });
 const backTarget = computed(() => params.get('origin') === 'cabinet' ? (props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power') : batchId || mode === 'new' ? `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),...(params.get('status')==='todo'?{status:'todo'}:{}) })}` : props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power');
@@ -228,6 +233,13 @@ const confirmProgress = computed(() => { const rows=batch.value.rows || []; cons
 const rollbackProgress = computed(() => { const rows=batch.value.rows || []; const active=rows.filter((row:Dict)=>['rollback_queued','rolling_back'].includes(row.status)); const done=rows.filter((row:Dict)=>['rolled_back','rollback_failed','rollback_blocked'].includes(row.status)); return {active:active.length>0,done:done.length,total:Math.max(1,active.length+done.length)}; });
 const warningsPending = computed(() => Boolean(batch.value.blocking_warnings?.length && !batch.value.warnings_acknowledged));
 const attentionCount = computed(() => ['duplicate','conflict','invalid','failed'].reduce((total,key) => total + Number(batch.value.stats?.[key] || 0),0));
+const recognizingEvidence = computed(() => activeImages.value.some((image: Dict) => image.status === 'recognizing'));
+const previewGallery = ref<string[]>([]);
+const previewIndex = computed(() => previewGallery.value.indexOf(previewImage.value));
+function openImage(id:string):void { previewGallery.value=[imageUrl(id,true)]; previewImage.value=previewGallery.value[0] || ''; }
+function openProofImages(row:Dict,index=0):void { previewGallery.value=(row.evidence_images || []).map((id:string)=>imageUrl(id,true)); previewImage.value=previewGallery.value[index] || ''; }
+function moveProof(offset:number):void { previewImage.value=previewGallery.value[previewIndex.value+offset] || previewImage.value; }
+function proofFileUrl(id:string):string { return `${api}/batches/${encodeURIComponent(batchId)}/files/${encodeURIComponent(id)}`; }
 const showExpectedColumn = computed(() => batch.value.source !== 'notice' || (batch.value.rows || []).some((row: Dict) => Boolean(row.expected)));
 const showRackColumn = computed(() => (batch.value.rows || []).some((row: Dict) => hasCabinetValue(row.rack)));
 const showSupplierRackColumn = computed(() => (batch.value.rows || []).some((row: Dict) => hasCabinetValue(row.supplier_rack)));
@@ -259,7 +271,9 @@ function mergeBatchResponse(saved:Dict,pending:{row_id:string,values:Dict}[]=[])
   else{
     const rows=[...(batch.value.rows||[])],byId=new Map(rows.map((row:Dict,index:number)=>[row.row_id,index]));
     for(const row of saved.rows||[]){const index=byId.get(row.row_id);if(index===undefined)rows.push(row);else rows[index]=row;}
-    const images=batch.value.images,files=batch.value.files;
+    const changedImages=new Map((saved.images || []).map((image:Dict)=>[image.image_id,image]));
+    const images=(batch.value.images || []).map((image:Dict)=>changedImages.get(image.image_id) || image);
+    const files=saved.files || batch.value.files;
     batch.value={...batch.value,...saved,rows,images,files};
   }
   snapshotRows();
@@ -366,10 +380,26 @@ async function applyEvidence(image:Dict,rowId:string,candidate:Dict|null,index:n
   if(!row)return;
   const sameRack=candidate && [candidate.scope,candidate.room,candidate.rack].join('/')===[row.scope,row.room,row.rack].join('/');
   const fields:Dict={};
-  if(sameRack)for(const key of ['action','expected','actual','supplier_rack'])if(candidate?.[key] && !row[key])fields[key]=candidate[key];
+  if(sameRack)for(const key of ['action','expected','actual','supplier_rack']){
+    const value=String(candidate?.[key] || '');
+    if(!value)continue;
+    if(key==='expected'||key==='actual'){
+      const parsed=new Date(value.replace(' ','T'));
+      if(!Number.isNaN(parsed.getTime())&&(key==='expected'||parsed.getTime()<=Date.now()))fields[key]=value;
+    }else if(!row[key])fields[key]=value;
+  }
   saving.value=true;
   try{batch.value=await write(`batches/${batchId}/images/${image.image_id}/apply`,{version:batch.value.version,row_id:rowId,candidate_index:index,fields,attach:true});snapshotRows();message.value='截图已关联到机柜';}
   catch(exc:any){error.value=exc.message||'截图关联失败';}finally{saving.value=false;}
+}
+async function reviewProofTimes(row:Dict):Promise<void>{
+  if(!await saveChanges())return;
+  const current=(batch.value.rows || []).find((item:Dict)=>item.row_id===row.row_id);
+  const imageId=current?.evidence_images?.[0];
+  if(!current?.editable || !imageId)return;
+  saving.value=true;
+  try{batch.value=await write(`batches/${batchId}/images/${imageId}/apply`,{version:batch.value.version,row_id:row.row_id,candidate_index:-1,fields:{},review_times:true});snapshotRows();message.value='已记录时间核对结果';}
+  catch(exc:any){error.value=exc.message||'时间核对失败';}finally{saving.value=false;}
 }
 async function restoreEvidence(imageId:string):Promise<void>{
   if(!await saveChanges())return;
@@ -534,7 +564,17 @@ watch(rowPage,()=>{if(editingRowId.value)closeRowEditor();});
 watch(editingRowId,value=>{if(value)void nextTick(()=>document.querySelector<HTMLElement>('.row-editor-overlay .row-editor')?.focus());});
 watch(previewImage,value=>{if(value)void nextTick(()=>document.querySelector<HTMLElement>('.image-preview .image-close')?.focus());});
 function closeImageOnEscape(event:KeyboardEvent):void{
-  if(previewImage.value){if(event.key==='Escape'){event.preventDefault();previewImage.value='';}else if(event.key==='Tab'){event.preventDefault();document.querySelector<HTMLElement>('.image-preview .image-close')?.focus();}return;}
+  if(previewImage.value){
+    if(event.key==='Escape'){event.preventDefault();previewImage.value='';}
+    else if(event.key==='ArrowLeft'){event.preventDefault();moveProof(-1);}
+    else if(event.key==='ArrowRight'){event.preventDefault();moveProof(1);}
+    else if(event.key==='Tab'){
+      const controls=[...document.querySelectorAll<HTMLButtonElement>('.image-preview button:not(:disabled)')];
+      const index=controls.indexOf(document.activeElement as HTMLButtonElement);
+      event.preventDefault();controls[(index+(event.shiftKey?-1:1)+controls.length)%controls.length]?.focus();
+    }
+    return;
+  }
   if(!editingRowId.value)return;
   if(event.key==='Escape'){event.preventDefault();closeRowEditor();return;}
   if(event.key!=='Tab')return;
@@ -608,8 +648,18 @@ onBeforeUnmount(()=>{persistBatchDraft();disposed=true;window.clearTimeout(pollT
 .operation-summary .muted{color:#9a6b20}
 .records-table .time-cell{width:144px;color:#35536f;font-variant-numeric:tabular-nums;white-space:nowrap}
 .records-table .result-summary{width:74px}
-.records-table .source-cell{width:84px}
-.source-cell strong{font-size:12px!important}
+.records-table .proof-cell{width:152px}
+.proof-thumbs{display:flex;align-items:center;gap:4px}
+.proof-more{min-width:28px!important;min-height:30px!important;padding:2px 5px!important;font-size:12px}
+.proof-file{display:flex;align-items:flex-start;gap:4px;max-width:100%;margin-top:5px;color:#175ebd;font-size:12px;line-height:1.4;text-decoration:none}
+.proof-file svg{flex:none;margin-top:1px}
+.proof-file span{min-width:0;overflow-wrap:anywhere}
+.proof-cell .proof-file span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.proof-file.muted{color:#738497}
+.row-documents{display:grid;gap:4px;max-width:100%}
+.preview-navigation{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:16px;color:#fff}
+.preview-navigation button{width:36px;min-height:32px;padding:0}
+
 .records-table .action-column,.records-table .row-actions{width:88px}
 .row-actions{position:sticky;right:0;z-index:1;white-space:nowrap;background:#fff;box-shadow:-1px 0 #e1e8f0}
 .records-table .action-column{right:0;z-index:3;box-shadow:-1px 0 #d4dfeb}
@@ -673,7 +723,7 @@ onBeforeUnmount(()=>{persistBatchDraft();disposed=true;window.clearTimeout(pollT
 .row-evidence-content label{display:flex;align-items:center;gap:8px;color:#60758b}
 .row-evidence-content input{width:min(480px,70vw)}
 .row-image-list{display:flex;gap:8px;flex-wrap:wrap}.row-image-list .image-button{width:90px;height:70px}
-.image-preview{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:55px 24px 24px;background:rgba(15,28,43,.86)}
+.image-preview{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:55px 24px 56px;background:rgba(15,28,43,.86)}
 .image-preview img{max-width:100%;max-height:100%;object-fit:contain}
 .image-close{position:absolute;top:12px;right:20px;width:38px;padding:0}
 @media(max-width:1100px){

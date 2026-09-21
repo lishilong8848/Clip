@@ -54,7 +54,8 @@ def group_events(groups, allow_success_without_actual=False):
         for i,action in enumerate(actions):
             events.append({"action":action,"actual":actual[i] if len(actions)==len(actual) else "", "expected":expected[i] if len(expected)==len(actions) else "", "group":index,
                            "id":str(g.get("id",index))+":"+str(i), "result":g.get("result", ""),
-                           "failure_reason":g.get("failure_reason", ""), "evidence_images":copy.deepcopy(g.get("evidence_images", []))})
+                           "failure_reason":g.get("failure_reason", ""), "evidence_images":copy.deepcopy(g.get("evidence_images", [])),
+                           "evidence_files":copy.deepcopy(g.get("evidence_files", []))})
     return events,issues
 
 
@@ -191,7 +192,8 @@ def to_fields(op):
     fields["结果"]=(groups[primary].get("result") if groups else "") or None
     fields["失败原因"]=(text_value(groups[primary].get("failure_reason")) if groups and groups[primary].get("result")=="失败" else "") or None
     tokens=list(dict.fromkeys(
-        str(image.get("file_token") or "") for group in groups for image in group.get("evidence_images", [])
+        str(image.get("file_token") or "") for group in groups
+        for image in [*group.get("evidence_images", []), *group.get("evidence_files", [])]
         if isinstance(image,dict) and image.get("file_token")
     ))
     for image in op.get("raw_fields", {}).get("上下电确认截图") or []:

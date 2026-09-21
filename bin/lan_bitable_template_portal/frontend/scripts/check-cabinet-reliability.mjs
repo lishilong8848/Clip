@@ -171,7 +171,7 @@ try {
   const afterCleanup = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=B")).json();
   assert.equal(afterCleanup.data.items.length, 2, "cleanup must retain export history");
   assert.equal(afterCleanup.data.items.find(item => item.export_id === singleRecord.export_id).file_available, false);
-  assert(await page.getByText("本地已清理", { exact: true }).isVisible());
+  await page.getByText("本地已清理", { exact: true }).waitFor();
   await page.unroute("**/api/cabinet-power/overview**");
   await page.unroute("**/api/cabinet-power/export-history**");
   assert.deepEqual(exportErrors, []);
@@ -210,6 +210,8 @@ try {
     image_id:`image-${index + 1}`, name:`确认截图-${index + 1}.png`, extension:".png",
     status:"done", suggestions:[], error:"",
   }));
+  rows[0].evidence_images=["image-1","image-2","image-3"];
+  rows[0].proof_files=[{file_id:"pdf-1",name:"机柜确认单.pdf",available:true,can_download:true}];
   let batch = {
     batch_id:"batch-test", owner_id:"owner", source:"notice", status:"pending", version:1,
     created_at:"2026-09-19 10:00:00", scopes:["E"], allowed_scopes:["E"], rows, images,
@@ -234,6 +236,15 @@ try {
   assert.equal(await page.locator(".evidence-item").count(),12,"evidence gallery must paginate");
   assert((await page.locator(".evidence-match select").first().locator("option").count()) <= 51,"cabinet matcher must cap options");
   assert.equal(await page.getByText("不计入通告汇总", { exact:true }).count(),0);
+  assert.equal(await page.getByRole("columnheader", { name:"证明",exact:true }).count(),1);
+  assert.equal(await page.locator(".records-table tbody .proof-cell").first().locator(".row-thumb").count(),2);
+  assert.equal(await page.locator(".records-table tbody .proof-cell").first().getByRole("link",{name:"机柜确认单.pdf"}).count(),1);
+  await page.getByRole("button",{name:"查看全部 3 张证明",exact:true}).click();
+  await page.getByRole("dialog",{name:"确认截图原图"}).waitFor();
+  assert(await page.getByText("3 / 3",{exact:true}).isVisible());
+  await page.getByRole("button",{name:"上一张证明",exact:true}).click();
+  assert(await page.getByText("2 / 3",{exact:true}).isVisible());
+  await page.getByRole("button",{name:"关闭原图",exact:true}).click();
   assert.equal(await page.getByRole("columnheader", { name:"期望完成",exact:true }).count(),0);
   assert.equal(await page.locator(".source-details").first().getAttribute("open"),null);
   assert(await page.locator(".batch-summary").evaluate(node => node.getBoundingClientRect().height < 100));

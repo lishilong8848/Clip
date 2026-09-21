@@ -1,6 +1,7 @@
 import copy
 import datetime as dt
 import io
+import hashlib
 import json
 import os
 import re
@@ -1132,7 +1133,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         fields=to_fields(operation)
         self.assertEqual({item["file_token"] for item in fields["上下电确认截图"]},{"fileOldEvidence123","fileNewEvidence123"})
 
-    def test_one_image_can_fill_multiple_existing_batch_rows_without_overwriting(self):
+    def test_one_image_links_all_cabinets_and_overwrites_recognized_times(self):
         from PIL import Image
         racks=self.configs["A"]["inventory"][:2]
         rows=[{"scope":"A","room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],
@@ -1150,9 +1151,12 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(result["rows"][0]["expected"],candidates[0]["expected"])
         self.assertEqual(result["rows"][0]["actual"],candidates[0]["actual"])
         self.assertEqual(result["rows"][0]["evidence_images"],[result["images"][0]["image_id"]])
-        self.assertEqual(result["rows"][1]["expected"],"2026-09-13 01:00:00")
-        self.assertEqual(result["rows"][1]["actual"],"")
-        self.assertEqual(result["images"][0]["suggestions"][1]["status"],"needs_review")
+        self.assertEqual(result["rows"][1]["expected"],candidates[1]["expected"])
+        self.assertEqual(result["rows"][1]["actual"],candidates[1]["actual"])
+        self.assertEqual(result["rows"][1]["evidence_images"],[result["images"][0]["image_id"]])
+        self.assertEqual(result["images"][0]["suggestions"][1]["status"],"applied")
+        self.assertTrue(any(edit.get("before")=="2026-09-13 01:00:00" and edit.get("image_id")
+                            for edit in result["rows"][1]["edits"]))
         self.assertEqual(len(result["rows"]),2)
 
     def test_pending_image_recognition_resumes_after_restart(self):
@@ -1161,6 +1165,9 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.service.batches._change(batch["batch_id"],lambda current:current.setdefault("images",[]).append(
             {"image_id":image_id,"name":"proof.png","extension":".png","status":"recognizing","suggestions":[]}
         ))
+        pending=self.service.batches.get(batch["batch_id"])
+        with self.assertRaisesRegex(CabinetError,"截图仍在识别"):
+            self.service.batches.confirm(batch["batch_id"],{"version":pending["version"],"all":True},"owner",["A"])
         self.service.batches.shutdown(wait=True)
         with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[]):
             self.service._batches=CabinetBatchService(self.service,self.service.root)
@@ -1168,6 +1175,231 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
         image=self.service.batches.get(batch["batch_id"])["images"][0]
         self.assertEqual(image["status"],"failed")
+
+    def _add_proof_images(self, batch, candidates):
+        from PIL import Image
+        files=[]
+        for index in range(len(candidates)):
+            content=io.BytesIO()
+            Image.new("RGB",(80,60),(40+index*30,80,100)).save(content,format="PNG")
+            files.append((f"proof-{index}.png",content.getvalue()))
+        with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",
+                   side_effect=candidates):
+            self.service.batches.add_images(batch["batch_id"],files,"owner",list("ABCDE"),True)
+            deadline=time.time()+10
+            while time.time()<deadline:
+                result=self.service.batches.get(batch["batch_id"])
+                if all(image["status"]!="recognizing" for image in result["images"]): return result
+                time.sleep(.01)
+        self.fail("proof recognition timed out")
+
+    def test_proof_linking_is_independent_of_missing_time_and_action_difference(self):
+        for source in ("manual","notice","pdf"):
+            batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+            batch=self.service.batches._change(batch["batch_id"],lambda current:current.update(source=source))
+            row=batch["rows"][0]
+            candidate={key:row[key] for key in ("scope","room","rack")}
+            candidate.update(action="下测试电",expected="",actual="2026-09-15 02:03:04",supplier_rack="")
+            result=self._add_proof_images(batch,[[candidate]])
+            self.assertEqual(result["images"][0]["status"],"done",(source,result["images"]))
+            saved=result["rows"][0]
+            self.assertEqual(saved["action"],"上正式电")
+            self.assertEqual(saved["expected"],"2026-09-14 01:02:03")
+            self.assertEqual(saved["actual"],"2026-09-15 02:03:04")
+            self.assertEqual(saved["evidence_images"],[result["images"][0]["image_id"]])
+            visible=self.service.batches.visible(result,"owner",["A"])
+            self.assertEqual(visible["rows"][0]["evidence_images"],saved["evidence_images"])
+
+    def test_proof_time_conflict_blocks_confirm_until_review_or_removal(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row("A","2026-09-13 01:02:03")],"owner")
+        row=batch["rows"][0]
+        base={key:row[key] for key in ("scope","room","rack","action")}
+        candidates=[{**base,"supplier_rack":"","expected":date,"actual":date}
+                    for date in ("2026-09-14 01:02:03","2026-09-15 01:02:03")]
+        result=self._add_proof_images(batch,[[item] for item in candidates])
+        self.assertEqual((len(result["rows"]),result["stats"]["conflict"],result["stats"]["confirmable"]),(1,1,0))
+        self.assertEqual(len(result["rows"][0]["evidence_images"]),2)
+        with self.assertRaisesRegex(CabinetError,"没有可确认"):
+            service.confirm(result["batch_id"],{"version":result["version"],"all":True},"owner",["A"])
+        result=service.get(result["batch_id"])
+        first,second=result["images"]
+        removed=service.delete_image(result["batch_id"],first["image_id"],result["version"],"owner",["A"])
+        self.assertFalse(removed["rows"][0]["evidence_time_conflict"])
+        self.assertEqual(removed["rows"][0]["actual"],candidates[1]["actual"])
+        restored=service.restore_image(result["batch_id"],first["image_id"],removed["version"],"owner",["A"])
+        self.assertTrue(restored["rows"][0]["evidence_time_conflict"])
+        reviewed=service.apply_image(result["batch_id"],first["image_id"],{
+            "version":restored["version"],"row_id":row["row_id"],"candidate_index":0,
+            "fields":{key:candidates[0][key] for key in ("expected","actual")}},"owner",["A"])
+        self.assertFalse(reviewed["rows"][0]["evidence_time_conflict"])
+        self.assertEqual(reviewed["stats"]["confirmable"],1)
+        self.assertEqual(reviewed["rows"][0]["actual"],candidates[0]["actual"])
+        self.assertEqual(service.get(result["batch_id"])["rows"][0]["evidence_time_review"]["owner"],"owner")
+        delta=service.update(result["batch_id"],{"version":reviewed["version"],"response_mode":"delta",
+            "rows":[{"row_id":row["row_id"],"actual":"2026-09-16 01:02:03"}]},"owner",["A"])
+        self.assertTrue(delta["rows"][0]["evidence_time_conflict"])
+        self.assertTrue(delta["images"])
+        checked=service.apply_image(result["batch_id"],first["image_id"],{"version":delta["version"],
+            "row_id":row["row_id"],"fields":{},"review_times":True},"owner",["A"])
+        self.assertFalse(checked["rows"][0]["evidence_time_conflict"])
+        self.assertEqual(checked["rows"][0]["actual"],"2026-09-16 01:02:03")
+
+    def test_recognition_reads_without_triggering_notice_default_migration(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        image={"image_id":"a"*64,"extension":".png","name":"proof.png","status":"recognizing","suggestions":[]}
+        service._atomic_write(self.service.root/"evidence"/("a"*64+".png"),b"test")
+        service._change(batch["batch_id"],lambda current:current.update(source="notice",images=[image]))
+        candidate={**batch["rows"][0],"actual":"2026-09-15 02:03:04"}
+        with patch.object(service,"get",side_effect=AssertionError("OCR reads must not migrate notice defaults")), \
+                patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
+            service._recognize_image(batch["batch_id"],image)
+        saved=service.store.get(batch["batch_id"])
+        self.assertEqual(saved["images"][0]["status"],"done",saved["images"])
+        self.assertEqual(saved["rows"][0]["actual"],candidate["actual"])
+
+    def test_proof_recognition_preserves_locked_rows_and_ambiguous_matches(self):
+        rows=[self._manual_batch_row("A","2026-09-14 01:02:03") for _ in range(2)]
+        batch=self.service.batches.create_manual(rows,"owner")
+        candidate={key:rows[0][key] for key in ("scope","room","rack","action","expected","actual")}
+        candidate["actual"]="2026-09-15 01:02:03"
+        result=self._add_proof_images(batch,[[candidate]])
+        self.assertFalse(any(row.get("evidence_images") for row in result["rows"]))
+        self.assertEqual(result["images"][0]["suggestions"][0]["status"],"needs_review")
+        for status in ("completed","queued","excluded_cancelled"):
+            batch=self.service.batches.create_manual([rows[0]],"owner")
+            stored=self.service.batches._change(batch["batch_id"],lambda current:current["rows"][0].update(status=status))
+            image={"image_id":"a"*64,"extension":".png","name":"locked.png","status":"recognizing","suggestions":[]}
+            self.service.batches._change(batch["batch_id"],lambda current:current.update(images=[image]))
+            path=self.service.root/"evidence"/("a"*64+".png");path.parent.mkdir(exist_ok=True);path.write_bytes(b"test")
+            with patch("bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout",return_value=[candidate]):
+                self.service.batches._recognize_image(batch["batch_id"],image)
+            result=self.service.batches.get(batch["batch_id"])
+            self.assertEqual(result["rows"][0]["actual"],stored["rows"][0]["actual"])
+            self.assertFalse(result["rows"][0].get("evidence_images"))
+
+    def _pdf_proof_batch(self, scopes, date="2026-09-14 01:02:03", files_per_row=None):
+        from pypdf import PdfWriter
+        rows=[]
+        for scope in scopes:
+            row=self._manual_batch_row(scope,date)
+            state=self.service.batches._current_state(self.service._snapshot(scope),row["room"],row["rack"])
+            row["action"]={"formal":"下正式电","test":"下测试电"}.get(state,"上正式电")
+            rows.append(row)
+        batch=self.service.batches.create_manual(rows,"owner")
+        indexes=files_per_row or [0]*len(rows); files=[]
+        for index in sorted(set(indexes)):
+            writer=PdfWriter();writer.add_blank_page(width=200+index,height=200)
+            writer.add_metadata({"/Title":date})
+            content=io.BytesIO();writer.write(content);data=content.getvalue()
+            meta={"file_id":f"f{index}","name":f"confirmation-{index}.pdf","sha256":hashlib.sha256(data).hexdigest(),
+                  "size":len(data),"status":"completed"}
+            self.service.batches._atomic_write(self.service.batches.import_root/batch["batch_id"]/(meta["file_id"]+".pdf"),data)
+            files.append(meta)
+        def source(current):
+            current.update(source="pdf",files=files)
+            for row,index in zip(current["rows"],indexes):
+                row.update(file_id=f"f{index}",file_name=f"confirmation-{index}.pdf")
+        return self.service.batches._change(batch["batch_id"],source,validate=True)
+
+    def test_pdf_proofs_upload_once_and_follow_rows_across_buildings(self):
+        service=self.service.batches
+        batch=self._pdf_proof_batch(["A","D","E"],files_per_row=[0,0,1])
+        visible=service.visible(batch,"owner",list("ADE"))
+        self.assertEqual([row["proof_files"][0]["name"] for row in visible["rows"]],
+                         ["confirmation-0.pdf","confirmation-0.pdf","confirmation-1.pdf"])
+        row=batch["rows"][0]
+        delta=service.update(batch["batch_id"],{"version":batch["version"],"response_mode":"delta",
+            "rows":[{"row_id":row["row_id"],"expected":"2026-09-14 02:00:00"}]},"owner",list("ADE"))
+        self.assertEqual(service.visible(delta,"owner",list("ADE"))["rows"][0]["proof_files"][0]["file_id"],"f0")
+        batch=service.get(batch["batch_id"])
+        service.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",list("ADE"))
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],3,done["rows"])
+        self.assertEqual(len(self.remote.attachments),2)
+        for row in done["rows"]:
+            saved=from_feishu(self.remote.get(row["record_id"]))
+            document=next(group["evidence_files"][0] for group in saved["groups"] if group.get("evidence_files"))
+            expected=next(file for file in done["files"] if file["file_id"]==row["file_id"])
+            self.assertEqual(document["file_token"],expected["cloud_file_token"])
+            self.assertIn({"file_token":document["file_token"]},saved["raw_fields"]["上下电确认截图"])
+            self.assertTrue(any(event.get("evidence_files") for event in saved["events"]))
+            path,name=self.service.document_path(row["scope"],row["record_id"],document["file_id"],list("ADE"))
+            self.assertEqual(name,expected["name"])
+            path.unlink()
+            self.assertEqual(hashlib.sha256(self.service.document_path(row["scope"],row["record_id"],document["file_id"],list("ADE"))[0].read_bytes()).hexdigest(),expected["sha256"])
+            if row["scope"]=="A":
+                with self.assertRaisesRegex(CabinetError,"其他楼栋"):
+                    self.service.document_path("A",row["record_id"],document["file_id"],["A"])
+        service.shutdown(wait=True)
+        restored=CabinetBatchService(self.service,self.service.root)
+        self.service._batches=restored
+        self.assertTrue(all(file.get("cloud_file_token") for file in restored.get(batch["batch_id"])["files"]))
+
+    def test_pdf_proofs_survive_edit_and_rollback_preserves_previous_attachment(self):
+        service=self.service.batches
+        first=self._pdf_proof_batch(["D"])
+        service.confirm(first["batch_id"],{"version":first["version"],"all":True},"owner",["D"])
+        first=self._wait_batch(first["batch_id"]); rid=first["rows"][0]["record_id"]
+        previous=copy.deepcopy(self.remote.get(rid)["fields"]["上下电确认截图"])
+        second=self._pdf_proof_batch(["D"],"2026-09-15 01:02:03")
+        service.confirm(second["batch_id"],{"version":second["version"],"all":True},"owner",["D"])
+        done=self._wait_batch(second["batch_id"])
+        self.assertEqual(done["stats"]["completed"],1,done["rows"])
+        operation=from_feishu(self.remote.get(rid))
+        self.assertEqual(len(operation["raw_fields"]["上下电确认截图"]),2)
+        groups=copy.deepcopy(operation["groups"])
+        for group in groups: group.pop("evidence_files",None)
+        edited=self.service.validate_op("D",{"groups":groups},operation)
+        self.assertEqual(to_fields(edited)["上下电确认截图"],operation["raw_fields"]["上下电确认截图"])
+        self.assertEqual([group.get("evidence_files") for group in edited["groups"]],
+                         [group.get("evidence_files") for group in operation["groups"]])
+        book=Workbook(export_workbook((TEMPLATES/"D.xlsm").read_bytes(),self.service.config("D"),self.service._snapshot("D")["operations"]))
+        self.assertFalse(any(".pdf" in name for name in book.archive.namelist()))
+        self.assertFalse(any("confirmation-0.pdf" in str(value) for name in book.sheets for _,row in book.rows(name) for value in row.values()))
+        service.rollback(done["batch_id"],{"version":done["version"],"all":True},"owner",["D"])
+        undone=self._wait_batch(done["batch_id"])
+        self.assertEqual(undone["stats"]["rolled_back"],1,undone["rows"])
+        self.assertEqual(self.remote.get(rid)["fields"]["上下电确认截图"],previous)
+        service.confirm(undone["batch_id"],{"version":undone["version"],"all":True},"owner",["D"])
+        repeated=self._wait_batch(done["batch_id"])
+        self.assertEqual(repeated["stats"]["completed"],1,repeated["rows"])
+        self.assertEqual(len(self.remote.attachments),2)
+
+    def test_identical_pdf_bytes_reuse_upload_across_source_file_ids(self):
+        service=self.service.batches
+        batch=self._pdf_proof_batch(["A","E"],files_per_row=[0,1])
+        content=(service.import_root/batch["batch_id"]/"f0.pdf").read_bytes()
+        service._atomic_write(service.import_root/batch["batch_id"]/"f1.pdf",content)
+        service._change(batch["batch_id"],lambda current:current["files"][1].update(sha256=current["files"][0]["sha256"]))
+        first=service._upload_proof(batch["batch_id"],"files","f0","A")
+        second=service._upload_proof(batch["batch_id"],"files","f1","E")
+        self.assertEqual(first,second)
+        self.assertEqual(len(self.remote.attachments),1)
+        self.assertTrue(all(item.get("cloud_file_token")==first for item in service.get(batch["batch_id"])["files"]))
+
+    def test_pdf_upload_failure_retries_without_creating_duplicate_records(self):
+        service=self.service.batches
+        batch=self._pdf_proof_batch(["A"])
+        operation_id=batch["rows"][0]["operation_id"]
+        with patch.object(self.remote,"upload_attachment",side_effect=TimeoutError("upload failed")):
+            service.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+            failed=self._wait_batch(batch["batch_id"])
+        self.assertEqual(failed["stats"]["failed"],1)
+        self.assertEqual(failed["stats"]["completed"],0)
+        self.assertEqual(self.remote.creates,0)
+        self.remote.fail_after_create=True
+        service.confirm(failed["batch_id"],{"version":failed["version"],"all":True},"owner",["A"])
+        unconfirmed=self._wait_batch(batch["batch_id"])
+        self.assertEqual(unconfirmed["stats"]["failed"],1)
+        self.assertEqual(self.remote.creates,1)
+        self.remote.fail_after_create=False
+        service.confirm(unconfirmed["batch_id"],{"version":unconfirmed["version"],"all":True},"owner",["A"])
+        done=self._wait_batch(batch["batch_id"])
+        self.assertEqual(done["stats"]["completed"],1,done["rows"])
+        self.assertEqual(done["rows"][0]["operation_id"],operation_id)
+        self.assertEqual((self.remote.creates,len(self.remote.attachments)),(1,1))
 
     def test_de_history_keeps_evidence_group_and_rollback_removes_new_attachment(self):
         from PIL import Image
@@ -1295,7 +1527,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(batch["rows"],[])
         self.assertEqual(batch["images"][0]["suggestions"][0]["status"],"unauthorized")
 
-    def test_image_registration_keeps_distinct_events_for_same_cabinet(self):
+    def test_image_registration_flags_different_times_without_creating_duplicate_cabinet(self):
         from PIL import Image
         rack=self.configs["A"]["inventory"][0]
         batch=self.service.batches.create_image_batch("owner",["A"])
@@ -1311,9 +1543,10 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             deadline=time.time()+5
             while time.time()<deadline and any(item["status"]=="recognizing" for item in self.service.batches.get(batch["batch_id"])["images"]):time.sleep(.01)
         result=self.service.batches.get(batch["batch_id"])
-        self.assertEqual(len(result["rows"]),2)
-        self.assertEqual({row["actual"] for row in result["rows"]},{item["actual"] for item in candidates})
-        self.assertEqual({row["evidence_images"][0] for row in result["rows"]},{item["image_id"] for item in result["images"]})
+        self.assertEqual(len(result["rows"]),1)
+        self.assertTrue(result["rows"][0]["evidence_time_conflict"])
+        self.assertEqual(result["stats"]["confirmable"],0)
+        self.assertEqual(set(result["rows"][0]["evidence_images"]),{item["image_id"] for item in result["images"]})
 
     def test_todo_batch_list_and_badge_are_scoped_to_building(self):
         a=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
@@ -1408,7 +1641,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(again["stats"]["completed"],1,again["rows"])
         self.assertNotEqual(again["rows"][0]["operation_id"],old_id)
 
-    def test_image_registration_validates_sequential_events_on_same_cabinet(self):
+    def test_image_registration_does_not_infer_sequential_events_from_conflicting_screenshots(self):
         from PIL import Image
         rack=self.configs["A"]["inventory"][0]
         current=next(item for item in self.service.overview("A")["racks"] if (item["room"],item["rack"])==(rack["room"],rack["rack"]))
@@ -1426,8 +1659,11 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             deadline=time.time()+5
             while time.time()<deadline and any(item["status"]=="recognizing" for item in self.service.batches.get(batch["batch_id"])["images"]):time.sleep(.01)
         result=self.service.batches.get(batch["batch_id"])
-        self.assertEqual(result["stats"]["confirmable"],2,result["rows"])
-        self.assertEqual(result["rows"][1]["current_power_state"],{"下正式电":"off","下测试电":"off","上正式电":"formal"}[first])
+        self.assertEqual(len(result["rows"]),1)
+        self.assertEqual(result["stats"]["confirmable"],0,result["rows"])
+        self.assertEqual(result["rows"][0]["action"],first)
+        self.assertTrue(result["rows"][0]["evidence_time_conflict"])
+        self.assertEqual(len(result["rows"][0]["evidence_images"]),2)
 
     def test_deleted_photo_cannot_be_restored_into_completed_record(self):
         from PIL import Image

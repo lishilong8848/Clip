@@ -204,6 +204,11 @@ def install_cabinet_power_routes(app,controller,runtime):
                 _,record_id,_,image_id=path.split("/")
                 file_path,media_type=await asyncio.to_thread(service.evidence_path,scope,record_id,image_id,query.get("thumbnail")=="1")
                 return FileResponse(file_path,media_type=media_type,headers={"Cache-Control":"private, max-age=86400","X-Content-Type-Options":"nosniff"})
+            elif path.startswith("operations/") and path.count("/")==3 and "/documents/" in path and request.method=="GET":
+                _,record_id,_,file_id=path.split("/")
+                file_path,filename=await asyncio.to_thread(service.document_path,scope,record_id,file_id,allowed,admin)
+                return FileResponse(file_path,filename=filename,media_type="application/pdf",
+                    headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
             elif (path=="operations" and request.method=="POST") or (path.startswith("operations/") and request.method=="PATCH"):
                 rid=path.split("/")[1] if "/" in path else ""
                 data=await asyncio.to_thread(service.save_operation,scope,payload,owner,rid,can_move_scope=bool(admin and payload.get("confirm_scope_move") is True),defer=query.get('defer')=='1')
@@ -227,7 +232,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],
         "operations":["GET","POST"],"operations/{record_id}":["PATCH"],
-        "operations/{record_id}/evidence/{image_id}":["GET"],"refresh":["POST"],
+        "operations/{record_id}/evidence/{image_id}":["GET"],"operations/{record_id}/documents/{file_id}":["GET"],"refresh":["POST"],
         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],
         "writes/{operation_id}/reconcile":["POST"],

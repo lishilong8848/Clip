@@ -652,6 +652,25 @@ class CabinetPowerService:
             return path,"image/png"
         return path, {".jpg":"image/jpeg",".png":"image/png",".webp":"image/webp"}[extension]
 
+    def document_path(self,scope,record_id,file_id,allowed,admin=False):
+        if not re.fullmatch(r"[a-f0-9]{64}",str(file_id or "")):
+            raise CabinetError("PDF证明标识无效",400)
+        operation=next((item for item in self._snapshot(scope)["operations"] if item["record_id"]==record_id),None)
+        if operation is None: raise CabinetError("机柜记录不存在",404)
+        document=next((item for group in operation["groups"] for item in group.get("evidence_files",[])
+                       if isinstance(item,dict) and item.get("file_id")==file_id),None)
+        if document is None or document.get("extension")!=".pdf":
+            raise CabinetError("该机柜记录未关联此PDF",404)
+        if not admin and not set(document.get("scopes") or [scope])<=set(allowed):
+            raise CabinetError("无权查看包含其他楼栋的PDF证明",403)
+        path=self.root/"evidence_documents"/(file_id+".pdf")
+        if not path.is_file():
+            content=self.remote_for(scope).download_attachment(document.get("file_token",""))
+            if hashlib.sha256(content).hexdigest()!=file_id or not content.startswith(b"%PDF"):
+                raise CabinetError("飞书PDF与机柜证明校验值不一致",409)
+            self.batches._atomic_write(path,content)
+        return path,Path(str(document.get("name") or file_id+".pdf")).name
+
     def validate_op(self,scope,payload,old=None):
         op=copy.deepcopy(old or {})
         op.setdefault("result","")
@@ -688,10 +707,10 @@ class CabinetPowerService:
             g.setdefault("result",op.get("result",""))
             prior=old_groups.get(g["id"])
             for key in list(g):
-                if key not in ('id','action','actual','expected','result','failure_reason','evidence_images'): g.pop(key)
+                if key not in ('id','action','actual','expected','result','failure_reason','evidence_images','evidence_files'): g.pop(key)
             if prior:
                 g.update({k:copy.deepcopy(v) for k,v in prior.items() if k.startswith('source_')})
-                for key in ('failure_reason','evidence_images'):
+                for key in ('failure_reason','evidence_images','evidence_files'):
                     if key not in g and key in prior: g[key]=copy.deepcopy(prior[key])
             reason=str(g.get('failure_reason') or '').strip()
             if len(reason)>1000: raise CabinetError('失败原因不能超过1000字')
@@ -705,7 +724,18 @@ class CabinetPowerService:
                 )
             ) for item in images):
                 raise CabinetError('确认截图引用无效')
-            if prior and all(g.get(k,"")==prior.get(k,"") for k in ("action","expected","actual","result","failure_reason","evidence_images")): continue
+            documents=g.get('evidence_files') or []
+            if not isinstance(documents,list) or any(not isinstance(item,dict) or (
+                item not in (prior or {}).get('evidence_files', []) and (
+                    not re.fullmatch(r'[a-f0-9]{64}',str(item.get('file_id') or ''))
+                    or not re.fullmatch(r'[A-Za-z0-9_-]{10,200}',str(item.get('file_token') or ''))
+                    or item.get('extension')!='.pdf' or not isinstance(item.get('name'),str)
+                    or not item['name'].strip() or len(item['name'])>255
+                    or not isinstance(item.get('scopes'),list) or not item['scopes']
+                    or any(not isinstance(value,str) or value not in TOTALS for value in item['scopes'])
+                )
+            ) for item in documents): raise CabinetError('PDF证明引用无效')
+            if prior and all(g.get(k,"")==prior.get(k,"") for k in ("action","expected","actual","result","failure_reason","evidence_images","evidence_files")): continue
             if not any(g.get(k) for k in ("action","actual","expected")): continue
             if g.get("result") not in ("成功","失败"): raise CabinetError(f"第{i+1}组须选择成功或失败")
             if g['result']=='失败' and not reason: raise CabinetError(f'第{i+1}组操作失败时须填写失败原因')
