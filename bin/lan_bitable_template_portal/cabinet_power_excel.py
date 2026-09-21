@@ -1143,7 +1143,7 @@ def export_workbook(content, config, operations, notice_summary=None):
     with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as archive:
         for name,data in parts.items(): archive.writestr(name,data)
     verified=Workbook(out.getvalue())
-    expected=["机柜上电汇总表（邮件）","机柜上电汇总表（通告）",*(name for name in book.sheets if name!="机柜上电汇总表")]
+    expected=["机柜上电汇总表（邮件）","机柜上电汇总表（每月阿里统计）",*(name for name in book.sheets if name!="机柜上电汇总表")]
     if list(verified.sheets)!=expected: raise CabinetError("通告汇总工作表关系校验失败")
     formula_errors=[(name,ref,cell.findtext(T("v"),"")) for name in verified.sheets
                     for ref,cell in verified.cells(name).items()
@@ -1343,7 +1343,7 @@ def _apply_period_summary(root,book,config,daily,monthly):
 def append_notice_summary_parts(parts, book, config, summary):
     old_name = "机柜上电汇总表"
     mail_name = "机柜上电汇总表（邮件）"
-    notice_name = "机柜上电汇总表（通告）"
+    notice_name = "机柜上电汇总表（每月阿里统计）"
     if old_name not in book.sheets:
         raise CabinetError("原模板缺少机柜上电汇总表")
     workbook = ET.fromstring(parts["xl/workbook.xml"])

@@ -283,6 +283,18 @@ class CabinetPowerTests(unittest.TestCase):
         changed=derive_records(config,operations)["counts"]
         self.assertEqual((changed["formal"],changed["test"]),(938,32))
 
+    def test_latest_success_matches_floorplan_baseline_state(self):
+        scope="A"; content=(TEMPLATES/"A.xlsm").read_bytes(); config=copy.deepcopy(self.configs[scope])
+        records=[copy.deepcopy(record) for record in self.source_records if record["fields"]["楼栋"]=="A楼"]
+        operations=[from_feishu(record) for record in records]
+        config["power_baseline"]=map_state_baseline(content,config,operations)[0]
+        key=next(key for key,value in config["power_baseline"].items() if value["state"]=="formal")
+        config["power_baseline"][key].update(state="off",color="#00B050")
+        self.service.local.replace(scope,config,records,[]); self.service._cache.pop(scope,None)
+        room,rack=key.split("/"); state=self.service.operations(scope,{"room":room,"rack":rack,"page_size":100})["rack_state"]
+        self.assertEqual((state["state"],state["latest_success"]["action"],state["latest_success"]["actual"],
+                          state["latest_success"]["baseline_correction"]),("off","下正式电","",True))
+
     def test_export_attachment_uses_archive_base_parent(self):
         path=Path(self.tmp.name)/"sample.xlsm"; path.write_bytes(b"export")
         remote=CabinetFeishu(EXPORT_ARCHIVE_TABLE_ID,EXPORT_ARCHIVE_APP_TOKEN); captured={}
@@ -1648,7 +1660,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             original=(TEMPLATES/(scope+".xlsm")).read_bytes(); before=Workbook(original)
             ops=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]==scope+"楼"]
             result=export_workbook(original,self.configs[scope],ops); after=Workbook(result)
-            self.assertEqual(list(after.sheets),["机柜上电汇总表（邮件）","机柜上电汇总表（通告）",*(name for name in before.sheets if name!="机柜上电汇总表")])
+            self.assertEqual(list(after.sheets),["机柜上电汇总表（邮件）","机柜上电汇总表（每月阿里统计）",*(name for name in before.sheets if name!="机柜上电汇总表")])
             self.assertEqual(before.archive.read("xl/vbaProject.bin"),after.archive.read("xl/vbaProject.bin"))
             for name in before.sheets:
                 original_merges=[x.get("ref") for x in before.sheet(name).iter(T("mergeCell"))]
@@ -1683,7 +1695,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         day=next(row for row in mail.values() if str(row.get(13))=="2026.9.20")
         self.assertEqual(day[14],1.0)
         self.assertFalse(any(str(value).startswith("系统新增上下电") for row in mail.values() for value in row.values()))
-        notice=dict(workbook.rows("机柜上电汇总表（通告）"))
+        notice=dict(workbook.rows("机柜上电汇总表（每月阿里统计）"))
         notice_day=next(row for row in notice.values() if str(row.get(13))=="2026.9.20")
         self.assertEqual(notice_day[14],1.0)
 
@@ -1693,7 +1705,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             "date":"2026-09-20","sent_at":"2026-09-20 10:00:00","direction":"up"}]}
         deduplicated=Workbook(export_workbook((TEMPLATES/"B.xlsm").read_bytes(),config,
             [*snapshot["operations"],notice_operation],notice_summary))
-        notice_day=next(row for row in dict(deduplicated.rows("机柜上电汇总表（通告）")).values()
+        notice_day=next(row for row in dict(deduplicated.rows("机柜上电汇总表（每月阿里统计）")).values()
                         if str(row.get(13))=="2026.9.20")
         self.assertEqual(notice_day[14],1.0)
 
@@ -1721,7 +1733,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             column=next(column for column,value in row.items() if label in str(value))
             return next(float(row[index]) for index in range(column+1,column+5) if isinstance(row.get(index),(int,float)))
 
-        for sheet in ("机柜上电汇总表（邮件）","机柜上电汇总表（通告）"):
+        for sheet in ("机柜上电汇总表（邮件）","机柜上电汇总表（每月阿里统计）"):
             self.assertEqual(metric(workbook,sheet,"测试电总数"),metric(original,sheet,"测试电总数")+1)
             self.assertEqual(metric(workbook,sheet,"正式电总数"),metric(original,sheet,"正式电总数")-1)
             before=sum("2026.9.20" in str(value) for row in original.rows(sheet) for value in row[1].values())
@@ -1797,7 +1809,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         scope="A"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
         ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
         exported=Workbook(export_workbook(original,self.configs[scope],ops))
-        for sheet in ("机柜上电汇总表（邮件）","机柜上电汇总表（通告）"):
+        for sheet in ("机柜上电汇总表（邮件）","机柜上电汇总表（每月阿里统计）"):
             cells=exported.cells(sheet)
             self.assertIsNone(cells["E15"].get("t"),(sheet,"E15"))
             self.assertIsNone(cells["E15"].find(T("is")),(sheet,"E15"))
@@ -1812,7 +1824,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             {"room":"402","rack":"B15","date":"2026-09-04","direction":"down"},
         ]}
         book=Workbook(export_workbook(original,self.configs[scope],ops,summary))
-        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        rows=dict(book.rows("机柜上电汇总表（每月阿里统计）"))
         by_name={str(values.get(1)):values for values in rows.values() if values.get(1)}
         self.assertIn("B-216运营商机房",by_name)
         self.assertIn("B-247运营商机房",by_name)
@@ -1839,7 +1851,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         saved=self.service.local.document("B","export:"+result["export_id"])
         workbook=Workbook(Path(saved["path"]).read_bytes())
         self.assertIn("机柜上电汇总表（邮件）",workbook.sheets)
-        notice=dict(workbook.rows("机柜上电汇总表（通告）"))
+        notice=dict(workbook.rows("机柜上电汇总表（每月阿里统计）"))
         added=next(values for values in notice.values() if values.get(13)=="2026.9.18")
         self.assertEqual((added[14],added.get(15,""),added[16]),(2.0,"",1022.0))
         self.assertEqual(len(archive.records),1)
@@ -1870,7 +1882,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     return ET.tostring(root)
                 self.assertEqual(stable_mail(empty),stable_mail(filled))
                 mail_root=filled.sheet("机柜上电汇总表（邮件）")
-                notice_root=filled.sheet("机柜上电汇总表（通告）")
+                notice_root=filled.sheet("机柜上电汇总表（每月阿里统计）")
                 for tag in ("sheetPr","sheetFormatPr","printOptions","pageMargins","pageSetup","headerFooter"):
                     mail_node,notice_node=mail_root.find(T(tag)),notice_root.find(T(tag))
                     self.assertEqual(ET.tostring(mail_node) if mail_node is not None else None,
@@ -1879,14 +1891,14 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     path=book.sheets[name]; rel=path.rsplit("/",1)[0]+"/_rels/"+path.rsplit("/",1)[1]+".rels"
                     if rel not in book.archive.namelist(): return []
                     return sorted(item.get("Type","").rsplit("/",1)[-1] for item in ET.fromstring(book.archive.read(rel)))
-                self.assertEqual(relation_types(filled,mail),relation_types(filled,"机柜上电汇总表（通告）"),(scope,"relationships"))
+                self.assertEqual(relation_types(filled,mail),relation_types(filled,"机柜上电汇总表（每月阿里统计）"),(scope,"relationships"))
                 mail_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（邮件）").items()}
-                notice_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（通告）").items()}
+                notice_styles={ref:cell.get("s","0") for ref,cell in filled.cells("机柜上电汇总表（每月阿里统计）").items()}
                 for ref,style in mail_styles.items():
                     if ref in notice_styles:
                         self.assertEqual(notice_styles[ref],style,(scope,ref))
 
-                rows=dict(filled.rows("机柜上电汇总表（通告）"))
+                rows=dict(filled.rows("机柜上电汇总表（每月阿里统计）"))
                 columns={"A":(2,3,5,6),"B":(13,14,15,16),"C":(27,28,29,30),"D":(2,3,4,5),"E":(2,3,4,5)}[scope]
                 date_col,up_col,down_col,total_col=columns
                 def date_key(value):
@@ -1909,7 +1921,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                         return (dt.datetime(1899,12,30)+dt.timedelta(days=raw)).strftime("%Y-%m")
                     match=re.search(r"(20\d{2})\D+(\d{1,2})",str(raw or ""))
                     return f"{int(match[1]):04d}-{int(match[2]):02d}" if match else ""
-                empty_rows=dict(empty.rows("机柜上电汇总表（通告）"))
+                empty_rows=dict(empty.rows("机柜上电汇总表（每月阿里统计）"))
                 base_month=next((values for values in empty_rows.values() if month_key(values.get(month_date))=="2026-09"),None)
                 filled_month=next(values for values in rows.values() if month_key(values.get(month_date))=="2026-09")
                 numeric=lambda raw: float(raw) if raw not in (None,"") else 0.0
@@ -1925,7 +1937,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         targets=[key.split("/") for key,state in baseline.items() if state["state"]=="off"][:6]
         items=[{"room":room,"rack":rack,"date":"2026-09-19","direction":"up","action":"上正式电"} for room,rack in targets]
         book=Workbook(export_workbook(original,self.configs[scope],ops,{"items":items}))
-        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        rows=dict(book.rows("机柜上电汇总表（每月阿里统计）"))
         self.assertEqual(tuple(rows[48].get(col,"") for col in (1,2,3,4,5)),(32.0,"2026.9.19",6.0,"",408.0))
         month=(dt.datetime(1899,12,30)+dt.timedelta(days=rows[32][8])).strftime("%Y-%m")
         self.assertEqual((rows[32][7],month,rows[32][9],rows[32].get(10,""),rows[32][11]),(16.0,"2026-09",6.0,"",408.0))
@@ -1934,7 +1946,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual((mail[10][4],rows[10][4]),(870.0,864.0))
         self.assertEqual(rows[10][11],408.0)
         self.assertFalse(any(str(value).startswith("系统新增上下电") for row in rows.values() for value in row.values()))
-        styles=book.cells("机柜上电汇总表（通告）")
+        styles=book.cells("机柜上电汇总表（每月阿里统计）")
         self.assertEqual([styles[f"{col}48"].get("s") for col in "ABCDE"],[styles[f"{col}47"].get("s") for col in "ABCDE"])
         self.assertEqual([styles[f"{col}32"].get("s") for col in "GHIJK"],[styles[f"{col}31"].get("s") for col in "GHIJK"])
 
@@ -1942,7 +1954,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         scope="A"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
         ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
         book=Workbook(export_workbook(original,self.configs[scope],ops))
-        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        rows=dict(book.rows("机柜上电汇总表（每月阿里统计）"))
         def month_row(period):
             for values in rows.values():
                 raw=values.get(9)
@@ -1962,7 +1974,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         summary={"items":[{"room":room,"rack":rack,"date":"2027-01-02","sent_at":"2027-01-02 09:00:00",
                            "direction":"up","action":"上测试电","rack_type":"服务器机柜"}]}
         book=Workbook(export_workbook(original,self.configs[scope],ops,summary))
-        rows=dict(book.rows("机柜上电汇总表（通告）"))
+        rows=dict(book.rows("机柜上电汇总表（每月阿里统计）"))
         self.assertTrue(any(values.get(1)=="C栋2027年上、下电总数量统计" for values in rows.values()))
         added=next(values for values in rows.values() if values.get(2)=="2027.1.2")
         self.assertEqual((added[3],added.get(4,""),added[5]),(1.0,"",971.0))

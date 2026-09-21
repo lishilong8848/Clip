@@ -26,7 +26,7 @@ def main():
             notice_summary=service.batches.notice_summary(scope,config)
             generated=export_workbook(original,config,ops,notice_summary)
             before=Workbook(original); after=Workbook(generated)
-            expected_sheets=['机柜上电汇总表（邮件）','机柜上电汇总表（通告）',
+            expected_sheets=['机柜上电汇总表（邮件）','机柜上电汇总表（每月阿里统计）',
                              *(name for name in before.sheets if name!='机柜上电汇总表')]
             assert list(after.sheets)==expected_sheets,(scope,list(after.sheets))
             assert before.archive.read('xl/vbaProject.bin')==after.archive.read('xl/vbaProject.bin')

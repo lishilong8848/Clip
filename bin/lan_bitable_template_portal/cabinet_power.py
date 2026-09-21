@@ -15,7 +15,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
-from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, TOTALS, baseline_correction_operations, calculate, derive_records, dates, digest, export_workbook, operation_key, system_name, text_value, project_layout,completed_state_event
+from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, calculate, derive_records, dates, digest, export_workbook, operation_key, system_name, text_value, project_layout,completed_state_event
 from .cabinet_power_data import from_feishu, to_fields, group_events, source_sheet, table_columns, normalized_actions
 from .cabinet_power_store import CabinetStore
 
@@ -586,8 +586,11 @@ class CabinetPowerService:
             state=next((r for r in derived["racks"] if (r["room"],r["rack"])==(query["room"],query["rack"])),None)
             if state is not None:
                 events=[{**o,**e} for o in snap['operations'] if (o['room'],o['rack'])==(query['room'],query['rack']) for e in o['events']]
-                latest=max((e for e in events if completed_state_event(e)),key=lambda e:(e['actual'],e['id']),default={})
+                corrections=[e for e in events if e.get('meta',{}).get('baseline_correction') and e.get('result')=='成功']
+                compatible=[e for e in events if completed_state_event(e) and STATES.get(e.get('action'))==state['state']]
+                latest=max(corrections,key=lambda e:e['id'],default={}) or max(compatible,key=lambda e:(e['actual'],e['id']),default={})
                 state['latest_success']={k:latest[k] for k in ('id','record_id','action','actual','expected','result') if k in latest}
+                if latest.get('meta',{}).get('baseline_correction'): state['latest_success']['baseline_correction']=True
         return {"items":items,"total":len(ops),"page":page,"page_size":size,"version":snap["version"],"rack_state":state}
 
     def evidence_path(self,scope,record_id,image_id,thumbnail=False):

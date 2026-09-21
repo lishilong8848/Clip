@@ -128,7 +128,7 @@
       <section class="drawer modal" role="dialog" aria-modal="true" aria-label="机柜完整历史" tabindex="-1">
         <header><div><h2>{{ historyRoom }} / {{ historyRack }}</h2><p v-if="selectedRack">当前状态：{{ stateLabels[selectedRack.state] }} · {{ selectedRack.rack_type }}</p></div><button @click="historyOpen = false" aria-label="关闭历史"><X :size="20" /></button></header>
         <div class="drawer-body">
-          <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual }}</dd></div></dl>
+          <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}{{ selectedRack.latest_success.baseline_correction ? '（平面图基线校正）' : '' }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual || '未填写' }}</dd></div></dl>
           <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading">正在读取完整历史…</p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
