@@ -276,6 +276,14 @@ try {
   await page.goto(base + "/cabinet-power/batches?scope=E&batch_id=batch-test");
   await page.getByRole("heading", { name:"上下电待办详情" }).waitFor();
   assert.equal(await page.getByRole("dialog", { name:"恢复未保存的批次更正？" }).count(),0,"discarded draft must not return");
+  batch.source_notice.deleted_at = "2026-09-21 18:00:00";
+  batch.stats.confirmable = 0;
+  batch.rows.forEach(row => { row.editable = false; row.confirmable = false; });
+  await page.reload();
+  await page.locator(".summary-title").getByText("来源通告已删除", {exact:true}).waitFor();
+  assert(await page.getByRole("button", {name:"确认整批",exact:true}).isDisabled());
+  assert.equal(await page.getByText(/条上下电通告联动失败/).count(),0);
+  await page.screenshot({path:path.join(output,"batch-deleted-1024.png"),fullPage:true});
   assert.deepEqual(batchErrors, []);
   await batchContext.close();
   console.log("cabinet saves, export response recovery, five-building upload and layout passed");

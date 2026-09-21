@@ -572,12 +572,39 @@ class CabinetPowerTests(unittest.TestCase):
         service.apply_notice_event({**source,"event_action":"end","sent_at":"2026-09-20 09:00:00"})
         service.apply_notice_event({**source,"event_action":"delete"})
         self.assertFalse(service.list("owner",["B"])["items"])
+        self.assertEqual(service.get(batch["batch_id"])["stats"]["confirmable"],0)
         service.apply_notice_event({**source,"event_action":"undo_delete","prior_record_id":"rec-notice-summary",
                                     "target_record_id":"rec-notice-restored"})
 
         restored=service.get(batch["batch_id"])
         self.assertFalse(restored["source_notice"]["deleted_at"])
         self.assertEqual(restored["source_notice"]["target_record_id"],"rec-notice-restored")
+
+    def test_notice_delete_before_batch_creation_is_terminal_and_restorable(self):
+        service=self.service.batches
+        source={"event_action":"delete","target_record_id":"rec-deleted-before-start",
+                "notice_type":"上电通告","event_at":2.0,"idempotency_key":"early-delete"}
+        with patch.object(service,"_notice_rows",side_effect=AssertionError("deletion must not read cabinet data")):
+            deleted=service.apply_notice_event(source)
+        self.assertTrue(deleted["source_notice"]["deleted_at"])
+        self.assertEqual(deleted["rows"],[])
+        self.assertFalse(deleted["source_notice"]["sent_at"])
+        self.assertEqual(service.apply_notice_event(source)["batch_id"],deleted["batch_id"])
+        for action in ("start","update","end","undo_end"):
+            result=service.apply_notice_event({**source,"event_action":action,"event_at":1.0,
+                "cabinet":"B-216运营商机房B04","quantity":"1"})
+            self.assertTrue(result["source_notice"]["deleted_at"])
+            self.assertFalse(result["rows"])
+        self.assertEqual(service.list("system",list("ABCDE"),True)["pending_count"],0)
+        with self.assertRaisesRegex(CabinetError,"尚未创建"):
+            service.apply_notice_event({**source,"event_action":"update","target_record_id":"rec-not-deleted"})
+        restored=service.apply_notice_event({**source,"event_action":"undo_delete","event_at":3.0,
+            "prior_record_id":source["target_record_id"],"target_record_id":"rec-restored-before-start",
+            "scope":"B","cabinet":"B-216运营商机房B04","quantity":"1"})
+        self.assertEqual(restored["batch_id"],deleted["batch_id"])
+        self.assertFalse(restored["source_notice"]["deleted_at"])
+        self.assertEqual([(row["room"],row["rack"]) for row in restored["rows"]],[("216","B04")])
+        self.assertEqual(len(service.store.notice_batches()),1)
 
     def test_batch_store_version_compare_is_atomic_across_instances(self):
         batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-19 01:02:03")],"owner")
@@ -623,6 +650,7 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual(service.list("owner",["B"])["total"],0)
         exceptions=service.list("owner",["B"],status="notice_rollback_error")
         self.assertEqual([item["batch_id"] for item in exceptions["items"]],[batch["batch_id"]])
+        self.assertTrue(exceptions["items"][0]["source_notice_deleted"])
 
     def test_notice_delete_waits_for_inflight_write_then_resumes_rollback(self):
         service=self.service.batches
@@ -806,6 +834,42 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertIsNone(store.next_notice_handoff())
         store.requeue_failed_notice_handoffs()
         self.assertEqual(store.next_notice_handoff()["attempts"],0)
+
+    def test_deleted_notice_handoff_recovery_clears_primary_and_fallback_errors(self):
+        bin_path=str(Path(__file__).parent)
+        added_path=bin_path not in sys.path
+        if added_path: sys.path.insert(0,bin_path)
+        from .lan_bitable_template_portal.server import PortalRuntime
+        from .lan_bitable_template_portal.state_store import LanPortalStateStore
+        state=LanPortalStateStore(Path(self.tmp.name)/"deleted-handoff.sqlite3")
+        try:
+            with patch.object(PortalRuntime,"state_store",state), patch.object(PortalRuntime,"cabinet_power_service",self.service), \
+                    patch("bin.lan_bitable_template_portal.server.query_record_by_id",side_effect=AssertionError("deleted notice must not be queried")):
+                channel=PortalRuntime.cabinet_notice_queue_channel
+                source={"event_action":"delete","target_record_id":"rec-missing-batch","notice_type":"上电通告",
+                        "idempotency_key":"missing-batch-delete","event_at":2.0}
+                event_id=state.enqueue_outbox_event(channel,source)
+                for _ in range(6):
+                    state.mark_outbox_event(event_id,"pending",max_attempts=6,error="来源通告待办尚未创建，请稍后重试")
+                state.requeue_failed_outbox_events(channel,max_attempts=5)
+                self.assertTrue(state.list_outbox_events(channel,status="failed"))
+                PortalRuntime._recover_cabinet_notice_rollbacks()
+                self.assertFalse(state.list_outbox_events(channel,status="failed"))
+                store=self.service.batches.store
+                first=store.notice_by_target(source["target_record_id"])
+                self.assertTrue(first["source_notice"]["deleted_at"])
+                store.queue_notice_handoff(source)
+                for _ in range(5): store.finish_notice_handoff(source["idempotency_key"],"来源通告待办尚未创建，请稍后重试")
+                store.requeue_failed_notice_handoffs()
+                second=PortalRuntime._process_cabinet_notice_queue_once()
+                self.assertEqual((second["status"],second["batch_id"]),("success",first["batch_id"]))
+                self.assertFalse(store.failed_notice_handoffs())
+                state.enqueue_outbox_event(channel,{**source,"event_action":"end","event_at":1.0,"idempotency_key":"late-end"})
+                self.assertEqual(PortalRuntime._process_cabinet_notice_queue_once()["status"],"success")
+                self.assertFalse(PortalRuntime._process_cabinet_notice_queue_once()["processed"])
+        finally:
+            state.shutdown_write_worker(timeout=1)
+            if added_path: sys.path.remove(bin_path)
 
     def test_stale_notice_update_does_not_overwrite_newer_end_snapshot(self):
         service=self.service.batches

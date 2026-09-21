@@ -861,6 +861,8 @@ class CabinetBatchService:
     def _refresh_summary(self, batch):
         rows = batch.get("rows", [])
         batch["stats"] = self._stats(rows)
+        if (batch.get("source_notice") or {}).get("deleted_at"):
+            batch["stats"]["confirmable"] = 0
         batch["scopes"] = sorted({row.get("scope") for row in rows if row.get("scope") in SCOPES})
         if batch.get("status") == "cancelled" and not any(row.get("status") in ("rollback_queued", "rolling_back") for row in rows):
             return
@@ -1509,11 +1511,13 @@ class CabinetBatchService:
         if existing:
             existing["duplicate_source"] = True
             return existing
+        deleting = str(source.get("event_action") or "").lower() == "delete"
         parsed, diagnostics = self._parse_notice_cabinets(source.get("cabinet"))
-        if not parsed:
+        if not parsed and not deleting:
             raise CabinetError("通告柜号未识别到包间和机柜")
         batch_id = uuid.uuid4().hex
-        rows = self._notice_rows(source, source_hash, parsed)
+        # Keep a deletion tombstone even when the start handoff never arrived.
+        rows = [] if deleting else self._notice_rows(source, source_hash, parsed)
         scope = str(source.get("scope") or "").upper().replace("楼", "")
         source_notice = {
             "job_id": str(source.get("job_id") or ""),
@@ -1528,10 +1532,10 @@ class CabinetBatchService:
             "declared_quantity": self._notice_quantity(source.get("quantity")),
             "sender_open_id": str(source.get("sender_open_id") or ""),
             "sender_name": str(source.get("sender_name") or ""),
-            "sent_at": self._notice_datetime(source.get("sent_at")),
+            "sent_at": self._notice_datetime(source.get("start_sent_at") if deleting else source.get("sent_at")),
             "last_event_at": float(source.get("event_at") or 0),
             "ended_at": "",
-            "deleted_at": "",
+            "deleted_at": (self._notice_datetime(source.get("sent_at")) or now()) if deleting else "",
         }
         try:
             batch = self.store.create(
@@ -1561,7 +1565,7 @@ class CabinetBatchService:
                 existing["duplicate_source"] = True
                 return existing
             raise
-        return self._change(batch["batch_id"], lambda _batch: None, validate=True)
+        return self._change(batch["batch_id"], lambda _batch: None, validate=not deleting)
 
     def _sync_notice_rows(self, batch, source):
         cabinet_text = str(source.get("cabinet") or (batch.get("source_notice") or {}).get("cabinet") or "")
@@ -1628,6 +1632,8 @@ class CabinetBatchService:
         batch = self.store.notice_by_target(record_id)
         if batch is None and source.get("prior_record_id"):
             batch = self.store.notice_by_target(str(source["prior_record_id"]))
+        if batch and (batch.get("source_notice") or {}).get("deleted_at") and action in {"start", "update", "end", "undo_end"}:
+            return batch
         if action == "start":
             if batch is None:
                 return self.create_from_notice(source)
@@ -1636,7 +1642,9 @@ class CabinetBatchService:
                 batch = self._change(batch["batch_id"], lambda current: current["source_notice"].update(sent_at=sent_at))
             return batch
         if batch is None:
-            if action in {"update", "end"} and source.get("cabinet"):
+            if action == "delete":
+                batch = self.create_from_notice(source)
+            elif action in {"update", "end"} and source.get("cabinet"):
                 batch = self.create_from_notice({**source, "sent_at": self._notice_datetime(source.get("start_sent_at"))})
             else:
                 raise CabinetError("来源通告待办尚未创建，请稍后重试", 409)
@@ -1649,7 +1657,8 @@ class CabinetBatchService:
             batch = self._change(batch_id, lambda current: current["source_notice"].update(sent_at=start_sent_at))
         if action == "end" and not self._notice_datetime(source.get("sent_at")):
             raise CabinetError("结束通告缺少实际发送时间", 409)
-        if action == "update" or action == "end" and source.get("cabinet_verified"):
+        if (action == "update" or action == "end" and source.get("cabinet_verified")
+                or action == "undo_delete" and not batch["rows"]):
             batch = self._sync_notice_rows(batch, source)
         if action in {"end", "undo_end", "delete", "undo_delete"}:
             def lifecycle(current):
@@ -1794,6 +1803,8 @@ class CabinetBatchService:
             result["files"] = []
         else:
             result.pop("_visible_stats", None)
+        if deleted_notice:
+            result["stats"]["confirmable"] = 0
         pdf_files = {item["file_id"]: item for item in batch.get("files", [])} if batch.get("source") == "pdf" else {}
         for row in result.get("rows", []):
             document = pdf_files.get(row.get("file_id"))
@@ -1856,7 +1867,7 @@ class CabinetBatchService:
                           "scopes": batch.get("scopes", []) if admin or batch["owner_id"] == owner else [scope for scope in batch.get("scopes", []) if scope in allowed],
                           "stats": batch.get("stats") if admin or batch["owner_id"] == owner else self._stats(visible_rows),
                           "pending_rows": pending_rows, "pending_label": pending_label, "is_todo": is_todo,
-                          "notice_rollback_error": rollback_error})
+                          "notice_rollback_error": rollback_error, "source_notice_deleted": deleted_notice})
         page_size = max(1, min(int(page_size), 100))
         pages = max(1, (len(items) + page_size - 1) // page_size)
         page = max(1, min(int(page), pages))

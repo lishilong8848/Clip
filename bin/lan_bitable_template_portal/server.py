@@ -6298,6 +6298,16 @@ class PortalRuntime:
     def _recover_cabinet_notice_rollbacks(cls) -> None:
         try:
             batches = cls.cabinet_power_service.batches
+            # Old deletion handoffs exhausted their retries before tombstones were supported.
+            for task in cls.state_store.list_outbox_events(cls.cabinet_notice_queue_channel, status="failed", limit=500):
+                payload = task.get("payload") or {}
+                if (payload.get("event_action") == "delete"
+                        and task.get("last_error") == "来源通告待办尚未创建，请稍后重试"):
+                    try:
+                        batches.apply_notice_event(payload)
+                        cls.state_store.mark_outbox_event(task["id"], "done")
+                    except Exception as exc:
+                        log_warning(f"恢复来源通告删除状态失败: {exc}")
             for batch in batches.store.notice_batches():
                 if (batch.get("source_notice") or {}).get("rollback_error"):
                     batches._resume_notice_rollback_after_confirm(batch["batch_id"])
@@ -6420,7 +6430,9 @@ class PortalRuntime:
             service = cls.cabinet_power_service
             if service is None:
                 raise RuntimeError("机柜上下电服务尚未就绪")
-            if payload.get("event_action") == "end":
+            existing = service.batches.store.notice_by_target(str(payload.get("target_record_id") or ""))
+            deleted = bool(((existing or {}).get("source_notice") or {}).get("deleted_at"))
+            if payload.get("event_action") == "end" and not deleted:
                 ok, record = query_record_by_id(str(payload.get("target_record_id") or ""), str(payload.get("notice_type") or ""))
                 if not ok or not isinstance(record, dict):
                     raise RuntimeError(f"核对结束通告目标记录失败: {record}")
