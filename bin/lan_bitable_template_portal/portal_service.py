@@ -10747,6 +10747,17 @@ class MaintenancePortalService:
         for operation in operations:
             status = str(operation.get("status") or "")
             if status == "sync_pending":
+                if self._repair_management_record_not_found_error(
+                    operation.get("last_error")
+                ):
+                    result = dict(operation.get("result") or {})
+                    result["available_at"] = 0
+                    self._state_store.update_repair_management_operation(
+                        str(operation.get("operation_id") or ""),
+                        status="sync_pending",
+                        result=result,
+                        error=str(operation.get("last_error") or ""),
+                    )
                 resumable_count += 1
                 continue
             if (
@@ -13425,6 +13436,43 @@ class MaintenancePortalService:
                 "warning": "",
             }
 
+    def _clear_missing_repair_target_link(
+        self,
+        *,
+        summary_record_id: str,
+        target_record_id: str,
+        summary_record: dict[str, Any] | None = None,
+    ) -> bool:
+        summary_id = str(summary_record_id or "").strip()
+        target_id = str(target_record_id or "").strip()
+        if not summary_id.startswith("rec") or not target_id.startswith("rec"):
+            return False
+        with self._repair_management_record_lock(summary_id):
+            summary = (
+                summary_record
+                if isinstance(summary_record, dict)
+                and str(summary_record.get("record_id") or "").strip() == summary_id
+                else self._ensure_repair_management_record_in_scope(summary_id, "ALL")
+            )
+            if self._repair_target_record_id(summary) != target_id:
+                return False
+            self._patch_record_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                record_id=summary_id,
+                fields={REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME: None},
+            )
+            self._upsert_repair_snapshot_fields(
+                source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                record_id=summary_id,
+                fields={
+                    REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME: None,
+                    REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: None,
+                },
+            )
+            self._invalidate_repair_management_status_cache()
+            return True
+
     def _sync_repair_notice_relation_projection(
         self,
         *,
@@ -13656,23 +13704,39 @@ class MaintenancePortalService:
         warnings: list[str] = []
         target_fields: dict[str, Any] = {}
         if include_target_fields and target_id.startswith("rec"):
-            _target_metas, _target_meta_by_name, target_records = (
-                self._load_repair_management_target_records_by_ids([target_id])
-            )
-            if len(target_records) != 1:
-                raise PortalError(f"未找到检修目标记录：{target_id}")
-            target_record = target_records[0]
-            target_raw = (
-                target_record.get("raw_fields")
-                if isinstance(target_record.get("raw_fields"), dict)
-                else {}
-            )
-            target_display = (
-                target_record.get("display_fields")
-                if isinstance(target_record.get("display_fields"), dict)
-                else {}
-            )
-            target_fields = {**target_raw, **target_display}
+            try:
+                _target_metas, _target_meta_by_name, target_records = (
+                    self._load_repair_management_target_records_by_ids([target_id])
+                )
+                if len(target_records) != 1:
+                    raise PortalError(f"未找到检修目标记录：{target_id}")
+            except PortalError as exc:
+                if not self._repair_management_record_not_found_error(exc):
+                    raise
+                cleared = self._clear_missing_repair_target_link(
+                    summary_record_id=summary_id,
+                    target_record_id=target_id,
+                    summary_record=summary,
+                )
+                warnings.append(
+                    "原关联检修通告已删除，已解除失效关联。"
+                    if cleared
+                    else "原关联检修通告已删除，本次旧同步任务已忽略。"
+                )
+                target_id = ""
+            else:
+                target_record = target_records[0]
+                target_raw = (
+                    target_record.get("raw_fields")
+                    if isinstance(target_record.get("raw_fields"), dict)
+                    else {}
+                )
+                target_display = (
+                    target_record.get("display_fields")
+                    if isinstance(target_record.get("display_fields"), dict)
+                    else {}
+                )
+                target_fields = {**target_raw, **target_display}
 
         event_fields: dict[str, Any] = {}
         historical_event_warning = ""
@@ -14096,6 +14160,24 @@ class MaintenancePortalService:
                 write=False,
             )
         except Exception as exc:
+            if self._repair_management_record_not_found_error(exc):
+                cleared = self._clear_missing_repair_target_link(
+                    summary_record_id=repair_management_record_id,
+                    target_record_id=target_record_id,
+                    summary_record=existing,
+                )
+                return {
+                    "synced": True,
+                    "skipped": False,
+                    "repair_management_record_id": repair_management_record_id,
+                    "target_record_id": target_record_id,
+                    "stale_target_removed": cleared,
+                    "warnings": [
+                        "原关联检修通告已删除，已解除失效关联。"
+                        if cleared
+                        else "原关联检修通告已删除，本次旧同步任务已忽略。"
+                    ],
+                }
             raise PortalError(f"检修目标记录关联预检失败：{exc}") from exc
         target_summary_warning = str(
             target_summary_sync.get("warning") or ""
@@ -20237,6 +20319,7 @@ class MaintenancePortalService:
                 "recordidnotfound",
                 "recordldnotfound",
                 "记录id不存在",
+                "未找到检修目标记录",
             )
         )
 
@@ -42554,7 +42637,21 @@ class MaintenancePortalService:
                     or ""
                 ).strip()
             )
-            if remote_written and phase not in {"success", "failed"}:
+            projection_failed = bool(
+                phase == "failed"
+                and job.get("projection_pending")
+                and any(
+                    marker in str(job.get("error") or "")
+                    for marker in (
+                        "页面同步连续失败",
+                        "界面进行中状态同步失败",
+                        "本地状态收敛失败",
+                    )
+                )
+            )
+            if remote_written and (
+                phase not in {"success", "failed"} or projection_failed
+            ):
                 if phase == "sending_message" and not bool(job.get("message_sent")):
                     job["message_delivery_uncertain"] = True
                 job["phase"] = "remote_written"

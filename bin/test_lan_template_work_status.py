@@ -5338,6 +5338,67 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "消防",
         )
 
+    def test_qt_non_event_create_projects_without_remote_readback(self):
+        for notice_type in ("维保通告", "变更通告", "设备检修", "上电通告", "下电通告", "设备轮巡", "设备调整"):
+            with self.subTest(notice_type=notice_type), tempfile.TemporaryDirectory() as tmp:
+                store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+                self.addCleanup(store.shutdown_write_worker, timeout=2.0)
+                request = {
+                    "action_type": "upload",
+                    "operation_id": "qt_notice:no-readback",
+                    "data_dict": {
+                        "record_id": "local-no-readback",
+                        "active_item_id": "local-no-readback",
+                        "notice_type": notice_type,
+                        "text": f"【{notice_type}】状态：开始\n【名称】A楼测试",
+                        "_is_placeholder_record": True,
+                        "_upload_in_progress": True,
+                    },
+                }
+                with (
+                    patch.object(PortalRuntime, "state_store", store),
+                    patch.object(PortalRuntime, "local_upload_created_targets", {}),
+                    patch.object(PortalRuntime, "_existing_target_for_local_upload", return_value=""),
+                    patch.object(portal_server_module, "create_bitable_record_by_payload", return_value=(True, "rec-created")) as create,
+                    patch.object(portal_server_module, "query_record_by_id", side_effect=RuntimeError("查询飞书记录超时")) as read,
+                ):
+                    result = PortalRuntime.execute_local_notice_upload(request)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["real_record_id"], "rec-created")
+                self.assertEqual(store.get_notice_remote_operation(request["operation_id"])["status"], "completed")
+                active = store.find_qt_active_items(record_id="rec-created")
+                self.assertEqual(len(active), 1)
+                self.assertFalse(active[0]["payload"]["_upload_in_progress"])
+                create.assert_called_once()
+                read.assert_not_called()
+
+    def test_qt_non_event_create_persists_target_before_projection_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            self.addCleanup(store.shutdown_write_worker, timeout=2.0)
+            request = {
+                "action_type": "upload", "operation_id": "qt_notice:projection-error",
+                "data_dict": {
+                    "record_id": "local-projection-error", "notice_type": "维保通告",
+                    "text": "【维保通告】状态：开始\n【名称】A楼测试",
+                },
+            }
+            with (
+                patch.object(PortalRuntime, "state_store", store),
+                patch.object(PortalRuntime, "local_upload_created_targets", {}),
+                patch.object(PortalRuntime, "_existing_target_for_local_upload", return_value=""),
+                patch.object(portal_server_module, "create_bitable_record_by_payload", return_value=(True, "rec-created")) as create,
+                patch.object(PortalRuntime, "_remember_local_upload_target", side_effect=[RuntimeError("local unavailable"), ""]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "local unavailable"):
+                    PortalRuntime.execute_local_notice_upload(request)
+                operation = store.get_notice_remote_operation(request["operation_id"])
+                self.assertEqual(operation["status"], "remote_written")
+                self.assertEqual(operation["target_record_id"], "rec-created")
+                result = PortalRuntime.execute_local_notice_upload(request)
+                self.assertTrue(result["ok"], result)
+                create.assert_called_once()
+
     def test_local_qt_change_start_syncs_today_in_progress_state(self):
         request_payload = {
             "action_type": "upload",
@@ -5690,15 +5751,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(second["real_record_id"], "rec-event-1")
         self.assertTrue(second.get("deduped"))
         create_record.assert_called_once()
-        self.assertGreaterEqual(query_record.call_count, 1)
-        self.assertTrue(
-            all(
-                item.args == ("rec-event-1", "事件通告")
-                for item in query_record.call_args_list
-            )
-        )
+        query_record.assert_not_called()
 
-    def test_event_create_keeps_target_when_readback_times_out(self):
+    def test_event_create_does_not_fail_when_readback_times_out(self):
         request_payload = {
             "action_type": "upload",
             "operation_id": "qt_notice:readback-timeout",
@@ -5736,9 +5791,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     side_effect=create_event,
                 ) as create_record, patch.object(
                     portal_server_module, "query_record_by_id",
-                    side_effect=[RuntimeError("read timeout"), (True, {
-                        "fields": remote_fields, "record_version": "v1",
-                    })],
+                    side_effect=RuntimeError("read timeout"),
                 ), patch.object(
                     portal_server_module, "send_robot_message_by_payload",
                     return_value={"robot_sent": True, "robot_skipped": False, "last_robot_error": ""},
@@ -5759,12 +5812,49 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = old_store
                 PortalRuntime.local_upload_created_targets = old_targets
 
-        self.assertFalse(first["ok"])
+        self.assertTrue(first["ok"], first)
         self.assertEqual(first["real_record_id"], "rec-readback-timeout")
-        self.assertEqual(pending["status"], "remote_written")
+        self.assertEqual(pending["status"], "completed")
         self.assertEqual(pending["target_record_id"], "rec-readback-timeout")
         self.assertTrue(second["ok"], second)
         create_record.assert_called_once()
+
+    def test_event_end_accepts_successful_write_without_immediate_readback(self):
+        payload = NoticePayload(text="【事件通告】状态：结束\n【标题】E楼测试事件")
+        setattr(payload, "_clipflow_written_fields", {"事件状态": "已结束"})
+        operation = {
+            "result": {
+                "written_fields": {"事件状态": "已结束"},
+                "robot_payload": {},
+            }
+        }
+        with patch.object(
+            PortalRuntime,
+            "_get_notice_remote_operation",
+            return_value=operation,
+        ), patch.object(
+            PortalRuntime,
+            "_mark_notice_remote_operation",
+            return_value=operation,
+        ), patch.object(
+            PortalRuntime,
+            "_verify_event_remote_write",
+            side_effect=AssertionError("event end must not block on readback"),
+        ):
+            verified, query_result, error, _robot = (
+                PortalRuntime._verify_and_send_event_remote_write(
+                    "qt_notice:event-end",
+                    payload,
+                    target_record_id="rec-event-end",
+                    action="end",
+                    result_message="结束写入成功",
+                    send_message=False,
+                )
+            )
+
+        self.assertTrue(verified)
+        self.assertEqual(query_result["fields"], {"事件状态": "已结束"})
+        self.assertEqual(error, "")
 
     def test_local_event_upload_dedupes_different_local_ids_by_notice_text(self):
         def payload(local_id: str) -> dict:
@@ -5844,13 +5934,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(second["real_record_id"], "rec-event-1")
         self.assertTrue(second.get("deduped"))
         create_record.assert_called_once()
-        self.assertGreaterEqual(query_record.call_count, 1)
-        self.assertTrue(
-            all(
-                item.args == ("rec-event-1", "事件通告")
-                for item in query_record.call_args_list
-            )
-        )
+        query_record.assert_not_called()
 
     def test_event_local_fields_seed_from_existing_local_month_snapshot(self):
         old_store = PortalRuntime.state_store
@@ -6855,7 +6939,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
-    def test_backend_source_start_creates_directly_without_existing_target_query(self):
+    def test_backend_source_start_reuses_binding_without_remote_query(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -6910,10 +6994,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = old_store
 
         self.assertTrue(ok)
-        self.assertEqual(message, "rec-maint-new")
-        self.assertEqual(record_id, "rec-maint-new")
+        self.assertEqual(message, "rec-maint-existing")
+        self.assertEqual(record_id, "rec-maint-existing")
         query_record.assert_not_called()
-        create_record.assert_called_once()
+        create_record.assert_not_called()
 
     def test_backend_manual_start_creates_directly_without_semantic_target_query(self):
         old_store = PortalRuntime.state_store
@@ -7211,7 +7295,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(update_record.call_args.args[2].file_tokens, ["event-update-token"])
         create_record.assert_not_called()
 
-    def test_local_qt_notice_update_syncs_active_item_projection(self):
+    def test_local_qt_notice_update_syncs_active_item_after_version_read_timeout(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -7266,11 +7350,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "recover_selected": False,
                 "robot_group_choice": "auto",
             }
+            query_count = 0
+
+            def query_with_version_timeout(*_args):
+                nonlocal query_count
+                query_count += 1
+                if query_count == 2:
+                    raise RuntimeError("查询飞书记录超时")
+                return True, {"fields": {}}
+
             try:
                 with patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {}}),
+                    side_effect=query_with_version_timeout,
                 ), patch.object(
                     portal_server_module,
                     "upload_media_to_feishu",
@@ -7616,7 +7709,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertTrue(handled)
-        self.assertFalse(harness.finished[0][1])
+        self.assertEqual(harness.finished, [])
         self.assertEqual(
             harness._remote_written_retry_operations[
                 "qt_notice:remote-written"
@@ -12086,33 +12179,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     worker.join(5)
                 self.assertFalse(worker.is_alive())
 
-    def test_repeated_projection_failure_stops_with_remote_written_warning(self):
+    def test_remote_written_projection_recovers_from_read_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
+            target_record_id = "existing-target"
+            prepared = {
+                "action": "update",
+                "work_type": "adjust",
+                "notice_type": "调整通告",
+                "scope": "A",
+                "active_item_id": target_record_id,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "title": "A楼设备调整",
+                "progress": "调整完成",
+                "text": "【设备调整】状态：更新\n【名称】A楼设备调整\n【进度】调整完成",
+                "skip_personal_message": True,
+                "message_sent": True,
+            }
             job_id, _ = service.create_action_job({
                 "action": "update", "work_type": "adjust", "scope": "A",
-                "target_record_id": "existing-target", "operation_id": "projection-limit",
+                "target_record_id": target_record_id, "operation_id": "projection-limit",
             })
-            service.mark_job(job_id, remote_written=True, remote_record_id="existing-target", prepared={"work_type": "adjust"})
+            service.mark_job(
+                job_id,
+                phase="failed",
+                remote_written=True,
+                remote_record_id=target_record_id,
+                target_record_id=target_record_id,
+                remote_result_message="目标多维已写入",
+                projection_pending=True,
+                projection_retry_count=3,
+                error=(
+                    "多维已写入，但页面同步连续失败，已停止自动重试。"
+                    "原因：查询飞书记录超时"
+                ),
+                prepared=prepared,
+            )
             store = service._state_store
+            restarted = self._new_temp_service(Path(tmp))
+            recovered = restarted.get_job(job_id)
+            self.assertEqual(recovered["phase"], "remote_written")
+            self.assertTrue(recovered["restart_recovered"])
+            self.assertIn(job_id, restarted.recoverable_action_job_ids())
+            store = restarted._state_store
             store.upsert_runtime_queue_item("qt_action", job_id)
+            operation = {
+                "status": "remote_written",
+                "target_record_id": target_record_id,
+                "result": {"record_id": target_record_id, "message": "目标多维已写入"},
+                "conflict": False,
+            }
             with (
-                patch.object(PortalRuntime, "service", service),
+                patch.object(PortalRuntime, "service", restarted),
                 patch.object(PortalRuntime, "state_store", store),
-                patch.object(PortalRuntime, "_get_notice_remote_operation", return_value={"status": "remote_written"}),
-                patch.object(PortalRuntime, "_begin_notice_remote_operation", side_effect=RuntimeError("local unavailable")),
+                patch.object(PortalRuntime, "_get_notice_remote_operation", return_value=operation),
+                patch.object(PortalRuntime, "_begin_notice_remote_operation", return_value=operation),
+                patch.object(PortalRuntime, "_mark_notice_remote_operation", return_value=operation),
+                patch.object(portal_server_module, "query_record_by_id", side_effect=TimeoutError("read timed out")),
                 patch.object(PortalRuntime, "_execute_backend_prepared_upload") as upload,
             ):
-                for _ in range(3):
-                    PortalRuntime._process_maintenance_action_job(job_id)
-            final = service.get_job(job_id)
-            self.assertEqual(final["phase"], "failed")
-            self.assertTrue(final["remote_written"])
-            self.assertIn("勿重新发送", final["error"])
-            restarted = self._new_temp_service(Path(tmp))
-            self.assertEqual(restarted.get_job(job_id)["phase"], "failed")
-            self.assertTrue(restarted.get_job(job_id)["remote_written"])
-            self.assertNotIn(job_id, restarted.recoverable_action_job_ids())
+                PortalRuntime._process_maintenance_action_job(job_id)
+            final = restarted.get_job(job_id)
+            self.assertEqual(final["phase"], "success")
+            self.assertFalse(final.get("projection_pending"))
+            active = store.find_qt_active_items(record_id=target_record_id)
+            self.assertEqual(len([row for row in active if row.get("deleted_at") is None]), 1)
             upload.assert_not_called()
 
     def test_source_refresh_publishes_successes_and_retains_failed_source(self):
@@ -13407,6 +13539,38 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             deleted = service._state_store.list_qt_active_items(include_deleted=True)
             self.assertEqual(len(deleted), 1)
             self.assertIsNotNone(deleted[0].get("deleted_at"))
+
+    def test_backend_update_and_end_never_create_when_version_readback_times_out(self):
+        for notice_type in ("维保通告", "变更通告", "设备检修", "上电通告", "下电通告", "设备轮巡", "设备调整"):
+            for action in ("update", "end"):
+                with (
+                    self.subTest(notice_type=notice_type, action=action),
+                    patch.object(portal_server_module, "external_real_write_guard", return_value={
+                        "mock_external": False, "real_write_allowed": True,
+                    }),
+                    patch.object(PortalRuntime, "_has_cumulative_site_photo_for_notice", return_value=True),
+                    patch.object(PortalRuntime, "_work_order_end_error", return_value=""),
+                    patch.object(PortalRuntime, "_create_backend_undo_checkpoint", return_value=""),
+                    patch.object(PortalRuntime, "_mark_local_notice_images_target_written"),
+                    patch.object(portal_server_module, "query_record_by_id", side_effect=[
+                        (True, {"fields": {}, "record_version": "v1"}),
+                        RuntimeError("查询飞书记录超时"),
+                    ]),
+                    patch.object(portal_server_module, "create_bitable_record_by_payload") as create,
+                    patch.object(portal_server_module, "update_bitable_record_by_payload", return_value=(True, "rec-existing")) as update,
+                ):
+                    prepared = {
+                        "notice_type": notice_type, "action": action,
+                        "target_record_id": "rec-existing", "expected_record_version": "v1",
+                        "title": "隔离测试", "text": "隔离测试",
+                    }
+                    ok, _, target = PortalRuntime._execute_backend_prepared_upload(prepared)
+                    self.assertTrue(ok)
+                    self.assertEqual(target, "rec-existing")
+                    create.assert_not_called()
+                    update.assert_called_once()
+                    self.assertEqual(update.call_args.args[0], "rec-existing")
+                    self.assertFalse(prepared.get("expected_record_version"))
 
     def test_backend_end_upload_creates_undo_checkpoint_before_update(self):
         original_service = PortalRuntime.service
@@ -32298,6 +32462,101 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertFalse(
             service._repair_sync_warnings_require_retry(raced_result["warnings"])
         )
+
+    def test_deleted_repair_target_clears_stale_link_without_retry(self):
+        service = _TestMaintenancePortalService()
+        summary = {
+            "record_id": "rec_summary",
+            "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+            "raw_fields": {
+                REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: "rec_target",
+            },
+            "display_fields": {},
+        }
+        patches: list[dict[str, Any]] = []
+        snapshots: list[dict[str, Any]] = []
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: summary
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([], {}, [summary])
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patches.append(dict(kwargs)) or {}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: snapshots.append(dict(kwargs))
+        )
+        service._invalidate_repair_management_status_cache = (  # type: ignore[method-assign]
+            lambda: None
+        )
+        service._sync_repair_target_summary_id = (  # type: ignore[method-assign]
+            lambda **_kwargs: (_ for _ in ()).throw(
+                PortalError("飞书接口失败: code=1254043, msg=RecordIdNotFound")
+            )
+        )
+
+        notice_result = service.sync_repair_management_notice_action(
+            {
+                "work_type": WORK_TYPE_REPAIR,
+                "scope": "B",
+                "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                "repair_management_record_id": "rec_summary",
+            },
+            action="update",
+            target_record_id="rec_target",
+        )
+
+        self.assertTrue(notice_result["synced"])
+        self.assertTrue(notice_result["stale_target_removed"])
+        self.assertFalse(
+            service._repair_sync_warnings_require_retry(notice_result["warnings"])
+        )
+        self.assertIsNone(patches[-1]["fields"]["设备检修关联"])
+        self.assertIsNone(
+            snapshots[-1]["fields"][
+                REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME
+            ]
+        )
+
+        service._load_repair_management_target_records_by_ids = (  # type: ignore[method-assign]
+            lambda _record_ids: (_ for _ in ()).throw(
+                PortalError("飞书接口失败: code=1254043, msg=RecordIdNotFound")
+            )
+        )
+        relation_result = service._sync_repair_relation_business_fields(
+            summary_record_id="rec_summary",
+            summary_record=summary,
+            target_record_id="rec_target",
+            scope="B",
+        )
+
+        self.assertEqual(relation_result["target_record_id"], "")
+        self.assertFalse(
+            service._repair_sync_warnings_require_retry(relation_result["warnings"])
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service._state_store = LanPortalStateStore(  # type: ignore[assignment]
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            worker_calls: list[bool] = []
+            service._process_repair_sync_tasks_async = (  # type: ignore[method-assign]
+                lambda: worker_calls.append(True)
+            )
+            operation_id = service._schedule_repair_sync_task(
+                "followup_summary_sync",
+                summary_record_id="rec_summary",
+                scope="B",
+                error="飞书接口失败: code=1254043, msg=RecordIdNotFound",
+            )
+
+            self.assertEqual(service.resume_repair_sync_tasks_async(), 1)
+            operation = service._state_store.get_repair_management_operation(
+                operation_id
+            )
+            self.assertEqual(operation["result"]["available_at"], 0)
+            self.assertEqual(worker_calls, [True])
 
     def test_repair_target_summary_id_sync_writes_missing_and_preserves_conflict(self):
         service = _TestMaintenancePortalService()

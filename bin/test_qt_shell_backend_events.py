@@ -2210,6 +2210,46 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_event_clipboard_a_chiller_update_and_end_keep_same_target(self):
+        text = (
+            "【事件通告】状态：更新\n"
+            " 【标题】EA118机房A楼I3级事件通报\n"
+            " 【来源】轮巡\n"
+            " 【时间】2026-09-21 16：35\n"
+            " 【概述】轮巡发现A-127-2#冷水机组故障\n"
+            " 【影响】IT业务暂无影响\n"
+            " 【进展】1、轮巡中发现2#冷水机组自启失败，工程师现场检查中！\n"
+            " 2、工程师现对2#冷水机组进行排查，请知晓\n"
+            " 3、工程师正在排故中，末端供冷无影响，请知悉\n"
+            " 4、工程师在排查故障中，末端供冷无影响，请知悉\n"
+            " 5、工程师在排查故障中，末端供冷无影响@I3通报组"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            with patch.object(PortalRuntime, "state_store", store):
+                for stamp in ("2026-09-21T16:35:00", "2026-09-21 16:35:00"):
+                    for status in ("更新", "结束"):
+                        with self.subTest(stamp=stamp, status=status):
+                            store.upsert_qt_active_item({
+                                "active_item_id": "rec-chiller-test",
+                                "record_id": "rec-chiller-test",
+                                "target_record_id": "rec-chiller-test",
+                                "notice_type": "事件通告", "work_type": "event",
+                                "title": "轮巡发现A-127-2#冷水机组故障",
+                                "time_str": stamp, "building_codes": ["A"],
+                                "event_source": "轮巡", "level": "I3",
+                                "event_match_fields": {"time": "20260921163500"},
+                                "_is_placeholder_record": False,
+                            }, section="event", origin="target_snapshot_refresh")
+                            entry = FastAPIPortalController._clipboard_entry_from_content(
+                                text.replace("状态：更新", "状态：" + status)
+                            )
+                            result = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+                            self.assertFalse(result.get("ignored"), result)
+                            self.assertEqual(result["record_id"], "rec-chiller-test")
+                            self.assertEqual(result["item"]["payload"]["status"], status)
+                            self.assertEqual(len(store.list_visible_qt_active_items()), 1)
+
     def test_event_clipboard_update_reuses_target_snapshot_for_exact_user_sample(self):
         update_text = (
             "【事件通告】状态：更新\n"

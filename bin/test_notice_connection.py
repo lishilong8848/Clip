@@ -51,6 +51,50 @@ class NoticeConnectionTests(unittest.TestCase):
                         service._execute_bitable_write(request, notice)
                     self.assertEqual(request.call_count, 1)
 
+    def test_record_timeout_falls_back_to_exact_id_without_losing_fields(self):
+        service._ensure_lark_sdk_loaded()
+        fields = {"过程现场图片": [{"file_token": "old-photo"}], "过程更新时间": "old-progress"}
+        record = SimpleNamespace(record_id="rec-test", fields=fields)
+        for response_data, expected in (
+            (SimpleNamespace(records=[record]), True),
+            (SimpleNamespace(records=[], absent_record_ids=["rec-test"]), "1254043"),
+            (SimpleNamespace(records=[], forbidden_record_ids=["rec-test"]), "1254302"),
+            (SimpleNamespace(records=[]), "暂不能确认"),
+        ):
+            with self.subTest(expected=expected):
+                client = Mock()
+                client.bitable.v1.app_table_record.get.side_effect = ReadTimeout()
+                client.bitable.v1.app_table_record.batch_get.return_value = SimpleNamespace(
+                    success=lambda: True, data=response_data,
+                )
+                with (
+                    patch.object(service.config, "user_token", "test"),
+                    patch.object(service, "_resolve_handler", return_value=(None, "table-test", "")),
+                    patch.object(service, "_build_client", return_value=client),
+                    patch.object(service.time, "sleep"),
+                ):
+                    ok, result = service.query_record_by_id("rec-test", "维保通告")
+                client.bitable.v1.app_table_record.get.assert_called_once()
+                batch = client.bitable.v1.app_table_record.batch_get
+                batch.assert_called_once()
+                self.assertEqual(batch.call_args.args[0].request_body.record_ids, ["rec-test"])
+                if expected is True:
+                    self.assertTrue(ok)
+                    self.assertEqual(result["fields"], fields)
+                    self.assertTrue(result["record_version"])
+                else:
+                    self.assertFalse(ok)
+                    self.assertIn(expected, result)
+
+    def test_both_read_paths_timeout_without_further_retry(self):
+        primary = Mock(side_effect=ReadTimeout())
+        fallback = Mock(side_effect=ReadTimeout())
+        with patch.object(service.config, "user_token", "test"), patch.object(service.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "查询飞书记录超时"):
+                service._query_with_transport_retry(primary, fallback)
+        primary.assert_called_once()
+        fallback.assert_called_once()
+
     def test_explicit_conflict_can_retry_but_other_rejection_cannot(self):
         ok = SimpleNamespace(success=lambda: True)
         rejected = SimpleNamespace(success=lambda: False, code=1254291)

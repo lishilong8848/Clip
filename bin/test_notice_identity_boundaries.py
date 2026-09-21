@@ -1382,6 +1382,48 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         finally:
             PortalRuntime.state_store = old_state_store
 
+    def test_event_existing_target_keeps_local_binding_on_read_timeout(self) -> None:
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
+            "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【进展】测试"
+        )
+
+        class FakeStateStore:
+            def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
+                return [{
+                    "record_id": "recExistingEvent",
+                    "notice_type": "事件通告",
+                    "payload": {
+                        "notice_type": "事件通告",
+                        "target_record_id": "recExistingEvent",
+                        "record_id": "recExistingEvent",
+                        "text": text,
+                    },
+                }]
+
+        old_state_store = PortalRuntime.state_store
+        PortalRuntime.state_store = FakeStateStore()
+        try:
+            with mock.patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                side_effect=RuntimeError("查询飞书记录超时"),
+            ):
+                self.assertEqual(
+                    PortalRuntime._existing_target_for_local_upload(
+                        {"notice_type": "事件通告", "text": text},
+                        "事件通告",
+                    ),
+                    "recExistingEvent",
+                )
+        finally:
+            PortalRuntime.state_store = old_state_store
+
     def test_event_upload_with_stale_target_recreates_record(self) -> None:
         class FakeStateStore:
             def __init__(self) -> None:

@@ -7985,7 +7985,7 @@ class PortalRuntime:
         if not raw_time:
             return ""
         try:
-            start_dt, _ = parse_time_range(raw_time)
+            start_dt, _ = parse_time_range(raw_time.replace("T", " "))
         except Exception:
             start_dt = None
         if start_dt is not None:
@@ -8125,7 +8125,11 @@ class PortalRuntime:
         stored = data.get("event_match_fields")
         stored = stored if isinstance(stored, dict) else {}
         return {
-            key: str(stored.get(key) or computed.get(key) or "").strip()
+            key: str(
+                (computed.get(key) or stored.get(key) or "")
+                if key == "time"
+                else (stored.get(key) or computed.get(key) or "")
+            ).strip()
             for key in ("title", "time", "building", "source", "level")
         }
 
@@ -8799,12 +8803,20 @@ class PortalRuntime:
             or getattr(payload, "_clipflow_written_fields", {})
             or {}
         )
-        verified, query_result, verify_error = cls._verify_event_remote_write(
-            target_record_id,
-            payload,
-            action=action,
-            expected_fields=expected_fields,
-        )
+        if action in {"start", "end"} and expected_fields:
+            verified = True
+            query_result = {
+                "record_id": target_record_id,
+                "fields": copy.deepcopy(expected_fields),
+            }
+            verify_error = ""
+        else:
+            verified, query_result, verify_error = cls._verify_event_remote_write(
+                target_record_id,
+                payload,
+                action=action,
+                expected_fields=expected_fields,
+            )
         if not verified:
             cls._mark_notice_remote_operation(
                 operation_id,
@@ -9420,7 +9432,17 @@ class PortalRuntime:
             guard = external_real_write_guard()
             if guard.get("mock_external"):
                 return event_target
-            ok_query, query_result = query_record_by_id(event_target, notice_type)
+            try:
+                ok_query, query_result = query_record_by_id(
+                    event_target,
+                    notice_type,
+                )
+            except Exception as exc:
+                log_warning(
+                    "已有事件目标记录暂时无法回读，已沿用本地绑定避免重复创建: "
+                    f"record_id={event_target}, error={exc}"
+                )
+                return event_target
             if ok_query and isinstance(query_result, dict):
                 if event_target_finished(event_target, query_result):
                     return ""
@@ -9433,9 +9455,11 @@ class PortalRuntime:
                 if allowed:
                     return event_target
             if not ok_query and not cls._remote_record_not_found(query_result):
-                raise PortalError(
-                    f"已有事件目标记录核验失败：{query_result}"
+                log_warning(
+                    "已有事件目标记录暂时无法回读，已沿用本地绑定避免重复创建: "
+                    f"record_id={event_target}, error={query_result}"
                 )
+                return event_target
             return ""
         work_type = str(data.get("work_type") or data.get("lan_work_type") or "").strip()
         if not work_type:
@@ -9459,7 +9483,17 @@ class PortalRuntime:
         guard = external_real_write_guard()
         if guard.get("mock_external"):
             return target_record_id
-        ok_query, query_result = query_record_by_id(target_record_id, notice_type)
+        try:
+            ok_query, query_result = query_record_by_id(
+                target_record_id,
+                notice_type,
+            )
+        except Exception as exc:
+            log_warning(
+                "事件目标记录暂时无法回读，已沿用本地绑定避免重复创建: "
+                f"record_id={target_record_id}, error={exc}"
+            )
+            return target_record_id
         if ok_query:
             if event_target_finished(target_record_id, query_result):
                 return ""
@@ -9467,8 +9501,9 @@ class PortalRuntime:
         if cls._remote_record_not_found(query_result):
             return ""
         if str(notice_type or "").strip() == "事件通告":
-            raise PortalError(
-                f"已有事件目标记录核验失败：{query_result}"
+            log_warning(
+                "事件目标记录暂时无法回读，已沿用本地绑定避免重复创建: "
+                f"record_id={target_record_id}, error={query_result}"
             )
         return target_record_id
 
@@ -9778,24 +9813,38 @@ class PortalRuntime:
                 )
             except Exception:
                 target_record_id = ""
-        if not target_record_id and not source_record_id:
+        if not target_record_id and not source_record_id and notice_type == "事件通告":
             target_record_id = cls._existing_manual_active_target_for_start(
                 prepared,
                 work_type,
             )
         if not target_record_id:
             return ""
+        if notice_type != "事件通告":
+            # A known binding survives retries; never turn a read failure into a create.
+            return target_record_id
         guard = external_real_write_guard()
         if guard.get("mock_external"):
             return target_record_id
-        ok_query, query_result = query_record_by_id(target_record_id, notice_type)
+        try:
+            ok_query, query_result = query_record_by_id(
+                target_record_id,
+                notice_type,
+            )
+        except Exception as exc:
+            log_warning(
+                "事件开始目标暂时无法回读，已沿用本地绑定避免重复创建: "
+                f"record_id={target_record_id}, error={exc}"
+            )
+            return target_record_id
         if ok_query:
             return target_record_id
         if cls._remote_record_not_found(query_result):
             return ""
         if str(notice_type or "").strip() == "事件通告":
-            raise PortalError(
-                f"已有事件目标记录核验失败：{query_result}"
+            log_warning(
+                "事件开始目标暂时无法回读，已沿用本地绑定避免重复创建: "
+                f"record_id={target_record_id}, error={query_result}"
             )
         return target_record_id
 
@@ -10848,14 +10897,7 @@ class PortalRuntime:
         work_order_fields = cls._work_order_field_config(prepared)
         work_order_label = cls._work_order_label(prepared)
         if action == "start":
-            # Event upload keeps its strict remote identity verification.  Other
-            # notice starts are idempotent through Feishu client_token and can
-            # create immediately without a preliminary record lookup.
-            existing_target = (
-                cls._existing_target_for_prepared_start(prepared, notice_type)
-                if notice_type == "事件通告"
-                else ""
-            )
+            existing_target = cls._existing_target_for_prepared_start(prepared, notice_type)
             if existing_target:
                 if cls._has_extra_images_payload(prepared):
                     ok_existing_images, existing_image_record = query_record_by_id(
@@ -11348,7 +11390,12 @@ class PortalRuntime:
                 error=str(result or "多维更新失败。"),
             )
         if ok and bool(prepared.get("expected_record_version")):
-            ok_updated, updated_result = query_record_by_id(record_id, notice_type)
+            try:
+                ok_updated, updated_result = query_record_by_id(record_id, notice_type)
+            except Exception as exc:
+                # The write succeeded; a version refresh must not cause a resend.
+                log_warning(f"多维已更新，版本回读暂不可用: record_id={record_id}, error={exc}")
+                ok_updated, updated_result = False, {}
             if ok_updated and isinstance(updated_result, dict):
                 cls._rebase_remote_record_version(
                     prepared,
@@ -12171,7 +12218,13 @@ class PortalRuntime:
             record_id = target_record_id
         direct_event_update = (
             notice_type == "事件通告"
-            and requested_action_type == "update"
+            and (
+                requested_action_type == "update"
+                or (
+                    coerced_upload_to_update
+                    and (extract_event_info(str(data.get("text") or "")) or {}).get("status") == "更新"
+                )
+            )
         )
         if direct_event_update and request_operation_id:
             previous_attempt = cls._get_notice_remote_operation(request_operation_id) or {}
@@ -12665,6 +12718,7 @@ class PortalRuntime:
                         confirm_remote_state=(
                             deduped and notice_type != "事件通告"
                         ),
+                        skip_remote_read=notice_type == "事件通告",
                     )
                     if notice_type == "事件通告":
                         cls._mark_notice_remote_operation(
@@ -12821,13 +12875,19 @@ class PortalRuntime:
                             str(result or real_record_id),
                             deduped=False,
                         )
-                    ok_created, created_query = query_record_by_id(real_record_id, notice_type)
-                    if ok_created and isinstance(created_query, dict):
-                        data["record_version"] = str(created_query.get("record_version") or "").strip()
+                    # Persist the successful create before local projection can fail.
+                    cls._mark_notice_remote_operation(
+                        operation_id,
+                        status="remote_written",
+                        target_record_id=real_record_id,
+                        result={"record_id": real_record_id, "message": str(result or "")},
+                    )
+                    cls._rebase_remote_record_version(data, "")
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = real_record_id
                     record_version = cls._remember_local_upload_target(
-                        data, notice_type=notice_type, target_record_id=real_record_id, action="start"
+                        data, notice_type=notice_type, target_record_id=real_record_id,
+                        action="start", skip_remote_read=True,
                     )
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -13393,10 +13453,14 @@ class PortalRuntime:
                         "；本次未发送群消息。"
                     )
             else:
-                ok_updated, updated_query = query_record_by_id(
-                    target_record_id,
-                    notice_type,
-                )
+                try:
+                    ok_updated, updated_query = query_record_by_id(
+                        target_record_id,
+                        notice_type,
+                    )
+                except Exception as exc:
+                    log_warning(f"多维已更新，Qt版本回读暂不可用: record_id={target_record_id}, error={exc}")
+                    ok_updated, updated_query = False, {}
                 if ok_updated and isinstance(updated_query, dict):
                     updated_record_version = str(
                         updated_query.get("record_version") or ""
@@ -13514,13 +13578,20 @@ class PortalRuntime:
                         or cls._notice_work_type_from_notice_type(notice_type)
                         or ""
                     ).strip()
-                    if notice_type == "事件通告" and verified_event_query:
+                    if (
+                        notice_type == "事件通告"
+                        and action_type == "update"
+                        and verified_event_query
+                    ):
                         ok_latest, latest_result = True, verified_event_query
                     else:
-                        ok_latest, latest_result = query_record_by_id(
-                            target_record_id,
-                            notice_type,
-                        )
+                        try:
+                            ok_latest, latest_result = query_record_by_id(
+                                target_record_id,
+                                notice_type,
+                            )
+                        except Exception as exc:
+                            ok_latest, latest_result = False, str(exc)
                     latest_fields = (
                         latest_result.get("fields")
                         if ok_latest and isinstance(latest_result, dict)
@@ -13564,6 +13635,12 @@ class PortalRuntime:
                         )
                         if lifecycle.get("finished"):
                             target_end_confirmed = True
+                            if notice_type == "事件通告" and action_type == "end":
+                                remote_fields_for_action = dict(latest_fields)
+                                if repair_project_request:
+                                    repair_project_request["remote_fields"] = dict(
+                                        latest_fields
+                                    )
                             try:
                                 cls.service.sync_notice_source_ended_fields(data)
                             except Exception:
@@ -15033,6 +15110,11 @@ class PortalRuntime:
             if action in {"start", "update"}:
                 try:
                     projection_payload = prepared
+                    projection_readback_required = bool(
+                        remote_already_written
+                        or current_job.get("projection_pending")
+                        or current_job.get("restart_recovered")
+                    )
                     projection_lock_key = ""
                     projection_lock_owner = ""
                     try:
@@ -15053,10 +15135,16 @@ class PortalRuntime:
                                 prepared,
                                 target_record_id=resolved_remote_record_id,
                             )
-                            ok_latest, latest_result = query_record_by_id(
-                                resolved_remote_record_id,
-                                str(prepared.get("notice_type") or ""),
-                            )
+                            if projection_readback_required:
+                                try:
+                                    ok_latest, latest_result = query_record_by_id(
+                                        resolved_remote_record_id,
+                                        str(prepared.get("notice_type") or ""),
+                                    )
+                                except Exception as exc:
+                                    ok_latest, latest_result = False, str(exc)
+                            else:
+                                ok_latest, latest_result = True, {}
                             latest_fields = (
                                 latest_result.get("fields")
                                 if ok_latest and isinstance(latest_result, dict)
@@ -15067,7 +15155,9 @@ class PortalRuntime:
                                 and cls._remote_record_not_found(latest_result)
                             )
                             terminal_projection = False
-                            if target_missing:
+                            if not projection_readback_required:
+                                pass
+                            elif target_missing:
                                 cls._enqueue_active_delete_for_ended_notice(
                                     prepared,
                                     remote_record_id=resolved_remote_record_id,
@@ -15090,10 +15180,11 @@ class PortalRuntime:
                                     "未再恢复。"
                                 )
                             elif not isinstance(latest_fields, dict) or not latest_fields:
-                                raise RuntimeError(
-                                    "目标记录最新状态读取失败，稍后继续恢复进行中显示"
+                                log_warning(
+                                    "目标记录回读暂不可用，已按成功写入的本地内容恢复界面: "
+                                    f"job_id={job_id}, error={latest_result}"
                                 )
-                            if not target_missing:
+                            if projection_readback_required and latest_fields and not target_missing:
                                 lifecycle = cls.service._target_record_lifecycle(
                                     work_type=str(prepared.get("work_type") or ""),
                                     notice_type=str(
