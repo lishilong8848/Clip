@@ -55,10 +55,23 @@ def _date(value):
 
 
 def _date_words(items):
-    parts=[]
-    for text,_x,_y in items:
-        cleaned=_compact(text).translate(str.maketrans({"O":"0","I":"1","L":"1"}))
-        parts.extend(re.findall(r"\d+",cleaned))
+    lines=[]
+    numeric=[item for item in items if re.search(r"\d",_compact(item[0]).translate(str.maketrans({"O":"0","I":"1","L":"1"})))]
+    for item in sorted(numeric,key=lambda value:(value[2],value[1])):
+        if not lines or item[2]-sum(value[2] for value in lines[-1])/len(lines[-1])>6: lines.append([item])
+        else: lines[-1].append(item)
+    line_parts=[]
+    for line in lines:
+        parts=[]
+        for text,_x,_y in sorted(line,key=lambda value:value[1]):
+            cleaned=_compact(text).translate(str.maketrans({"O":"0","I":"1","L":"1"}))
+            parts.extend(re.findall(r"\d+",cleaned))
+        line_parts.append(parts)
+    if len(line_parts)>=2 and len(line_parts[0])==5 and len(line_parts[0][4])==1 and len(line_parts[1])>=2 and len(line_parts[1][0])==1:
+        joined=[*line_parts[0][:4],line_parts[0][4]+line_parts[1][0],line_parts[1][1]]
+        try: return dt.datetime(*(int(value) for value in joined)).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError: pass
+    parts=[part for line in line_parts for part in line]
     if len(parts)<5 or len(parts[0])!=4:
         return ""
     values=[int(value) for value in parts[:6]]
@@ -96,21 +109,22 @@ def _action(value):
 
 
 def _rows_from_ocr(lines,image_width):
-    headers={}; room_headers=[]
+    headers={}; room_headers=[]; room_header_ys=[]
     for text,words in lines:
+        header_text=text.replace("包问","包间")
         markers=(("room","包间"),("action","操作类"),("expected","期望完成"),("actual","实际完成"),("result","结果"))
         for key,marker in markers:
-            if marker not in text:
+            if marker not in header_text:
                 continue
             x=min(word[1] for word in words)
             if key=="room":
-                room_headers.append(x)
+                room_headers.append(x); room_header_ys.append(min(word[2] for word in words))
             elif key not in headers or x<headers[key][0]:
                 headers[key]=(x,min(word[2] for word in words))
         if "运营商机柜" in text or "营商机柜编" in text or "机柜编号" in text:
             headers["supplier"]=(min(word[1] for word in words),min(word[2] for word in words))
     if room_headers:
-        headers["room"]=(min(room_headers),min(word[2] for text,words in lines if "包间" in text for word in words))
+        headers["room"]=(min(room_headers),min(room_header_ys))
     if not all(key in headers for key in ("room","action","expected","actual")):
         return []
     room_x=headers["room"][0]; action_x=headers["action"][0]

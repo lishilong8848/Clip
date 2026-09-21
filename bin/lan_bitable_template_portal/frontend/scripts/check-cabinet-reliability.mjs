@@ -109,6 +109,7 @@ try {
     await page.waitForTimeout(clicked ? 500 : 1000);
   }
   await page.getByText("所有楼栋均已导出并上传多维表。", { exact: true }).waitFor({ timeout: 120000 });
+  await page.getByText(/^导出时间：20\d{2}-\d{2}-\d{2}/).waitFor();
   const history = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=C")).json();
   assert.equal(history.data.items.length, 1, "retry must reuse the original C building export");
   assert.deepEqual(exportErrors, []);
@@ -180,6 +181,12 @@ try {
   page = await batchContext.newPage();
   const batchErrors = [];
   page.on("pageerror", error => batchErrors.push(error.message));
+  await page.goto(base + "/cabinet-power");
+  await page.getByRole("heading", { name:"机柜上下电",exact:true }).waitFor();
+  await page.getByRole("button", { name:"批量登记",exact:true }).click();
+  await page.waitForURL(url => url.searchParams.get("origin") === "cabinet");
+  await page.getByRole("button", { name:"返回",exact:true }).click();
+  await page.waitForURL(url => url.pathname === "/cabinet-power" && !url.searchParams.get("scope"));
   await page.goto(base + "/cabinet-power?scope=E");
   await page.getByRole("heading", { name:"E楼机柜上下电" }).waitFor();
   for (const name of ["新增记录","登记机柜操作","多维表","归档表"])

@@ -163,7 +163,7 @@ const editableFields = ['scope','room','rack','supplier_rack','rack_type','type_
 const fieldLabels: Dict = {scope:'楼栋',room:'包间',rack:'机柜',supplier_rack:'供应商机柜号',rack_type:'机柜类型',type_detail:'类型明细',action:'操作类型',expected:'期望完成时间',actual:'实际完成时间',result:'结果',failure_reason:'失败原因',type_resolution:'类型处理',excluded:'排除状态',exclude_notice_summary:'通告汇总'};
 const read = (path: string, query: Dict = {}, timeoutMs = 90000) => requestJson(`${api}/${path}?${new URLSearchParams(query as Record<string,string>)}`, { timeoutMs });
 const write = (path: string, body: Dict, method = 'POST') => requestJson(`${api}/${path}`, { method, body: JSON.stringify(body), timeoutMs: 90000 });
-const backTarget = computed(() => batchId || mode === 'new' ? `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),...(params.get('status')==='todo'?{status:'todo'}:{}) })}` : props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power');
+const backTarget = computed(() => params.get('origin') === 'cabinet' ? (props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power') : batchId || mode === 'new' ? `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),...(params.get('status')==='todo'?{status:'todo'}:{}) })}` : props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power');
 const buildingOptions = computed(() => {
   const map = new Map<string,string>();
   for (const item of props.scopeOptions || []) { const value = String(item.value || '').toUpperCase(); if (/^[A-E]$/.test(value)) map.set(value,item.label || value + '楼'); }
@@ -293,7 +293,7 @@ function candidateRows(key:string):Dict[]{
 }
 function openNew(): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...((listScope.value || props.scope) ? {scope:listScope.value || props.scope}:{}),mode:'new',...(listStatus.value==='todo'?{status:'todo'}:{}) })}`); }
 function openList(): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}), ...(params.get('status')==='todo'?{status:'todo'}:{}) })}`); }
-function openBatch(id: string): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),batch_id:id,...(listStatus.value==='todo'?{status:'todo'}:{}) })}`); }
+function openBatch(id: string): void { navigate(`/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),batch_id:id,...(listStatus.value==='todo'?{status:'todo'}:{}),...(params.get('origin')==='cabinet'?{origin:'cabinet'}:{}) })}`); }
 function addPdfFiles(input: FileList | File[]): void {
   const incoming=Array.from(input); if (!incoming.length) return;
   if (incoming.some(file=>!file.name.toLowerCase().endsWith('.pdf') && file.type!=='application/pdf')) { error.value='只支持PDF确认单。'; return; }
