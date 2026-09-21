@@ -3426,6 +3426,17 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
                     for name in book.sheets if "平面图" in name
                 },
             }
+            states = {"#00B050": "off", "#92D050": "off", "#FFC000": "test", "#FF0000": "formal"}
+            cabinet_config["power_baseline"] = {
+                f"{rack['room']}/{rack['rack']}": {
+                    "state": states.get(str(rack.get("template_color") or "").upper(), "off"),
+                    "color": str(rack.get("template_color") or "").upper(),
+                    "last_operation": "",
+                    "event_hashes": [],
+                }
+                for rack in model["inventory"]
+            }
+            cabinet_config["power_baseline_frozen"] = True
             records = [cabinet_record] if cabinet_scope == "A" else []
             baseline = [event["id"] for event in cabinet_op.get("events") or []] if cabinet_scope == "A" else []
             controller._cabinet_power.local.replace(cabinet_scope, cabinet_config, records, baseline)
