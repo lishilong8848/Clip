@@ -266,6 +266,8 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual(sum(bool(item.get("meta",{}).get("baseline_correction")) for item in snapshot["operations"]),25)
         first=corrections[0]; visible=self.service.operations("C",{"room":first["room"],"rack":first["rack"],"page_size":100})
         self.assertTrue(any(item.get("meta",{}).get("baseline_correction") for item in visible["items"]))
+        self.assertEqual((visible["rack_state"]["latest_success"]["action"],visible["rack_state"]["latest_success"]["actual"],
+                          visible["rack_state"]["latest_success"]["baseline_correction"]),(first["action"],"",True))
         self.assertTrue(self.service.operations("C",{"sheet":first["source"],"page_size":100})["items"])
         exported=Workbook(export_workbook(content,snapshot["config"],snapshot["operations"]))
         fmt=next(item for item in model["formats"] if item["sheet"]==first["source"])
@@ -283,7 +285,7 @@ class CabinetPowerTests(unittest.TestCase):
         changed=derive_records(config,operations)["counts"]
         self.assertEqual((changed["formal"],changed["test"]),(938,32))
 
-    def test_latest_success_matches_floorplan_baseline_state(self):
+    def test_inconsistent_cloud_baseline_is_rebuilt_from_template(self):
         scope="A"; content=(TEMPLATES/"A.xlsm").read_bytes(); config=copy.deepcopy(self.configs[scope])
         records=[copy.deepcopy(record) for record in self.source_records if record["fields"]["楼栋"]=="A楼"]
         operations=[from_feishu(record) for record in records]
@@ -292,8 +294,27 @@ class CabinetPowerTests(unittest.TestCase):
         config["power_baseline"][key].update(state="off",color="#00B050")
         self.service.local.replace(scope,config,records,[]); self.service._cache.pop(scope,None)
         room,rack=key.split("/"); state=self.service.operations(scope,{"room":room,"rack":rack,"page_size":100})["rack_state"]
-        self.assertEqual((state["state"],state["latest_success"]["action"],state["latest_success"]["actual"],
-                          state["latest_success"]["baseline_correction"]),("off","下正式电","",True))
+        current=self.service.config(scope)["power_baseline"][key]
+        self.assertEqual((current["color"],current["state"],state["state"],state["latest_success"]["action"]),
+                         ("#FF0000","formal","formal","上正式电"))
+
+    def test_floorplan_baseline_is_frozen_across_later_writes_and_restart(self):
+        scope="A"; before=self.service._snapshot(scope)
+        frozen=copy.deepcopy(self.service.local.document(scope,"power_baseline:frozen_v1"))
+        rack=next(item for item in derive_records(before["config"],before["operations"])["racks"] if item["state"]=="off")
+        saved=self.service.save_operation(scope,{"operation_id":"baseline_restart_write_01",
+            "room":rack["room"],"rack":rack["rack"],"rack_type":rack["rack_type"],"result":"成功",
+            "groups":[{"id":"later_event","action":"上正式电","expected":"2026-09-20 09:00:00",
+                       "actual":"2026-09-20 09:01:00","result":"成功"}]},"owner")
+        fresh=CabinetPowerService(self.store,self.remote,self.tmp.name); fresh._directory=self.service._directory
+        try:
+            current=next(item for item in fresh.overview(scope)["racks"]
+                         if (item["room"],item["rack"])==(rack["room"],rack["rack"]))
+            self.assertEqual(current["state"],"formal")
+            self.assertEqual(fresh.local.document(scope,"power_baseline:frozen_v1"),frozen)
+            self.assertNotIn(saved["events"][0]["id"],str(frozen))
+        finally:
+            fresh.shutdown()
 
     def test_export_attachment_uses_archive_base_parent(self):
         path=Path(self.tmp.name)/"sample.xlsm"; path.write_bytes(b"export")

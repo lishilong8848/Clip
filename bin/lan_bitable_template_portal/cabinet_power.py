@@ -15,7 +15,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
-from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, calculate, derive_records, dates, digest, export_workbook, operation_key, system_name, text_value, project_layout,completed_state_event
+from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, baseline_matches_inventory, calculate, derive_records, dates, digest, export_workbook, inventory_state_baseline, operation_key, system_name, text_value, project_layout,completed_state_event
 from .cabinet_power_data import from_feishu, to_fields, group_events, source_sheet, table_columns, normalized_actions
 from .cabinet_power_store import CabinetStore
 
@@ -30,6 +30,7 @@ DIRECTORY_NAME="机柜基础资料"
 INITIAL_TEMPLATES=Path(__file__).with_name("templates")/"cabinet_power"
 LAYOUT_CACHE=INITIAL_TEMPLATES/"layouts.json.gz"
 SNAPSHOT_KEY="feishu_snapshot_v1:"
+FROZEN_BASELINE_KEY="power_baseline:frozen_v1"
 
 def layout_identity(config):
     rooms=sorted((room["id"],int(room.get("total") or 0),room.get("sheet","").strip()) for room in config.get("rooms",[]))
@@ -408,6 +409,7 @@ class CabinetPowerService:
             ops=[]
             for record in saved["records"]:
                 op=from_feishu(record); op["ordinal"]=record["ordinal"]; ops.append(op)
+            config["power_baseline"]=self._frozen_power_baseline(scope,config,ops)
             ordinal=max((op["ordinal"] for op in ops),default=0)
             for correction in baseline_correction_operations(config,ops):
                 ordinal+=1; correction["ordinal"]=ordinal; ops.append(correction)
@@ -415,6 +417,23 @@ class CabinetPowerService:
             snapshot={"config":config,"operations":ops,"version":saved["version"],"updated_at":saved["updated_at"],"source":"local","error":""}
             self._cache[scope]=snapshot
             return snapshot
+
+    def _frozen_power_baseline(self,scope,config,operations):
+        identity=layout_identity(config); saved=self.local.document(scope,FROZEN_BASELINE_KEY)
+        if saved:
+            baseline=saved.get("racks") if isinstance(saved,dict) else None
+            if saved.get("layout_identity")!=identity or not isinstance(baseline,dict):
+                raise CabinetError("固定平面图基线与当前机柜目录不一致，请先核对模板资料")
+            if not baseline_matches_inventory({**config,"power_baseline":baseline}):
+                raise CabinetError("固定平面图基线内容不完整，请先核对模板资料")
+            return copy.deepcopy(baseline)
+        baseline=config.get("power_baseline") if config.get("power_baseline_frozen") else None
+        if not baseline_matches_inventory({**config,"power_baseline":baseline}):
+            source=[op for op in operations if text_value(op.get("raw_fields",{}).get("数据标识")).startswith("source_")]
+            baseline=inventory_state_baseline(config,source)[0]
+        self.local.document(scope,FROZEN_BASELINE_KEY,{"version":1,"layout_identity":identity,
+            "source_hash":config.get("power_baseline_source_hash",""),"racks":baseline,"created_at":stamp()})
+        return copy.deepcopy(baseline)
 
     def list_remote(self,remote,scope="",data_id=""):
         if isinstance(remote,CabinetFeishu):
@@ -439,7 +458,7 @@ class CabinetPowerService:
             if len({r["record_id"] for r in records})!=len(records): raise CabinetError("飞书分页存在重复记录")
             ops=[from_feishu(r) for r in records]
             configs={scope:{"scope":scope,"rooms":[],"inventory":[],"history_ready":True,"issues":[]}}
-            baseline_hashes=set()
+            baseline_hashes=set(); baseline_frozen=set(); baseline_sources=set()
             for item in directory:
                 f=item["fields"]; s=text_value(f.get("楼栋")).replace("楼","")
                 if s not in configs: continue
@@ -453,6 +472,8 @@ class CabinetPowerService:
                     if baseline:
                         if baseline.get('version')!=1 or not isinstance(baseline.get('racks'),dict): raise CabinetError('机柜颜色基线格式无效')
                         baseline_hashes.add(baseline.get('template_hash'))
+                        baseline_frozen.add(bool(baseline.get('frozen')))
+                        if baseline.get('source_hash'): baseline_sources.add(str(baseline['source_hash']))
                         for rack,value in baseline['racks'].items():
                             if not re.fullmatch(r'[A-Z]\d{2}',rack) or not isinstance(value,dict) or value.get('state') not in COLORS or not isinstance(value.get('last_operation'),str) or not isinstance(value.get('event_hashes'),list) or any(not isinstance(h,str) or not re.fullmatch(r'[0-9a-f]{32}',h) for h in value['event_hashes']): raise CabinetError('机柜颜色基线内容无效')
                         configs[s].setdefault('power_baseline',{}).update({room+'/'+rack:value for rack,value in baseline['racks'].items()})
@@ -463,6 +484,9 @@ class CabinetPowerService:
             for s,config in configs.items():
                 if not config["rooms"]: raise CabinetError("飞书缺少"+s+"楼房间资料")
                 if baseline_hashes and baseline_hashes!={config.get('template_data',{}).get('hash')}: raise CabinetError('颜色基线与原模板版本不一致')
+                if len(baseline_frozen)>1 or len(baseline_sources)>1: raise CabinetError('机柜颜色基线版本不一致')
+                config['power_baseline_frozen']=baseline_frozen=={True}
+                config['power_baseline_source_hash']=next(iter(baseline_sources),'')
                 keys=[(r["room"],r["rack"]) for r in config["inventory"]]
                 if len(set(keys))!=len(keys): raise CabinetError(s+"楼飞书目录存在重复机柜")
                 config["rooms"].sort(key=lambda r:r["id"]); config["version"]=digest([config["rooms"],config["inventory"],config.get("template_data"),config.get("map_values")])

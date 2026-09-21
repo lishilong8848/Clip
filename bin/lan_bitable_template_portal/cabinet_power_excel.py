@@ -501,6 +501,48 @@ def completed_state_event(event):
     return event.get('result')=='成功' and event.get('action') in STATES and bool(event.get('actual')) and '包间与楼栋不一致' not in event.get('issues',[])
 
 
+def inventory_state_baseline(config,operations):
+    histories=defaultdict(list)
+    for op in operations:
+        histories[(op['room'],op['rack'])].extend({**op,**event} for event in op.get('events',[]))
+    baseline={}; counts=Counter()
+    for rack in config['inventory']:
+        history=histories[(rack['room'],rack['rack'])]
+        valid=[event for event in history if completed_state_event(event)]
+        latest=max(valid,key=lambda event:event['actual'],default={})
+        color=str(rack.get('template_color') or '').upper()
+        if color in ('#00B050','#92D050'): state='off'
+        elif color=='#FFC000': state='test'
+        elif color=='#FF0000':
+            if config['scope']=='C': state='formal'
+            else:
+                powered=[event for event in valid if STATES[event['action']] in ('formal','test')]
+                if not powered: raise CabinetError('红色机柜缺少可区分正式/测试电的记录：'+rack['room']+'/'+rack['rack'])
+                state=STATES[max(powered,key=lambda event:event['actual'])['action']]
+        elif not color and config['scope']=='B' and rack['room'] in ('216','247'):
+            state=STATES.get(latest.get('action'),'off')
+        else: raise CabinetError('机柜颜色未识别：'+rack['room']+'/'+rack['rack'])
+        baseline[rack['room']+'/'+rack['rack']]={'state':state,'color':color,'last_operation':latest.get('actual',''),
+                                                'event_hashes':sorted({state_event_hash(event) for event in history})}
+        counts['mapped_powered' if color and state in ('formal','test') else 'outside_powered' if state in ('formal','test') else 'off']+=1
+    return baseline,dict(counts)
+
+
+def baseline_matches_inventory(config):
+    baseline=config.get('power_baseline') or {}
+    if len(baseline)!=len(config.get('inventory',[])):
+        return False
+    for rack in config['inventory']:
+        saved=baseline.get(rack['room']+'/'+rack['rack']) or {}
+        color=str(rack.get('template_color') or '').upper(); state=saved.get('state')
+        if str(saved.get('color') or '').upper()!=color:
+            return False
+        allowed={'#00B050':{'off'},'#92D050':{'off'},'#FFC000':{'test'},'#FF0000':{'formal'} if config.get('scope')=='C' else {'formal','test'}}.get(color)
+        if allowed is not None and state not in allowed:
+            return False
+    return True
+
+
 def map_state_baseline(content,config,operations):
     """Freeze physical rack fills, never the formula values printed below the drawing."""
     book=Workbook(content); cells={name:book.cells(name) for name in book.sheets}; histories=defaultdict(list)
