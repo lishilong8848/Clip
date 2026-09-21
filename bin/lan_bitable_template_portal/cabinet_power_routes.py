@@ -220,7 +220,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         except Exception as exc: return controller._portal_error_response(exc,default_status=400)
 
     for path,methods in {
-        "batches/retry-handoffs":["POST"],"batches/reconcile-notices":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH"],
+        "batches/retry-handoffs":["POST"],"batches/reconcile-notices":["POST"],"batches/recognize":["POST"],"batches":["GET","POST"],"batches/{batch_id}":["GET","PATCH","DELETE"],
         "batches/{batch_id}/status":["GET"],
         "batches/{batch_id}/clear-overlaps":["POST"],"batches/{batch_id}/confirm":["POST"],"batches/{batch_id}/rollback":["POST"],
         "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/restore-rows":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],

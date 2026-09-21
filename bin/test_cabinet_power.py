@@ -23,6 +23,10 @@ from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_empty_batch_delete_route_is_registered(self):
+        source=(Path(__file__).parent/"lan_bitable_template_portal/cabinet_power_routes.py").read_text(encoding="utf-8")
+        self.assertIn('"batches/{batch_id}":["GET","PATCH","DELETE"]',source)
+
     def test_split_ocr_cells_produce_a_complete_batch_row(self):
         lines=[
             ("包间",[("包",245,45),("间",262,45)]),("包间系统名",[("包",350,34)]),
