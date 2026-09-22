@@ -445,7 +445,7 @@ try {
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").press("Tab");
   await page.getByText("自动保存失败，请重试", { exact:false }).first().waitFor({ timeout:10000 });
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByRole("button", { name:"关闭",exact:true }).click();
-  await page.getByRole("button", { name:"返回待办",exact:true }).click();
+  await page.getByRole("button", { name:"返回",exact:true }).click();
   await page.getByRole("dialog", { name:"放弃未保存的批次修改？" }).waitFor();
   await page.getByRole("button", { name:"放弃修改",exact:true }).click();
   await page.goto(base + "/cabinet-power/batches?scope=E&batch_id=batch-test");

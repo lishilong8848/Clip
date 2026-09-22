@@ -1,5 +1,7 @@
 <template>
-  <header class="app-topbar" :class="{ 'home-mode': homeMode }">
+  <header id="page-navigation" class="app-topbar" :class="{ 'home-mode': homeMode }">
+    <div class="page-header-fade" aria-hidden="true"></div>
+    <div id="page-back-slot"></div>
     <div class="brand">
       <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
       <div>

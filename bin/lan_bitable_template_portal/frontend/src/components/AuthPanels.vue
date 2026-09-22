@@ -10,10 +10,7 @@
   </section>
 
   <section v-else class="center-state request-panel">
-    <button type="button" v-if="showBack" class="back-link" @click="$emit('back')">
-      <span aria-hidden="true">‹</span>
-      返回
-    </button>
+    <VnetBackButton v-if="showBack" @click="$emit('back')" />
     <strong>{{ title || "当前账号暂无门户权限" }}</strong>
     <p class="user-line" :title="userOpenId ? `飞书身份：${userOpenId}` : ''">{{ userLineText }}</p>
     <div class="request-steps" aria-label="权限申请流程">
@@ -74,6 +71,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import VnetBackButton from "./VnetBackButton.vue";
 
 type Dict = Record<string, any>;
 
@@ -199,27 +197,6 @@ const userLineText = computed(() => {
   line-height: 1.25;
   font-weight: 950;
   letter-spacing: 0;
-}
-
-.back-link {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid #d4e3f7;
-  border-radius: 999px;
-  padding: 0 13px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #0757d7;
-  font-size: 13px;
-  font-weight: 900;
-  cursor: pointer;
-  box-shadow: 0 8px 20px rgba(22, 78, 151, 0.08);
-}
-
-.back-link span {
-  font-size: 19px;
-  line-height: 1;
 }
 
 .spinner {

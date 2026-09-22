@@ -312,6 +312,7 @@ class TransportSafetyTests(unittest.TestCase):
             assets.mkdir(parents=True)
             (root / FRONTEND_INDEX).write_text(
                 '<script src="/assets/new.js"></script><link href="/assets/new.css">'
+                '<link rel="stylesheet" href="/assets/page-navigation.css">'
                 '<link rel="icon" href="/assets/favicon.svg">',
                 encoding="utf-8",
             )
@@ -321,13 +322,36 @@ class TransportSafetyTests(unittest.TestCase):
             )
             (assets / "shared.js").write_text("// shared", encoding="utf-8")
             (assets / "new.css").write_text("/* current */", encoding="utf-8")
+            (assets / "page-navigation.css").write_text("#page-navigation{position:sticky}", encoding="utf-8")
             (assets / "favicon.svg").write_text("<svg/>", encoding="utf-8")
             (assets / "logo.png").write_bytes(b"png")
+            node = shutil.which("node")
+            if node:
+                script = root / FRONTEND_DIST.parent / "scripts/prune-dist-assets.mjs"
+                script.parent.mkdir(parents=True)
+                shutil.copy2(BIN / "lan_bitable_template_portal/frontend/scripts/prune-dist-assets.mjs", script)
+                (assets / "stale.js").write_text("// stale", encoding="utf-8")
+                subprocess.run([node, str(script)], check=True, capture_output=True, timeout=15)
+                self.assertFalse((assets / "stale.js").exists())
+                self.assertTrue((assets / "shared.js").exists())
             (patch_dir / FRONTEND_INDEX).parent.mkdir(parents=True)
             shutil.copy2(root / FRONTEND_INDEX, patch_dir / FRONTEND_INDEX)
 
-            self.assertEqual(portable_packaging._include_frontend_generation(root, patch_dir), 5)
+            with patch.object(portable_packaging, "PROJECT_ROOT", root):
+                portable_packaging._cleanup_vue_dist_assets()
+            self.assertTrue((assets / "page-navigation.css").is_file())
+            self.assertEqual(portable_packaging._include_frontend_generation(root, patch_dir), 6)
             self.assertEqual(referenced_assets(patch_dir), referenced_assets(root))
+            self.assertIn(FRONTEND_DIST / "assets/page-navigation.css", referenced_assets(patch_dir))
+
+            (assets / "shared.js").unlink()
+            (assets / "stale.js").write_text("// keep until validated", encoding="utf-8")
+            with patch.object(portable_packaging, "PROJECT_ROOT", root), self.assertRaisesRegex(ValueError, "Missing frontend asset"):
+                portable_packaging._cleanup_vue_dist_assets()
+            if node:
+                result = subprocess.run([node, str(script)], capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((assets / "stale.js").exists())
 
     def test_distribution_filter_keeps_only_runtime_material(self):
         with tempfile.TemporaryDirectory() as tmp:

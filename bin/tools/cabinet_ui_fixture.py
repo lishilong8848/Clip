@@ -65,6 +65,16 @@ def workbench(request:Request):
     from bin.lan_bitable_template_portal.workbench_lite import render_workbench_lite
     return HTMLResponse(render_workbench_lite(payload={'records':[],'ongoing':[],'stats':{}},session={'role':'admin'},scope=request.query_params.get('scope','D'),work_type=request.query_params.get('work_type','maintenance')))
 
+@app.get('/polling-work-order/steps')
+def work_order_steps():
+    from bin.lan_bitable_template_portal.workbench_lite import render_polling_work_order_steps_page
+    return HTMLResponse(render_polling_work_order_steps_page())
+
+@app.get('/polling-work-order')
+def work_order_overview():
+    from bin.lan_bitable_template_portal.workbench_lite import render_polling_work_order_page
+    return HTMLResponse(render_polling_work_order_page())
+
 @app.get('/api/{path:path}')
 def empty(path): return {"ok":True,"data":{}}
 

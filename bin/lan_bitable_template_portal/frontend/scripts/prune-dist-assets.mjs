@@ -1,6 +1,6 @@
-import { readdir, readFile, unlink } from "node:fs/promises";
+import { access, readdir, readFile, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 const distDir = new URL("../dist/", import.meta.url);
 const assetsDir = new URL("./assets/", distDir);
@@ -10,31 +10,30 @@ const assetsPath = fileURLToPath(assetsDir);
 const indexHtml = await readFile(indexPath, "utf8");
 const reachable = new Set();
 const pending = [];
+const references = /["'`(](?:\/?assets\/|\.\/)([^"'`)\s?#,;]+)/g;
 
 function addAsset(name) {
   if (!name || reachable.has(name)) return;
+  if (isAbsolute(name) || name.split('/').includes('..') || /[\\:]/.test(name)) throw new Error("Unsafe frontend asset reference");
   reachable.add(name);
   if (/\.(js|css)$/.test(name)) {
     pending.push(name);
   }
 }
 
-for (const match of indexHtml.matchAll(/\/assets\/([^"')\s>]+)/g)) {
+for (const match of indexHtml.matchAll(references)) {
   addAsset(match[1]);
 }
 
 while (pending.length) {
   const name = pending.shift();
-  let text = "";
-  try {
-    text = await readFile(join(assetsPath, name), "utf8");
-  } catch {
-    continue;
-  }
-  for (const match of text.matchAll(/(?:^|["'`(,])\/?assets\/([^"'`),\s]+)/g)) {
+  const text = await readFile(join(assetsPath, name), "utf8");
+  for (const match of text.matchAll(references)) {
     addAsset(match[1]);
   }
 }
+
+for (const name of reachable) await access(join(assetsPath, name));
 
 let removed = 0;
 for (const name of await readdir(assetsDir)) {

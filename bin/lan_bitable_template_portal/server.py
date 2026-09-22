@@ -2743,7 +2743,7 @@ class PortalRuntime:
             HTTPStatus.OK,
             {
                 "Content-Type": content_type,
-                "Cache-Control": "public, max-age=86400",
+                "Cache-Control": "no-cache" if resolved.name == "page-navigation.css" else "public, max-age=86400",
             },
             body,
         )
@@ -2877,9 +2877,9 @@ class PortalRuntime:
         body = (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
-            f"<title>{html.escape(title)}</title><style>*{{box-sizing:border-box}}body{{margin:0;min-height:100dvh;display:grid;place-items:center;padding:16px;background:#eef5ff;color:#0c244d;font-family:'Microsoft YaHei',Arial,sans-serif}}main{{width:min(480px,100%);border:1px solid #d8e5f7;border-radius:18px;padding:24px;background:#fff;box-shadow:0 18px 48px rgba(15,73,153,.14)}}h2{{margin:0;font-size:22px}}p{{margin:14px 0;color:#5b6f8b;line-height:1.65;overflow-wrap:anywhere}}a{{display:inline-flex;min-height:44px;align-items:center;justify-content:center;border-radius:12px;padding:0 18px;background:#155fff;color:#fff;text-decoration:none;font-weight:800}}</style></head><body><main>"
+            f"<title>{html.escape(title)}</title><link rel=\"stylesheet\" href=\"/assets/page-navigation.css\"><style>*{{box-sizing:border-box}}body{{margin:0;min-height:100dvh;display:grid;place-items:center;padding:16px;background:#eef5ff;color:#0c244d;font-family:'Microsoft YaHei',Arial,sans-serif}}main{{width:min(480px,100%);border:1px solid #d8e5f7;border-radius:18px;padding:24px;background:#fff;box-shadow:0 18px 48px rgba(15,73,153,.14)}}h2{{margin:0;font-size:22px}}p{{margin:14px 0;color:#5b6f8b;line-height:1.65;overflow-wrap:anywhere}}a{{display:inline-flex;min-height:44px;align-items:center;justify-content:center;border-radius:12px;padding:0 18px;background:#155fff;color:#fff;text-decoration:none;font-weight:800}}</style></head><body class=\"page-message\"><header id=\"page-navigation\" class=\"page-navigation-standalone\"><div id=\"page-back-slot\"><a class=\"vnet-back-button\" href=\"/\" aria-label=\"返回\" title=\"返回\"><span aria-hidden=\"true\">&#8592;</span>返回</a></div></header><main>"
             f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p>"
-            "<a href=\"/\">返回</a></main></body></html>"
+            "</main></body></html>"
         ).encode("utf-8")
         self._write_response(
             status,

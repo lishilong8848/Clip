@@ -1559,32 +1559,12 @@ def _cleanup_vue_dist_assets() -> None:
     assets_dir = dist_dir / "assets"
     if not index_path.exists() or not assets_dir.exists():
         return
-    html_text = index_path.read_text(encoding="utf-8", errors="ignore")
-    referenced = {
-        match.group(1)
-        for match in re.finditer(r"/assets/([^\"'>]+)", html_text)
-        if match.group(1)
-    }
-    reachable = set(referenced)
-    pending = list(sorted(referenced))
-    asset_ref_pattern = re.compile(r"(?:^|[\"'`(,])/?assets/([^\"'`),\s]+)")
-    while pending:
-        name = pending.pop()
-        path = assets_dir / name
-        if not path.is_file() or path.suffix.lower() not in {".js", ".css"}:
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for match in asset_ref_pattern.findall(text):
-            asset_name = match.strip()
-            if not asset_name or asset_name in reachable:
-                continue
-            reachable.add(asset_name)
-            pending.append(asset_name)
+    reachable = referenced_assets(PROJECT_ROOT)
     removed = 0
     for path in assets_dir.glob("*"):
         if not path.is_file():
             continue
-        if path.name in reachable:
+        if path.relative_to(PROJECT_ROOT) in reachable:
             continue
         if path.suffix.lower() not in {".js", ".css"}:
             continue

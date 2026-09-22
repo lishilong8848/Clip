@@ -1,9 +1,6 @@
 <template>
   <header class="preview-head">
-    <button type="button" class="btn ghost preview-back" @click="$emit('back')">
-      <span aria-hidden="true">‹</span>
-      返回
-    </button>
+    <VnetBackButton @click="$emit('back')" />
     <div class="preview-title">
       <strong>{{ title }}</strong>
       <p>
@@ -24,6 +21,7 @@
 </template>
 
 <script setup lang="ts">
+import VnetBackButton from "./VnetBackButton.vue";
 defineProps<{
   title: string;
   noticeTitle: string;
@@ -45,7 +43,7 @@ defineEmits<{
 <style scoped>
 .preview-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(180px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
   gap: 7px;
   align-items: center;
   padding: 6px 8px;
@@ -55,28 +53,6 @@ defineEmits<{
     linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(239, 246, 255, 0.86)),
     #fff;
   box-shadow: 0 8px 20px rgba(37, 99, 235, 0.07);
-}
-
-.btn {
-  min-height: 29px;
-  border: 1px solid rgba(191, 219, 254, 0.8);
-  border-radius: 999px;
-  padding: 0 10px;
-  background: rgba(255, 255, 255, 0.86);
-  color: #1d4ed8;
-  font-weight: 900;
-  cursor: pointer;
-}
-
-.btn span {
-  font-size: 18px;
-  line-height: 1;
-}
-
-.preview-back {
-  border-color: rgba(30, 99, 255, 0.22);
-  background: #eff6ff;
-  color: #0757d7;
 }
 
 .preview-title {

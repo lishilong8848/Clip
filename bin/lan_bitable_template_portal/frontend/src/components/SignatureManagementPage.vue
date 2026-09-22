@@ -7,7 +7,7 @@
         <p>集中查看正式与临时人员签名，签名由本人通过安全链接完成。</p>
       </div>
       <div class="hero-actions">
-        <button type="button" class="btn hero-ghost" @click="navigateBack('/')">返回</button>
+        <VnetBackButton to="/" />
         <button v-if="loggedIn" class="btn hero-ghost" :disabled="loading" @click="load(true)">
           <RefreshCw :size="16" :class="{ spin: loading }" />刷新签名
         </button>
@@ -194,7 +194,7 @@
 </template>
 
 <script setup lang="ts">
-import { navigateBack } from "../navigation";
+import VnetBackButton from "./VnetBackButton.vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { CheckCircle2, CircleAlert, Fingerprint, Link2, Plus, RefreshCw, Search, ShieldCheck, UserRound, UsersRound, X } from "lucide-vue-next";
 import ConfirmDialog from "./ConfirmDialog.vue";

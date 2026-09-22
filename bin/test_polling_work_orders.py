@@ -1242,6 +1242,27 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(merged["version"], 3)
         self.assertEqual(merged["attachments"][0]["name"], "附件.pdf")
 
+    def test_shared_navigation_on_notice_work_order_and_error_pages(self) -> None:
+        pages = [
+            render_workbench_lite(payload={"records": [], "ongoing": [], "stats": {}}, session={"role": "admin"}, scope="E", work_type="maintenance"),
+            render_polling_work_order_steps_page(),
+            FastAPIPortalController._html_message(400, "<test>", "<script>bad</script>").body.decode("utf-8"),
+        ]
+        for page in pages:
+            self.assertEqual(page.count('id="page-navigation"'), 1)
+            self.assertEqual(page.count('id="page-back-slot"'), 1)
+            self.assertEqual(page.count('class="vnet-back-button"'), 1)
+            self.assertIn('/assets/page-navigation.css', page)
+        self.assertIn('&lt;script&gt;bad&lt;/script&gt;', pages[-1])
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        with tempfile.TemporaryDirectory() as temp:
+            for filename, cache in (("page-navigation.css", "no-cache"), ("other.css", "public, max-age=86400")):
+                path = Path(temp) / filename
+                path.write_text("body{}", encoding="utf-8")
+                with patch("clipflow_backend.main.portal_static_roots", return_value=[Path(temp).resolve()]):
+                    response = controller._static_file_response(MagicMock(headers={}), path)
+                self.assertEqual(response.headers["cache-control"], cache)
+
     def test_work_order_overview_and_steps_are_separate_pages(self) -> None:
         overview = render_polling_work_order_page()
         steps = render_polling_work_order_steps_page()
@@ -1681,63 +1702,49 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("与本次完成记录不一致", message)
 
-    def test_exempt_polling_start_creates_directly_without_stale_target_lookup(self) -> None:
-        prepared = {
-            "action": "start",
-            "work_type": "polling",
-            "notice_type": "设备轮巡",
-            "record_id": "recTarget1",
-            "target_record_id": "recTarget1",
-            "polling_work_order_exempt": True,
-            "text": "【设备轮巡】状态：开始\n【标题】非工单轮巡",
-        }
-        manager = MagicMock()
+    def test_exempt_polling_start_preserves_target_identity(self) -> None:
+        for target, update_ok in (("", True), ("recTarget1", True), ("recTarget1", False)):
+            with self.subTest(target=target, update_ok=update_ok):
+                prepared = {
+                    "action": "start", "work_type": "polling", "notice_type": "设备轮巡",
+                    "record_id": target, "target_record_id": target,
+                    "polling_work_order_exempt": True,
+                    "text": "【设备轮巡】状态：开始\n【标题】非工单轮巡",
+                }
+                manager = MagicMock()
+                with patch.object(portal_server, "external_real_write_guard", return_value={
+                    "mock_external": False, "real_write_allowed": True, "reason": "",
+                }), patch.object(PortalRuntime, "_existing_target_for_prepared_start", return_value=target) as existing_target, \
+                     patch.object(PortalRuntime, "_upload_change_confirmation_images", return_value=(True, "", [], [])), \
+                     patch.object(PortalRuntime, "_upload_extra_images_for_notice", return_value=(True, "", [], [])), \
+                     patch.object(portal_server, "create_bitable_record_by_payload", return_value=(True, "recNewTarget")) as create_record, \
+                     patch.object(portal_server, "query_record_by_id", return_value=(True, {"fields": {}})) as query_record, \
+                     patch.object(portal_server, "update_bitable_record_fields", return_value=(update_ok, target if update_ok else "write failed")) as update_record, \
+                     patch.object(PortalRuntime, "_create_backend_undo_checkpoint", return_value=""), \
+                     patch.object(PortalRuntime, "_mark_local_notice_images_target_written"), \
+                     patch.object(PortalRuntime, "_rebase_remote_record_version"), \
+                     patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+                    ok, message, record_id = PortalRuntime._execute_backend_prepared_upload(prepared)
 
-        with patch.object(
-            portal_server,
-            "external_real_write_guard",
-            return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
-        ), patch.object(
-            PortalRuntime,
-            "_existing_target_for_prepared_start",
-            return_value="recTarget1",
-        ) as existing_target, patch.object(
-            PortalRuntime,
-            "_upload_change_confirmation_images",
-            return_value=(True, "", [], []),
-        ), patch.object(
-            portal_server,
-            "create_bitable_record_by_payload",
-            return_value=(True, "recNewTarget"),
-        ) as create_record, patch.object(
-            portal_server,
-            "query_record_by_id",
-            return_value=(True, {"fields": {}}),
-        ) as query_record, patch.object(
-            portal_server,
-            "update_bitable_record_fields",
-        ), patch.object(
-            PortalRuntime,
-            "_create_backend_undo_checkpoint",
-            return_value="",
-        ), patch.object(
-            PortalRuntime,
-            "_mark_local_notice_images_target_written",
-        ), patch.object(
-            PortalRuntime,
-            "polling_work_orders",
-            return_value=manager,
-        ):
-            ok, _message, record_id = PortalRuntime._execute_backend_prepared_upload(
-                prepared
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(record_id, "recNewTarget")
-        existing_target.assert_not_called()
-        query_record.assert_not_called()
-        create_record.assert_called_once()
-        manager.cancel_group.assert_not_called()
+                existing_target.assert_called_once()
+                self.assertEqual(ok, update_ok)
+                self.assertEqual(record_id, target or "recNewTarget")
+                if not target:
+                    create_record.assert_called_once()
+                    update_record.assert_not_called()
+                    query_record.assert_not_called()
+                    manager.cancel_group.assert_not_called()
+                else:
+                    create_record.assert_not_called()
+                    update_record.assert_called_once()
+                    self.assertEqual(update_record.call_args.args[0], target)
+                    if update_ok:
+                        query_record.assert_called_once_with(target, "设备轮巡")
+                        manager.cancel_group.assert_called_once_with(target, reason="work_order_exempt")
+                    else:
+                        self.assertEqual(message, "write failed")
+                        query_record.assert_not_called()
+                        manager.cancel_group.assert_not_called()
 
     def test_polling_start_writes_work_order_fields_but_not_h_confirmation(self) -> None:
         fields = PollingNoticeHandler().build_create_fields(
