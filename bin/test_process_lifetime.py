@@ -20,13 +20,14 @@ def _process_alive(pid: int) -> bool:
         return False
     import win32api
     import win32con
+    import win32event
 
     try:
         process = win32api.OpenProcess(win32con.SYNCHRONIZE, False, pid)
     except Exception:
         return False
     try:
-        return win32api.WaitForSingleObject(process, 0) == 0x102
+        return win32event.WaitForSingleObject(process, 0) == 0x102
     finally:
         process.Close()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextvars import ContextVar
 import datetime as dt
 import hashlib
 import html
@@ -25,6 +26,8 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
+
+_request_notice_locks = ContextVar("request_notice_locks", default=None)
 from .portal_service import (
     BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
@@ -3187,6 +3190,71 @@ class PortalRuntime:
         return result
 
     @classmethod
+    def _projection_record(cls, payload, record_id, notice_type, operation_id=""):
+        fields = payload.get("_accepted_target_fields") or {}
+        accepted_at = float(payload.get("_accepted_target_at") or 0)
+        if fields and accepted_at:
+            newer = any(
+                item.get("operation_id") != operation_id
+                and float(item.get("updated_at") or 0) > accepted_at
+                and item.get("status") in {"executing", "remote_written", "verified", "completed"}
+                for item in cls.state_store.list_notice_remote_operations_for_target(record_id)
+            )
+            if not newer:
+                return True, {"record_id": record_id, "fields": fields}
+        return query_record_by_id(record_id, notice_type)
+
+    @classmethod
+    def _queue_source_end_sync(cls, payload, record_id, notice_type):
+        source_id = canonical_source_record_id(payload)
+        work_type = str(payload.get("source_work_type") or payload.get("converted_from_work_type") or payload.get("work_type") or "")
+        if work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE} or not source_id or source_id == record_id or is_local_record_id(source_id):
+            return ""
+        try:
+            cls.state_store.enqueue_outbox_event("notice_source_finalize", {
+                **payload, "target_record_id": record_id, "notice_type": notice_type,
+            })
+            return "通告已结束，关联事项正在后台同步。"
+        except Exception as exc:
+            log_warning(f"结束通告源表任务暂未保存: {record_id}: {exc}")
+            return "通告已结束，关联事项同步暂未提交，请刷新核验。"
+
+    @classmethod
+    def _source_end_payload(cls, payload, fields, notice_type):
+        config = get_field_config(notice_type)
+        value = fields.get(config.get("actual_end") or config.get("end_time") or "实际结束时间")
+        ended_ms = cls.service._repair_management_datetime_ms(value)
+        if not ended_ms:
+            raise RuntimeError("目标记录缺少实际结束时间，未使用当前时间代替。")
+        return {**payload, "ended_at": dt.datetime.fromtimestamp(ended_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")}
+
+    @classmethod
+    def process_source_end_sync(cls):
+        for task in cls.state_store.lease_outbox_events("notice_source_finalize", limit=3, lease_seconds=300):
+            payload = task["payload"]
+            try:
+                target_id = canonical_target_record_id(payload)
+                notice_type = str(payload.get("notice_type") or "")
+                ok, record = query_record_by_id(target_id, notice_type)
+                if not ok and cls._remote_record_not_found(record):
+                    cls.state_store.mark_outbox_event(task["id"], "done")
+                    continue
+                if not ok:
+                    raise RuntimeError(str(record))
+                fields = record.get("fields") or {}
+                lifecycle = cls.service._target_record_lifecycle(work_type=str(payload.get("work_type") or ""),
+                    notice_type=notice_type, target_record={"record_id": target_id, "display_fields": fields})
+                if lifecycle.get("finished"):
+                    payload = cls._source_end_payload(payload, fields, notice_type)
+                    cls.service.sync_notice_source_ended_fields(payload)
+                    cls._reconcile_source_ongoing_after_target_terminal()
+                    cls.clear_payload_cache()
+                cls.state_store.mark_outbox_event(task["id"], "done")
+            except Exception as exc:
+                cls.state_store.mark_outbox_event(task["id"], "pending", error=str(exc), max_attempts=8)
+                log_warning(f"结束通告关联事项同步待重试: {exc}")
+
+    @classmethod
     def _sync_confirmed_ended_source_fields(cls, *, limit: int = 200) -> dict:
         """Repair source rows left ongoing by an older successful end action."""
         synced = 0
@@ -3224,6 +3292,7 @@ class PortalRuntime:
                 )
                 if not lifecycle.get("finished"):
                     continue
+                identity = cls._source_end_payload(identity, fields, notice_type)
                 if cls.service.sync_notice_source_ended_fields(identity):
                     synced += 1
             except Exception as exc:
@@ -8256,6 +8325,9 @@ class PortalRuntime:
         )
         if not ok:
             return lock_key, "", str(result or "该通告正在处理，请稍后再试。")
+        held = _request_notice_locks.get()
+        if held is not None:
+            held.append((lock_key, result))
         return lock_key, result, ""
 
     @classmethod
@@ -11386,6 +11458,10 @@ class PortalRuntime:
         )
         ok, result = update_bitable_record_by_payload(record_id, notice_type, payload)
         if ok:
+            written = dict(getattr(payload, "_clipflow_written_fields", {}) or {})
+            if written:
+                prepared["_accepted_target_fields"] = {**fields, **written}
+                prepared["_accepted_target_at"] = time.time()
             cls._mark_local_notice_images_target_written(prepared)
         if not ok and checkpoint_id:
             cls.state_store.mark_notice_undo_action(
@@ -12115,6 +12191,17 @@ class PortalRuntime:
 
     @classmethod
     def execute_local_notice_upload(cls, request_payload: dict) -> dict:
+        held = []
+        token = _request_notice_locks.set(held)
+        try:
+            return cls._execute_local_notice_upload(request_payload)
+        finally:
+            for key, owner in reversed(held):
+                cls._release_event_operation_lock(key, owner)
+            _request_notice_locks.reset(token)
+
+    @classmethod
+    def _execute_local_notice_upload(cls, request_payload: dict) -> dict:
         payload = dict(request_payload or {})
         data = payload.get("data_dict")
         data = dict(data) if isinstance(data, dict) else {}
@@ -13381,6 +13468,11 @@ class PortalRuntime:
             event_lock_key = ""
             event_lock_owner = ""
         updated_record_version = ""
+        if success and notice_type != "事件通告" and not resume_remote_written:
+            written = dict(getattr(notice_payload, "_clipflow_written_fields", {}) or {})
+            if written:
+                data["_accepted_target_fields"] = {**remote_fields_for_action, **written}
+                data["_accepted_target_at"] = time.time()
         if success:
             if direct_event_update:
                 previous_result = operation.get("result") if isinstance(operation.get("result"), dict) else {}
@@ -13556,16 +13648,12 @@ class PortalRuntime:
                     ).strip()
                     if (
                         notice_type == "事件通告"
-                        and action_type == "update"
                         and verified_event_query
                     ):
                         ok_latest, latest_result = True, verified_event_query
                     else:
                         try:
-                            ok_latest, latest_result = query_record_by_id(
-                                target_record_id,
-                                notice_type,
-                            )
+                            ok_latest, latest_result = cls._projection_record(data, target_record_id, notice_type, operation_id)
                         except Exception as exc:
                             ok_latest, latest_result = False, str(exc)
                     latest_fields = (
@@ -13618,19 +13706,8 @@ class PortalRuntime:
                                     repair_project_request["remote_fields"] = dict(
                                         latest_fields
                                     )
-                            try:
-                                cls.service.sync_notice_source_ended_fields(data)
-                            except Exception:
-                                cls._mark_notice_remote_operation(
-                                    operation_id,
-                                    status="remote_written",
-                                    target_record_id=target_record_id,
-                                    result={
-                                        "record_id": target_record_id,
-                                        "message": str(result or ""),
-                                    },
-                                )
-                                raise
+                            active_projection_warning = cls._queue_source_end_sync(data, target_record_id, notice_type)
+                            cls.service.mark_maintenance_source_ended_locally(data)
                             cls._enqueue_active_delete_for_ended_notice(
                                 data,
                                 remote_record_id=target_record_id,
@@ -15299,7 +15376,7 @@ class PortalRuntime:
                         )
                         or 0
                     ) + 1
-                    if retry_count >= 3 and str(prepared.get("work_type") or "") != WORK_TYPE_EVENT:
+                    if retry_count >= 3:
                         raise RuntimeError(projection_warning) from exc
                     cls.service.mark_job(
                         job_id,
@@ -15447,10 +15524,8 @@ class PortalRuntime:
                             "结束后的本地状态核对遇到并发操作，已保留进行中显示。"
                         )
                     else:
-                        ok_latest, latest_result = query_record_by_id(
-                            resolved_remote_record_id,
-                            str(prepared.get("notice_type") or ""),
-                        )
+                        ok_latest, latest_result = cls._projection_record(prepared, resolved_remote_record_id,
+                            str(prepared.get("notice_type") or ""), remote_operation_id)
                         latest_fields = (
                             latest_result.get("fields")
                             if ok_latest and isinstance(latest_result, dict)
@@ -15481,7 +15556,9 @@ class PortalRuntime:
                             and cls._remote_record_not_found(latest_result)
                         )
                         if lifecycle.get("finished"):
-                            cls.service.sync_notice_source_ended_fields(prepared)
+                            sync_warning = cls._queue_source_end_sync(prepared, resolved_remote_record_id, str(prepared.get("notice_type") or ""))
+                            if sync_warning:
+                                result_warnings.append(sync_warning)
                             cls.service.mark_maintenance_source_ended_locally(
                                 prepared
                             )
@@ -15636,7 +15713,7 @@ class PortalRuntime:
                 ) + 1
                 warning = f"远端已成功，本地状态收敛失败，稍后重试：{exc}"
                 current = cls.service.get_job(job_id) or {}
-                if retry_count >= 3 and str((current.get("request") or {}).get("work_type") or "") != WORK_TYPE_EVENT:
+                if retry_count >= 3:
                     error = f"多维已写入，但页面同步连续失败，已停止自动重试，请勿重新发送。原因：{exc}"
                     cls.service.mark_job(
                         job_id, phase="failed", remote_written=True,

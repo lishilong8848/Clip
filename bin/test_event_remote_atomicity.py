@@ -113,7 +113,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
 
         return query
 
-    def test_create_readback_failure_does_not_send_message_or_report_success(self):
+    def test_accepted_create_does_not_depend_on_extra_get_or_recreate(self):
         remote = {"error": "query timeout"}
         request = _request(
             "upload",
@@ -131,20 +131,20 @@ class EventRemoteAtomicityTests(unittest.TestCase):
         ), patch.object(
             server_module,
             "send_robot_message_by_payload",
+            return_value={"robot_sent": True, "robot_skipped": False, "last_robot_error": ""},
         ) as send_robot:
             # The write succeeds, then its point read fails.
             remote["error"] = "query timeout"
             result = PortalRuntime.execute_local_notice_upload(request)
 
-        self.assertFalse(result["ok"], result)
+        self.assertTrue(result["ok"], result)
         self.assertTrue(result.get("remote_written"), result)
-        self.assertIn("回读校验失败", result["message"])
-        send_robot.assert_not_called()
+        send_robot.assert_called_once()
         operation = PortalRuntime.state_store.get_notice_remote_operation(
             request["operation_id"]
         )
-        self.assertEqual(operation["status"], "remote_written")
-        self.assertFalse(operation["result"].get("remote_verified"))
+        self.assertEqual(operation["status"], "completed")
+        self.assertTrue(operation["result"].get("remote_verified"))
 
         remote.pop("error", None)
         with patch.object(
@@ -167,7 +167,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             recovered = PortalRuntime.execute_local_notice_upload(request)
 
         self.assertTrue(recovered["ok"], recovered)
-        send_robot.assert_called_once()
+        send_robot.assert_not_called()
         self.assertEqual(
             PortalRuntime.state_store.get_notice_remote_operation(
                 request["operation_id"]
@@ -245,6 +245,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
                     ),
                     "version": "before",
                 }
+                PortalRuntime._save_event_local_fields(record_id, remote["fields"], "baseline")
                 with patch.object(
                     server_module,
                     "query_record_by_id",
@@ -536,7 +537,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
         )
         self.assertEqual(retry_operation["status"], "completed")
 
-    def test_update_pending_verification_recovers_without_new_screenshot_or_write(self):
+    def test_update_local_commit_failure_recovers_without_rewrite_and_releases_lock(self):
         record_id = "rec-event-update-recovery"
         operation_id = "event-update-recovery"
         initial_payload = NoticePayload(
@@ -570,6 +571,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             record_id=record_id,
         )
         request["screenshot_upload_id"] = attachment["upload_id"]
+        PortalRuntime._save_event_local_fields(record_id, remote["fields"], "baseline")
 
         def query(current_record_id, _notice_type):
             if remote["fail_readback"]:
@@ -611,8 +613,12 @@ class EventRemoteAtomicityTests(unittest.TestCase):
                 "last_robot_error": "",
             },
         ) as send_robot:
-            first = PortalRuntime.execute_local_notice_upload(request)
-            self.assertFalse(first["ok"], first)
+            with patch.object(PortalRuntime, "_save_event_local_fields", side_effect=OSError("disk busy")):
+                with self.assertRaisesRegex(OSError, "disk busy"):
+                    PortalRuntime.execute_local_notice_upload(request)
+            acquired, owner = PortalRuntime.state_store.acquire_notice_operation_lock(f"event:target:{record_id}", action="verify-release")
+            self.assertTrue(acquired)
+            PortalRuntime.state_store.release_notice_operation_lock(f"event:target:{record_id}", owner)
             remote["fail_readback"] = False
             retry = _request(
                 "update",
@@ -725,7 +731,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
         self.assertIs(result, accepted)
         self.assertEqual(sleep.call_count, 2)
 
-    def test_existing_event_target_transient_read_failure_fails_closed(self):
+    def test_existing_event_target_transient_read_failure_keeps_binding(self):
         prepared = {
             "record_id": "rec-existing-event",
             "target_record_id": "rec-existing-event",
@@ -741,11 +747,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             "query_record_by_id",
             return_value=(False, "network timeout"),
         ):
-            with self.assertRaisesRegex(PortalError, "核验失败"):
-                PortalRuntime._existing_target_for_prepared_start(
-                    prepared,
-                    "事件通告",
-                )
+            self.assertEqual(PortalRuntime._existing_target_for_prepared_start(prepared, "事件通告"), "rec-existing-event")
 
     def test_finished_event_identity_is_not_reused_for_new_start(self):
         data = {
@@ -1195,18 +1197,12 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             "fields": EventNoticeHandler("事件通告").build_create_fields(initial),
             "version": "before-lock-update",
         }
+        PortalRuntime._save_event_local_fields(record_id, remote["fields"], "baseline")
         sequence = []
         query_count = 0
 
         def query(current_record_id, _notice_type):
-            nonlocal query_count
-            query_count += 1
-            sequence.append("verify" if query_count > 1 else "prequery")
-            return True, {
-                "record_id": current_record_id,
-                "fields": dict(remote["fields"]),
-                "record_version": remote["version"],
-            }
+            raise AssertionError("事件本地直写不应查询飞书记录")
 
         def update(current_record_id, notice_type, notice_payload):
             sequence.append("write")
@@ -1260,8 +1256,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             result = PortalRuntime.execute_local_notice_upload(request)
 
         self.assertTrue(result["ok"], result)
-        self.assertLess(sequence.index("write"), sequence.index("verify"))
-        self.assertLess(sequence.index("verify"), sequence.index("projection"))
+        self.assertLess(sequence.index("write"), sequence.index("projection"))
         self.assertLess(sequence.index("projection"), sequence.index("release"))
 
     def test_event_lock_is_released_when_remote_update_raises(self):
@@ -1292,6 +1287,7 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             ),
             "version": "before-exception",
         }
+        PortalRuntime._save_event_local_fields(record_id, remote["fields"], "baseline")
         with patch.object(
             server_module,
             "query_record_by_id",

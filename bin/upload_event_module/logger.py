@@ -220,6 +220,8 @@ class SafeConsoleHandler(logging.StreamHandler):
     """Console handler that tolerates late shutdown and invalid streams."""
 
     def emit(self, record):
+        if getattr(record, "stream_echoed", False):
+            return
         if self.stream is None:
             self.stream = sys.__stdout__ or _orig_stdout
             if self.stream is None:
@@ -266,15 +268,17 @@ class StreamLogger:
     def write(self, message):
         if not message:
             return
+        echoed = False
         if self.stream:
             try:
                 self.stream.write(message)
+                echoed = True
             except Exception:
                 pass
         text = message.strip()
         if self._should_log_text(text):
             try:
-                self.logger.log(self.level, text)
+                self.logger.log(self.level, text, extra={"stream_echoed": echoed})
             except Exception:
                 pass
 
@@ -349,6 +353,9 @@ def setup_logging():
         handlers=[queue_handler],
         force=True,
     )
+    queue_handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.captureWarnings(True)
+    logging.getLogger("py.warnings").setLevel(logging.WARNING)
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)

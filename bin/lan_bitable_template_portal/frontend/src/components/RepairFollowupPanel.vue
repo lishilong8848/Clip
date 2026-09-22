@@ -9,7 +9,7 @@
           v-if="summaryRecordId"
           type="button"
           class="followup-button quiet compact followup-bind-button"
-          :disabled="bindLoading || binding"
+          :disabled="saving || bindLoading || binding"
           title="选择未绑定的历史跟进记录"
           @click="openFollowupBindPicker"
         >
@@ -21,6 +21,7 @@
       </div>
     </header>
 
+    <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
     <MessageBanner v-if="message" :tone="messageTone" :text="message" />
     <section v-if="conflictState" class="followup-conflict" role="alert">
       <div>
@@ -110,7 +111,7 @@
             <b>CMDB 设备（可多选）</b>
             <span>{{ selectedCmdbLabel }}</span>
           </div>
-          <button v-if="!readOnly" type="button" class="followup-button quiet" @click="openCmdbPicker">
+          <button v-if="!readOnly" type="button" class="followup-button quiet" :disabled="saving" @click="openCmdbPicker">
             {{ cmdbRecordIds.length ? "重新选择" : "选择设备" }}
           </button>
         </div>
@@ -135,7 +136,7 @@
               <input
                 type="checkbox"
                 :checked="involvesSpareParts"
-                :disabled="readOnly"
+                :disabled="saving || readOnly"
                 @change="onSparePartsToggle"
               />
               <span class="spare-parts-toggle-track" aria-hidden="true"><i /></span>
@@ -148,7 +149,7 @@
                   :scope="scope"
                   :input-id="followupFieldInputId(field)"
                   :model-value="workerPeople"
-                  :disabled="readOnly"
+                  :disabled="saving || readOnly"
                   @update:model-value="updateWorkerPeople"
                 />
                 <RepairFieldControl
@@ -163,7 +164,7 @@
                   :percentage="isProgressField(field)"
                   :select-options="selectOptionsForField(field)"
                   :allow-custom-select="isModelField(field)"
-                  :disabled="readOnly || isFollowupFieldDisabled(field)"
+                  :disabled="saving || readOnly || isFollowupFieldDisabled(field)"
                   :placeholder="fieldPlaceholder(field)"
                   :number-min="isProgressField(field) ? 0 : undefined"
                   :number-max="isProgressField(field) ? 1 : undefined"
@@ -296,6 +297,8 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { useRepairSubmission } from "../composables/useRepairSubmission";
+import RepairSubmissionStatus from "./RepairSubmissionStatus.vue";
 import {
   AlertCircle,
   Check,
@@ -421,7 +424,25 @@ const FOLLOWUP_BIND_MAX_LIMIT = 500;
 
 const loading = ref(false);
 const sourceRefreshing = ref(false);
-const saving = ref(false);
+const saveBusy = ref(false);
+const submission = useRepairSubmission(() => `followup:${props.scope}:${props.summaryRecordId}`, (result) => {
+  editingRecordId.value = String(result.record_id || "");
+  createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  if (!result.deleted) applySavedFollowupRecord(editingRecordId.value, result.fields || {}, String(result.record_version || ""));
+  refreshFollowupsAfterSave();
+  emit("changed");
+  showMessage("跟进记录已保存；维修汇总单独在后台同步。", "success");
+});
+const saving = computed({ get: () => saveBusy.value || Boolean(submission.pending.value), set: (value: boolean) => { saveBusy.value = value; } });
+function dismissFailedSubmission() {
+  if (submission.status.value !== "failed") return;
+  createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  submission.dismissFailed();
+}
 const records = ref<LooseDict[]>([]);
 const fields = ref<LooseDict[]>([]);
 const sharedFields = ref<LooseDict>({});
@@ -565,6 +586,7 @@ const primaryActionMode = computed<"create" | "save">(() => (
   editingRecordId.value && !followupDirty.value ? "create" : "save"
 ));
 const primaryActionLabel = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "待核实";
   if (saving.value) return "保存中";
   if (primaryActionMode.value === "create") return "新增跟进记录";
   return editingRecordId.value ? "更新跟进记录" : "新增跟进记录";
@@ -577,6 +599,7 @@ const primaryActionDisabled = computed(() => {
   return !hasDraftContent.value;
 });
 const primaryActionDisabledReason = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "请先核验原提交";
   if (props.readOnly) return "已完成项目仅供查看";
   if (saving.value) return "正在保存";
   if (!props.summaryRecordId) return "请先选择维修项目";
@@ -585,17 +608,20 @@ const primaryActionDisabledReason = computed(() => {
   return "请至少填写一项跟进内容";
 });
 const followupSaveStateText = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "待核实";
   if (saving.value) return "保存中";
   if (followupDirty.value) return "有未保存修改";
   if (editingRecordId.value) return "已保存";
   return hasDraftContent.value ? "等待保存" : "等待填写";
 });
 const followupSaveStateTone = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "dirty";
   if (saving.value) return "saving";
   if (followupDirty.value || hasDraftContent.value && !editingRecordId.value) return "dirty";
   return editingRecordId.value ? "saved" : "idle";
 });
 const followupSaveStateIcon = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return AlertCircle;
   if (saving.value) return LoaderCircle;
   if (followupDirty.value || hasDraftContent.value && !editingRecordId.value) return AlertCircle;
   return CheckCircle2;
@@ -1450,11 +1476,11 @@ async function saveRecord(): Promise<void> {
         : createOperationId.value,
     });
     const payload = wasEditing
-      ? await requestJson(`/api/repair-management/followups/${encodeURIComponent(editingRecordId.value)}`, {
+      ? await submission.submit(`/api/repair-management/followups/${encodeURIComponent(editingRecordId.value)}`, {
           method: "PUT",
           body,
         })
-      : await requestJson("/api/repair-management/followups", { method: "POST", body });
+      : await submission.submit("/api/repair-management/followups", { method: "POST", body });
     editingRecordId.value = String(payload.record_id || editingRecordId.value || "");
     createOperationId.value = "";
     updateOperationId.value = "";
@@ -1479,7 +1505,9 @@ async function saveRecord(): Promise<void> {
     refreshFollowupsAfterSave();
     emit("changed");
   } catch (error: unknown) {
-    if (!captureFollowupConflict(error)) {
+    if (submission.pending.value) {
+      showMessage("本次提交结果仍在核验，请勿重复新增。", "warning");
+    } else if (!captureFollowupConflict(error)) {
       showMessage(error instanceof Error ? error.message : "维修跟进保存失败。", "failed");
     }
   } finally {
@@ -1513,9 +1541,9 @@ async function deleteRecordNow(): Promise<void> {
       operation_id: deleteOperationId.value,
       expected_version: String(selectedRecord.value?.record_version || ""),
     });
-    await requestJson(
+    await submission.submit(
       `/api/repair-management/followups/${encodeURIComponent(recordId)}?${params.toString()}`,
-      { method: "DELETE" },
+      { method: "DELETE", body: JSON.stringify({ operation_id: deleteOperationId.value }) },
     );
     deleteOperationId.value = "";
     deleteOperationRecordId = "";

@@ -195,11 +195,10 @@ class NoticeUndoTests(unittest.TestCase):
                 PortalRuntime.auth_manager,
             )
             try:
-                with patch.object(
-                    MaintenancePortalService,
-                    "__new__",
-                    return_value=fake_service,
-                ), patch.object(PortalRuntime, "apply_runtime_settings"):
+                class TestService:
+                    def __new__(cls, **kwargs):
+                        return fake_service
+                with patch("clipflow_backend.main.MaintenancePortalService", TestService), patch.object(PortalRuntime, "apply_runtime_settings"):
                     controller._initialize_portal_handler_state()
                 self.assertIs(PortalRuntime.state_store, shared_store)
                 self.assertIs(PortalRuntime.service._state_store, shared_store)

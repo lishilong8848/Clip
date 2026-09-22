@@ -4883,6 +4883,22 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.api_route("/api/repair-management/operations/{operation_id}", methods=["GET", "POST"])
+        async def repair_operation_status(request: Request, operation_id: str):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                operation = await asyncio.to_thread(PortalRuntime.state_store.get_repair_management_operation, operation_id)
+                if not operation:
+                    return JSONResponse({"ok": False, "error": "尚未收到该提交，请继续核验。"}, status_code=404)
+                self._authorized_scope_or_error(session, operation.get("scope") or "ALL")
+                data = await asyncio.to_thread(PortalRuntime.service.repair_operation_status, operation_id,
+                                              recover=request.method == "POST")
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/repair-management/followups")
         async def repair_management_followups(request: Request):
             session = self._current_session(request)
@@ -13144,6 +13160,8 @@ class FastAPIPortalController:
             max_instances=1,
             coalesce=True,
         )
+        scheduler.add_job(PortalRuntime.process_source_end_sync, "interval", seconds=30,
+                          id="notice_source_finalize", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(
             self._run_scheduled_sqlite_maintenance,
             "interval",

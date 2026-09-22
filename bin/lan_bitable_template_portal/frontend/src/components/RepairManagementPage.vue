@@ -18,13 +18,14 @@
           <RefreshCw :size="16" :class="{ spinning: refreshingSources }" aria-hidden="true" />
           <span>{{ refreshingSources ? "刷新中" : "刷新" }}</span>
         </button>
-        <button type="button" class="btn primary" @click="requestStartCreate">
+        <button type="button" class="btn primary" :disabled="saving" @click="requestStartCreate">
           <FilePlus2 :size="16" aria-hidden="true" />
           <span>新建维修单</span>
         </button>
       </div>
     </div>
 
+    <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
     <MessageBanner v-if="messageText && !projectDrawerOpen" :tone="messageTone" :text="messageText" />
     <div v-if="hasAnyUnsavedChanges && !projectDrawerOpen" class="page-unsaved-notice" role="status" aria-live="polite">
       <AlertCircle :size="16" aria-hidden="true" />
@@ -271,6 +272,7 @@
           </div>
 
           <div class="project-drawer-body">
+            <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
             <MessageBanner v-if="messageText" :tone="messageTone" :text="messageText" />
             <section v-if="projectConflict" class="project-conflict" role="alert">
               <div>
@@ -334,10 +336,10 @@
                 <span class="relation-order">1</span>
                 <div><b>关联事件单</b><small>{{ selectedEventSummary }}</small></div>
                 <div v-if="!selectedRecordReadOnly" class="relation-actions">
-                  <button type="button" class="btn secondary" :disabled="prefillLoading" @click="openSourcePicker('event')">
+                  <button type="button" class="btn secondary" :disabled="saving || prefillLoading" @click="openSourcePicker('event')">
                     {{ sourceEventId ? "重新选择" : "选择事件" }}
                   </button>
-                  <button v-if="sourceEventId" type="button" class="btn quiet" :disabled="prefillLoading" @click="clearEventSelection">
+                  <button v-if="sourceEventId" type="button" class="btn quiet" :disabled="saving || prefillLoading" @click="clearEventSelection">
                     清除
                   </button>
                 </div>
@@ -364,13 +366,13 @@
                   <button
                     type="button"
                     class="btn secondary"
-                    :disabled="prefillLoading || !sourceEventId"
+                    :disabled="saving || prefillLoading || !sourceEventId"
                     :title="!sourceEventId ? '请先选择关联事件单' : ''"
                     @click="openSourcePicker('repair')"
                   >
                     {{ selectedRepairIds.length ? "重新选择" : "选择检修通告" }}
                   </button>
-                  <button v-if="selectedRepairIds.length" type="button" class="btn quiet" :disabled="prefillLoading" @click="clearRepairSelection">
+                  <button v-if="selectedRepairIds.length" type="button" class="btn quiet" :disabled="saving || prefillLoading" @click="clearRepairSelection">
                     清除
                   </button>
                 </div>
@@ -405,7 +407,7 @@
                     :input-id="fieldInputId(field)"
                     :label="projectFieldLabel(field.field_name)"
                     :model-value="projectWorkerPeople"
-                    :disabled="selectedRecordReadOnly"
+                    :disabled="saving || selectedRecordReadOnly"
                     @update:model-value="updateProjectWorkerPeople"
                     @edited="markFieldDirty(field.field_name)"
                   />
@@ -417,7 +419,7 @@
                     :model-value="fieldDraft[field.field_name]"
                     :required="isRequiredField(field.field_name)"
                     :error="fieldValidationError(field.field_name)"
-                    :disabled="selectedRecordReadOnly || projectFieldIsSourceControlled(field) || isCurrentProjectProgressField(field)"
+                    :disabled="saving || selectedRecordReadOnly || projectFieldIsSourceControlled(field) || isCurrentProjectProgressField(field)"
                     :percentage="isCurrentProjectProgressField(field)"
                     :wide="usesTextarea(field.field_name)"
                     compact
@@ -595,6 +597,8 @@ import {
   X,
 } from "lucide-vue-next";
 import { ApiError, refreshRemoteSourceAndWait, requestJson } from "../api/client";
+import { useRepairSubmission } from "../composables/useRepairSubmission";
+import RepairSubmissionStatus from "./RepairSubmissionStatus.vue";
 import { navigate, navigateBack, navigateHard } from "../navigation";
 import { invalidateRepairStatus } from "../repairStatusState";
 import {
@@ -781,7 +785,25 @@ const reconcilingRemote = ref(false);
 const serverUpdatePending = ref(false);
 const refreshingSources = ref(false);
 const repairSourceRefreshVersion = ref(0);
-const saving = ref(false);
+const saveBusy = ref(false);
+const submission = useRepairSubmission(() => `project:${props.scope}`, (result) => {
+  editingRecordId.value = String(result.record_id || "");
+  createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  applySavedProjectRecord(editingRecordId.value, result.fields || {}, String(result.record_version || ""));
+  refreshProjectsAfterSave();
+  void loadProjectSyncStatus(editingRecordId.value);
+  showMessage("维修单已保存；关联状态单独在后台同步。", "success");
+});
+const saving = computed({ get: () => saveBusy.value || Boolean(submission.pending.value), set: (value: boolean) => { saveBusy.value = value; } });
+function dismissFailedSubmission() {
+  if (submission.status.value !== "failed") return;
+  createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  submission.dismissFailed();
+}
 const searchText = ref("");
 const recordState = ref<RecordStateFilter>("all");
 const recordHistoryPeriod = ref<RecordHistoryPeriod>("all");
@@ -962,23 +984,27 @@ const unsavedNoticeText = computed(() => {
     : "维修单信息有未保存修改";
 });
 const projectSaveStateText = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "待核实";
   if (saving.value) return "保存中";
   if (missingRequiredEditableFields.value.length) return `缺 ${missingRequiredEditableFields.value.length} 项`;
   if (hasUnsavedChanges.value) return "有未保存修改";
   return editingRecordId.value ? "已保存" : "等待填写";
 });
 const projectSaveStateTone = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "warning";
   if (saving.value) return "saving";
   if (missingRequiredEditableFields.value.length) return "warning";
   if (hasUnsavedChanges.value) return "dirty";
   return "saved";
 });
 const projectSaveStateIcon = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return AlertCircle;
   if (saving.value) return LoaderCircle;
   if (missingRequiredEditableFields.value.length || hasUnsavedChanges.value) return AlertCircle;
   return CheckCircle2;
 });
 const saveDisabledReason = computed(() => {
+  if (submission.pending.value && !saveBusy.value) return "请先核验原提交";
   if (saving.value) return "正在保存";
   if (prefillLoading.value) return "关联字段正在填入";
   if (!hasWritableDraft.value) return "请先填写维修项目";
@@ -3326,7 +3352,7 @@ async function saveRecord(): Promise<boolean> {
     });
     let savedPayload: LooseDict;
     if (editingRecordId.value) {
-      const updated = await requestJson(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}`, {
+      const updated = await submission.submit(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}`, {
         method: "PUT",
         body,
       });
@@ -3345,7 +3371,7 @@ async function saveRecord(): Promise<boolean> {
         warnings.length ? "warning" : "success",
       );
     } else {
-      const created = await requestJson("/api/repair-management/records", {
+      const created = await submission.submit("/api/repair-management/records", {
         method: "POST",
         body,
       });
@@ -3375,7 +3401,9 @@ async function saveRecord(): Promise<boolean> {
     void loadProjectSyncStatus(editingRecordId.value);
     return true;
   } catch (error: unknown) {
-    if (!captureProjectConflict(error)) {
+    if (submission.pending.value) {
+      showMessage("本次提交结果仍在核验，请勿重复新增。", "warning");
+    } else if (!captureProjectConflict(error)) {
       showMessage(error instanceof Error ? error.message : "保存失败。", "failed");
     }
     return false;

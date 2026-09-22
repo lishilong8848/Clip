@@ -1454,6 +1454,8 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
         PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "process_lifetime.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "repair_operations.py",
+        PROJECT_ROOT / "bin" / "test_submission_reliability.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
@@ -1524,6 +1526,15 @@ def _run_packaging_preflight_tests() -> None:
         check=True,
     )
     log("通告 ID 边界测试通过。")
+
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_submission_reliability",
+         "bin.test_event_remote_atomicity", "bin.test_notice_undo",
+         "bin.test_repair_snapshot_cache", "bin.test_process_lifetime"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    log("通告与维修可靠性、恢复及进程退出测试通过。")
 
     subprocess.run(
         [sys.executable, "-m", "unittest", "bin.test_critical_guard"],

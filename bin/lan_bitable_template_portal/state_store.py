@@ -13434,6 +13434,8 @@ class LanPortalStateStore:
         operation_types: tuple[str, ...] | list[str] = (),
         statuses: tuple[str, ...] | list[str] = (),
         limit: int = 100,
+        due_at: float | None = None,
+        processing_lease_seconds: float = 300,
     ) -> list[dict[str, Any]]:
         normalized_types = [
             self._text(operation_type)
@@ -13450,6 +13452,13 @@ class LanPortalStateStore:
         limit = max(1, min(int(limit or 100), 5000))
         type_placeholders = ", ".join("?" for _ in normalized_types)
         status_placeholders = ", ".join("?" for _ in normalized_statuses)
+        due_sql = ""
+        due_params = ()
+        if due_at is not None:
+            due_sql = """AND ((status='sync_pending' AND
+                COALESCE(json_extract(result_json, '$.available_at'), 0)<=?)
+                OR (status='processing' AND updated_at<=?))"""
+            due_params = (due_at, due_at - processing_lease_seconds)
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
@@ -13459,10 +13468,11 @@ class LanPortalStateStore:
                     FROM repair_management_operations
                     WHERE operation_type IN ({type_placeholders})
                       AND status IN ({status_placeholders})
+                      {due_sql}
                     ORDER BY updated_at ASC
                     LIMIT ?
                     """,
-                    (*normalized_types, *normalized_statuses, limit),
+                    (*normalized_types, *normalized_statuses, *due_params, limit),
                 ).fetchall()
         return [
             payload
@@ -13485,6 +13495,7 @@ class LanPortalStateStore:
         summary_record_id: str | None = None,
         result: dict[str, Any] | None = None,
         error: str | None = None,
+        expected_updated_at: float | None = None,
     ) -> bool:
         operation_id = self._text(operation_id)
         status = self._text(status)
@@ -13494,12 +13505,15 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
-                    "SELECT record_id, summary_record_id, result_json, last_error "
+                    "SELECT record_id, summary_record_id, result_json, last_error, updated_at "
                     "FROM repair_management_operations WHERE operation_id = ?",
                     (operation_id,),
                 ).fetchone()
                 if row is None:
+                    return False
+                if expected_updated_at is not None and row["updated_at"] != expected_updated_at:
                     return False
                 next_record_id = (
                     self._text(record_id)
