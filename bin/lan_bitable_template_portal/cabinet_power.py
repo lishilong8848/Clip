@@ -408,6 +408,7 @@ class CabinetPowerService:
             for _attempt in range(3):
                 saved=self.local.load(scope); config=self._packaged_config(scope,saved["config"])
                 if layout_identity(config)!=layout_identity(saved["config"]):
+                    config["layout_previous_identity"]=layout_identity(saved["config"])
                     self.local.extend_layout(scope,config,saved["version"])
                     continue
                 extension=self._layout_data(scope).get("extension") or {}
@@ -435,9 +436,9 @@ class CabinetPowerService:
         if saved:
             baseline=saved.get("racks") if isinstance(saved,dict) else None
             data=self._layout_data(scope); extension=data.get("extension") or {}
-            if (isinstance(baseline,dict) and saved.get("layout_identity")==extension.get("from_identity")
+            if (isinstance(baseline,dict) and saved.get("layout_identity") in (extension.get("from_identity"),config.get("layout_previous_identity"))
                     and identity==data.get("layout_identity")):
-                additions=inventory_state_baseline({"scope":scope,"inventory":extension["inventory"]},[])[0]
+                additions=inventory_state_baseline({"scope":scope,"inventory":[rack for rack in extension.get("inventory",[]) if rack["room"]+"/"+rack["rack"] not in baseline]},[])[0]
                 extended={**baseline,**additions}
                 if set(baseline)&set(additions) or not baseline_matches_inventory({**config,"power_baseline":extended}):
                     raise CabinetError("新增包间基线与现有机柜目录冲突，请先核对模板资料")
@@ -533,10 +534,30 @@ class CabinetPowerService:
         current=copy.deepcopy(config)
         if data.get("layout_identity")!=layout_identity(current):
             extension=data.get("extension") or {}
-            if extension.get("from_identity")==layout_identity(current):
-                current["rooms"].extend(copy.deepcopy(extension["rooms"]))
-                current["inventory"].extend(copy.deepcopy(extension["inventory"]))
-                additions=inventory_state_baseline({"scope":scope,"inventory":extension["inventory"]},[])[0]
+            previous=copy.deepcopy(current)
+            if extension.get("position_updates"):
+                new_keys={(rack["room"],rack["rack"]) for rack in extension["inventory"]}
+                previous["inventory"]=[rack for rack in previous["inventory"] if (rack["room"],rack["rack"]) not in new_keys]
+                old_rooms={room["id"]:room for room in extension["previous_rooms"]}
+                old_positions={(rack["room"],rack["rack"]):rack["previous_positions"] for rack in extension["position_updates"]}
+                for room in previous["rooms"]:
+                    if room["id"] in old_rooms: room.update(old_rooms[room["id"]])
+                for rack in previous["inventory"]:
+                    key=(rack["room"],rack["rack"])
+                    if key in old_positions: rack["positions"]=copy.deepcopy(old_positions[key])
+            if extension.get("from_identity")==layout_identity(previous):
+                rooms={room["id"]:room for room in current["rooms"]}
+                for room in extension["rooms"]:
+                    if room["id"] in rooms: rooms[room["id"]].update(copy.deepcopy(room))
+                    else: current["rooms"].append(copy.deepcopy(room))
+                racks={(rack["room"],rack["rack"]):rack for rack in current["inventory"]}
+                for rack in extension["inventory"]:
+                    key=(rack["room"],rack["rack"])
+                    if key in racks: racks[key]["positions"]=copy.deepcopy(rack["positions"])
+                    else: current["inventory"].append(copy.deepcopy(rack))
+                for rack in extension.get("position_updates",[]):
+                    racks[(rack["room"],rack["rack"])]["positions"]=copy.deepcopy(rack["positions"])
+                additions=inventory_state_baseline({"scope":scope,"inventory":[rack for rack in extension["inventory"] if rack["room"]+"/"+rack["rack"] not in current.get("power_baseline",{})]},[])[0]
                 current.setdefault("power_baseline",{}).update(additions)
         if not data.get("template_data") or data.get("layout_identity")!=layout_identity(current):
             raise CabinetError("飞书布局与当前模板结构不一致，请重新同步模板资料")
@@ -582,7 +603,9 @@ class CabinetPowerService:
             while len(f["groups"])<count:
                 col=max(c["column"] for c in table_columns(f,scope)); f["groups"].append({"action":col+1,"expected":col+2,"actual":col+3})
             formats.append({**f,"columns":table_columns(f,scope),"count":len(selected)})
-        result={"scope":scope,"configured":True,"activated":True,"history_ready":True,"source":"local","counts":derived["counts"],"rooms":rooms,"racks":derived["racks"],"issues":issues,"version":snap["version"],"updated_at":snap["updated_at"],"error":snap.get("error",""),"daily":derived["daily"],"record_count":len(business_ops),"inventory_only":sum(o["empty"] for o in business_ops),"sheet_formats":formats,"table_url":f"https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}"}
+        operated={(op["room"],op["rack"]) for op in business_ops if not op.get("meta",{}).get("baseline_correction") and op.get("events")}
+        inventory_only=len({(rack["room"],rack["rack"]) for rack in config["inventory"]}-operated)
+        result={"scope":scope,"configured":True,"activated":True,"history_ready":True,"source":"local","counts":derived["counts"],"rooms":rooms,"racks":derived["racks"],"issues":issues,"version":snap["version"],"updated_at":snap["updated_at"],"error":snap.get("error",""),"daily":derived["daily"],"record_count":len(business_ops),"inventory_only":inventory_only,"sheet_formats":formats,"table_url":f"https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}"}
         snap["overview"]=result
         response=copy.deepcopy(result if include_racks else {k:v for k,v in result.items() if k!="racks"})
         response["export_state"]=self._export_state(scope,snap)
@@ -886,7 +909,11 @@ class CabinetPowerService:
                 stages.append({"kind":"directory","record_id":"","fields":{"数据标识":"rack_"+digest([scope,op["room"],op["rack"]]),"类别":"机柜","楼栋":scope+"楼","包间":op["room"],"名称":op["rack"],"机柜类型":op["rack_type"],"数量":1,"布局资料":json.dumps({"positions":[],"template_color":""})},"before":None})
             elif inventory and "rack_type" in payload and (not old or payload["rack_type"]!=old["rack_type"]):
                 if inventory["rack_type"]!=payload["rack_type"]:
-                    stages.append({"kind":"directory","record_id":inventory["record_id"],"fields":{"机柜类型":payload["rack_type"] or None},"before_subset":{"机柜类型":inventory["rack_type"]}})
+                    directory_fields={"机柜类型":payload["rack_type"] or None}
+                    if not inventory.get("record_id"):
+                        directory_fields.update({"数据标识":"rack_"+digest([scope,op["room"],op["rack"]]),"类别":"机柜","楼栋":scope+"楼","包间":op["room"],"名称":op["rack"],"数量":1,
+                            "布局资料":json.dumps({"positions":inventory.get("positions",[]),"template_color":inventory.get("template_color","")},ensure_ascii=False)})
+                    stages.append({"kind":"directory","record_id":inventory.get("record_id", ""),"fields":directory_fields,"before_subset":{"机柜类型":inventory["rack_type"]},"lookup_data_id":not bool(inventory.get("record_id"))})
                     inventory["rack_type"]=payload["rack_type"]
                 else: inventory=None
             else: inventory=None
@@ -946,6 +973,7 @@ class CabinetPowerService:
                 creates=[j for _,j in journals if not j["record_id"]]
                 for _,journal in journals:
                     journal["stages"][0]["attempted"]=True
+                    journal["stages"][0]["batch_create"]=not bool(journal["record_id"])
                     journal.update(status="writing",error_stage="main")
                     self.write("write:"+journal["operation_id"],journal)
                 created_records={}
@@ -953,6 +981,13 @@ class CabinetPowerService:
                     created=remote.batch_create([{k:v for k,v in j["stages"][0]["fields"].items() if v is not None} for j in creates])
                     if len(created)!=len(creates): raise CabinetError("批量新增返回数量不一致，需逐条核验",409)
                     created_ids=[record["record_id"] for record in created]
+                    returned={record.get("fields",{}).get("数据标识"):record for record in created}
+                    for journal in creates:
+                        record=returned.get(journal["stages"][0]["fields"]["数据标识"])
+                        if not record: continue
+                        journal["stages"][0]["record_id"]=record["record_id"]
+                        journal["record_id"]=record["record_id"]
+                        self.write("write:"+journal["operation_id"],journal)
                     created_records={record["fields"].get("数据标识"):record for record in remote.batch_get(created_ids)}
                     for journal in creates:
                         record=created_records.get(journal["stages"][0]["fields"]["数据标识"])
@@ -1152,6 +1187,11 @@ class CabinetPowerService:
 
     def _resume_write(self,journal):
         if journal.get("delete"): return self._resume_delete(journal)
+        uncertain_batch = journal.get("error_stage") == "batch_reconcile"
+        if uncertain_batch:
+            for stage in journal["stages"]:
+                if stage.get("attempted") and stage.get("before") is None and not stage.get("record_id"):
+                    stage["batch_create"] = True
         scope=journal["scope"]; key="write:"+journal["operation_id"]; stage_name="prepare"
         try:
             main=self.remote_for(scope)
@@ -1166,10 +1206,14 @@ class CabinetPowerService:
                     if stage_name=="main": journal["record"]=current
                     continue
                 current=remote.get(stage["record_id"]) if stage["record_id"] else None
-                if current is None and stage.get("attempted"):
+                if current is None and (stage.get("attempted") or stage.get("lookup_data_id")):
                     found=self.list_remote(remote,data_id=stage["fields"]["数据标识"])
                     if len(found)>1: raise CabinetError("云端操作标识重复，请核对",409)
                     current=found[0] if found else None
+                    # A missing search result is not proof that a batch create failed.
+                    if current is None and (stage.get("batch_create") or uncertain_batch):
+                        stage["batch_create"]=True
+                        raise CabinetError("批量写入结果尚未确认，请稍后继续核验；不会重复创建机柜记录",409)
                 already_verified=bool(current and equivalent(stage["fields"],current["fields"]))
                 if already_verified: pass
                 else:
@@ -1244,6 +1288,8 @@ class CabinetPowerService:
                 found=self.list_remote(remote,data_id=main["fields"].get("数据标识",""))
                 if len(found)>1: raise CabinetError("云端存在重复记录，请先核实",409)
                 current=found[0] if found else None
+            if current is None and main.get("attempted") and (main.get("batch_create") or journal.get("error_stage")=="batch_reconcile"):
+                raise CabinetError("批量写入结果仍未确认，请稍后继续核验，不能按空结果取消操作",409)
             current_scope=from_feishu(current)["scope"] if current else scope
             if current_scope not in (scope,journal["old_scope"]): raise CabinetError("记录被调整到其他楼栋，请由管理员核对",409)
             inventory=copy.deepcopy(journal.get("inventory"))
@@ -1308,7 +1354,7 @@ class CabinetPowerService:
                 self.write("export:"+eid,record)
                 return self._public_export(record)
             if record.get("cloud_upload_status")=="succeeded": return self._public_export(record)
-            record.update(cloud_upload_status="uploading",cloud_upload_error="",cloud_updated_at=stamp())
+            record.update(cloud_upload_status="uploading",phase="uploading",cloud_upload_error="",cloud_updated_at=stamp())
             self.write("export:"+eid,record)
             try:
                 self.ensure_export_archive_fields()
@@ -1323,14 +1369,15 @@ class CabinetPowerService:
                     "导出时间":str(record.get("created_at") or ""),"文件SHA256":str(record.get("sha256") or ""),
                     "导出人":str(record.get("owner") or owner or ""),"导出文件":[{"file_token":file_token}],
                 }
+                record["phase"]="archiving"; self.write("export:"+eid,record)
                 cloud=self.export_remote.get(record["cloud_record_id"]) if record.get("cloud_record_id") else self._find_export_archive_record(eid)
                 if cloud: cloud=self.export_remote.update(cloud["record_id"],fields)
                 else: cloud=self.export_remote.create(fields,"export:"+eid)
                 record["cloud_record_id"]=str(cloud.get("record_id") or "")
-                record["cloud_updated_at"]=stamp(); self.write("export:"+eid,record)
+                record.update(cloud_updated_at=stamp(),phase="verifying"); self.write("export:"+eid,record)
                 if not record["cloud_record_id"]: raise CabinetError("导出归档未返回记录ID")
                 self._verify_export_archive(self.export_remote.get(record["cloud_record_id"]),eid,file_token)
-                record.update(cloud_upload_status="succeeded",cloud_upload_error="",cloud_updated_at=stamp())
+                record.update(cloud_upload_status="succeeded",phase="completed",cloud_upload_error="",cloud_updated_at=stamp())
             except Exception as exc:
                 record=self.local.document(scope,"export:"+eid) or record
                 self._export_schema_ready=False
@@ -1381,7 +1428,7 @@ class CabinetPowerService:
 
     def _run_job(self,job):
         try:
-            job.update(status="running",started_at=stamp()); self.write("job:"+job["job_id"],job)
+            job.update(status="running",phase="preparing",started_at=stamp()); self.write("job:"+job["job_id"],job)
             if job["kind"]=="export" and not job["payload"].get("snapshot"):
                 snapshot=self.snapshot(job["scope"])
                 job["payload"].update(snapshot=snapshot)
@@ -1408,10 +1455,16 @@ class CabinetPowerService:
         try: stale=time.time()-dt.datetime.fromisoformat(created).timestamp()>30
         except (ValueError,TypeError): stale=True
         if job["status"] in ("pending","running") and (not process_alive(job.get("pid")) or job.get("pid")==os.getpid() and jid not in self._running and stale): job.update(status="failed",error="任务已中断，请重新执行")
+        if job.get("kind")=="export" and (job.get("result") or {}).get("export_id"):
+            export=self.local.document(job["scope"],"export:"+job["result"]["export_id"])
+            if export:
+                job.update(result=self._public_export(export),phase=export.get("phase","generated"))
         return {k:v for k,v in job.items() if k!="payload"}
 
     def do_export(self,scope,payload,job):
         snap=payload.get("snapshot") or self.snapshot(scope); config=snap["config"]
+        if job.get("job_id"):
+            job["phase"]="generating"; self.write("job:"+job["job_id"],job)
         with self._lock:
             if self._exports is None: self._exports=ProcessPoolExecutor(
                 max_workers=5,mp_context=multiprocessing.get_context("spawn"),initializer=lower_export_priority)
@@ -1422,6 +1475,8 @@ class CabinetPowerService:
         path=self.atomic_file(Path("exports")/eid/filename,content)
         result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"export_format_version":EXPORT_FORMAT_VERSION,"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
         self.write("export:"+eid,result)
+        if job.get("job_id"):
+            job.update(phase="generated",result=self._public_export(result)); self.write("job:"+job["job_id"],job)
         return self.upload_export(scope,eid,result["owner"])
 
     def cleanup_export(self,scope,eid):

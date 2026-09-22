@@ -52,11 +52,16 @@ def install_cabinet_power_routes(app,controller,runtime):
                     response=controller._json_ok(request,session,data); response.status_code=202
                     return response
                 payload=await controller._read_json_request(request,max_bytes=4*1024*1024) if request.method in ("POST","PATCH") and not (path.endswith("/images") and request.method=="POST") else {}
+                if path=="batches/text-preview" and request.method=="POST":
+                    data=await asyncio.to_thread(service.batches.text_preview,payload.get("sources"),allowed)
+                    return controller._json_ok(request,session,data)
                 if path=="batches":
                     if request.method=="POST":
                         if payload.get("source")=="image":
                             if payload.get("rows"): raise CabinetError("图片识别批次不能预置机柜记录",400)
                             data=await asyncio.to_thread(service.batches.create_image_batch,owner,allowed,payload.get("scope"))
+                        elif payload.get("source")=="text":
+                            data=await asyncio.to_thread(service.batches.create_text,payload,owner,allowed)
                         else:
                             rows=payload.get("rows",[])
                             requested={str(row.get("scope") or "").upper().replace("楼","") for row in rows if isinstance(row,dict)}
@@ -117,6 +122,10 @@ def install_cabinet_power_routes(app,controller,runtime):
                     return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
                 if len(parts)==5 and parts[2]=="images" and parts[4]=="apply" and request.method=="POST":
                     data=await asyncio.to_thread(service.batches.apply_image,batch_id,parts[3],payload,owner,allowed,admin)
+                    return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
+                if len(parts)==5 and parts[2]=="images" and parts[4] in ("retry","correct") and request.method=="POST":
+                    action=service.batches.retry_image if parts[4]=="retry" else service.batches.correct_image
+                    data=await asyncio.to_thread(action,batch_id,parts[3],payload,owner,allowed,admin)
                     return controller._json_ok(request,session,service.batches.visible(data,owner,allowed,admin))
                 if len(parts)==5 and parts[2]=="images" and parts[4]=="restore" and request.method=="POST":
                     data=await asyncio.to_thread(service.batches.restore_image,batch_id,parts[3],payload.get("version"),owner,allowed,admin)
@@ -228,6 +237,9 @@ def install_cabinet_power_routes(app,controller,runtime):
         "batches/{batch_id}/cancel":["POST"],"batches/{batch_id}/restore-rows":["POST"],"batches/{batch_id}/files/{file_id}":["GET"],
         "batches/{batch_id}/images":["POST"],"batches/{batch_id}/images/{image_id}":["GET","DELETE"],
         "batches/{batch_id}/images/{image_id}/apply":["POST"],
+        "batches/{batch_id}/images/{image_id}/retry":["POST"],
+        "batches/{batch_id}/images/{image_id}/correct":["POST"],
+        "batches/text-preview":["POST"],
         "batches/{batch_id}/images/{image_id}/restore":["POST"],
         "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],

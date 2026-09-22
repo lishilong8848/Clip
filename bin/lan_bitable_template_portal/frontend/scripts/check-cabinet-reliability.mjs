@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -181,6 +181,23 @@ try {
   page = await batchContext.newPage();
   const batchErrors = [];
   page.on("pageerror", error => batchErrors.push(error.message));
+  await page.goto(base + "/cabinet-power?scope=B");
+  await page.getByRole("heading", {name:"B楼机柜上下电",exact:true}).waitFor();
+  for(const [room,left,right] of [["216","B05","B10"],["247","B10","B05"]]){
+    await page.getByRole("button",{name:"包间汇总",exact:true}).click();
+    const summaryRow=page.locator(".mobile-card-table tbody tr").filter({hasText:`${room} 包间`});
+    await summaryRow.getByRole("button",{name:"查看平面图",exact:true}).click();
+    const leftRack=page.locator(`.map-canvas button[aria-label^='${left} ']`);
+    const rightRack=page.locator(`.map-canvas button[aria-label^='${right} ']`);
+    await leftRack.waitFor();await rightRack.waitFor();
+    assert((await leftRack.boundingBox()).x<(await rightRack.boundingBox()).x,`B-${room} direction must follow its own drawing`);
+    assert.equal(await page.locator(".map-canvas").getByRole("button",{name:/^[A-Z]\d{2} /}).count(),10);
+    await page.screenshot({path:path.join(output,`b-${room}-floorplan.png`),fullPage:true});
+    await page.locator(".map-canvas button[aria-label^='B06 ']").click();
+    await page.getByRole("heading",{name:`${room} / B06`,exact:true}).waitFor();
+    assert(await page.getByRole("button",{name:"登记上正式电",exact:true}).isEnabled());
+    await page.keyboard.press("Escape");
+  }
   await page.goto(base + "/cabinet-power?scope=A");
   await page.getByRole("heading", { name:"A楼机柜上下电",exact:true }).waitFor();
   for (const room of ["203","303","403"]) {
@@ -211,6 +228,128 @@ try {
   await page.waitForURL(url => url.pathname === "/cabinet-power/batches" && !url.searchParams.get("mode"));
   assert.equal(new URL(page.url()).searchParams.get("scope"),"E");
   assert.equal(new URL(page.url()).searchParams.get("status"),"todo","return must restore the todo filter");
+  const beforeText=(await (await page.request.get(base+"/api/cabinet-power/batches?scope=E")).json()).data.total;
+  await page.goto(base+"/cabinet-power/batches?scope=E&mode=new&status=todo");
+  await page.getByRole("button",{name:"粘贴文本识别",exact:true}).click();
+  const minimumText="EA118-E2-2\tA11\t测试电转正式电\t2026-09-16 16:02:59\t2026-09-14 16:03:16";
+  const fullText="机房\t机房系统名称\t包间\t包间系统名称\t机架\t操作类型\t期望完成时间\t实际完成时间\t运营商机柜编号\t结果\nEA118\t南通综保区基地A\tE2-2.EA118\t"+minimumText+"\tA11\tSuccess";
+  async function pasteText(text){
+    await page.getByRole("textbox",{name:"粘贴机柜确认文本",exact:true}).evaluate((node,value)=>{
+      const data=new DataTransfer();data.setData("text/plain",value);node.dispatchEvent(new ClipboardEvent("paste",{clipboardData:data,bubbles:true,cancelable:true}));
+    },text);
+  }
+  await pasteText("EA118-E2-2\tA11\t测试电转正式电\t\t2026-09-14 16:03:16");
+  await page.locator(".text-entry>[role=alert]").filter({hasText:"缺少期望完成时间"}).waitFor();
+  assert.equal(await page.locator(".text-preview tbody tr").count(),0,"incomplete paste must not enter preview");
+  assert.equal(await page.getByLabel("粘贴机柜确认文本",{exact:true}).inputValue(),"");
+  for(const [index,text] of [minimumText,fullText].entries()){
+    await pasteText(text);
+    await page.locator(".text-preview tbody tr").nth(index).waitFor();
+  }
+  assert.equal(await page.getByLabel("粘贴机柜确认文本",{exact:true}).inputValue(),"");
+  assert.equal(await page.locator(".text-entry table").count(),1,"pasted rows must not be rendered twice");
+  await page.getByLabel("筛选粘贴记录",{exact:true}).selectOption({index:2});
+  await page.getByRole("button",{name:"移除所选粘贴记录",exact:true}).click();
+  await page.getByRole("dialog").getByRole("button",{name:"确认移除",exact:true}).click();
+  assert.equal(await page.locator(".text-preview tbody tr").count(),1,"removing a paste removes its records");
+  await pasteText(fullText);
+  await page.locator(".text-preview tbody tr").nth(1).waitFor();
+  assert.equal((await (await page.request.get(base+"/api/cabinet-power/batches?scope=E")).json()).data.total,beforeText,"preview must not create batches");
+  assert.equal(await page.getByLabel("文本记录结果",{exact:true}).first().inputValue(),"");
+  assert.equal(await page.getByLabel("文本记录结果",{exact:true}).nth(1).inputValue(),"成功");
+  assert.equal(await page.getByLabel("文本记录期望完成时间",{exact:true}).first().inputValue(),"2026-09-16T16:02:59");
+  assert.equal(await page.getByLabel("文本记录实际完成时间",{exact:true}).first().inputValue(),"2026-09-14T16:03:16");
+  await page.getByText("本次粘贴中重复",{exact:true}).waitFor();
+  const review=page.getByLabel("筛选核对状态",{exact:true});
+  await review.selectOption('duplicates');
+  await page.getByLabel('筛选粘贴记录',{exact:true}).selectOption({index:1});
+  assert.equal(await review.locator('option[value="duplicates"]').innerText(),'重复（0）');
+  assert.equal(await review.locator('option[value=""]').innerText(),'全部记录（1）');
+  assert.equal(await page.locator('.text-preview tbody tr').count(),0);
+  await page.getByText('当前筛选范围没有重复记录',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'查看全部重复（1）',exact:true}).click();
+  await page.getByText('当前 1 条 / 全部 2 条',{exact:true}).waitFor();
+  await page.getByLabel('筛选粘贴记录',{exact:true}).selectOption({index:2});
+  assert.equal(await review.locator('option[value="duplicates"]').innerText(),'重复（1）');
+  assert.equal(await page.locator('.text-preview tbody tr').count(),1);
+  await page.getByLabel('搜索粘贴记录',{exact:true}).fill('B99');
+  assert.equal(await review.locator('option[value="duplicates"]').innerText(),'重复（0）');
+  assert.equal(await review.locator('option[value="issues"]').innerText(),'待核对（0）');
+  await page.getByRole('button',{name:'查看全部重复（1）',exact:true}).click();
+  assert.equal(await page.getByLabel('搜索粘贴记录',{exact:true}).inputValue(),'');
+  await review.selectOption('');
+  await page.screenshot({path:path.join(output,"text-paste-preview.png"),fullPage:true});
+  await page.reload();
+  await page.locator(".text-preview tbody tr").nth(1).waitFor();
+  let textResponseLost=false;const textRequests=[];
+  await page.route("**/api/cabinet-power/batches",async route=>{
+    if(route.request().method()!=="POST"||route.request().postDataJSON().source!=="text")return route.continue();
+    textRequests.push(route.request().postDataJSON().request_id);
+    const response=await route.fetch();
+    if(!textResponseLost){textResponseLost=true;return route.abort("connectionreset");}
+    return route.fulfill({response});
+  });
+  await page.getByRole("button",{name:/^识别并创建待办/}).click();
+  await page.locator(".batch-page>.notice.danger").waitFor();
+  await page.getByRole("button",{name:/^识别并创建待办/}).click();
+  await page.waitForURL(url=>Boolean(url.searchParams.get("batch_id")));
+  await page.getByRole("heading",{name:"上下电待办详情",exact:true}).waitFor();
+  assert.equal(textRequests.length,2);assert.equal(textRequests[0],textRequests[1]);
+  const textBatch=(await (await page.request.get(base+"/api/cabinet-power/batches/"+new URL(page.url()).searchParams.get("batch_id"))).json()).data;
+  assert.equal(textBatch.source,"text");assert.equal(textBatch.rows.length,2);assert.equal(textBatch.text_sources.length,2);
+  assert.equal((await (await page.request.get(base+"/api/cabinet-power/batches?scope=E")).json()).data.total,beforeText+1);
+  await page.unroute("**/api/cabinet-power/batches");
+  const densityContext=await browser.newContext({viewport:{width:1366,height:900}});
+  const density=await densityContext.newPage();
+  const densityErrors=[];density.on('pageerror',error=>densityErrors.push(error.message));
+  await density.goto(base+"/cabinet-power/batches?scope=E&mode=new");
+  await density.getByRole("button",{name:"粘贴文本识别",exact:true}).click();
+  for(let index=0;index<100;index++){
+    const text=Array.from({length:5},(_,row)=>`EA118-E2-2\tA${String(row+1).padStart(2,'0')}\t测试电转正式电\t2026-09-16 16:02:59\t2026-09-14 16:03:16\tSuccess`).join('\n');
+    await density.getByLabel("粘贴机柜确认文本",{exact:true}).evaluate((node,value)=>{
+      const data=new DataTransfer();data.setData("text/plain",value);node.dispatchEvent(new ClipboardEvent("paste",{clipboardData:data,bubbles:true,cancelable:true}));
+    },text);
+    await density.getByRole('status').filter({hasText:`${index+1} 次粘贴 · ${(index+1)*5} 条记录`}).waitFor();
+  }
+  assert.equal(await density.locator('.text-preview tbody tr').count(),25);
+  assert.equal(await density.locator('.text-entry table').count(),1);
+  assert.equal(await density.getByLabel('筛选粘贴记录',{exact:true}).locator('option').count(),101);
+  for(const viewport of [{width:1366,height:900},{width:1280,height:720}]){
+    await density.setViewportSize(viewport);
+    const tableHeight=await density.locator('.text-preview').evaluate(node=>({client:node.clientHeight,scroll:node.scrollHeight}));
+    assert(tableHeight.scroll<=tableHeight.client+2,'all 25 rows must expand without an inner vertical scrollbar');
+    const tableBounds=await density.locator('.text-preview').boundingBox();
+    const lastRowBounds=await density.locator('.text-preview tbody tr').last().boundingBox();
+    assert(lastRowBounds.y+lastRowBounds.height<=tableBounds.y+tableBounds.height+2,'last row must be inside the expanded table');
+    const bounds=await density.locator('.text-footer').boundingBox();
+    assert(bounds.y+bounds.height<=viewport.height+2,'creation controls must remain visible');
+    assert(await density.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'page must not overflow horizontally');
+    await density.screenshot({path:path.join(output,`text-500-${viewport.width}.png`),fullPage:true});
+  }
+  await density.locator('.text-preview tbody tr').last().evaluate(node=>node.scrollIntoView({block:'center'}));
+  const expandedLastRow=await density.locator('.text-preview tbody tr').last().boundingBox();
+  const expandedFooter=await density.locator('.text-footer').boundingBox();
+  assert(expandedLastRow.y+expandedLastRow.height<=expandedFooter.y+2,'page scrolling must reveal the last row above the footer');
+  await density.getByRole('navigation',{name:'文本记录分页'}).getByRole('button',{name:'1',exact:true}).click();
+  await density.getByLabel('搜索粘贴记录',{exact:true}).fill('A03');
+  await density.getByText('当前 100 条 / 全部 500 条',{exact:true}).waitFor();
+  await density.getByLabel('筛选粘贴记录',{exact:true}).selectOption({index:100});
+  await density.getByText('当前 1 条 / 全部 500 条',{exact:true}).waitFor();
+  await density.getByRole('button',{name:'移除所选粘贴记录',exact:true}).click();
+  await density.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
+  assert.equal(await density.getByLabel('筛选粘贴记录',{exact:true}).locator('option').count(),101);
+  await density.getByRole('button',{name:'移除所选粘贴记录',exact:true}).click();
+  await density.getByRole('dialog').getByRole('button',{name:'确认移除',exact:true}).click();
+  await density.getByText('当前 99 条 / 全部 495 条',{exact:true}).waitFor();
+  await density.getByLabel('筛选核对状态',{exact:true}).selectOption('duplicates');
+  await density.getByText('当前 98 条 / 全部 495 条',{exact:true}).waitFor();
+  await density.getByRole('button',{name:/^识别并创建待办/}).click();
+  await density.waitForURL(url=>Boolean(url.searchParams.get('batch_id')));
+  const densityBatch=(await (await density.request.get(base+'/api/cabinet-power/batches/'+new URL(density.url()).searchParams.get('batch_id'))).json()).data;
+  assert.equal(densityBatch.rows.length,495,'create must include all pages, not just filtered rows');
+  assert.equal(densityBatch.text_sources.length,99);
+  assert.deepEqual(densityErrors,[]);
+  await densityContext.close();
   const rows = Array.from({ length: 60 }, (_, index) => ({
     row_id:`row-${index + 1}`, scope:"E", room:"202", rack:`B${String(index + 1).padStart(2,"0")}`,
     rack_type:"服务器机柜", action:"上正式电", expected:"", actual:"",
@@ -231,11 +370,18 @@ try {
     notice_counts:{declared:60,unique:60,directory_matched:60}, can_download_files:true,can_confirm_all:true,
   };
   let rejectPatch = true;
-  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  const pixel = process.argv[2] ? await readFile(process.argv[2]) : Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
   await page.route("**/api/cabinet-power/batches/batch-test**", async route => {
     const url = new URL(route.request().url());
     if (url.pathname.includes("/images/")) return route.fulfill({ status:200,contentType:"image/png",body:pixel });
     if (route.request().method() === "PATCH") {
+      if(rejectPatch === "conflict" || rejectPatch === "overlap") {
+        const overlap=rejectPatch === "overlap";rejectPatch=false;
+        batch={...batch,version:batch.version+1};
+        batch.rows[0].supplier_rack="REMOTE-RACK";
+        if(overlap)batch.rows[0].type_detail="其他用户已保存";
+        return route.fulfill({status:409,json:{error:"批次已被其他操作更新，请重新载入"}});
+      }
       if (rejectPatch) return route.abort("connectionreset");
       for (const patch of route.request().postDataJSON().rows || []) Object.assign(batch.rows.find(row => row.row_id === patch.row_id), patch);
       batch = { ...batch,version:batch.version + 1 };
@@ -266,7 +412,7 @@ try {
   await page.getByRole("button", { name:"编辑记录",exact:true }).first().click();
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").fill("2026-09-19T12:34:56");
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").press("Tab");
-  await page.getByText("自动保存失败，请重试", { exact:false }).waitFor({ timeout:10000 });
+  await page.getByText("自动保存失败，请重试", { exact:false }).first().waitFor({ timeout:10000 });
   await page.reload();
   await page.getByRole("dialog", { name:"恢复未保存的批次更正？" }).waitFor();
   rejectPatch = false;
@@ -279,7 +425,7 @@ try {
   rejectPatch = true;
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").fill("2026-09-19T13:34:56");
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByLabel("实际完成时间").press("Tab");
-  await page.getByText("自动保存失败，请重试", { exact:false }).waitFor({ timeout:10000 });
+  await page.getByText("自动保存失败，请重试", { exact:false }).first().waitFor({ timeout:10000 });
   await page.getByRole("dialog", { name:/编辑 E楼 202 B01/ }).getByRole("button", { name:"关闭",exact:true }).click();
   await page.getByRole("button", { name:"返回待办",exact:true }).click();
   await page.getByRole("dialog", { name:"放弃未保存的批次修改？" }).waitFor();
@@ -295,6 +441,43 @@ try {
   assert(await page.getByRole("button", {name:"确认整批",exact:true}).isDisabled());
   assert.equal(await page.getByText(/条上下电通告联动失败/).count(),0);
   await page.screenshot({path:path.join(output,"batch-deleted-1024.png"),fullPage:true});
+  batch.source_notice.deleted_at="";batch.rows.forEach(row=>row.editable=true);rejectPatch="conflict";
+  await page.reload();
+  await page.getByRole("button",{name:"编辑记录",exact:true}).first().click();
+  let dialog=page.getByRole("dialog",{name:/编辑 E楼 202 B01/});
+  await dialog.getByLabel("类型明细",{exact:true}).fill("本次更正");
+  await dialog.getByLabel("类型明细",{exact:true}).press("Tab");
+  await page.getByText("更正已自动保存",{exact:true}).waitFor();
+  assert.equal(batch.rows[0].supplier_rack,"REMOTE-RACK");
+  assert.equal(batch.rows[0].type_detail,"本次更正");
+  rejectPatch="overlap";
+  await dialog.getByLabel("类型明细",{exact:true}).fill("冲突后保留本次");
+  await dialog.getByLabel("类型明细",{exact:true}).press("Tab");
+  await dialog.getByText("请选择保留的内容",{exact:true}).waitFor();
+  assert.equal(await dialog.getByLabel("类型明细",{exact:true}).inputValue(),"冲突后保留本次");
+  await page.screenshot({path:path.join(output,"batch-save-conflict.png")});
+  await dialog.getByRole("button",{name:"保留本次",exact:true}).click();
+  await page.getByText("更正已自动保存",{exact:true}).waitFor();
+  await dialog.getByRole("button",{name:"核对原图",exact:true}).click();
+  await page.locator(".proof-panel img").first().waitFor();
+  for(const width of [1366,1024,760]){
+    await page.setViewportSize({width,height:900});
+    assert(await dialog.evaluate(node=>node.scrollWidth<=node.clientWidth+2),"editor must not overflow");
+    await page.screenshot({path:path.join(output,`batch-proof-editor-${width}.png`)});
+  }
+  await dialog.getByRole("button",{name:"关闭",exact:true}).click();
+  batch={...batch,version:batch.version+1,source:"image",rows:[],stats:{total:0},images:images.slice(0,2).map((image,index)=>({...image,status:"recognizing",phase:index?"queued":"running"}))};
+  await page.setViewportSize({width:1366,height:900});await page.reload();
+  await page.getByText("图片识别中 · 已完成 0/2 张",{exact:true}).waitFor();
+  assert.equal(await page.getByRole("button",{name:"删除空批次",exact:true}).count(),0);
+  await page.screenshot({path:path.join(output,"image-recognition-progress.png")});
+  batch.images[0].status="done";batch.version++;
+  await page.getByText("图片识别中 · 已完成 1/2 张",{exact:true}).waitFor({timeout:10000});
+  batch.images[1].status="failed";batch.images[1].error="截图识别失败";batch.version++;
+  await page.getByRole("button",{name:"删除空批次",exact:true}).waitFor({timeout:10000});
+  await page.getByRole("button",{name:"补全机柜",exact:true}).first().click();
+  await page.getByRole("form",{name:"补全截图机柜"}).waitFor();
+  await page.screenshot({path:path.join(output,"image-correction.png"),fullPage:true});
   assert.deepEqual(batchErrors, []);
   await batchContext.close();
   console.log("cabinet saves, export response recovery, five-building upload and layout passed");

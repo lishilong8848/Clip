@@ -19,11 +19,62 @@ from xml.etree import ElementTree as ET
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, baseline_correction_operations, calculate, completed_state_event, derive_records, export_workbook, dates, digest, map_state_baseline, room_code, system_name
 from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, EXPORT_FORMAT_VERSION, equivalent
-from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, POWER_ACTIONS_BY_STATE
+from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, CabinetBatchStore, POWER_ACTIONS_BY_STATE
 from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_pasted_confirmation_text_accepts_minimal_full_markdown_and_wrapped_rows(self):
+        from .lan_bitable_template_portal.cabinet_power_text import parse_confirmation_text
+        minimal=['EA118-E2-2','A11','测试电转正式电','2026-09-16 16:02:59','2026-09-14 16:03:16']
+        full=['EA118','南通综保区基地A','E2-2.EA118',*minimal,'A11','Success']
+        header='机房\t机房系统名称\t包间\t包间系统名称\t机架\t操作类型\t期望完成时间\t实际完成时间\t运营商机柜编号\t结果\n'
+        for text in ('\t'.join(minimal),' '.join(minimal),'\n'.join(minimal),' | '.join(minimal),header+'\t'.join(full),'| '+' | '.join(full)+' |\n| --- | --- |'):
+            with self.subTest(text=text):
+                rows=parse_confirmation_text(text)
+                self.assertEqual(len(rows),1)
+                row=rows[0]
+                self.assertEqual([row[key] for key in ('scope','room','rack','action','expected','actual')],['E','202',*minimal[1:]])
+                self.assertEqual(row['result'],'成功' if 'Success' in text else '')
+                self.assertEqual(row['supplier_rack'],'A11' if 'Success' in text else '')
+
+    def test_pasted_text_preserves_missing_cells_and_normalizes_without_guessing_success(self):
+        from .lan_bitable_template_portal.cabinet_power_text import parse_confirmation_text
+        rows=parse_confirmation_text('EA118-B-216运营商机房\tB06\t上正式电\t2026/9/16 10:00\t2026/9/14 16：03：16\tB06\t功\n'
+                                     'EA118-B-247运营商机房 B07 下测试电 2026/9/16 10:00 2026/9/14 09:00 B07 Failed')
+        self.assertEqual([(row['scope'],row['room'],row['rack']) for row in rows],[('B','216','B06'),('B','247','B07')])
+        self.assertEqual((rows[0]['expected'],rows[0]['actual'],rows[0]['result']),('2026-09-16 10:00:00','2026-09-14 16:03:16',''))
+        self.assertEqual(rows[1]['result'],'失败')
+        self.assertEqual(rows[1]['actual'],'2026-09-14 09:00:00')
+        with self.assertRaises(CabinetError): parse_confirmation_text('只有邮件标题，没有机柜明细')
+        with self.assertRaises(CabinetError): parse_confirmation_text('x'*200001)
+        with self.assertRaisesRegex(CabinetError,'期望完成时间'):
+            parse_confirmation_text('EA118-E2-2\tA11\t上正式电\t\t2026-09-14 16:03:16')
+        with self.assertRaisesRegex(CabinetError,'包间系统名称'):
+            parse_confirmation_text('A11 上正式电 2026-09-16 16:02:59 2026-09-14 16:03:16')
+        with self.assertRaisesRegex(CabinetError,'机柜编号'):
+            parse_confirmation_text('EA118-E2-2 测试电转正式电 2026-09-16 16:02:59 2026-09-14 16:03:16')
+        with self.assertRaisesRegex(CabinetError,'第2条缺少机柜编号、操作类型'):
+            parse_confirmation_text('EA118-E2-2 A11 上正式电 2026-09-16 16:02:59 2026-09-14 16:03:16\n'
+                                    'EA118-E2-1 2026-09-16 16:02:59 2026-09-14 16:03:16')
+
+    def test_ten_thousand_batch_summaries_paginate_without_reading_details(self):
+        with tempfile.TemporaryDirectory() as root:
+            store=CabinetBatchStore(Path(root)/'batches.sqlite3')
+            records=[];views=[]
+            for index in range(10000):
+                bid=f'batch-{index:05d}'
+                records.append((bid,'owner','pending',None,'["A"]','{"source":"image"}',1,'2026-09-20','2026-09-20'))
+                summary={'batch_id':bid,'scopes':['A'],'rooms':['A楼 203'],'stats':{'total':1},'is_todo':True}
+                views.append((bid,'*',1,0,json.dumps(summary)))
+            with store._connect() as conn,conn:
+                conn.executemany('INSERT INTO batches VALUES(?,?,?,?,?,?,?,?,?)',records)
+                conn.executemany('INSERT INTO batch_list_views VALUES(?,?,?,?,?)',views)
+            with patch.object(store,'_decode',side_effect=AssertionError('details must not be decoded')):
+                page=store.list_page('owner',[],False,'A','todo','','',9999,20)
+                self.assertEqual((page['total'],page['pending_count'],page['page'],len(page['items'])),(10000,10000,500,20))
+                self.assertEqual(store.list_page("owner' OR 1=1",[],False,'A','todo','','',1,20)['total'],0)
+
     def test_xlsm_package_parts_use_default_namespace(self):
         from .lan_bitable_template_portal.cabinet_power_excel import xml_bytes
         for namespace, name in (("http://schemas.openxmlformats.org/package/2006/content-types", "Types"),
@@ -261,6 +312,114 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual(rooms[room]["total"], 10)
         self.assertEqual(rooms["201"]["name"], "EA118-B2-1")
         self.assertFalse(rooms["201"]["carrier"])
+
+    def test_text_preview_is_read_only_and_creation_is_idempotent_with_audit(self):
+        service=self.service.batches
+        text='EA118-A2-3\tA02\t上正式电\t2026-09-16 16:02:59\t2026-09-14 16:03:16\tA02\tSuccess'
+        sources=[{'id':'text_sample_01','text':text}]
+        before_records=copy.deepcopy(self.remote.records)
+        preview=service.text_preview(sources,['A'])
+        self.assertEqual(len(preview['rows']),1)
+        self.assertEqual(service.store.list(None),[])
+        row=preview['rows'][0]
+        request={'request_id':'text_create_request_0001','sources':sources,'rows':[{'text_id':row['text_id'],'text_row':row['text_row'],'expected':'2026-09-17 16:02:59'}]}
+        created=service.create_text(request,'owner',['A'])
+        self.assertEqual(service.create_text(request,'owner',['A'])['batch_id'],created['batch_id'])
+        self.assertEqual(len(service.store.list(None)),1)
+        self.assertEqual(created['source'],'text')
+        self.assertEqual(created['rows'][0]['expected'],'2026-09-17 16:02:59')
+        self.assertEqual(created['rows'][0]['original']['expected'],'2026-09-16 16:02:59')
+        self.assertTrue(created['rows'][0]['edits'])
+        self.assertEqual(self.remote.records,before_records)
+        payload,_=service._row_payload(created,created['rows'][0])
+        self.assertEqual(payload[0]['batch_meta']['text_source']['raw'],text)
+        with self.assertRaisesRegex(CabinetError,'请求内容已改变'):
+            service.create_text({**request,'rows':[{'text_id':row['text_id'],'text_row':row['text_row'],'result':'失败'}]},'owner',['A'])
+        with self.assertRaises(CabinetError): service.text_preview(sources,['B'])
+        with self.assertRaises(CabinetError): service.create_text({**request,'request_id':'text_bad_ref_00000001','rows':[{'text_id':'missing1','text_row':1}]},'owner',['A'])
+
+    def test_text_combines_pastes_and_keeps_missing_results_for_review(self):
+        service=self.service.batches
+        text='EA118-E2-2 A11 测试电转正式电 2026-09-16 16:02:59 2026-09-14 16:03:16'
+        sources=[{'id':'text_fragment_01','text':text},{'id':'text_fragment_02','text':text+' A11 Success'}]
+        preview=service.text_preview(sources,['E'])
+        self.assertEqual(len(preview['rows']),2)
+        self.assertEqual([row['result'] for row in preview['rows']],['','成功'])
+        self.assertTrue(any(issue['code']=='result' for issue in preview['rows'][0]['issues']))
+        self.assertEqual(preview['rows'][1]['status'],'duplicate')
+        self.assertEqual(service.store.list(None),[])
+
+    def test_text_hundred_pastes_create_five_hundred_rows(self):
+        text='EA118-E2-2 A11 测试电转正式电 2026-09-16 16:02:59 2026-09-14 16:03:16 A11 Success'
+        sources=[{'id':f'text_large_{index:04d}','text':'\n'.join([text]*5)} for index in range(100)]
+        service=self.service.batches
+        preview=service.text_preview(sources,['E'])
+        self.assertEqual(len(preview['rows']),500)
+        self.assertEqual(service.store.list(None),[])
+        rows=[{key:row[key] for key in ('text_id','text_row')} for row in preview['rows']]
+        batch=service.create_text({'request_id':'text_large_request_0001','sources':sources,'rows':rows},'owner',['E'])
+        self.assertEqual((len(batch['text_sources']),len(batch['rows'])),(100,500))
+
+    def test_b_carrier_drawings_preserve_opposite_columns_and_exclude_copied_helpers(self):
+        book=Workbook((TEMPLATES/'B.xlsm').read_bytes())
+        for room,left,right in (('216','B05','B10'),('247','B10','B05')):
+            name=f'B-{room}-机柜平面图'
+            cells=book.cells(name)
+            self.assertEqual((book.value(cells['G4']),book.value(cells['K4'])),(left,right))
+            self.assertNotIn('V1',cells)
+            self.assertEqual([book.value(cells[f'E{row}']) for row in range(22,27)],[10,5,5,1,4])
+            model=self.service.layout('B',room)
+            racks=[cell for cell in model['layout']['cells'] if cell.get('rack')]
+            self.assertEqual({cell['rack'] for cell in racks},{f'B{index:02}' for index in range(1,11)})
+            self.assertEqual(len(racks),10)
+            self.assertEqual(model['room']['region'],'A1:S26')
+
+    def test_b_carrier_geometry_upgrade_keeps_baseline_history_and_live_summary(self):
+        from .lan_bitable_template_portal.cabinet_power import layout_identity
+        from .lan_bitable_template_portal.cabinet_power_excel import inventory_state_baseline
+        extension=self.service._layout_data('B')['extension']
+        legacy=copy.deepcopy(self.configs['B'])
+        replacements={room['id']:room for room in extension['previous_rooms']}
+        for room in legacy['rooms']:
+            if room['id'] in replacements: room.update(replacements[room['id']])
+        new_keys={(rack['room'],rack['rack']) for rack in extension['inventory']}
+        legacy['inventory']=[rack for rack in legacy['inventory'] if (rack['room'],rack['rack']) not in new_keys]
+        for rack in legacy['inventory']:
+            if rack['room'] in replacements: rack['positions']=[]
+        legacy['template_data']['hash']='legacy-carrier-layout'
+        self.assertEqual(layout_identity(legacy),extension['from_identity'])
+        records=[record for record in self.source_records if record['fields']['楼栋']=='B楼']
+        baseline=inventory_state_baseline(legacy,[from_feishu(record) for record in records])[0]
+        self.service.local.replace('B',legacy,records,[])
+        self.service.local.document('B','power_baseline:frozen_v1',{'version':1,'layout_identity':layout_identity(legacy),'racks':baseline})
+        snapshot=self.service._snapshot('B')
+        self.assertEqual({key:value for key,value in snapshot['config']['power_baseline'].items() if key in baseline},baseline)
+        self.assertEqual(len(snapshot['config']['inventory']),len(legacy['inventory'])+10)
+        self.assertEqual({r['record_id'] for r in self.service.local.load('B')['records']},{r['record_id'] for r in records})
+        self.service._directory.records.pop('rackB216B06',None)
+        saved=self.service.save_operation('B',{'operation_id':'carrier_room_new_rack_power','room':'216','rack':'B06',
+            'rack_type':'服务器机柜','result':'成功','groups':[{'id':'carrier_new_event','action':'上正式电',
+            'expected':'2026-09-22 09:00:00','actual':'2026-09-22 09:01:00','result':'成功'}]},'owner')
+        fresh=CabinetPowerService(self.store,self.remote,self.tmp.name)
+        try:
+            current=fresh._snapshot('B')
+            config=current['config']
+            self.assertEqual({key:value for key,value in config['power_baseline'].items() if key in baseline},baseline)
+            self.assertEqual(next(r for r in fresh.overview('B')['racks'] if (r['room'],r['rack'])==('216','B06'))['state'],'formal')
+            upgraded=next(r for r in config['inventory'] if (r['room'],r['rack'])==('216','B06'))
+            self.assertTrue(upgraded['record_id'])
+            self.assertEqual(upgraded['rack_type'],'服务器机柜')
+            exported=Workbook(export_workbook((TEMPLATES/'B.xlsm').read_bytes(),config,current['operations']))
+            for room,expected in (('216',[10,6,4,1,5]),('247',[10,5,5,1,4])):
+                name=f'B-{room}-机柜平面图'; cells=exported.cells(name)
+                self.assertEqual([exported.value(cells[f'E{row}']) for row in range(22,27)],expected)
+                projected={cell['ref']:cell for cell in fresh.layout('B',room)['layout']['cells']}
+                self.assertEqual([int(projected[f'E{row}']['text']) for row in range(22,27)],expected)
+                self.assertEqual((exported.value(cells['G19']),exported.value(cells['G20'])),(expected[2],expected[1]))
+                self.assertEqual((int(projected['G19']['text']),int(projected['G20']['text'])),(expected[2],expected[1]))
+            self.assertEqual(exported.archive.read('xl/vbaProject.bin'),Workbook((TEMPLATES/'B.xlsm').read_bytes()).archive.read('xl/vbaProject.bin'))
+            self.assertIn(saved['record_id'],{r['record_id'] for r in fresh.local.load('B')['records']})
+        finally: fresh.shutdown()
 
     def test_current_state_uses_each_floorplan_baseline_then_new_operations(self):
         for scope in "ABCDE":
@@ -842,7 +1001,7 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertTrue(acknowledged["warnings_acknowledged"])
         row=acknowledged["rows"][0]
         changed=self.service.batches.update(batch["batch_id"],{
-            "version":acknowledged["version"],"rows":[{"row_id":row["row_id"],"rack":"B06"}],
+            "version":acknowledged["version"],"rows":[{"row_id":row["row_id"],"rack":"B11"}],
         },"owner",["B"])
         self.assertFalse(changed["warnings_acknowledged"])
         self.assertEqual((changed["rows"][0]["current_power_state"],changed["rows"][0]["action"]),("unknown",""))
@@ -1320,6 +1479,176 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             while time.time()<deadline and self.service.batches.get(batch["batch_id"])["images"][0]["status"]=="recognizing": time.sleep(.01)
         image=self.service.batches.get(batch["batch_id"])["images"][0]
         self.assertEqual(image["status"],"failed")
+
+    def test_uncertain_batch_create_never_falls_back_to_another_create_token(self):
+        service=self.service.batches
+        racks=[rack for rack in self.service._snapshot('A')['config']['inventory'] if rack['room']=='203'][:2]
+        rows=[dict(scope='A',room=rack['room'],rack=rack['rack'],rack_type=rack['rack_type'],action='上正式电',
+                   expected='2026-09-20 10:00:00',actual='2026-09-20 10:00:00',result='成功') for rack in racks]
+        batch=service.create_manual(rows,'owner')
+        self.remote.fail_after_batch_create=True
+        original_list=self.remote.list_all
+        def delayed_search(path='records',filters=None):
+            return [row for row in original_list(path,filters) if not row['fields'].get('数据标识','').startswith('manual_batch_')]
+        with patch.object(self.remote,'list_all',side_effect=delayed_search):
+            service.confirm(batch['batch_id'],dict(version=batch['version'],all=True),'owner',['A'])
+            failed=self._wait_batch(batch['batch_id'])
+            self.assertEqual(failed['stats']['completed'],0)
+            for row in failed['rows']:
+                self.assertTrue(row['operation_started'])
+                with self.assertRaisesRegex(CabinetError,'结果仍未确认'):
+                    self.service.reconcile_write('A',row['operation_id'],'owner')
+            service.confirm(batch['batch_id'],dict(version=failed['version'],all=True),'owner',['A'])
+            failed=self._wait_batch(batch['batch_id'])
+        counts=Counter(row['fields'].get('数据标识') for row in self.remote.records.values()
+                       if row['fields'].get('数据标识','').startswith('manual_batch_'))
+        self.assertEqual(sorted(counts.values()),[1,1])
+        service.confirm(batch['batch_id'],dict(version=failed['version'],all=True),'owner',['A'])
+        self.assertEqual(self._wait_batch(batch['batch_id'])['stats']['completed'],2)
+        self.assertEqual(self.remote.batch_create_calls,1)
+
+    def test_preparation_failure_leaves_row_editable_without_a_write_journal(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row('A','2026-09-20 10:00:00')],'owner')
+        with patch.object(service,'_row_payload',side_effect=CabinetError('证明文件已丢失',409)):
+            service.confirm(batch['batch_id'],dict(version=batch['version'],all=True),'owner',['A'])
+            failed=self._wait_batch(batch['batch_id'])
+        row=failed['rows'][0]
+        self.assertFalse(row['operation_started'])
+        self.assertIsNone(self.service.local.document('A','write:'+row['operation_id']))
+        updated=service.update(batch['batch_id'],{'version':failed['version'],'rows':[{'row_id':row['row_id'],'type_detail':'更正'}]},'owner',['A'])
+        self.assertEqual(updated['rows'][0]['type_detail'],'更正')
+
+    def test_proof_business_conflict_requires_explicit_review_and_rechecks_changes(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row('A','2026-09-20 10:00:00')],'owner')
+        row=batch['rows'][0]
+        def proof(current):
+            current['rows'][0]['evidence_images']=['proof']
+            current['images']=[{'image_id':'proof','name':'proof.png','status':'done','suggestions':[
+                {**row,'row_id':row['row_id'],'action':'上测试电' if row['action']!='上测试电' else '上正式电','result':'失败'}]}]
+        batch=service._change(batch['batch_id'],proof,validate=True)
+        self.assertEqual(batch['stats']['confirmable'],0)
+        self.assertTrue(batch['rows'][0]['evidence_business_conflict'])
+        reviewed=service.apply_image(batch['batch_id'],'proof',{'version':batch['version'],'row_id':row['row_id'],'fields':{},'review_business':True},'owner',['A'])
+        self.assertEqual(reviewed['stats']['confirmable'],1)
+        changed=service.update(batch['batch_id'],{'version':reviewed['version'],'rows':[{'row_id':row['row_id'],'action':'下正式电'}]},'owner',['A'])
+        self.assertTrue(changed['rows'][0]['evidence_business_conflict'])
+
+    def test_image_correction_validates_directory_duplicates_and_preserves_proof(self):
+        service=self.service.batches
+        batch=service.create_image_batch('owner',['A'],'A')
+        batch=service._change(batch['batch_id'],lambda current:current.update(images=[
+            {'image_id':'proof','name':'proof.png','status':'failed','suggestions':[]}]))
+        fields=self._manual_batch_row('A','2026-09-20 10:00:00')
+        corrected=service.correct_image(batch['batch_id'],'proof',{'version':batch['version'],'fields':fields},'owner',['A'])
+        self.assertEqual(corrected['rows'][0]['evidence_images'],['proof'])
+        self.assertEqual(corrected['rows'][0]['edits'][0]['field'],'image_correction')
+        with self.assertRaisesRegex(CabinetError,'已在本批'):
+            service.correct_image(batch['batch_id'],'proof',{'version':corrected['version'],'fields':fields},'owner',['A'])
+        with self.assertRaisesRegex(CabinetError,'不在当前楼栋目录'):
+            service.correct_image(batch['batch_id'],'proof',{'version':corrected['version'],'fields':{**fields,'rack':'Z99'}},'owner',['A'])
+        mixed=service._change(batch['batch_id'],lambda current:current['images'][0]['suggestions'].append({'scope':'B'}))
+        with self.assertRaisesRegex(CabinetError,'无权使用其他楼栋截图'):
+            service.correct_image(batch['batch_id'],'proof',{'version':mixed['version'],'fields':fields},'other',['A'])
+
+    def test_image_retry_preserves_corrections_and_delete_restore_invalidates_old_worker(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row('A','2026-09-20 10:00:00')],'owner')
+        candidate={**batch['rows'][0],'actual':'2026-09-19 10:00:00'}
+        batch=self._add_proof_images(batch,[[candidate]])
+        row=batch['rows'][0]; image=batch['images'][0]
+        batch=service.update(batch['batch_id'],{'version':batch['version'],'rows':[{'row_id':row['row_id'],'actual':'2026-09-20 10:01:02'}]},'owner',['A'])
+        with patch('bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout',return_value=[candidate]):
+            service.retry_image(batch['batch_id'],image['image_id'],{'version':batch['version']},'owner',['A'])
+            deadline=time.time()+5
+            while time.time()<deadline:
+                batch=service.get(batch['batch_id'])
+                if batch['images'][0]['status']!='recognizing': break
+                time.sleep(.02)
+        self.assertEqual(batch['rows'][0]['actual'],'2026-09-20 10:01:02')
+        entered=threading.Event(); release=threading.Event(); calls=[]
+        def slow_ocr(_content):
+            calls.append(1)
+            if len(calls)==1: entered.set();release.wait(5)
+            return [candidate]
+        with patch('bin.lan_bitable_template_portal.cabinet_power_evidence.recognize_image_with_timeout',side_effect=slow_ocr):
+            try:
+                service.retry_image(batch['batch_id'],image['image_id'],{'version':batch['version']},'owner',['A'])
+                self.assertTrue(entered.wait(5))
+                batch=service.get(batch['batch_id'])
+                removed=service.delete_image(batch['batch_id'],image['image_id'],batch['version'],'owner',['A'])
+                service.restore_image(batch['batch_id'],image['image_id'],removed['version'],'owner',['A'])
+            finally: release.set()
+            deadline=time.time()+5
+            while time.time()<deadline:
+                batch=service.get(batch['batch_id'])
+                if batch['images'][0]['status']!='recognizing': break
+                time.sleep(.02)
+        self.assertEqual(batch['images'][0]['status'],'done')
+        self.assertEqual(len(calls),2)
+        self.assertEqual(batch['rows'][0]['evidence_images'],[image['image_id']])
+
+    def test_export_is_downloadable_while_cloud_archive_upload_is_running(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.service._exports=ThreadPoolExecutor(max_workers=1)
+        archive=FakeExportFeishu();self.service.export_remote=archive;self.service._export_schema_ready=False
+        entered=threading.Event();release=threading.Event()
+        original=archive.upload_attachment
+        def upload(path,name):
+            entered.set();release.wait(5);return original(path,name)
+        with patch.object(archive,'upload_attachment',side_effect=upload),patch('bin.lan_bitable_template_portal.cabinet_power.export_snapshot',return_value=b'test-export'):
+            job=self.service.job('A','export','owner',{})
+            try:
+                self.assertTrue(entered.wait(5))
+                status=self.service.job_status(job['job_id'],'A')
+                self.assertEqual((status['status'],status['phase']),('running','uploading'))
+                export=self.service.local.document('A','export:'+status['result']['export_id'])
+                self.assertEqual(Path(export['path']).read_bytes(),b'test-export')
+            finally: release.set()
+            deadline=time.time()+5
+            while time.time()<deadline:
+                status=self.service.job_status(job['job_id'],'A')
+                if status['status']!='running': break
+                time.sleep(.02)
+        self.assertEqual(status['result']['cloud_upload_status'],'succeeded')
+
+    def test_recovery_pages_old_unfinished_images_and_skips_live_worker(self):
+        service=self.service.batches
+        first=service.create_manual([self._manual_batch_row('A','2026-09-20 10:00:00')],'owner')
+        service._change(first['batch_id'],lambda batch:batch.update(images=[
+            {'image_id':'old','status':'recognizing','worker':None,'extension':'.png','name':'old.png'}]))
+        with service.store._connect() as conn,conn:
+            for index in range(1005):
+                conn.execute("INSERT INTO batches VALUES(?,?,?,?,?,?,?,?,?)",(str(index),'owner','completed',None,'[]','{}',1,'2026-09-21','2026-09-21'))
+        with patch.object(service,'_queue_image') as queue:
+            service._recover_interrupted()
+            self.assertEqual(queue.call_args.args[0],first['batch_id'])
+        live=service._change(first['batch_id'],lambda batch:(batch['rows'][0].update(status='queued'),batch.update(worker=service._worker)))
+        second=CabinetBatchService(self.service,self.service.root)
+        try:
+            self.assertEqual(second.store.get(live['batch_id'])['rows'][0]['status'],'queued')
+        finally: second.shutdown(wait=True)
+
+    def test_list_sql_pagination_filters_permissions_without_decoding_history(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row('A','2026-09-20 10:00:00'),self._manual_batch_row('B','2026-09-20 10:00:00')],'owner')
+        with patch.object(service.store,'runtime_list',side_effect=AssertionError('unbounded scan')):
+            own=service.list('owner',[],scope='A',status='todo',page=99,page_size=1)
+            other=service.list('other',['B'],status='todo')
+            hidden=service.list('other',['E'],status='todo')
+        self.assertEqual((own['total'],own['page'],own['pending_count']),(1,1,1))
+        self.assertEqual(other['items'][0]['stats']['total'],1)
+        self.assertEqual(other['items'][0]['scopes'],['B'])
+        self.assertTrue(all(room.startswith('B楼') for room in other['items'][0]['rooms']))
+        self.assertEqual(hidden['total'],0)
+
+    def test_inventory_only_includes_new_directory_cabinets_without_operations(self):
+        snap=self.service._snapshot('A')
+        keys={(row['room'],row['rack']) for row in snap['config']['inventory']}
+        operated={(row['room'],row['rack']) for row in snap['operations'] if row.get('events') and not row.get('meta',{}).get('baseline_correction')}
+        self.assertEqual(self.service.overview('A')['inventory_only'],len(keys-operated))
+        self.assertGreaterEqual(self.service.overview('A')['inventory_only'],84)
 
     def _add_proof_images(self, batch, candidates):
         from PIL import Image

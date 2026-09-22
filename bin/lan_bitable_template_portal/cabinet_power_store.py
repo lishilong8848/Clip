@@ -187,7 +187,8 @@ class CabinetStore:
             conn.execute("BEGIN IMMEDIATE")
             version=conn.execute("SELECT payload FROM meta WHERE key='version'").fetchone()
             if version is None or int(version[0])!=expected_version: return False
-            conn.executemany("INSERT OR IGNORE INTO inventory VALUES(?,?,?)",
+            conn.executemany("INSERT INTO inventory VALUES(?,?,?) ON CONFLICT(room,rack) DO UPDATE SET "
+                             "payload=json_set(inventory.payload,'$.positions',json_extract(excluded.payload,'$.positions'))",
                              [(rack["room"],rack["rack"],encode(rack)) for rack in config["inventory"]])
             self._put(conn,"meta","config",{k:v for k,v in config.items() if k not in ("inventory","path")})
             self._version(conn)

@@ -302,6 +302,7 @@ def parse_template(content, scope):
         info = rooms.setdefault(room, {"id":room,"name":system_name(scope,room),"total":0})
         region = "A1:AX46" if scope == "B" and room in ("203","403") else "B1:AP46" if scope == "D" and room == "202" else "B1:AX46"
         if scope == "A" and room in ("203", "303", "403"): region = "A1:T42"
+        if scope == "B" and room in ("216", "247"): region = "A1:S26"
         if scope=='C' and room=='202': region='B1:AX49'
         layout = book.layout(name, region)
         info.update(sheet=name, region=region, layout=layout)
@@ -310,6 +311,9 @@ def parse_template(content, scope):
             if re.fullmatch(r"[A-Z]\d{2}", rack):
                 key = f"{room}/{rack}"
                 inv = inventory.setdefault(key, {"room":room, "rack":rack, "rack_type":"", "positions":[], "template_color":c["style"].get("fill", "")})
+                if scope == "B" and room in ("216", "247"):
+                    # New drawings supply geometry, not a replacement for the frozen carrier baseline.
+                    inv.update(template_color="", rack_type="网络机柜")
                 inv["positions"].append({"sheet":name, "range":c["range"]})
         if scope == "D" and room == "202":
             issues.append({"kind":"layout_review", "room":room, "message":"202工作表AV列起另有201布局。默认有效范围B1:AP46，右侧不计数；请核对镜像范围。"})
@@ -629,7 +633,7 @@ def project_layout(model, racks, building_racks=None):
     claimed=set()
     for cell in cells:
         label=cell["text"]; x,y=coord(cell["ref"])
-        if y<32 or not re.search(r"机柜|上电|下电|测试电|正式电",label): continue
+        if (y<32 and cell not in labelled.values()) or not re.search(r"机柜|上电|下电|测试电|正式电",label): continue
         metric="off" if "未上电" in label or "下电" in label else "test" if "测试电" in label else "formal" if "正式电" in label else "powered" if "上电" in label else "total" if "总" in label or "包间机柜数" in label else ""
         if not metric: continue
         target=next((c for xx in range(x+1,min(x+8,51)) if (c:=by_ref.get(f"{col_name(xx)}{y}")) and (c.get("formula") or re.fullmatch(r"\d+(?:\.\d+)?",c["text"]))),None)
@@ -642,6 +646,10 @@ def project_layout(model, racks, building_racks=None):
         chosen=[r for r in members if ("网络" not in label or r["rack_type"]=="网络机柜") and ("服务器" not in label or r["rack_type"]=="服务器机柜")]
         value=len(chosen) if metric=="total" else sum(r["state"] in ("formal","test") for r in chosen) if metric=="powered" else sum(r["state"]==metric for r in chosen)
         target["text"]=str(value)
+    if model.get("sheet") in ("B-216-机柜平面图", "B-247-机柜平面图"):
+        for ref,metric in (("G19","off"),("G20","powered")):
+            if ref in by_ref:
+                by_ref[ref].update(metric=metric,text=str(sum(r["state"]=="off" if metric=="off" else r["state"] in ("formal","test") for r in racks)))
     return model
 
 

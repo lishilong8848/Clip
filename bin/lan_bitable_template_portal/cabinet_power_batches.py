@@ -12,6 +12,7 @@ import tempfile
 import threading
 import uuid
 import io
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,6 +59,7 @@ EDITABLE_FIELDS = {
 }
 ACTIVE_ROW_STATUSES = {"ready", "failed", "rolled_back"}
 LOCKED_ROW_STATUSES = {"queued", "writing", "completed", "rollback_queued", "rolling_back", "rollback_failed", "rollback_blocked"}
+_WORKERS = weakref.WeakValueDictionary()
 
 
 def now():
@@ -105,6 +107,12 @@ class CabinetBatchStore:
                     batch_id TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS batch_list_views(
+                    batch_id TEXT NOT NULL, scope TEXT NOT NULL, is_todo INTEGER NOT NULL,
+                    rollback_error INTEGER NOT NULL, payload_json TEXT NOT NULL,
+                    PRIMARY KEY(batch_id,scope)
+                );
+                CREATE INDEX IF NOT EXISTS batch_list_scope ON batch_list_views(scope,is_todo,batch_id);
                 CREATE TABLE IF NOT EXISTS batch_rows(
                     batch_id TEXT NOT NULL,
                     item_id TEXT NOT NULL,
@@ -138,16 +146,17 @@ class CabinetBatchStore:
             marker = conn.execute(
                 "SELECT value FROM batch_meta WHERE key='batch_runtime_projection_version'"
             ).fetchone()
-            if not marker or marker[0] != "1":
+            if not marker or marker[0] != "2":
                 conn.execute("DROP TABLE IF EXISTS notice_summary_rows")
                 conn.execute("DROP TABLE IF EXISTS notice_summary_baselines")
                 conn.execute("DELETE FROM batch_meta WHERE key='notice_summary_projection_version'")
                 conn.execute("DELETE FROM batch_runtime_status")
+                conn.execute("DELETE FROM batch_list_views")
                 for row in conn.execute("SELECT * FROM batches"):
                     batch = self._decode(row, conn)
                     self._sync_runtime_status(conn, batch)
                 conn.execute(
-                    "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('batch_runtime_projection_version','1')"
+                    "INSERT OR REPLACE INTO batch_meta(key,value) VALUES('batch_runtime_projection_version','2')"
                 )
             conn.commit()
 
@@ -190,7 +199,7 @@ class CabinetBatchStore:
             if cursor.rowcount!=1:
                 exists=conn.execute("SELECT 1 FROM batches WHERE batch_id=?",(batch_id,)).fetchone()
                 raise CabinetError("批次已被其他操作更新，请重新载入" if exists else "批次不存在",409 if exists else 404)
-            for table in ("batch_rows","batch_images","batch_runtime_status"):
+            for table in ("batch_rows","batch_images","batch_runtime_status","batch_list_views"):
                 conn.execute(f"DELETE FROM {table} WHERE batch_id=?",(batch_id,))
 
     def by_hash(self, source_hash):
@@ -219,7 +228,8 @@ class CabinetBatchStore:
             "source_notice": {key: copy.deepcopy(source.get(key)) for key in
                               ("sent_at", "ended_at", "deleted_at", "rollback_error")},
             "images": [{"image_id": item.get("image_id", ""), "status": item.get("status", ""),
-                        "error": item.get("error", ""), "deleted_at": item.get("deleted_at", "")}
+                        "error": item.get("error", ""), "deleted_at": item.get("deleted_at", ""),
+                        "phase": item.get("phase", "")}
                        for item in batch.get("images", [])],
             "rows": [{key: copy.deepcopy(item.get(key)) for key in
                       ("row_id", "scope", "status", "notice_removed", "wrote_record",
@@ -228,6 +238,95 @@ class CabinetBatchStore:
         }
         conn.execute("INSERT OR REPLACE INTO batch_runtime_status(batch_id,payload_json) VALUES(?,?)",
                      (compact["batch_id"], _json(compact)))
+        conn.execute("DELETE FROM batch_list_views WHERE batch_id=?", (batch["batch_id"],))
+        for scope in ["*", *batch.get("scopes", [])]:
+            rows = batch.get("rows", []) if scope == "*" else [row for row in batch.get("rows", []) if row.get("scope") == scope]
+            item = CabinetBatchStore._list_item(batch, rows, scope == "*")
+            conn.execute("INSERT INTO batch_list_views VALUES(?,?,?,?,?)",
+                         (batch["batch_id"], scope, int(item["is_todo"]), int(item["notice_rollback_error"]), _json(item)))
+
+    @staticmethod
+    def _list_item(batch, rows, full):
+        source = batch.get("source_notice") or {}
+        deleted = bool(source.get("deleted_at"))
+        pending = sum(not row.get("notice_removed") and row.get("status") in {
+            "ready", "invalid", "conflict", "duplicate", "failed", "rolled_back", "queued", "writing",
+            "rollback_queued", "rolling_back", "rollback_failed", "rollback_blocked"} for row in rows)
+        images = [image for image in batch.get("images", []) if not image.get("deleted_at")]
+        recognizing = any(image.get("status") == "recognizing" for image in images)
+        rollback_error = any(row.get("status") in {"rollback_failed", "rollback_blocked"} and
+                             (deleted or row.get("notice_removed")) for row in rows) or bool(
+            source.get("rollback_error") and (full or any(row.get("status") in {
+                "queued", "writing", "rollback_queued", "rolling_back"} for row in rows)))
+        dates = sorted(str(row["actual"]) for row in rows if row.get("actual"))
+        rooms = sorted({str(row.get("scope", "")) + "楼 " + str(row.get("room", "")) for row in rows})
+        names = [item.get("name", "") for item in images or batch.get("files", [])]
+        title = str(source.get("title") or (names[0] if names else "") or "机柜批次") if full else "、".join(rooms)
+        if full and batch.get("source") == "text" and rows:
+            title=f"{rows[0].get('scope','')}楼 {rows[0].get('room','')}/{rows[0].get('rack','')} · 粘贴文本"
+        return {**{key: batch.get(key) for key in ("batch_id", "owner_id", "status", "source", "created_at", "updated_at", "error")},
+                "scopes": batch.get("scopes", []) if full else sorted({row["scope"] for row in rows}),
+                "stats": CabinetBatchService._stats(rows), "pending_rows": pending,
+                "is_todo": bool(batch["status"] != "cancelled" and (pending or recognizing or batch["status"] == "recognizing" or
+                    batch.get("source") == "image" and not batch.get("rows") and batch["status"] == "pending")),
+                "pending_label": "图片识别中" if recognizing else "待核对图片" if images else "待上传图片",
+                "notice_rollback_error": rollback_error, "source_notice_deleted": deleted,
+                "title": title, "rooms": rooms, "actual_from": dates[0] if dates else "", "actual_to": dates[-1] if dates else ""}
+
+    def list_page(self, owner, allowed, admin, scope, status, date_from, date_to, page, page_size):
+        conditions = ["(v.scope='*' AND (? OR b.owner_id=?) OR v.scope IN (SELECT value FROM json_each(?)) AND NOT (? OR b.owner_id=?))"]
+        args = [int(admin), owner, _json(list(allowed)), int(admin), owner]
+        if scope:
+            conditions.append("(EXISTS(SELECT 1 FROM json_each(b.scopes_json) WHERE value=?) OR ("
+                "json_extract(b.payload_json,'$.source')='image' AND json_extract(b.payload_json,'$.entry_scope')=? "
+                "AND NOT EXISTS(SELECT 1 FROM batch_rows r WHERE r.batch_id=b.batch_id)))")
+            args.extend([scope, scope])
+        if status != "notice_rollback_error":
+            conditions.append("COALESCE(json_extract(b.payload_json,'$.source_notice.deleted_at'),'')=''")
+        if status in {"todo", "notice_rollback_error"}:
+            conditions.append("v.is_todo=1" if status == "todo" else "v.rollback_error=1")
+        elif status:
+            conditions.append("b.status=?"); args.append(status)
+        if date_from:
+            conditions.append("b.created_at>=?"); args.append(date_from)
+        if date_to:
+            conditions.append("substr(b.created_at,1,10)<=?"); args.append(date_to)
+        join = "FROM batches b JOIN batch_list_views v ON v.batch_id=b.batch_id"
+        query = join + " WHERE " + " AND ".join(conditions)
+        page_size = max(1, min(int(page_size), 100))
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            total, pending = conn.execute("SELECT COUNT(*),COALESCE(SUM(todo),0) FROM (SELECT b.batch_id,MAX(v.is_todo) todo " + query + " GROUP BY b.batch_id)", args).fetchone()
+            page = max(1, min(int(page), max(1, (total + page_size - 1) // page_size)))
+            selected = conn.execute("SELECT b.batch_id " + query + " GROUP BY b.batch_id ORDER BY b.updated_at DESC,b.batch_id LIMIT ? OFFSET ?",
+                                    [*args, page_size, (page - 1) * page_size]).fetchall()
+            items = []
+            for selected_row in selected:
+                # Load only this page's authorized summaries, never all row payloads.
+                views = [json.loads(row[0]) for row in conn.execute("SELECT v.payload_json " + join +
+                    " WHERE " + conditions[0] + " AND b.batch_id=?", [int(admin), owner, _json(list(allowed)), int(admin), owner, selected_row[0]])]
+                item = views[0]
+                for view in views[1:]:
+                    item["scopes"] += view["scopes"]; item["rooms"] += view["rooms"]
+                    for key, value in view["stats"].items(): item["stats"][key] += value
+                    item["pending_rows"] += view["pending_rows"]
+                    for key in ("is_todo", "notice_rollback_error"): item[key] = item[key] or view[key]
+                    item["actual_from"] = min(filter(None, [item["actual_from"], view["actual_from"]]), default="")
+                    item["actual_to"] = max(item["actual_to"], view["actual_to"])
+                if len(views) > 1: item["title"] = "、".join(item["rooms"])
+                items.append(item)
+        return {"items": items, "total": total, "pending_count": pending, "page": page, "page_size": page_size}
+
+    def interrupted_batches(self):
+        after = 0
+        while True:
+            with self._connect() as conn:
+                selected = conn.execute("SELECT rowid,* FROM batches WHERE rowid>? AND (status IN ('running','recognizing') OR EXISTS("
+                    "SELECT 1 FROM batch_images i WHERE i.batch_id=batches.batch_id AND json_extract(i.payload_json,'$.status')='recognizing' "
+                    "AND COALESCE(json_extract(i.payload_json,'$.deleted_at'),'')='')) ORDER BY rowid LIMIT 50", (after,)).fetchall()
+                batches = [(row["rowid"], self._decode(row, conn)) for row in selected]
+            if not batches: return
+            for after, batch in batches: yield batch
 
     def runtime_status(self, batch_id):
         with self._connect() as conn:
@@ -396,12 +495,42 @@ class CabinetBatchService:
         self._ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cabinet-ocr")
         self._confirm_pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="cabinet-batch")
         self._scope_locks = {scope: threading.Lock() for scope in "ABCDE"}
+        self._worker = {"pid": os.getpid(), "instance": uuid.uuid4().hex}
+        _WORKERS[self._worker["instance"]] = self
         self._recover_interrupted()
 
     def shutdown(self, wait=False):
         self._pdf_pool.shutdown(wait=wait, cancel_futures=not wait)
         self._ocr_pool.shutdown(wait=wait, cancel_futures=not wait)
         self._confirm_pool.shutdown(wait=wait, cancel_futures=not wait)
+        if wait: _WORKERS.pop(self._worker["instance"], None)
+
+    @staticmethod
+    def _worker_alive(worker):
+        from .cabinet_power import process_alive
+        worker = worker or {}
+        return (worker.get("instance") in _WORKERS if worker.get("pid") == os.getpid()
+                else process_alive(worker.get("pid")))
+
+    def _queue_image(self, batch_id, image):
+        def claim(batch):
+            target = next(item for item in batch.get("images", []) if item["image_id"] == image["image_id"])
+            if target.get("deleted_at") or target.get("status") != "recognizing" or self._worker_alive(target.get("worker")):
+                raise CabinetError("截图已处理或正在识别", 409)
+            target.update(worker=self._worker, phase="queued", recognition_id=uuid.uuid4().hex)
+        try:
+            claimed=self._change(batch_id, claim)
+        except CabinetError as exc:
+            if exc.status_code == 409: return
+            raise
+        image=next(item for item in claimed["images"] if item["image_id"]==image["image_id"])
+        try: self._ocr_pool.submit(self._recognize_image, batch_id, image)
+        except RuntimeError:
+            def failed(batch):
+                target = next(item for item in batch["images"] if item["image_id"] == image["image_id"])
+                target.update(status="failed", worker=None, error="识别队列已停止，请重新识别")
+            self._change(batch_id, failed)
+            raise
 
     @staticmethod
     def _directory_size(path):
@@ -501,12 +630,12 @@ class CabinetBatchService:
                 if item["image_id"] not in known:
                     images.append(item)
                 elif known[item["image_id"]].get("status") == "failed":
-                    known[item["image_id"]].update(status="recognizing", error="", suggestions=[])
+                    known[item["image_id"]].update(status="recognizing", error="", worker=None, phase="queued", manual_retry=True)
         updated = self._change(batch_id, add)
         submitted = set()
         for item in accepted:
             if item["image_id"] not in submitted and existing_status.get(item["image_id"]) in (None, "failed"):
-                self._ocr_pool.submit(self._recognize_image, batch_id, item)
+                self._queue_image(batch_id, item)
                 submitted.add(item["image_id"])
         return updated
 
@@ -536,6 +665,12 @@ class CabinetBatchService:
         return digest([(image_id, index, values) for image_id, index, _candidate, values
                        in self._proof_time_entries(batch, row)])
 
+    def _proof_business_signature(self, batch, row, entries=None):
+        if entries is None: entries=self._proof_time_entries(batch, row)
+        return digest([[(image_id, index, candidate.get("action", ""), candidate.get("result", ""))
+                        for image_id, index, candidate, _times in entries],
+                       row.get("action", ""), row.get("result", "")])
+
     def _refresh_proof_times(self, batch, rows, overwrite=False):
         rows = list(rows)
         links = {row["row_id"]: set(row.get("evidence_images", [])) for row in rows}
@@ -559,6 +694,12 @@ class CabinetBatchService:
                         and all(review.get(key, "") == row.get(key, "") for key in values))
             conflict = any(len(found) > 1 for found in values.values()) and not reviewed
             row["evidence_time_conflict"] = conflict
+            business_review = row.get("evidence_business_review") or {}
+            business_conflict = any(candidate.get(key) and candidate[key] != row.get(key, "")
+                                    for _id, _index, candidate, _times in entries
+                                    for key in ("action", "result"))
+            business_conflict = business_conflict and business_review.get("signature") != self._proof_business_signature(batch, row, entries)
+            row["evidence_business_conflict"] = business_conflict
             if overwrite and not conflict and not reviewed:
                 for key, found in values.items():
                     if len(found) != 1:
@@ -574,12 +715,26 @@ class CabinetBatchService:
             for _id, _index, candidate, _times in entries:
                 candidate["attached"] = True
                 candidate["time_conflict"] = conflict
-                action_differs = candidate.get("action") and row.get("action") and candidate["action"] != row["action"]
-                candidate["status"] = "needs_review" if conflict or action_differs else "applied"
+                candidate["business_conflict"] = business_conflict
+                candidate["status"] = "needs_review" if conflict or business_conflict else "applied"
 
     def _recognize_image(self, batch_id, image):
         from .cabinet_power_evidence import recognize_image_with_timeout
 
+        def start(batch):
+            target = next(item for item in batch.get("images", []) if item["image_id"] == image["image_id"])
+            worker = target.get("worker")
+            if image.get("recognition_id") != target.get("recognition_id"):
+                raise CabinetError("截图识别任务已替换", 409)
+            if target.get("deleted_at") or target.get("status") != "recognizing" or (
+                worker and worker != self._worker and self._worker_alive(worker)
+            ) or target.get("phase") == "running" and self._worker_alive(worker):
+                raise CabinetError("截图已处理或正在识别", 409)
+            target.update(worker=self._worker, phase="running")
+        try: self._change(batch_id, start)
+        except CabinetError as exc:
+            if exc.status_code in (404, 409): return
+            raise
         try:
             path = self.root / "evidence" / (image["image_id"] + image["extension"])
             suggestions = recognize_image_with_timeout(path.read_bytes())
@@ -601,9 +756,9 @@ class CabinetBatchService:
             if batch.get("status") == "cancelled":
                 return
             target = next((item for item in batch.get("images", []) if item["image_id"] == image["image_id"]), None)
-            if target is None or target.get("deleted_at"):
+            if target is None or target.get("deleted_at") or target.get("worker") != self._worker or target.get("recognition_id") != image.get("recognition_id"):
                 return
-            target.update(status="done" if suggestions else "failed", error=error, suggestions=[])
+            target.update(status="done" if suggestions else "failed", phase="finished", error=error, suggestions=[])
             image_source = batch.get("source") == "image"
             linked = {}
             for index, candidate in enumerate(suggestions, 1):
@@ -652,13 +807,13 @@ class CabinetBatchService:
                             row[key] = candidate[key]
                             suggestion["applied_fields"].append(key)
                 linked[row["row_id"]] = row
-            self._refresh_proof_times(batch, linked.values(), overwrite=True)
+            self._refresh_proof_times(batch, linked.values(), overwrite=not target.get("manual_retry"))
         try:
             self._change(batch_id, apply, validate=True)
         except Exception as exc:
             def failed(batch):
                 target = next((item for item in batch.get("images", []) if item["image_id"] == image["image_id"]), None)
-                if target:
+                if target and target.get("recognition_id") == image.get("recognition_id"):
                     target.update(status="failed", error=f"截图匹配失败：{exc}")
             self._change(batch_id, failed)
 
@@ -685,6 +840,73 @@ class CabinetBatchService:
             from .cabinet_power_evidence import ensure_thumbnail
             path = ensure_thumbnail(path, self.root / "evidence_thumbnails" / (image_id + ".png"))
         return path, image
+
+    def retry_image(self, batch_id, image_id, payload, owner, allowed, admin=False):
+        try: version=int(payload["version"])
+        except (KeyError, TypeError, ValueError) as exc: raise CabinetError("缺少有效批次版本", 400) from exc
+        def retry(batch):
+            if not admin and (batch["owner_id"] != owner or not set(batch.get("scopes", [])) <= set(allowed)):
+                raise CabinetError("无权重新识别截图", 403)
+            image = next((item for item in batch.get("images", []) if item["image_id"] == image_id), None)
+            if image is None: raise CabinetError("截图不存在", 404)
+            if batch["status"] == "cancelled" or image.get("deleted_at") or image.get("status") == "recognizing":
+                raise CabinetError("截图当前不能重新识别", 409)
+            if any(image_id in row.get("evidence_images", []) and not self._proof_row_editable(row) for row in batch.get("rows", [])):
+                raise CabinetError("截图关联的机柜已提交或排除，不能重新识别", 409)
+            image.setdefault("recognition_history", []).append({"suggestions": copy.deepcopy(image.get("suggestions", [])), "owner": owner, "at": now()})
+            image.update(status="recognizing", error="", worker=None, phase="queued", manual_retry=True)
+        batch = self._change(batch_id, retry, expected_version=version)
+        self._queue_image(batch_id, next(item for item in batch["images"] if item["image_id"] == image_id))
+        return self.get(batch_id)
+
+    def correct_image(self, batch_id, image_id, payload, owner, allowed, admin=False):
+        fields = payload.get("fields")
+        if not isinstance(fields, dict) or set(fields) - EDITABLE_FIELDS:
+            raise CabinetError("截图更正字段无效", 400)
+        fields = {key: str(value or "").strip() for key, value in fields.items()}
+        scope = fields.get("scope", "")
+        if scope not in SCOPES or not admin and scope not in allowed:
+            raise CabinetError("无权更正该楼栋", 403)
+        inventory = next((item for item in self.cabinet._snapshot(scope)["config"]["inventory"]
+                          if (item["room"], item["rack"]) == (fields.get("room"), fields.get("rack"))), None)
+        if inventory is None: raise CabinetError("包间和机柜不在当前楼栋目录中", 400)
+        try:
+            version, index = int(payload["version"]), int(payload.get("candidate_index", -1))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CabinetError("截图更正版本或候选无效", 400) from exc
+        def correct(batch):
+            if batch.get("source") != "image" or batch["status"] == "cancelled":
+                raise CabinetError("仅图片登记批次支持从截图补全机柜", 409)
+            if not admin and batch["owner_id"] != owner and not set(batch.get("scopes", [])) & set(allowed):
+                raise CabinetError("无权修改该批次", 403)
+            image = next((item for item in batch.get("images", []) if item["image_id"] == image_id), None)
+            if image is None or image.get("deleted_at") or image.get("status") == "recognizing":
+                raise CabinetError("请等待截图识别完成后更正", 409)
+            if not admin and batch["owner_id"] != owner and not self._image_scopes(batch, image_id) <= set(allowed):
+                raise CabinetError("无权使用其他楼栋截图", 403)
+            suggestions = image.setdefault("suggestions", [])
+            if index < -1 or index >= len(suggestions): raise CabinetError("识别候选不存在", 404)
+            if index >= 0 and suggestions[index].get("status") == "unauthorized": raise CabinetError("无权使用其他楼栋截图", 403)
+            if index >= 0 and any(row["row_id"] == suggestions[index].get("row_id") for row in batch["rows"]):
+                raise CabinetError("识别内容已关联机柜，请编辑已有待办行", 409)
+            if any((row.get("scope"), row.get("room"), row.get("rack")) == (scope, fields["room"], fields["rack"]) for row in batch["rows"]):
+                raise CabinetError("该机柜已在本批中，请关联已有机柜，不要重复新增", 409)
+            if len(batch["rows"]) >= MAX_ROWS: raise CabinetError("批次机柜数量已达上限", 413)
+            original = copy.deepcopy(suggestions[index]) if index >= 0 else {}
+            values = {key: fields.get(key, "") for key in EDITABLE_FIELDS}
+            values["rack_type"] = inventory.get("rack_type", "")
+            row_id = "row_" + uuid.uuid4().hex[:24]
+            row = {**values, "row_id": row_id, "source_index": len(batch["rows"]) + 1,
+                   "file_id": image_id, "file_name": image["name"], "file_sha256": image_id,
+                   "original": original, "edits": [{"field": "image_correction", "before": original, "after": fields, "owner": owner, "at": now()}],
+                   "status": "ready", "issues": [], "error": "", "evidence_images": [image_id],
+                   "operation_id": "batch_" + digest([batch_id, row_id])[:32]}
+            candidate = {**values, "row_id": row_id, "original": original, "status": "applied", "reviewer": owner, "reviewed_at": now()}
+            if index >= 0: suggestions[index] = candidate
+            else: suggestions.append(candidate)
+            batch["rows"].append(row)
+            image.update(status="done", phase="finished", error="")
+        return self._change(batch_id, correct, expected_version=version, validate=True)
 
     def delete_image(self, batch_id, image_id, expected_version, owner, allowed, admin=False):
         batch = self.get(batch_id)
@@ -716,7 +938,7 @@ class CabinetBatchService:
                     removed_statuses[row["row_id"]] = row["status"]
                     row["status"] = "excluded_image"
             image.update(deleted_at=now(), deleted_by=owner, removed_row_ids=[row["row_id"] for row in linked],
-                         removed_row_statuses=removed_statuses)
+                         removed_row_statuses=removed_statuses, worker=None, phase="cancelled", recognition_id=uuid.uuid4().hex)
             self._refresh_proof_times(current, linked, overwrite=True)
 
         return self._change(batch_id, remove, expected_version=expected_version, validate=True)
@@ -756,13 +978,13 @@ class CabinetBatchService:
         updated = self._change(batch_id, restore, expected_version=expected_version, validate=True)
         image = next(item for item in updated["images"] if item["image_id"] == image_id)
         if image.get("status") == "recognizing":
-            self._ocr_pool.submit(self._recognize_image, batch_id, image)
+            self._queue_image(batch_id, image)
         return updated
 
     def apply_image(self, batch_id, image_id, payload, owner, allowed, admin=False):
         row_id = str(payload.get("row_id") or "")
         fields = payload.get("fields") or {}
-        if not row_id or not isinstance(fields, dict) or set(fields) - {"action", "expected", "actual", "supplier_rack"}:
+        if not row_id or not isinstance(fields, dict) or set(fields) - {"action", "result", "failure_reason", "expected", "actual", "supplier_rack"}:
             raise CabinetError("截图匹配参数无效", 400)
         try:
             expected_version = int(payload.get("version"))
@@ -816,19 +1038,27 @@ class CabinetBatchService:
                     "image_id": image_id, "owner": owner, "at": now()}
                 row.setdefault("edits", []).append({"field": "evidence_time_review", "before": "",
                     "after": image_id, "owner": owner, "at": now()})
+            if image_id in refs and payload.get("review_business") is True:
+                row["evidence_business_review"] = {"signature": self._proof_business_signature(batch, row),
+                    "image_id": image_id, "owner": owner, "at": now()}
+                row.setdefault("edits", []).append({"field": "evidence_business_review", "before": "",
+                    "after": {key: row.get(key, "") for key in ("action", "result")}, "owner": owner, "at": now()})
         return self._change(batch_id, apply, expected_version=expected_version, validate=True)
 
     def _recover_interrupted(self):
-        for batch in self.store.list(1000):
+        for batch in self.store.interrupted_batches():
             changed = False
-            if batch["status"] == "recognizing":
+            active = self._worker_alive(batch.get("worker"))
+            if batch["status"] == "recognizing" and not active:
                 batch["status"] = "failed"
                 batch["error"] = "PDF识别因服务退出而中断，请重新上传文件"
                 changed = True
             elif batch["status"] == "running":
                 for row in batch.get("rows", []):
+                    if self._worker_alive(row.get("worker") or batch.get("worker")): continue
                     if row.get("status") in ("queued", "writing"):
-                        row.update(status="failed", error="提交因服务退出而中断，可继续重试")
+                        journal=self.cabinet.local.document(row["scope"],"write:"+row["operation_id"]) if row.get("scope") in SCOPES and row.get("operation_id") else None
+                        row.update(status="failed", operation_started=bool(journal), error="提交因服务退出而中断，可继续重试")
                         changed = True
                     elif row.get("status") in ("rollback_queued", "rolling_back"):
                         row.update(status="rollback_failed",error="回退因服务退出中断，可继续重试")
@@ -842,7 +1072,7 @@ class CabinetBatchService:
                     pass
             for image in batch.get("images", []):
                 if image.get("status") == "recognizing" and not image.get("deleted_at"):
-                    self._ocr_pool.submit(self._recognize_image, batch["batch_id"], image)
+                    self._queue_image(batch["batch_id"], image)
 
     @staticmethod
     def _stats(rows):
@@ -1119,7 +1349,7 @@ class CabinetBatchService:
         if existing:
             if existing["status"] == "failed" and all((self.import_root / existing["batch_id"] / f"{item['file_id']}.pdf").is_file() for item in existing.get("files", [])):
                 def retry(batch):
-                    batch.update(status="recognizing", error="", rows=[])
+                    batch.update(status="recognizing", error="", rows=[], worker=self._worker)
                     for item in batch.get("files", []): item.update(status="waiting", pages=0, processed_pages=0, error="")
                     batch["progress"]={"files_done":0,"files_total":len(batch.get("files",[])),"pages_done":0,"pages_total":0}
                 existing=self._change(existing["batch_id"],retry)
@@ -1129,7 +1359,7 @@ class CabinetBatchService:
         batch_id = uuid.uuid4().hex
         batch = self.store.create({
             "batch_id": batch_id, "owner_id": owner, "status": "recognizing", "source_hash": source_hash,
-            "scopes": [], "source": "pdf", "files": metas, "rows": [], "error": "",
+            "scopes": [], "source": "pdf", "files": metas, "rows": [], "error": "", "worker": self._worker,
             "progress": {"files_done": 0, "files_total": len(files), "pages_done": 0, "pages_total": 0},
         })
         folder = self.import_root / batch_id
@@ -1349,7 +1579,7 @@ class CabinetBatchService:
             if all(key):
                 batch_slots.setdefault(slot, set()).add(row["action"])
         image_states = {}
-        if batch.get("source") == "image":
+        if batch.get("source") in ("image", "text"):
             pending_states = {scope: states.copy() for scope, states in current_states.items()}
             for pending_row, key, slot in sorted(normalized, key=lambda item: (item[0].get("actual", ""), item[0].get("source_index", 0))):
                 scope, room, rack, action, _actual = key
@@ -1363,6 +1593,8 @@ class CabinetBatchService:
             issues = []
             if row.get("evidence_time_conflict"):
                 issues.append({"code": "evidence_time_conflict", "message": "同一机柜截图时间不一致，请在确认截图中核对"})
+            if row.get("evidence_business_conflict"):
+                issues.append({"code": "evidence_business_conflict", "message": "截图与待办的操作或结果不一致，请核对证明后确认采用的内容"})
             rolled_back = row.get("status") == "rolled_back"
             scope, room, rack, action, actual = key
             if scope not in SCOPES:
@@ -1389,7 +1621,7 @@ class CabinetBatchService:
             if len(row.get("failure_reason", "")) > 1000:
                 issues.append({"code": "failure_reason_length", "message": "失败原因不能超过1000字"})
             inventory = inventories.get(scope, {}).get((room, rack))
-            if batch.get("source") in ("pdf", "image") and inventory is not None:
+            if batch.get("source") in ("pdf", "image", "text") and inventory is not None:
                 state = image_states.get(row["row_id"], current_states.get(scope, {}).get((room, rack), "off"))
                 row["current_power_state"] = state
                 if action and action not in POWER_ACTIONS_BY_STATE.get(state, ()):
@@ -1408,7 +1640,7 @@ class CabinetBatchService:
             duplicate = bool(all(key) and (key in existing_exact or key in seen))
             if rolled_back and self.store.later_completed(batch["batch_id"], scope, room, rack):
                 issues.append({"code": "later_batch", "message": "该机柜已有后续批次操作，不能再次确认"})
-            if conflict or row.get("evidence_time_conflict"):
+            if conflict or row.get("evidence_time_conflict") or row.get("evidence_business_conflict"):
                 if conflict: issues.append({"code": "time_conflict", "message": "同一机柜同一实际时间存在不同操作，须人工核对"})
                 row["status"] = "rolled_back" if rolled_back else "conflict"
             elif duplicate:
@@ -1462,6 +1694,79 @@ class CabinetBatchService:
                  "progress": {"files_done": 0, "files_total": 0, "pages_done": 0, "pages_total": 0}}
         self._refresh_summary(batch)
         return self.store.create(batch)
+
+    def text_preview(self, sources, allowed, patches=None, batch_id="preview"):
+        from .cabinet_power_text import parse_confirmation_text
+        if not isinstance(sources, list) or not 1 <= len(sources) <= MAX_ROWS:
+            raise CabinetError(f"每批须包含1至{MAX_ROWS}段粘贴文本", 400)
+        if any(not isinstance(item, dict) or not isinstance(item.get("text"), str) or
+               not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", str(item.get("id") or "")) for item in sources):
+            raise CabinetError("粘贴文本格式无效", 400)
+        if len({item["id"] for item in sources}) != len(sources): raise CabinetError("粘贴文本标识重复", 400)
+        if sum(len(item["text"].encode("utf-8")) for item in sources) > 1024 * 1024:
+            raise CabinetError("整批文本不能超过1MiB", 413)
+        candidates={}
+        for source in sources:
+            for index, candidate in enumerate(parse_confirmation_text(source["text"]), 1):
+                candidates[(source["id"], index)] = candidate
+        if len(candidates) > MAX_ROWS: raise CabinetError("单批最多2000条机柜记录", 413)
+        if patches is None: patches=[{"text_id":key[0],"text_row":key[1]} for key in candidates]
+        if not isinstance(patches, list) or not 1 <= len(patches) <= MAX_ROWS:
+            raise CabinetError("请选择1至2000条识别记录", 400)
+        selected=set(); rows=[]; inventories={}
+        for patch in patches:
+            if not isinstance(patch, dict) or set(patch)-EDITABLE_FIELDS-{"text_id","text_row"}:
+                raise CabinetError("文本更正格式无效", 400)
+            if not isinstance(patch.get("text_id"),str) or not isinstance(patch.get("text_row"),int):
+                raise CabinetError("文本记录标识无效",400)
+            key=(patch.get("text_id"), patch.get("text_row"))
+            if key not in candidates or key in selected: raise CabinetError("文本识别记录不存在或重复", 400)
+            selected.add(key); candidate=candidates[key]
+            values={field:str(candidate.get(field) or "") for field in EDITABLE_FIELDS}
+            values.update({field:str(patch[field] or "").strip() for field in EDITABLE_FIELDS if field in patch})
+            if candidate["scope"] not in allowed or values["scope"] not in allowed:
+                raise CabinetError("文本包含无权操作的楼栋", 403)
+            scope=values["scope"]
+            if scope not in inventories:
+                inventories[scope]={(rack["room"],rack["rack"]):rack for rack in self.cabinet._snapshot(scope)["config"]["inventory"]}
+            current_type=inventories[scope].get((values["room"],values["rack"]),{}).get("rack_type", "")
+            if "rack_type" not in patch: values["rack_type"]=current_type
+            original={field:str(candidate.get(field) or "") for field in EDITABLE_FIELDS}
+            original["rack_type"]=current_type
+            row_id="row_"+digest([batch_id,*key])[:24]
+            rows.append({**values,"row_id":row_id,"text_id":key[0],"text_row":key[1],
+                         "source_index":len(rows)+1,"file_id":"","file_name":"粘贴文本识别",
+                         "file_sha256":"","page":0,"source_row":key[1],"application_ids":[],
+                         "raw_text":candidate["raw_text"],"source_system_name":candidate["system_name"],"original":original,"edits":[],
+                         "status":"ready","issues":[],"error":"","operation_id":"batch_"+digest([batch_id,row_id])[:32]})
+        batch={"batch_id":batch_id,"source":"text","status":"pending","rows":rows,"files":[],"images":[],"error":""}
+        self._validate_rows(batch); self._refresh_summary(batch)
+        return batch
+
+    def create_text(self, payload, owner, allowed):
+        if not isinstance(payload.get("rows"),list) or not payload["rows"]:
+            raise CabinetError("没有可创建的文本识别记录",400)
+        request_id=str(payload.get("request_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_id): raise CabinetError("文本批次缺少有效请求标识", 400)
+        fingerprint=digest([payload.get("sources"),payload.get("rows")])
+        source_hash="text:"+digest([owner,request_id])
+        with self._lock:
+            existing=self.store.by_hash(source_hash)
+            if existing:
+                if existing.get("creation_hash") != fingerprint: raise CabinetError("创建请求内容已改变，请使用新的请求标识", 409)
+                if not set(existing.get("scopes",[])) <= set(allowed): raise CabinetError("无权查看该批次", 403)
+                return existing
+            batch=self.text_preview(payload.get("sources"),allowed,payload.get("rows"),uuid.uuid4().hex)
+            batch.update(owner_id=owner,source_hash=source_hash,creation_hash=fingerprint,
+                         text_sources=[{"id":item["id"],"text":item["text"]} for item in payload["sources"]])
+            for row in batch["rows"]:
+                row["edits"]=[{"field":key,"before":row["original"].get(key,""),"after":row[key],"owner":owner,"at":now()}
+                              for key in EDITABLE_FIELDS if row.get(key,"") != row["original"].get(key,"")]
+            try: return self.store.create(batch)
+            except sqlite3.IntegrityError:
+                existing=self.store.by_hash(source_hash)
+                if existing and existing.get("creation_hash")==fingerprint: return existing
+                raise CabinetError("文本批次创建冲突，请核对原请求",409)
 
     def _notice_rows(self, source, source_hash, parsed):
         direction = "up" if source["notice_type"] == "上电通告" else "down"
@@ -1801,6 +2106,7 @@ class CabinetBatchService:
                 image["suggestions"] = [item for item in image.get("suggestions", [])
                                         if not item.get("scope") or item.get("scope") in allowed]
             result["files"] = []
+            result.pop("text_sources",None)
         else:
             result.pop("_visible_stats", None)
         if deleted_notice:
@@ -1821,58 +2127,7 @@ class CabinetBatchService:
         return result
 
     def list(self, owner, allowed, admin=False, scope="", status="", date_from="", date_to="", page=1, page_size=20):
-        items = []
-        for batch in self.store.runtime_list():
-            deleted_notice = bool((batch.get("source_notice") or {}).get("deleted_at"))
-            if deleted_notice and status != "notice_rollback_error":
-                continue
-            if not admin and batch["owner_id"] != owner and not set(batch.get("scopes", [])) & set(allowed):
-                continue
-            if scope and scope not in batch.get("scopes", []) and not (
-                batch.get("source") == "image" and not batch.get("rows") and batch.get("entry_scope") == scope
-            ):
-                continue
-            if date_from and batch["created_at"][:10] < date_from:
-                continue
-            if date_to and batch["created_at"][:10] > date_to:
-                continue
-            visible_rows = batch.get("rows", []) if admin or batch["owner_id"] == owner else [
-                row for row in batch.get("rows", []) if row.get("scope") in allowed
-            ]
-            rollback_error = any(
-                row.get("status") in {"rollback_failed", "rollback_blocked"}
-                and (deleted_notice or row.get("notice_removed")) for row in visible_rows
-            ) or bool((batch.get("source_notice") or {}).get("rollback_error") and
-                      (admin or batch["owner_id"] == owner or any(
-                          row.get("status") in {"queued", "writing", "rollback_queued", "rolling_back"}
-                          for row in visible_rows)))
-            if status == "notice_rollback_error" and not rollback_error:
-                continue
-            pending_rows = sum(not row.get("notice_removed") and row.get("status") in {"ready", "invalid", "conflict", "duplicate", "failed",
-                                                      "rolled_back", "queued", "writing", "rollback_queued",
-                                                      "rolling_back", "rollback_failed", "rollback_blocked"}
-                               for row in visible_rows)
-            is_todo = bool(batch["status"] != "cancelled" and (
-                pending_rows or batch["status"] == "recognizing" or
-                batch.get("source") == "image" and not batch.get("rows") and batch["status"] == "pending"
-            ))
-            if status == "todo" and not is_todo or status and status not in {"todo", "notice_rollback_error"} and batch["status"] != status:
-                continue
-            active_images = [image for image in batch.get("images", []) if not image.get("deleted_at")]
-            pending_label = ("图片识别中" if any(image.get("status") == "recognizing" for image in active_images)
-                             else "待撤回或重传" if batch.get("source") == "image" and not active_images and batch.get("images")
-                             else "待上传图片" if batch.get("source") == "image" and not active_images
-                             else "待核对图片" if batch.get("source") == "image" else "解析中")
-            items.append({**{key: batch.get(key) for key in ("batch_id", "owner_id", "status", "source", "scopes", "stats", "created_at", "updated_at", "error")},
-                          "scopes": batch.get("scopes", []) if admin or batch["owner_id"] == owner else [scope for scope in batch.get("scopes", []) if scope in allowed],
-                          "stats": batch.get("stats") if admin or batch["owner_id"] == owner else self._stats(visible_rows),
-                          "pending_rows": pending_rows, "pending_label": pending_label, "is_todo": is_todo,
-                          "notice_rollback_error": rollback_error, "source_notice_deleted": deleted_notice})
-        page_size = max(1, min(int(page_size), 100))
-        pages = max(1, (len(items) + page_size - 1) // page_size)
-        page = max(1, min(int(page), pages))
-        return {"items": items[(page - 1) * page_size:page * page_size], "total": len(items), "page": page, "page_size": page_size,
-                "pending_count": sum(item["is_todo"] for item in items)}
+        return self.store.list_page(owner, allowed, admin, scope, status, date_from, date_to, page, page_size)
 
     def update(self, batch_id, payload, owner, allowed, admin=False):
         current = self.get(batch_id)
@@ -2035,7 +2290,7 @@ class CabinetBatchService:
                 break
         if exact:
             return None, exact["record_id"]
-        if batch.get("source") in ("pdf", "image"):
+        if batch.get("source") in ("pdf", "image", "text"):
             state = self._current_state(snap, row["room"], row["rack"])
             if row["action"] not in POWER_ACTIONS_BY_STATE.get(state, ()):
                 raise CabinetError(f"该机柜当前为{POWER_STATE_LABELS.get(state, '状态待核实')}，与确认单操作不匹配，请重新核对",409)
@@ -2065,6 +2320,8 @@ class CabinetBatchService:
             "inference": row.get("inference", ""), "original": row.get("original", {}),
             "edits": row.get("edits", []),
         }
+        if batch.get("source") == "text":
+            evidence["text_source"]={"text_id":row.get("text_id"),"row":row.get("text_row"),"raw":row.get("raw_text", "")}
         group_key = [batch["batch_id"], row["row_id"]]
         if row.get("attempts"):
             group_key.append(row["operation_id"])
@@ -2165,7 +2422,8 @@ class CabinetBatchService:
                         def failed(current):
                             target = next((item for item in current.get("rows", []) if item["row_id"] == row_id), None)
                             if target and target.get("status") != "completed":
-                                target.update(status="failed", error=str(exc), operation_started=True)
+                                journal = self.cabinet.local.document(scope, "write:" + target["operation_id"])
+                                target.update(status="failed", error=str(exc), operation_started=bool(journal))
                         try:
                             self._change(batch_id, failed)
                         except Exception:
@@ -2209,6 +2467,7 @@ class CabinetBatchService:
 
         selected_ids = {row["row_id"] for row in selected}
         def queue(current):
+            current["worker"] = self._worker
             for row in current["rows"]:
                 if row["row_id"] in selected_ids and row.get("status") in ACTIVE_ROW_STATUSES:
                     if row["status"] == "rolled_back":
@@ -2218,7 +2477,7 @@ class CabinetBatchService:
                         )})
                         row["operation_id"] = "batch_" + digest([batch_id, row["row_id"], len(attempts) + 1])[:32]
                         row.update(record_id="", wrote_record=False, operation_started=False)
-                    row.update(status="queued", error="")
+                    row.update(status="queued", error="", worker=self._worker)
         queued = self._change(batch_id, queue, expected_version=batch["version"])
         grouped = {}
         for row in queued["rows"]:
@@ -2276,7 +2535,8 @@ class CabinetBatchService:
         ids={row["row_id"] for row in selected}
         def queue(current):
             for row in current["rows"]:
-                if row["row_id"] in ids: row.update(status="rollback_queued",error="")
+                if row["row_id"] in ids: row.update(status="rollback_queued",error="",worker=self._worker)
+            current["worker"] = self._worker
         queued=self._change(batch_id,queue,expected_version=batch["version"])
         grouped={}
         for row in selected: grouped.setdefault(row["scope"],[]).append(row)
@@ -2316,6 +2576,8 @@ class CabinetBatchService:
             raise CabinetError("仅上传者或管理员可删除空批次",403)
         if batch.get("source")!="image" or batch.get("rows"):
             raise CabinetError("仅可删除没有机柜记录的图片识别批次",409)
+        if any(image.get("status") == "recognizing" and not image.get("deleted_at") for image in batch.get("images", [])):
+            raise CabinetError("图片仍在识别，请等待完成或先作废批次", 409)
         try: version=int(expected_version)
         except (TypeError,ValueError) as exc: raise CabinetError("缺少有效批次版本",400) from exc
         self.store.delete(batch_id,version)
