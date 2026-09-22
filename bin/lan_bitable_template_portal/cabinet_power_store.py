@@ -181,6 +181,18 @@ class CabinetStore:
             if not prior_baseline or extend_baseline: self._put(conn,"meta","baseline",sorted(set(baseline)|set(json.loads(prior_baseline[0]) if prior_baseline else [])))
             self._version(conn)
 
+    def extend_layout(self, scope, config, expected_version):
+        """Install verified additive room metadata without replacing ledger records or history."""
+        with self.connect(scope) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            version=conn.execute("SELECT payload FROM meta WHERE key='version'").fetchone()
+            if version is None or int(version[0])!=expected_version: return False
+            conn.executemany("INSERT OR IGNORE INTO inventory VALUES(?,?,?)",
+                             [(rack["room"],rack["rack"],encode(rack)) for rack in config["inventory"]])
+            self._put(conn,"meta","config",{k:v for k,v in config.items() if k not in ("inventory","path")})
+            self._version(conn)
+            return True
+
     def commit_operation(self, scope, journal, record=None, inventory=None, remove_id="", complete=False, baseline_ids=()):
         with self.connect(scope) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")

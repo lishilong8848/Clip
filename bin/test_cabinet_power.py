@@ -24,6 +24,15 @@ from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_xlsm_package_parts_use_default_namespace(self):
+        from .lan_bitable_template_portal.cabinet_power_excel import xml_bytes
+        for namespace, name in (("http://schemas.openxmlformats.org/package/2006/content-types", "Types"),
+                                ("http://schemas.openxmlformats.org/package/2006/relationships", "Relationships")):
+            root=ET.Element("{"+namespace+"}"+name)
+            raw=xml_bytes(root)
+            self.assertIn(("<"+name+" xmlns=\"").encode(),raw)
+            self.assertEqual(ET.fromstring(raw).tag,root.tag)
+
     def test_empty_batch_delete_route_is_registered(self):
         source=(Path(__file__).parent/"lan_bitable_template_portal/cabinet_power_routes.py").read_text(encoding="utf-8")
         self.assertIn('"batches/{batch_id}":["GET","PATCH","DELETE"]',source)
@@ -470,6 +479,52 @@ class CabinetPowerTests(unittest.TestCase):
         incompatible=copy.deepcopy(legacy); incompatible["inventory"][0]["positions"][0]["range"]="Z999:Z999"
         with self.assertRaisesRegex(CabinetError,"结构不一致"):
             self.service._packaged_config("A",incompatible)
+
+    def test_a_new_rooms_extend_frozen_baseline_without_resetting_existing_records(self):
+        from .lan_bitable_template_portal.cabinet_power import layout_identity
+        from .lan_bitable_template_portal.cabinet_power_excel import inventory_state_baseline
+        rooms={"203","303","403"}
+        legacy=copy.deepcopy(self.configs["A"])
+        legacy["rooms"]=[room for room in legacy["rooms"] if room["id"] not in rooms]
+        legacy["inventory"]=[rack for rack in legacy["inventory"] if rack["room"] not in rooms]
+        legacy["template_data"]["hash"]="previous-template"
+        records=[record for record in self.source_records if record["fields"]["楼栋"]=="A楼"]
+        baseline=inventory_state_baseline(legacy,[from_feishu(record) for record in records])[0]
+        frozen={"version":1,"layout_identity":layout_identity(legacy),"racks":baseline,"created_at":"2026-09-21"}
+        self.service.local.replace("A",legacy,records,[])
+        self.service.local.document("A","power_baseline:frozen_v1",frozen)
+        for rack in self.service._layout_data("A")["extension"]["inventory"]:
+            rack["record_id"]="rackA"+rack["room"]+rack["rack"]
+        snapshot=self.service._snapshot("A")
+        self.assertEqual(len(snapshot["config"]["inventory"]),1072)
+        self.assertEqual({key:value for key,value in snapshot["config"]["power_baseline"].items() if key in baseline},baseline)
+        self.assertEqual({r["record_id"] for r in self.service.local.load("A")["records"]},{r["record_id"] for r in records})
+        for room in rooms:
+            layout=self.service.layout("A",room)
+            self.assertEqual(layout["room"]["total"],28)
+            self.assertEqual(layout["room"]["region"],"A1:T42")
+            self.assertEqual(layout["summary"]["off"],28)
+        saved=self.service.save_operation("A",{"operation_id":"new_room_first_power_on", "room":"203","rack":"A02",
+            "rack_type":"服务器机柜","result":"成功","groups":[{"id":"new_room_event","action":"上正式电",
+            "expected":"2026-09-21 09:00:00","actual":"2026-09-21 09:01:00","result":"成功"}]},"owner")
+        fresh=CabinetPowerService(self.store,self.remote,self.tmp.name)
+        try:
+            current=fresh._snapshot("A")
+            self.assertEqual(next(r for r in fresh.overview("A")["racks"] if (r["room"],r["rack"])==("203","A02"))["state"],"formal")
+            content=(TEMPLATES/"A.xlsm").read_bytes()
+            exported=Workbook(export_workbook(content,current["config"],current["operations"]))
+            for room in rooms:
+                cells=exported.cells(room+"-机柜平面图")
+                self.assertEqual(exported.value(cells["K7"]),"B")
+                self.assertEqual(exported.value(cells["E37"]),28)
+                self.assertEqual(exported.value(cells["E38"]),1 if room=="203" else 0)
+                self.assertEqual(exported.value(cells["E39"]),27 if room=="203" else 28)
+                self.assertFalse(any(cell.get("t")=="e" or "#REF!" in cell.findtext(T("f"),"") for cell in cells.values()))
+            summary=dict(exported.rows("机柜上电汇总表（邮件）"))
+            self.assertEqual(summary[13][2],1072)
+            self.assertEqual(exported.archive.read("xl/vbaProject.bin"),Workbook(content).archive.read("xl/vbaProject.bin"))
+            self.assertEqual({key:value for key,value in fresh.local.document("A","power_baseline:frozen_v1")["racks"].items() if key in baseline},baseline)
+        finally: fresh.shutdown()
 
     def test_down_filter_includes_embedded_history_without_duplicate_records(self):
         down=self.service.operations("D",{"direction":"down","page_size":100})
@@ -2138,9 +2193,10 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         exported=Workbook(export_workbook(original,self.configs[scope],ops))
         for sheet in ("机柜上电汇总表（邮件）",):
             cells=exported.cells(sheet)
-            self.assertIsNone(cells["E15"].get("t"),(sheet,"E15"))
-            self.assertIsNone(cells["E15"].find(T("is")),(sheet,"E15"))
-            self.assertEqual(cells["F15"].findtext(T("f")),"F14+C15-E15")
+            row=next(number for number,values in exported.rows(sheet) if values.get(2)=="2025.5.17")
+            self.assertIsNone(cells[f"E{row}"].get("t"),(sheet,f"E{row}"))
+            self.assertIsNone(cells[f"E{row}"].find(T("is")),(sheet,f"E{row}"))
+            self.assertEqual(cells[f"F{row}"].findtext(T("f")),f"F{row-1}+C{row}-E{row}")
 
     def test_notice_batch_does_not_enter_export_until_confirmed(self):
         archive=FakeExportFeishu()

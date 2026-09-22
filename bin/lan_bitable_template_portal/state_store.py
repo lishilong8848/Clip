@@ -6562,6 +6562,10 @@ class LanPortalStateStore:
             )
             params.append(normalized_scope)
 
+        if source_key == "repair_cmdb" and normalized_scope != "ALL":
+            # Unassigned CMDB devices are shared candidates, regardless of their title-derived index.
+            clauses[-1] = "(" + clauses[-1] + " OR TRIM(COALESCE(json_extract(payload_json, '$.display_fields.楼栋'), '')) = '')"
+
         normalized_included_statuses = list(
             dict.fromkeys(
                 re.sub(r"\s+", "", self._text(value))

@@ -26,7 +26,7 @@ T = lambda name: f"{{{NS}}}{name}"
 OPS = ("上正式电", "上测试电", "测试电转正式电", "正式电转测试电", "下正式电", "下测试电")
 STATES = dict(zip(OPS, ("formal", "test", "formal", "test", "off", "off")))
 COLORS = {"formal": "#FF0000", "test": "#FFC000", "off": "#00B050", "unknown": "#94A3B8"}
-TOTALS = dict(zip("ABCDE", (988, 1076, 998, 988, 1272)))
+TOTALS = dict(zip("ABCDE", (1072, 1076, 998, 988, 1272)))
 RACK_TYPES = ("网络机柜", "服务器机柜")
 POWER_SUMMARY_LABELS = (("包间机柜总数：","total"),("测试电机柜总数：","test"),("正式电机柜总数：","formal"),("未上电机柜总数：","off"),("已上电机柜总数：","powered"))
 OP_PATTERN = re.compile("|".join(sorted(OPS, key=len, reverse=True)))
@@ -301,6 +301,7 @@ def parse_template(content, scope):
         room = match[0]
         info = rooms.setdefault(room, {"id":room,"name":system_name(scope,room),"total":0})
         region = "A1:AX46" if scope == "B" and room in ("203","403") else "B1:AP46" if scope == "D" and room == "202" else "B1:AX46"
+        if scope == "A" and room in ("203", "303", "403"): region = "A1:T42"
         if scope=='C' and room=='202': region='B1:AX49'
         layout = book.layout(name, region)
         info.update(sheet=name, region=region, layout=layout)
@@ -646,6 +647,10 @@ def project_layout(model, racks, building_racks=None):
 
 def xml_bytes(root, original=b""):
     # Preserve namespace declarations used only by mc:Ignorable/extension values.
+    namespace=root.tag.split("}")[0].lstrip("{")
+    if namespace in ("http://schemas.openxmlformats.org/package/2006/content-types",
+                     "http://schemas.openxmlformats.org/package/2006/relationships"):
+        ET.register_namespace("",namespace)
     declarations = dict(re.findall(rb'xmlns:([\w]+)="([^"]+)"', original))
     for prefix, uri in declarations.items():
         if not re.fullmatch(rb"ns\d+", prefix):

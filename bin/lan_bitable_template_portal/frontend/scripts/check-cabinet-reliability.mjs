@@ -181,6 +181,17 @@ try {
   page = await batchContext.newPage();
   const batchErrors = [];
   page.on("pageerror", error => batchErrors.push(error.message));
+  await page.goto(base + "/cabinet-power?scope=A");
+  await page.getByRole("heading", { name:"A楼机柜上下电",exact:true }).waitFor();
+  for (const room of ["203","303","403"]) {
+    await page.getByRole("button", {name:"包间汇总",exact:true}).click();
+    const row = page.locator(".mobile-card-table tbody tr").filter({hasText:`${room} 包间`});
+    await row.getByRole("button", {name:"查看平面图",exact:true}).click();
+    await page.locator(".map-canvas").waitFor();
+    await page.getByRole("button",{name:"A01 未上电/已下电",exact:true}).waitFor();
+    assert.equal(await page.locator(".map-canvas button[aria-label$=' 未上电/已下电']").count(),28);
+    await page.screenshot({path:path.join(output,`a-${room}-floorplan.png`),fullPage:true});
+  }
   await page.goto(base + "/cabinet-power");
   await page.getByRole("heading", { name:"机柜上下电",exact:true }).waitFor();
   await page.getByRole("button", { name:"批量登记",exact:true }).click();

@@ -51,6 +51,42 @@ class NoticeConnectionTests(unittest.TestCase):
                         service._execute_bitable_write(request, notice)
                     self.assertEqual(request.call_count, 1)
 
+    def test_cold_record_read_initializes_sdk_before_options_and_preserves_retry(self):
+        import lark_oapi as sdk
+
+        fields = {"事件状态": "进行中", "过程更新时间": "existing-progress"}
+        response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(
+            records=[SimpleNamespace(record_id="rec-cold", fields=fields)],
+        ))
+        for notice in ("事件通告", "维保通告", "变更通告", "设备检修", "设备轮巡", "设备调整", "上电通告", "下电通告"):
+            with self.subTest(notice=notice):
+                client, builder = Mock(), Mock()
+                for method in ("enable_set_token", "log_level", "timeout"):
+                    getattr(builder, method).return_value = builder
+                builder.build.return_value = client
+                batch_get = client.bitable.v1.app_table_record.batch_get
+                batch_get.side_effect = [ReadTimeout(), response, response]
+                with (
+                    patch.object(service, "lark", None),
+                    patch.object(service, "config", SimpleNamespace(user_token="test-token", app_token="test-base")),
+                    patch.object(service, "_resolve_handler", return_value=(None, "test-table", "")),
+                    patch.object(sdk.Client, "builder", return_value=builder),
+                    patch.object(service.time, "sleep"),
+                ):
+                    for _ in range(2):
+                        ok, record = service.query_record_by_id("rec-cold", notice)
+                        self.assertTrue(ok)
+                        self.assertEqual(record["fields"], fields)
+                        self.assertIs(service.lark, sdk)
+                self.assertEqual(batch_get.call_count, 3)
+                for call in batch_get.call_args_list:
+                    request, option = call.args
+                    self.assertEqual(request.request_body.record_ids, ["rec-cold"])
+                    self.assertEqual(option.user_access_token, "test-token")
+                client.bitable.v1.app_table_record.get.assert_not_called()
+                client.bitable.v1.app_table_record.create.assert_not_called()
+                client.bitable.v1.app_table_record.update.assert_not_called()
+
     def test_record_read_uses_batch_id_without_losing_fields(self):
         service._ensure_lark_sdk_loaded()
         fields = {"过程现场图片": [{"file_token": "old-photo"}], "过程更新时间": "old-progress"}

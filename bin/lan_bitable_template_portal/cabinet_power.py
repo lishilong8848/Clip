@@ -405,7 +405,11 @@ class CabinetPowerService:
         with self._scope_locks[scope]:
             version=self.local.version(scope)
             if self._cache.get(scope,{}).get("version")==version: return self._cache[scope]
-            saved=self.local.load(scope); config=self._packaged_config(scope,saved["config"])
+            for _attempt in range(3):
+                saved=self.local.load(scope); config=self._packaged_config(scope,saved["config"])
+                if layout_identity(config)==layout_identity(saved["config"]): break
+                self.local.extend_layout(scope,config,saved["version"])
+            else: raise CabinetError("机柜目录正在更新，请稍后重试",409)
             config["path"]=str(INITIAL_TEMPLATES/(scope+".xlsm"))
             config["baseline_event_ids"]=saved["baseline"]
             config["version"]=digest([config["rooms"],config["inventory"],config.get("template_data"),config.get("map_values")])
@@ -425,6 +429,16 @@ class CabinetPowerService:
         identity=layout_identity(config); saved=self.local.document(scope,FROZEN_BASELINE_KEY)
         if saved:
             baseline=saved.get("racks") if isinstance(saved,dict) else None
+            data=self._layout_data(scope); extension=data.get("extension") or {}
+            if (isinstance(baseline,dict) and saved.get("layout_identity")==extension.get("from_identity")
+                    and identity==data.get("layout_identity")):
+                additions=inventory_state_baseline({"scope":scope,"inventory":extension["inventory"]},[])[0]
+                extended={**baseline,**additions}
+                if set(baseline)&set(additions) or not baseline_matches_inventory({**config,"power_baseline":extended}):
+                    raise CabinetError("新增包间基线与现有机柜目录冲突，请先核对模板资料")
+                saved={**saved,"layout_identity":identity,"racks":extended,"extended_at":stamp()}
+                self.local.document(scope,FROZEN_BASELINE_KEY,saved)
+                baseline=extended
             if saved.get("layout_identity")!=identity or not isinstance(baseline,dict):
                 raise CabinetError("固定平面图基线与当前机柜目录不一致，请先核对模板资料")
             if not baseline_matches_inventory({**config,"power_baseline":baseline}):
@@ -511,9 +525,17 @@ class CabinetPowerService:
         data=self._layout_data(scope)
         if config.get("template_data",{}).get("hash")==data.get("hash"):
             return config
-        if not data.get("template_data") or data.get("layout_identity")!=layout_identity(config):
+        current=copy.deepcopy(config)
+        if data.get("layout_identity")!=layout_identity(current):
+            extension=data.get("extension") or {}
+            if extension.get("from_identity")==layout_identity(current):
+                current["rooms"].extend(copy.deepcopy(extension["rooms"]))
+                current["inventory"].extend(copy.deepcopy(extension["inventory"]))
+                additions=inventory_state_baseline({"scope":scope,"inventory":extension["inventory"]},[])[0]
+                current.setdefault("power_baseline",{}).update(additions)
+        if not data.get("template_data") or data.get("layout_identity")!=layout_identity(current):
             raise CabinetError("飞书布局与当前模板结构不一致，请重新同步模板资料")
-        current=copy.deepcopy(config); current["template_data"]=copy.deepcopy(data["template_data"])
+        current["template_data"]=copy.deepcopy(data["template_data"])
         current["map_values"]=copy.deepcopy(data.get("map_values",{}))
         room_meta={room["id"]:room for room in data.get("rooms_meta",[])}
         for room in current.get("rooms",[]):

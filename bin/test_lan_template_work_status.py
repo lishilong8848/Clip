@@ -28426,6 +28426,36 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "稀有制冷分类",
             )
 
+    def test_repair_cmdb_candidates_include_current_building_and_unassigned_devices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_snapshots_enabled = True
+            records = []
+            for record_id, building in (("a", "A楼"), ("b", "B楼"), ("missing", None), ("blank", ""), ("spaces", "   ")):
+                fields = {"设备名称": "柴发并机系统-5#柴油发电机" if record_id == "missing" else "B楼测试设备",
+                          "智航唯一ID": "5.140008.1.1.4.2" if record_id == "missing" else record_id,
+                          "位置": "全国/华东一区/HD8/南通数据中心A/A-F1/A-178.EA118"}
+                if building is not None:
+                    fields["楼栋"] = building
+                records.append(service._repair_snapshot_record_payload({"record_id": record_id, "display_fields": fields}))
+            for source in (REPAIR_SNAPSHOT_SOURCE_CMDB, REPAIR_SNAPSHOT_SOURCE_PROJECTS):
+                service._state_store.replace_repair_snapshot(source, records=records,
+                    app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_CMDB_TABLE_ID,
+                    meta={"catalog_version": REPAIR_CMDB_SNAPSHOT_VERSION})
+            service.start_repair_management_cmdb_cache_refresh = lambda: self.fail("must use existing cache")
+            for scope, expected in (("A", {"a", "missing", "blank", "spaces"}), ("D", {"missing", "blank", "spaces"}),
+                                    ("ALL", {"a", "b", "missing", "blank", "spaces"})):
+                result = service.list_repair_management_cmdb_candidates(scope=scope)
+                self.assertEqual({row["record_id"] for row in result["records"]}, expected)
+                self.assertEqual(result["total"], len(expected))
+            for query in ("5.140008.1.1.4.2", "柴发并机系统-5#柴油发电机"):
+                result = service.list_repair_management_cmdb_candidates(scope="A", query=query)
+                self.assertEqual([row["record_id"] for row in result["records"]], ["missing"])
+            page = service.list_repair_management_cmdb_candidates(scope="A", limit=2)
+            self.assertEqual((page["total"], page["returned"], page["has_more"]), (4, 2, True))
+            other = service._state_store.query_repair_snapshot_page(REPAIR_SNAPSHOT_SOURCE_PROJECTS, scope="A")
+            self.assertEqual([row["record_id"] for row in other["records"]], ["a"])
+
     def test_notice_command_latest_form_values_override_ongoing_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))

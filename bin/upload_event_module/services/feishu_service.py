@@ -120,7 +120,6 @@ def _ensure_lark_sdk_loaded() -> None:
         )
         from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest as LoadedGetNodeSpaceRequest
 
-        lark = loaded_lark
         AppTableRecord = LoadedAppTableRecord
         BatchCreateAppTableRecordRequest = LoadedBatchCreateAppTableRecordRequest
         BatchCreateAppTableRecordRequestBody = LoadedBatchCreateAppTableRecordRequestBody
@@ -134,6 +133,7 @@ def _ensure_lark_sdk_loaded() -> None:
         UploadAllMediaRequest = LoadedUploadAllMediaRequest
         UploadAllMediaRequestBody = LoadedUploadAllMediaRequestBody
         GetNodeSpaceRequest = LoadedGetNodeSpaceRequest
+        lark = loaded_lark
 
 
 def _info_logging_enabled() -> bool:
@@ -961,6 +961,7 @@ def query_record_by_id(record_id, notice_type):
         return False, err
 
     def do_batch_query(token: str):
+        client = _build_client(timeout=30.0)
         from lark_oapi.api.bitable.v1 import (
             BatchGetAppTableRecordRequest,
             BatchGetAppTableRecordRequestBody,
@@ -979,7 +980,7 @@ def query_record_by_id(record_id, notice_type):
             .build()
         )
         option = lark.RequestOption.builder().user_access_token(token).build()
-        return _build_client(timeout=30.0).bitable.v1.app_table_record.batch_get(
+        return client.bitable.v1.app_table_record.batch_get(
             batch_request, option
         )
 

@@ -266,7 +266,7 @@
       :status-message="cmdbPickerMessage"
       :status-tone="cmdbPickerMessageTone"
       :query="cmdbQuery"
-      search-placeholder="搜索设备名称或分类名称"
+      search-placeholder="搜索设备名称、智航唯一ID、分类或位置"
       @update:query="cmdbQuery = $event"
       @search="loadCmdbCandidates(true)"
       @load-more="loadCmdbCandidates(false)"
@@ -1685,7 +1685,7 @@ async function loadCmdbCandidates(resetLimit = true): Promise<void> {
     cmdbCandidateNote.value = reachedVisibleLimit
       ? "候选较多，当前已到显示上限，请输入关键词缩小范围。"
       : Number(payload.cache?.record_count || 0) > 0
-      ? `本地缓存 ${Number(payload.cache.record_count)} 条`
+      ? `本地缓存 ${Number(payload.cache.record_count)} 条 · 当前筛选匹配 ${Number(payload.total || 0)} 条`
       : "";
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
