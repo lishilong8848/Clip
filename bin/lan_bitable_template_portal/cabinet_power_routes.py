@@ -47,7 +47,7 @@ def install_cabinet_power_routes(app,controller,runtime):
                         if len(content)>10*1024*1024: raise CabinetError(f"{upload.filename} 超过10MiB",413)
                         if total>30*1024*1024: raise CabinetError("单批PDF总大小不能超过30MiB",413)
                         files.append((upload.filename,content))
-                    data=await asyncio.to_thread(service.batches.recognize,files,owner)
+                    data=await asyncio.to_thread(service.batches.recognize,files,owner,allowed,admin)
                     data=service.batches.visible(data,owner,allowed,admin)
                     response=controller._json_ok(request,session,data); response.status_code=202
                     return response

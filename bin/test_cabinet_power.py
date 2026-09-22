@@ -1387,6 +1387,48 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         cleaned=self.service.batches.cleanup_file(batch["batch_id"],cancelled["files"][0]["file_id"],"owner")
         self.assertTrue(cleaned["files"][0]["cleaned_at"])
 
+    def test_pdf_duplicate_upload_authorizes_before_retry_and_preserves_business_history(self):
+        service=self.service.batches
+        files=[("sample.pdf",b"%PDF-retry-permissions")]
+        with patch.object(service._pdf_pool,"submit") as submit:
+            batch=service.recognize(files,"owner")
+            def failed(current):
+                current.update(status="failed",scopes=["A"],error="rollback failed")
+                current["rows"]=[{**self._manual_batch_row("A","2026-09-14 01:02:03"),
+                    "row_id":"r1","status":"rollback_failed","operation_id":"original-operation",
+                    "record_id":"original-record","wrote_record":True,"attempts":[{"operation_id":"earlier-operation"}]}]
+            saved=service._change(batch["batch_id"],failed)
+            with self.assertRaises(CabinetError) as denied:
+                service.recognize(files,"other",["B"])
+            self.assertEqual(denied.exception.status_code,403)
+            for owner,allowed,admin in (("owner",["A"],False),("viewer",["A"],False),("admin",[],True)):
+                result=service.recognize(files,owner,allowed,admin)
+                self.assertTrue(result["duplicate_upload"])
+                self.assertEqual(service.get(batch["batch_id"]),saved)
+            self.assertEqual(submit.call_count,1)
+
+    def test_pdf_retry_only_restarts_empty_failed_recognition_with_current_version(self):
+        service=self.service.batches
+        files=[("sample.pdf",b"%PDF-retry-empty")]
+        with patch.object(service._pdf_pool,"submit") as submit:
+            batch=service.recognize(files,"owner")
+            failed=service._change(batch["batch_id"],lambda current:current.update(status="failed",error="parser failed",scopes=["A"]))
+            with self.assertRaises(CabinetError):
+                service.recognize(files,"viewer",["A"])
+            self.assertEqual(service.get(batch["batch_id"]),failed)
+            retried=service.recognize(files,"admin",[],True)
+            self.assertEqual(retried["status"],"recognizing")
+            self.assertEqual(submit.call_count,2)
+            service._change(batch["batch_id"],lambda current:current.update(status="failed"))
+            original_change=service._change
+            def concurrent_change(batch_id,callback,**kwargs):
+                original_change(batch_id,lambda current:current.update(status="cancelled"))
+                return original_change(batch_id,callback,**kwargs)
+            with patch.object(service,"_change",side_effect=concurrent_change),self.assertRaises(CabinetError):
+                service.recognize(files,"owner")
+            self.assertEqual(service.get(batch["batch_id"])["status"],"cancelled")
+            self.assertEqual(submit.call_count,2)
+
     def test_batch_confirm_creates_abc_and_appends_de(self):
         rows=[]
         for scope in ("A","D"):
@@ -2221,6 +2263,36 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(again["stats"]["completed"],1,again["rows"])
         self.assertNotEqual(again["rows"][0]["operation_id"],old_id)
 
+    def test_exclude_restore_reconfirms_rolled_back_row_with_new_attempt(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        for restore_mode in ("bulk","patch","legacy"):
+            with self.subTest(restore=restore_mode):
+                service.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+                done=self._wait_batch(batch["batch_id"])
+                self.assertEqual(done["stats"]["completed"],1,done["rows"])
+                old_id=done["rows"][0]["operation_id"]
+                service.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A"])
+                undone=self._wait_batch(batch["batch_id"])
+                row_id=undone["rows"][0]["row_id"]
+                excluded=service.update(batch["batch_id"],{"version":undone["version"],"rows":[{"row_id":row_id,"excluded":True}]},"owner",["A"])
+                if restore_mode=="patch":
+                    batch=service.update(batch["batch_id"],{"version":excluded["version"],"rows":[{"row_id":row_id,"excluded":False}]},"owner",["A"])
+                else:
+                    if restore_mode=="legacy":
+                        excluded=service._change(batch["batch_id"],lambda current:current["rows"][0].pop("excluded_from_status",None))
+                    else:
+                        excluded=service.cancel(batch["batch_id"],"owner",expected_version=excluded["version"])
+                    batch=service.restore_rows(batch["batch_id"],{"version":excluded["version"],"row_ids":[row_id]},"owner",["A"])
+                self.assertEqual(batch["rows"][0]["status"],"rolled_back")
+                service.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+                done=self._wait_batch(batch["batch_id"])
+                self.assertEqual(done["stats"]["completed"],1,done["rows"])
+                self.assertNotEqual(done["rows"][0]["operation_id"],old_id)
+                self.assertEqual(done["rows"][0]["attempts"][-1]["operation_id"],old_id)
+                service.rollback(batch["batch_id"],{"version":done["version"],"all":True},"owner",["A"])
+                batch=self._wait_batch(batch["batch_id"])
+
     def test_image_registration_does_not_infer_sequential_events_from_conflicting_screenshots(self):
         from PIL import Image
         rack=self.configs["A"]["inventory"][0]
@@ -2365,6 +2437,70 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(self._wait_batch(second["batch_id"])["rows"][0]["status"],"rolled_back")
         self.service.batches.rollback(first["batch_id"],{"version":first["version"],"all":True},"owner",["A"])
         self.assertEqual(self._wait_batch(first["batch_id"])["rows"][0]["status"],"rolled_back")
+
+    def test_rollback_uses_commit_order_not_batch_creation_or_business_time(self):
+        service=self.service.batches
+        for scope in ("A","D"):
+            with self.subTest(scope=scope):
+                first=service.create_manual([self._manual_batch_row(scope,"2026-09-14 01:02:03")],"owner")
+                second=service.create_manual([self._manual_batch_row(scope,"2026-09-14 01:03:03","下正式电")],"owner")
+                completed=[]
+                for batch in (second,first):
+                    service.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",[scope])
+                    batch=self._wait_batch(batch["batch_id"])
+                    self.assertEqual(batch["stats"]["completed"],1,batch["rows"])
+                    row=batch["rows"][0]
+                    journal=self.service.local.document(scope,"write:"+row["operation_id"])
+                    journal["completed_at"]=1000
+                    self.service.local.document(scope,"write:"+row["operation_id"],journal)
+                    completed.append(batch)
+                early,late=completed
+                self.assertGreater(service._write_order(scope,late["rows"][0]),service._write_order(scope,early["rows"][0]))
+                service.rollback(early["batch_id"],{"version":early["version"],"all":True},"owner",[scope])
+                self.assertEqual(self._wait_batch(early["batch_id"])["rows"][0]["status"],"rollback_blocked")
+                for batch in (late,early):
+                    batch=service.get(batch["batch_id"])
+                    service.rollback(batch["batch_id"],{"version":batch["version"],"all":True},"owner",[scope])
+                    self.assertEqual(self._wait_batch(batch["batch_id"])["rows"][0]["status"],"rolled_back")
+                early=service.get(early["batch_id"])
+                service.confirm(early["batch_id"],{"version":early["version"],"all":True},"owner",[scope])
+                self.assertEqual(self._wait_batch(early["batch_id"])["stats"]["completed"],1)
+                late=service.get(late["batch_id"])
+                with self.assertRaisesRegex(CabinetError,"没有可确认"):
+                    service.confirm(late["batch_id"],{"version":late["version"],"all":True},"owner",[scope])
+                self.assertIn("later_batch",{issue["code"] for issue in service.get(late["batch_id"])["rows"][0]["issues"]})
+
+    def test_same_batch_rollback_reverses_actual_commit_order(self):
+        service=self.service.batches
+        batch=service.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03"),
+                                    self._manual_batch_row("A","2026-09-14 01:03:03","下正式电")],"owner")
+        for row_id in [row["row_id"] for row in reversed(batch["rows"])]:
+            service.confirm(batch["batch_id"],{"version":batch["version"],"row_ids":[row_id]},"owner",["A"])
+            batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["stats"]["completed"],2,batch["rows"])
+        service.rollback(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["stats"]["rolled_back"],2)
+        service.confirm(batch["batch_id"],{"version":batch["version"],"all":True},"owner",["A"])
+        batch=self._wait_batch(batch["batch_id"])
+        self.assertEqual(batch["stats"]["completed"],2,batch["rows"])
+
+    def test_previous_release_write_order_uses_journal_completion_time(self):
+        service=self.service.batches
+        first=service.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
+        second=service.create_manual([self._manual_batch_row("A","2026-09-14 01:03:03")],"owner")
+        for batch,completed_at in ((first,2000.2),(second,2000.1)):
+            def complete(current):
+                current["rows"][0].update(status="completed",wrote_record=True,completed_at="2026-09-14 02:00:00")
+            service._change(batch["batch_id"],complete)
+            self.service.local.document("A","write:"+batch["rows"][0]["operation_id"],
+                                        {"status":"completed","completed_at":completed_at})
+        first,second=service.get(first["batch_id"]),service.get(second["batch_id"])
+        self.assertFalse(service._later_completed(first["batch_id"],first["rows"][0]))
+        self.assertTrue(service._later_completed(second["batch_id"],second["rows"][0]))
+        self.service.local.document("A","write:"+second["rows"][0]["operation_id"],{"status":"completed"})
+        service._change(second["batch_id"],lambda current:current["rows"][0].pop("completed_at"))
+        self.assertTrue(service._later_completed(first["batch_id"],first["rows"][0]),"unknown order must not permit rollback")
 
     def test_batch_rollback_recovers_lost_delete_response(self):
         batch=self.service.batches.create_manual([self._manual_batch_row("A","2026-09-14 01:02:03")],"owner")
@@ -2781,12 +2917,21 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(len(archive.records),1)
         self.assertEqual(next(iter(archive.records.values()))["fields"]["文件SHA256"],result["sha256"])
 
+    def _fake_export_file(self,scope,payload,job):
+        eid=uuid.uuid4().hex
+        path=self.service.atomic_file(Path("exports")/eid/"test.xlsm",b"test")
+        export={"export_id":eid,"scope":scope,"path":path,"filename":"test.xlsm",
+                "version":payload["snapshot"]["version"],"export_format_version":EXPORT_FORMAT_VERSION,
+                "created_at":job["created_at"]}
+        self.service.write("export:"+eid,export)
+        return self.service._public_export(export)
+
     def test_export_format_upgrade_invalidates_old_job_but_notice_changes_do_not(self):
         version=self.service._snapshot("B")["version"]
         self.service.write("export:old-stale",{"export_id":"old-stale","scope":"B","path":str(Path(self.tmp.name)/"old.xlsm"),
             "filename":"old.xlsm","version":version,"created_at":"2026-09-19 08:31:00"})
         calls=[]
-        self.service.do_export=lambda scope,payload,job: calls.append(payload["snapshot"]["version"]) or {"scope":scope}
+        self.service.do_export=lambda scope,payload,job: calls.append(payload["snapshot"]["version"]) or self._fake_export_file(scope,payload,job)
         request={"batch_id":"single_"+"f"*32}
         def wait(job):
             deadline=time.time()+10
@@ -2807,7 +2952,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(retry["job_id"],second["job_id"])
         self.assertEqual(len(calls),2)
         history=self.service.export_history("B")
-        self.assertEqual(history["items"][0]["stale_reason"],"导出格式已更新")
+        self.assertEqual(next(item for item in history["items"] if item["export_id"]=="old-stale")["stale_reason"],"导出格式已更新")
 
     def test_export_uses_local_snapshot_and_all_buildings_can_run_together(self):
         self.service.overview("D")
@@ -2825,7 +2970,10 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
 
     def test_completed_all_export_request_reuses_same_batch_job(self):
         calls=[]
-        self.service.do_export=lambda scope,payload,job: calls.append(payload["batch_id"]) or {"scope":scope}
+        def generate(scope,payload,job):
+            calls.append(payload["batch_id"])
+            return self._fake_export_file(scope,payload,job)
+        self.service.do_export=generate
         batch_id="all_"+"a"*32
         first=self.service.job("D","export","owner",{"batch_id":batch_id})
         deadline=time.time()+5
@@ -2834,6 +2982,22 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         retry=self.service.job("D","export","owner",{"batch_id":batch_id})
         self.assertEqual(retry["job_id"],first["job_id"])
         self.assertEqual(calls,[batch_id])
+        for missing in ("cleaned","unlinked","metadata"):
+            with self.subTest(missing=missing):
+                result=self.service.job_status(first["job_id"])["result"]
+                export=self.service.local.document("D","export:"+result["export_id"])
+                if missing=="cleaned": self.service.cleanup_export("D",result["export_id"])
+                elif missing=="unlinked": Path(export["path"]).unlink()
+                else:
+                    with self.service.local.connect("D") as conn,conn:
+                        conn.execute("DELETE FROM documents WHERE key=?",("export:"+result["export_id"],))
+                retry=self.service.job("D","export","owner",{"batch_id":batch_id})
+                self.assertNotEqual(retry["job_id"],first["job_id"])
+                deadline=time.time()+5
+                while time.time()<deadline and self.service.job_status(retry["job_id"])["status"]!="succeeded": time.sleep(.01)
+                self.assertEqual(self.service.job_status(retry["job_id"])["status"],"succeeded")
+                first=retry
+        self.assertEqual(calls,[batch_id]*4)
         second=self.service.job("D","export","owner",{"batch_id":"all_"+"b"*32})
         self.assertNotEqual(second["job_id"],first["job_id"])
 

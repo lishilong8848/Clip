@@ -141,6 +141,7 @@ class CabinetStore:
         version = int(row[0]) + 1 if row else 1
         CabinetStore._put(conn, "meta", "version", version)
         CabinetStore._put(conn, "meta", "updated_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+        return version
 
     def load(self, scope):
         with self.connect(scope) as conn:
@@ -223,9 +224,9 @@ class CabinetStore:
             if baseline_ids:
                 row=conn.execute("SELECT payload FROM meta WHERE key='baseline'").fetchone()
                 self._put(conn,"meta","baseline",sorted(set(json.loads(row[0]) if row else [])|set(baseline_ids)))
-            self._version(conn)
+            version = self._version(conn)
             final = copy.deepcopy(journal)
-            if complete: final.update(status="completed", error="", error_stage="", completed_at=time.time())
+            if complete: final.update(status="completed", error="", error_stage="", completed_at=time.time(), commit_version=version)
             self._put(conn, "documents", "write:" + journal["operation_id"], final)
         return final
 

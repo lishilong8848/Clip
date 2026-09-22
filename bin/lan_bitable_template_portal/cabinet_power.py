@@ -1524,8 +1524,11 @@ class CabinetPowerService:
             snapshot=self.snapshot(scope)
             old_payload=completed.get("payload") or {}
             old_snapshot_version=completed.get("snapshot_version") or (old_payload.get("snapshot") or {}).get("version")
-            if old_snapshot_version==snapshot["version"] and completed.get("export_format_version")==EXPORT_FORMAT_VERSION:
-                return {k:v for k,v in completed.items() if k!="payload"}
+            export_id=(completed.get("result") or {}).get("export_id")
+            export=self.local.document(scope,"export:"+export_id) if export_id else None
+            if (old_snapshot_version==snapshot["version"] and completed.get("export_format_version")==EXPORT_FORMAT_VERSION
+                    and export and not export.get("deleted") and Path(export.get("path") or "").is_file()):
+                return {**{k:v for k,v in completed.items() if k!="payload"},"result":self._public_export(export)}
             version=snapshot["version"]
             payload.update(snapshot=snapshot)
         else: version=0

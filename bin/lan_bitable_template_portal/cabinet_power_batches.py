@@ -469,18 +469,19 @@ class CabinetBatchStore:
                                     (max(1, min(int(limit), 1000)),))
             return [self._decode(row, conn) for row in rows]
 
-    def later_completed(self, batch_id, scope, room, rack):
+    def completed_rows(self, scope, room, rack):
         with self._connect() as conn:
             rows=conn.execute(
-                "SELECT child.payload_json FROM batch_rows child JOIN batches parent ON parent.batch_id=child.batch_id "
-                "WHERE parent.rowid>(SELECT rowid FROM batches WHERE batch_id=?) ORDER BY parent.rowid,child.ordinal",
-                (batch_id,),
+                "SELECT batch_id,payload_json FROM batch_rows WHERE json_extract(payload_json,'$.scope')=? "
+                "AND json_extract(payload_json,'$.room')=? AND json_extract(payload_json,'$.rack')=?",
+                (scope,room,rack),
             )
+            completed=[]
             for item in rows:
-                row=json.loads(item[0])
-                if (row.get("scope"), row.get("room"), row.get("rack")) == (scope,room,rack) and row.get("wrote_record") is not False and row.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}:
-                    return True
-        return False
+                row=json.loads(item[1])
+                if row.get("wrote_record") is not False and row.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}:
+                    completed.append((item[0],row))
+            return completed
 
 
 class CabinetBatchService:
@@ -1328,7 +1329,7 @@ class CabinetBatchService:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def recognize(self, files, owner):
+    def recognize(self, files, owner, allowed=(), admin=False):
         if not files or len(files) > MAX_FILES:
             raise CabinetError("每批须上传1至10份PDF")
         total = sum(len(content) for _name, content in files)
@@ -1347,12 +1348,21 @@ class CabinetBatchService:
         source_hash = hashlib.sha256("\n".join(sorted(item["sha256"] for item in metas)).encode()).hexdigest()
         existing = self.store.by_hash(source_hash)
         if existing:
-            if existing["status"] == "failed" and all((self.import_root / existing["batch_id"] / f"{item['file_id']}.pdf").is_file() for item in existing.get("files", [])):
+            if not admin and existing["owner_id"] != owner and not set(existing.get("scopes", [])) & set(allowed):
+                raise CabinetError("无权查看该批次", 403)
+            def can_retry(batch):
+                return (batch.get("source") == "pdf" and batch["status"] == "failed" and not batch.get("rows")
+                        and bool(batch.get("files")) and (admin or batch["owner_id"] == owner)
+                        and all((self.import_root / batch["batch_id"] / f"{item['file_id']}.pdf").is_file()
+                                for item in batch["files"]))
+            if can_retry(existing):
                 def retry(batch):
-                    batch.update(status="recognizing", error="", rows=[], worker=self._worker)
+                    if not can_retry(batch):
+                        raise CabinetError("批次已更新，不能重新识别", 409)
+                    batch.update(status="recognizing", error="", worker=self._worker)
                     for item in batch.get("files", []): item.update(status="waiting", pages=0, processed_pages=0, error="")
                     batch["progress"]={"files_done":0,"files_total":len(batch.get("files",[])),"pages_done":0,"pages_total":0}
-                existing=self._change(existing["batch_id"],retry)
+                existing=self._change(existing["batch_id"],retry,expected_version=existing["version"])
                 self._pdf_pool.submit(self._parse_batch,existing["batch_id"])
             existing["duplicate_upload"] = True
             return existing
@@ -1638,7 +1648,7 @@ class CabinetBatchService:
             conflict_actions = set(existing_slots.get(slot, set())) | set(batch_slots.get(slot, set()))
             conflict = bool(all(slot) and any(candidate != action for candidate in conflict_actions))
             duplicate = bool(all(key) and (key in existing_exact or key in seen))
-            if rolled_back and self.store.later_completed(batch["batch_id"], scope, room, rack):
+            if rolled_back and self._later_completed(batch["batch_id"], row):
                 issues.append({"code": "later_batch", "message": "该机柜已有后续批次操作，不能再次确认"})
             if conflict or row.get("evidence_time_conflict") or row.get("evidence_business_conflict"):
                 if conflict: issues.append({"code": "time_conflict", "message": "同一机柜同一实际时间存在不同操作，须人工核对"})
@@ -2197,8 +2207,12 @@ class CabinetBatchService:
                 if "excluded" in patch:
                     excluded = bool(patch["excluded"])
                     was_excluded = str(row.get("status", "")).startswith("excluded_")
-                    row["status"] = "excluded_manual" if excluded else "ready"
                     if was_excluded != excluded:
+                        if excluded:
+                            row["excluded_from_status"] = row["status"]
+                            row["status"] = "excluded_manual"
+                        else:
+                            self._restore_row_status(row)
                         row.setdefault("edits", []).append({"field": "excluded", "before": was_excluded, "after": excluded, "owner": owner, "at": now()})
         updated = self._change(batch_id, apply, expected_version=expected, validate=True, partial_rows=True)
         if payload.get("response_mode") != "delta":
@@ -2275,7 +2289,7 @@ class CabinetBatchService:
 
     def _row_payload(self, batch, row):
         scope = row["scope"]
-        if row.get("attempts") and self.store.later_completed(batch["batch_id"],scope,row["room"],row["rack"]):
+        if row.get("attempts") and self._later_completed(batch["batch_id"],row,previous_attempt=True):
             raise CabinetError("该机柜已有后续批次操作，不能再次确认",409)
         snap = self.cabinet._snapshot(scope)
         inventory = next((item for item in snap["config"]["inventory"] if (item["room"], item["rack"]) == (row["room"], row["rack"])),None)
@@ -2488,6 +2502,33 @@ class CabinetBatchService:
             self._confirm_pool.submit(self._confirm_scope, batch_id, building, ordered, owner)
         return queued
 
+    def _write_order(self, scope, row):
+        journal = self.cabinet.local.document(scope, "write:" + str(row.get("operation_id") or "")) or {}
+        if journal.get("commit_version"):
+            return (1, int(journal["commit_version"]))
+        # Previous releases only persisted completion times; never use batch creation order.
+        completed = journal.get("completed_at") or row.get("completed_at")
+        if completed:
+            try:
+                value = float(completed) if isinstance(completed, (int, float)) else dt.datetime.fromisoformat(completed).timestamp()
+                return (0, value)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    def _later_completed(self, batch_id, row, previous_attempt=False):
+        scope = row["scope"]
+        reference = row["attempts"][-1] if previous_attempt else row
+        order = self._write_order(scope, reference)
+        for other_batch, other in self.store.completed_rows(scope, row["room"], row["rack"]):
+            # The queue was validated before retry; earlier rows in this retry may now be committed.
+            if other_batch == batch_id and (other["row_id"] == row["row_id"] or previous_attempt):
+                continue
+            other_order = self._write_order(scope, other)
+            if order is None or other_order is None or other_order >= order:
+                return True
+        return False
+
     def _rollback_scope(self,batch_id,scope,row_ids):
         with self._scope_locks[scope]:
             for row_id in row_ids:
@@ -2498,13 +2539,7 @@ class CabinetBatchService:
                         row.update(status="rolling_back",error="")
                     batch=self._change(batch_id,start)
                     row=next(item for item in batch["rows"] if item["row_id"]==row_id)
-                    newer_in_batch=any(
-                        other["row_id"]!=row_id and other.get("wrote_record") is not False and other.get("status") in {"completed","rollback_queued","rolling_back","rollback_failed","rollback_blocked"}
-                        and (other.get("scope"),other.get("room"),other.get("rack"))==(scope,row["room"],row["rack"])
-                        and (other.get("actual", ""),other.get("source_index",0))>(row.get("actual", ""),row.get("source_index",0))
-                        for other in batch["rows"]
-                    )
-                    if newer_in_batch or self.store.later_completed(batch_id,scope,row["room"],row["rack"]):
+                    if self._later_completed(batch_id,row):
                         raise CabinetError("该机柜已有后续批次或本批后续操作，不能回退",409)
                     self.cabinet.rollback_batch_operation(scope,row["operation_id"],batch_id,row["record_id"])
                     def finished(current):
@@ -2541,7 +2576,7 @@ class CabinetBatchService:
         grouped={}
         for row in selected: grouped.setdefault(row["scope"],[]).append(row)
         for scope,rows in grouped.items():
-            ordered=[row["row_id"] for row in sorted(rows,key=lambda item:(item.get("actual",""),item.get("source_index",0)),reverse=True)]
+            ordered=[row["row_id"] for row in sorted(rows,key=lambda item:self._write_order(scope,item) or (0,0),reverse=True)]
             self._confirm_pool.submit(self._rollback_scope,batch_id,scope,ordered)
         return queued
 
@@ -2583,6 +2618,16 @@ class CabinetBatchService:
         self.store.delete(batch_id,version)
         return {"deleted":True,"batch_id":batch_id}
 
+    def _restore_row_status(self, row):
+        excluded = row.pop("excluded_from_status", "")
+        cancelled = row.pop("cancelled_from_status", "")
+        prior = excluded or cancelled
+        # Also recover rows excluded before the pre-exclusion status was saved.
+        rollback = (self.cabinet.local.document(row["scope"], "rollback:" + row["operation_id"])
+                    if row.get("rolled_back_at") and row.get("operation_id") and row.get("scope") in SCOPES else None)
+        row["status"] = ("rolled_back" if rollback and rollback.get("status") == "completed"
+                         else prior if prior in ("rolled_back", "excluded_image") else "ready")
+
     def restore_rows(self, batch_id, payload, owner, allowed, admin=False):
         batch = self.get(batch_id)
         if not admin and batch["owner_id"] != owner and not set(batch.get("scopes", [])) & set(allowed):
@@ -2609,8 +2654,7 @@ class CabinetBatchService:
                 if row.get("operation_started"):
                     raise CabinetError("该机柜存在未完成上传，不能直接恢复", 409)
                 before = row["status"]
-                prior = row.pop("cancelled_from_status", "")
-                row["status"] = prior if prior in ("rolled_back", "excluded_image") else "ready"
+                self._restore_row_status(row)
                 row.setdefault("edits", []).append({"field": "excluded", "before": before,
                                                     "after": False, "owner": owner, "at": now()})
                 changed += 1

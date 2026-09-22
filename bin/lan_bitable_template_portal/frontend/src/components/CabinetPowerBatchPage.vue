@@ -223,7 +223,7 @@ const mode = String(params.get('mode') || '');
 const actions = ['上正式电','上测试电','测试电转正式电','正式电转测试电','下正式电','下测试电'];
 const editableFields = ['scope','room','rack','supplier_rack','rack_type','type_detail','action','expected','actual','result','failure_reason','type_resolution'];
 const fieldLabels: Dict = {scope:'楼栋',room:'包间',rack:'机柜',supplier_rack:'供应商机柜号',rack_type:'机柜类型',type_detail:'类型明细',action:'操作类型',expected:'期望完成时间',actual:'实际完成时间',result:'结果',failure_reason:'失败原因',type_resolution:'类型处理',excluded:'排除状态',evidence_images:'证明截图',evidence_time_review:'截图时间核对'};
-const read = (path: string, query: Dict = {}, timeoutMs = 90000) => requestJson(`${api}/${path}?${new URLSearchParams(query as Record<string,string>)}`, { timeoutMs });
+const read = (path: string, query: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(`${api}/${path}?${new URLSearchParams(query as Record<string,string>)}`, { timeoutMs, signal });
 const write = (path: string, body: Dict, method = 'POST') => requestJson(`${api}/${path}`, { method, body: JSON.stringify(body), timeoutMs: 90000 });
 const backTarget = computed(() => params.get('origin') === 'cabinet' ? (props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power') : batchId || mode === 'new' ? `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? {scope:props.scope}:{}),...(params.get('status')==='todo'?{status:'todo'}:{}) })}` : props.scope ? `/cabinet-power?scope=${props.scope}` : '/cabinet-power');
 const buildingOptions = computed(() => {
@@ -272,6 +272,7 @@ const draftRestoreOpen = ref(false);
 const cleanupFileId = ref(''), rollbackRowId = ref(''), imageDeleteId = ref('');
 let pollTimer: number | undefined, saveTimer: number | undefined, savePromise: Promise<boolean> | undefined, disposed = false, pendingNavigation: (() => void) | undefined, removeGuard: (() => void) | undefined;
 let editorTrigger:HTMLElement|undefined;
+let listSequence=0, listAbort:AbortController|undefined;
 let draftChecked=false, discardDraft=false, pendingDraft:Dict|undefined;
 const draftStorage=resilientStorage('sessionStorage',()=>{error.value='浏览器无法保存批次恢复信息，请保持页面打开直到保存完成。';});
 const draftKey=`cabinet-batch-draft:${props.userId || 'session'}:${batchId}`;
@@ -633,7 +634,17 @@ async function loadBatch(): Promise<void> {
     if (['recognizing','running'].includes(batch.value.status) || batch.value.images?.some((item:Dict)=>!item.deleted_at&&item.status==='recognizing')) schedulePoll(); }
   catch(exc:any){error.value=exc.message||'批次读取失败';if(['recognizing','running'].includes(batch.value.status) || batch.value.images?.some((item:Dict)=>!item.deleted_at&&item.status==='recognizing'))schedulePoll();} finally{loading.value=false;}
 }
-async function loadList(page=1): Promise<void> { loading.value=true; try { list.value=await read('batches',{scope:listScope.value,status:listStatus.value,from:listFrom.value,to:listTo.value,page:String(page),page_size:'20'}); error.value=''; } catch(exc:any){error.value=exc.message||'待办读取失败';} finally{loading.value=false;} }
+async function loadList(page=1): Promise<void> {
+  if(disposed)return;
+  const sequence=++listSequence;
+  listAbort?.abort();listAbort=new AbortController();loading.value=true;
+  try {
+    const data=await read('batches',{scope:listScope.value,status:listStatus.value,from:listFrom.value,to:listTo.value,page:String(page),page_size:'20'},90000,listAbort.signal);
+    if(disposed||sequence!==listSequence)return;
+    list.value=data;error.value='';
+  } catch(exc:any) { if(!disposed&&sequence===listSequence)error.value=exc.message||'待办读取失败'; }
+  finally { if(!disposed&&sequence===listSequence)loading.value=false; }
+}
 function pollingActive(status:Dict=batch.value):boolean{return ['recognizing','running'].includes(String(status.status||''))||(status.images||[]).some((item:Dict)=>!item.deleted_at&&item.status==='recognizing');}
 async function pollBatchStatus():Promise<void>{
   if(disposed||!batchId)return;
@@ -786,7 +797,7 @@ function closeImageOnEscape(event:KeyboardEvent):void{
   else if(!event.shiftKey&&document.activeElement===nodes[nodes.length-1]){event.preventDefault();nodes[0].focus();}
 }
 onMounted(async()=>{window.addEventListener('paste',pasteFiles);window.addEventListener('keydown',closeImageOnEscape);window.addEventListener('pagehide',persistBatchDraft);removeGuard=registerNavigationGuard((_target,proceed)=>{if(!batchId&&textFragments.value.length){pendingNavigation=proceed;discardOpen.value=true;return false;}if(!dirtyCount.value&&!saving.value&&!saveConflicts.value.length)return true;void saveChanges().then(ok=>{if(ok&&!dirtyCount.value)proceed();else{pendingNavigation=proceed;discardOpen.value=true;}});return false;});if(batchId)await loadBatch();else if(mode!=='new')await loadList();else restoreTextDraft();if(mode==='new'&&createMode.value==='manual')await loadDirectory();});
-onBeforeUnmount(()=>{persistBatchDraft();disposed=true;window.clearTimeout(pollTimer);window.clearTimeout(saveTimer);window.removeEventListener('paste',pasteFiles);window.removeEventListener('keydown',closeImageOnEscape);window.removeEventListener('pagehide',persistBatchDraft);persistTextDraft();for(const url of imagePreviewUrls.values())URL.revokeObjectURL(url);imagePreviewUrls.clear();removeGuard?.();});
+onBeforeUnmount(()=>{persistBatchDraft();disposed=true;listAbort?.abort();window.clearTimeout(pollTimer);window.clearTimeout(saveTimer);window.removeEventListener('paste',pasteFiles);window.removeEventListener('keydown',closeImageOnEscape);window.removeEventListener('pagehide',persistBatchDraft);persistTextDraft();for(const url of imagePreviewUrls.values())URL.revokeObjectURL(url);imagePreviewUrls.clear();removeGuard?.();});
 </script>
 
 <style scoped>

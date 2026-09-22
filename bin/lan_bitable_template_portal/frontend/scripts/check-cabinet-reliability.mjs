@@ -498,6 +498,84 @@ try {
   await page.screenshot({path:path.join(output,"image-correction.png"),fullPage:true});
   assert.deepEqual(batchErrors, []);
   await batchContext.close();
+  const listContext=await browser.newContext({viewport:{width:1366,height:900}});
+  await listContext.addInitScript(()=>{
+    const original=window.fetch.bind(window);
+    window.__listAborts=0;
+    window.fetch=(input,options={})=>{
+      if(new URL(String(input),location.href).pathname==='/api/cabinet-power/batches'){
+        options.signal?.addEventListener('abort',()=>window.__listAborts++);
+        // Deliver late responses even after cancellation to exercise the sequence guard.
+        return original(input,{...options,signal:undefined});
+      }
+      return original(input,options);
+    };
+  });
+  page=await listContext.newPage();
+  const listErrors=[];
+  page.on('pageerror',error=>listErrors.push(error.message));
+  let held;
+  const listResponse=(scope,currentPage)=>({ok:true,data:{items:[{batch_id:`list-${scope}`,title:`${scope}-latest`,scopes:[scope],status:'pending'}],total:40,page:currentPage,page_size:20}});
+  await page.route('**/api/cabinet-power/batches?*',async route=>{
+    const query=new URL(route.request().url()).searchParams;
+    if(held&&query.get('scope')===(held.scope||'A')){held.resolve(route);return;}
+    await route.fulfill({json:listResponse(query.get('scope'),Number(query.get('page')||1))});
+  });
+  await page.goto(base+'/cabinet-power/batches?scope=E&status=todo');
+  await page.getByText('E-latest',{exact:true}).waitFor();
+  for(const lateError of [false,true]){
+    held=Promise.withResolvers();
+    await page.locator('.filters select').first().selectOption('A');
+    await page.getByRole('button',{name:'查询',exact:true}).click();
+    const oldRoute=await held.promise;
+    await page.locator('.filters select').first().selectOption('B');
+    await page.getByLabel('开始日期',{exact:true}).fill('2026-09-01');
+    await page.getByRole('button',{name:'查询',exact:true}).click();
+    await page.getByText('B-latest',{exact:true}).waitFor();
+    const oldResponse=page.waitForResponse(response=>response.url()===oldRoute.request().url());
+    await oldRoute.fulfill(lateError?{status:500,json:{ok:false,error:'stale list failure'}}:{json:listResponse('A',1)});
+    await (await oldResponse).finished();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await page.locator('.filters select').first().inputValue(),'B');
+    assert(await page.getByText('B-latest',{exact:true}).isVisible());
+    assert.equal(await page.locator('.notice.danger').count(),0);
+    assert(await page.getByRole('button',{name:'刷新',exact:true}).isEnabled());
+  }
+  held=Promise.withResolvers();
+  await page.locator('.filters select').first().selectOption('A');
+  await page.getByRole('button',{name:'查询',exact:true}).click();
+  const staleRoute=await held.promise;
+  held={...Promise.withResolvers(),scope:'B'};
+  await page.locator('.filters select').first().selectOption('B');
+  await page.getByRole('button',{name:'查询',exact:true}).click();
+  const currentRoute=await held.promise;
+  const staleResponse=page.waitForResponse(response=>response.url()===staleRoute.request().url());
+  await staleRoute.fulfill({status:500,json:{ok:false,error:'stale error while loading'}});
+  await (await staleResponse).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert(await page.getByRole('button',{name:'刷新',exact:true}).isDisabled());
+  assert.equal(await page.locator('.notice.danger').count(),0);
+  const currentResponse=page.waitForResponse(response=>response.url()===currentRoute.request().url());
+  await currentRoute.fulfill({json:listResponse('B',1)});
+  await (await currentResponse).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert(await page.getByRole('button',{name:'刷新',exact:true}).isEnabled());
+  held=undefined;
+  await page.locator('.pagination').getByRole('button',{name:'2',exact:true}).click();
+  await page.locator('.pagination button.active').filter({hasText:'2'}).waitFor();
+  await page.screenshot({path:path.join(output,'batch-list-latest-query.png'),fullPage:true});
+  held=Promise.withResolvers();
+  await page.locator('.filters select').first().selectOption('A');
+  await page.getByRole('button',{name:'查询',exact:true}).click();
+  const abandoned=await held.promise;
+  await page.getByRole('button',{name:'批量登记',exact:true}).click();
+  await page.getByRole('heading',{name:'机柜批量登记',exact:true}).waitFor();
+  await abandoned.fulfill({status:500,json:{ok:false,error:'abandoned list failure'}});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('.notice.danger').count(),0);
+  assert(await page.evaluate(()=>window.__listAborts>=3));
+  assert.deepEqual(listErrors,[]);
+  await listContext.close();
   console.log("cabinet saves, export response recovery, five-building upload and layout passed");
 } catch (error) {
   if (page && !page.isClosed()) await page.screenshot({ path: path.join(output, "failure.png") });
