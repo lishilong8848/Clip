@@ -407,8 +407,13 @@ class CabinetPowerService:
             if self._cache.get(scope,{}).get("version")==version: return self._cache[scope]
             for _attempt in range(3):
                 saved=self.local.load(scope); config=self._packaged_config(scope,saved["config"])
-                if layout_identity(config)==layout_identity(saved["config"]): break
-                self.local.extend_layout(scope,config,saved["version"])
+                if layout_identity(config)!=layout_identity(saved["config"]):
+                    self.local.extend_layout(scope,config,saved["version"])
+                    continue
+                extension=self._layout_data(scope).get("extension") or {}
+                if extension.get("types_revision") and self.local.apply_inventory_types(
+                        scope,extension["types_revision"],extension["inventory"]): continue
+                break
             else: raise CabinetError("机柜目录正在更新，请稍后重试",409)
             config["path"]=str(INITIAL_TEMPLATES/(scope+".xlsm"))
             config["baseline_event_ids"]=saved["baseline"]

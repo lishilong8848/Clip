@@ -193,6 +193,24 @@ class CabinetStore:
             self._version(conn)
             return True
 
+    def apply_inventory_types(self, scope, revision, inventory):
+        """Fill previously unknown directory types once; never rewrite operation history."""
+        key="inventory_types:"+revision
+        with self.connect(scope) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM documents WHERE key=?",(key,)).fetchone(): return False
+            changed=0
+            for rack in inventory:
+                if rack.get("rack_type") not in ("网络机柜","服务器机柜"): continue
+                changed+=conn.execute(
+                    "UPDATE inventory SET payload=json_set(payload,'$.rack_type',?) "
+                    "WHERE room=? AND rack=? AND COALESCE(json_extract(payload,'$.rack_type'),'')=''",
+                    (rack["rack_type"],rack["room"],rack["rack"]),
+                ).rowcount
+            self._put(conn,"documents",key,{"applied_at":time.time(),"changed":changed})
+            if changed: self._version(conn)
+            return bool(changed)
+
     def commit_operation(self, scope, journal, record=None, inventory=None, remove_id="", complete=False, baseline_ids=()):
         with self.connect(scope) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")

@@ -12167,6 +12167,8 @@ class MaintenancePortalService:
                 continue
             if isinstance(value, (dict, list)):
                 result[meta.field_name] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            elif field_type == 1 or ui_type == "text":
+                result[meta.field_name] = str(value)
             else:
                 result[meta.field_name] = value
         return result, list(dict.fromkeys(warnings))

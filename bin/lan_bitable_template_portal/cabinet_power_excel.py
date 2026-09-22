@@ -1248,7 +1248,8 @@ def _apply_period_summary(root,book,config,daily,monthly):
         sections.append(section); return section
     month_sections=[item for item in sections if item["kind"]=="month"]
     if not month_sections and day_sections:
-        placement={"A":(8,12,13),"B":(18,1,2),"C":(32,12,13)}.get(config["scope"])
+        day_header=min(item["header"] for item in day_sections)
+        placement={"A":(8,day_header-1,day_header),"B":(18,1,2),"C":(32,12,13)}.get(config["scope"])
         if placement:
             start,title_row,header_row=placement
             month=create_section("month",start,title_row,header_row,day_sections[-1],f"{config['scope']}栋上、下电月度统计",

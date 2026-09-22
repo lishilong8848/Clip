@@ -495,6 +495,7 @@ class CabinetPowerTests(unittest.TestCase):
         self.service.local.document("A","power_baseline:frozen_v1",frozen)
         for rack in self.service._layout_data("A")["extension"]["inventory"]:
             rack["record_id"]="rackA"+rack["room"]+rack["rack"]
+            self.service._directory.records[rack["record_id"]]["fields"]["机柜类型"]="网络机柜"
         snapshot=self.service._snapshot("A")
         self.assertEqual(len(snapshot["config"]["inventory"]),1072)
         self.assertEqual({key:value for key,value in snapshot["config"]["power_baseline"].items() if key in baseline},baseline)
@@ -504,6 +505,7 @@ class CabinetPowerTests(unittest.TestCase):
             self.assertEqual(layout["room"]["total"],28)
             self.assertEqual(layout["room"]["region"],"A1:T42")
             self.assertEqual(layout["summary"]["off"],28)
+            self.assertTrue(all(r["rack_type"]=="网络机柜" for r in snapshot["config"]["inventory"] if r["room"]==room))
         saved=self.service.save_operation("A",{"operation_id":"new_room_first_power_on", "room":"203","rack":"A02",
             "rack_type":"服务器机柜","result":"成功","groups":[{"id":"new_room_event","action":"上正式电",
             "expected":"2026-09-21 09:00:00","actual":"2026-09-21 09:01:00","result":"成功"}]},"owner")
@@ -522,8 +524,32 @@ class CabinetPowerTests(unittest.TestCase):
                 self.assertFalse(any(cell.get("t")=="e" or "#REF!" in cell.findtext(T("f"),"") for cell in cells.values()))
             summary=dict(exported.rows("机柜上电汇总表（邮件）"))
             self.assertEqual(summary[13][2],1072)
+            for row in (10,11,12):
+                self.assertEqual(summary[row][5],27 if row==10 else 28)
+                self.assertEqual(summary[row][8],1 if row==10 else 0)
             self.assertEqual(exported.archive.read("xl/vbaProject.bin"),Workbook(content).archive.read("xl/vbaProject.bin"))
             self.assertEqual({key:value for key,value in fresh.local.document("A","power_baseline:frozen_v1")["racks"].items() if key in baseline},baseline)
+        finally: fresh.shutdown()
+
+    def test_a_new_room_type_backfill_is_once_only_and_preserves_records(self):
+        before=self.service.local.load("A")
+        extension=self.service._layout_data("A")["extension"]
+        with self.service.local.connect("A") as conn, conn:
+            conn.execute("DELETE FROM documents WHERE key=?",("inventory_types:"+extension["types_revision"],))
+            conn.execute("UPDATE inventory SET payload=json_set(payload,'$.rack_type','') WHERE room IN ('203','303','403')")
+            self.service.local._version(conn)
+        snapshot=self.service._snapshot("A")
+        new=[r for r in snapshot["config"]["inventory"] if r["room"] in ("203","303","403")]
+        self.assertEqual(len(new),84)
+        self.assertTrue(all(r["rack_type"]=="网络机柜" for r in new))
+        self.assertEqual(self.service.local.load("A")["records"],before["records"])
+        with self.service.local.connect("A") as conn, conn:
+            conn.execute("UPDATE inventory SET payload=json_set(payload,'$.rack_type','') WHERE room='203' AND rack='A01'")
+            self.service.local._version(conn)
+        fresh=CabinetPowerService(self.store,self.remote,self.tmp.name)
+        try:
+            current=fresh._snapshot("A")
+            self.assertEqual(next(r["rack_type"] for r in current["config"]["inventory"] if (r["room"],r["rack"])==("203","A01")),"")
         finally: fresh.shutdown()
 
     def test_down_filter_includes_embedded_history_without_duplicate_records(self):

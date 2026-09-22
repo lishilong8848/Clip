@@ -31237,6 +31237,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertIsNone(prepared[REPAIR_FOLLOWUP_CMDB_FIELD_NAME])
 
+    def test_repair_management_coerce_text_preserves_scalar_values_and_typed_fields(self):
+        text = FieldMeta("fld_text", "设备使用年限", "Text", 1, False, {}, [], False)
+        number = FieldMeta("fld_number", "更换备件数量", "Number", 2, False, {}, [], False)
+        relation = FieldMeta("fld_relation", "关联记录", "DuplexLink", 21, False, {}, [], False)
+        metas = {meta.field_name: meta for meta in (text, number, relation)}
+        for value, expected in ((4, "4"), (0, "0"), (2.5, "2.5"), (False, "False"),
+                                ("004", "004"), ("第一行\n第二行", "第一行\n第二行"),
+                                (None, None), ("", None), (["rec_one"], '["rec_one"]')):
+            with self.subTest(value=value):
+                prepared, warnings = MaintenancePortalService._coerce_repair_management_fields(
+                    {"设备使用年限": value, "更换备件数量": 2, "关联记录": ["rec_one"]}, metas,
+                )
+                self.assertEqual(prepared["设备使用年限"], expected)
+                self.assertEqual(prepared["更换备件数量"], 2)
+                self.assertEqual(prepared["关联记录"], ["rec_one"])
+                self.assertEqual(warnings, [])
+
     def test_repair_management_coerce_skips_invalid_select_values(self):
         single = FieldMeta(
             "fld_device",
@@ -38192,6 +38209,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False),
             FieldMeta("fld_repairs", "设备检修关联", "Text", 1, False, {}, [], False),
             FieldMeta("fld_end", "维修结束时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_years", "设备使用年限", "Text", 1, False, {}, [], False),
         ]
         meta_by_name = {item.field_name: item for item in metas}
         captured = {}
@@ -38206,7 +38224,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         service._build_repair_management_prefill = (  # type: ignore[method-assign]
             lambda **_kwargs: {
-                "fields": {"设备检修关联": '["rec_repair"]'},
+                "fields": {"设备检修关联": '["rec_repair"]', "设备使用年限": 4},
                 "warnings": [],
             }
         )
@@ -38233,6 +38251,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertNotIn("维修结束时间", captured["fields"])
         self.assertEqual(captured["fields"]["设备检修关联"], "rec_repair")
+        self.assertEqual(captured["fields"]["设备使用年限"], "4")
 
     def test_repair_management_delete_cascades_followup_records(self):
         service = _TestMaintenancePortalService()
