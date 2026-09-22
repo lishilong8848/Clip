@@ -793,6 +793,7 @@ def export_workbook(content, config, operations):
     merge_values={name:{m.get("ref"):book.value(cell_maps[name].get(m.get("ref").split(":")[0])) for m in roots[name].iter(T("mergeCell"))} for name in formats}
     inherited_cells={name:{f"{col_name(xx)}{yy}":merge_values[name][m.get("ref")] for m in roots[name].iter(T("mergeCell")) for x,y,x2,y2 in [bounds(m.get("ref"))] for yy in range(y,y2+1) for xx in range(x,x2+1) if (xx,yy)!=(x,y)} for name in formats}
     from openpyxl.formula.translate import Translator
+    from openpyxl.styles.numbers import BUILTIN_FORMATS, is_date_format
     shared_groups=defaultdict(list)
     for name,cells in cell_maps.items():
         masters={c.find(T("f")).get("si"):(ref,c.findtext(T("f"))) for ref,c in cells.items() if c.find(T("f")) is not None and c.find(T("f")).get("t")=="shared" and c.findtext(T("f"))}
@@ -814,6 +815,14 @@ def export_workbook(content, config, operations):
         time_format=max([163,*[int(node.get('numFmtId')) for node in num_formats]])+1
         ET.SubElement(num_formats,T('numFmt'),numFmtId=str(time_format),formatCode='yyyy-mm-dd hh:mm')
     num_formats.set('count',str(len(num_formats)))
+    format_codes={**BUILTIN_FORMATS,**{int(node.get('numFmtId')):node.get('formatCode','') for node in num_formats}}
+    power_styles={}
+    def power_style(style):
+        if not is_date_format(format_codes.get(int(xfs[style].get('numFmtId','0')),'')): return style
+        if style not in power_styles:
+            xf=copy.deepcopy(xfs[style]); xf.set('numFmtId','0'); xf.set('applyNumberFormat','1')
+            power_styles[style]=len(xfs); xfs.append(xf); book.styles.append(copy.deepcopy(book.styles[style]))
+        return power_styles[style]
     date_styles={}
     def time_style(style):
         if int(xfs[style].get('numFmtId','0'))==time_format: return style
@@ -895,7 +904,9 @@ def export_workbook(content, config, operations):
         if ordinal in (None,""):
             next_ordinals[name]+=1; ordinal=next_ordinals[name]
         for col,value in ((1,ordinal),(2,"EA118"),(fmt["room"],op["system_name"]),(fmt["rack"],op["rack"]),(fmt["type"],op["rack_type"]),(fmt["power"],op.get("power","")),(fmt["result"],op.get("result",""))):
-            if col: write(name,f"{col_name(col)}{rn}",value,preserve_formula=text_value(value)==text_value(meta.get("cells",{}).get(str(col))))
+            if col:
+                cell=write(name,f"{col_name(col)}{rn}",value,preserve_formula=text_value(value)==text_value(meta.get("cells",{}).get(str(col))))
+                if col==fmt["power"]: cell.set('s',str(power_style(int(cell.get('s','0')))))
         groups=copy.deepcopy(op.get("groups",[])); continuation_groups=[]
         if meta.get("source_completed"):
             source_count=len(template["formats"][next(i for i,f in enumerate(template["formats"]) if f["sheet"]==name)]["groups"])
@@ -1202,7 +1213,7 @@ def export_workbook(content, config, operations):
     with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as archive:
         for name,data in parts.items(): archive.writestr(name,data)
     verified=Workbook(out.getvalue())
-    expected=["机柜上电汇总表（邮件）" if name=="机柜上电汇总表" else name for name in book.sheets]
+    expected=list(book.sheets)
     if list(verified.sheets)!=expected: raise CabinetError("邮件汇总工作表关系校验失败")
     error_values={"#VALUE!","#REF!","#NAME?","#DIV/0!","#N/A","#NUM!","#NULL!","#SPILL!","#CALC!"}
     formula_errors=[(name,ref,verified.value(cell)) for name in verified.sheets
@@ -1403,29 +1414,14 @@ def _apply_period_summary(root,book,config,daily,monthly):
 
 def finalize_mail_summary(parts, book, config, items):
     old_name = "机柜上电汇总表"
-    mail_name = "机柜上电汇总表（邮件）"
     if old_name not in book.sheets:
         raise CabinetError("原模板缺少机柜上电汇总表")
     workbook = ET.fromstring(parts["xl/workbook.xml"])
-    for sheet in workbook.find(T("sheets")):
-        if sheet.get("name") == old_name:
-            sheet.set("name", mail_name)
-
-    def rename_reference(formula):
-        if formula.text:
-            formula.text = formula.text.replace(f"'{old_name}'!", f"'{mail_name}'!").replace(
-                f"{old_name}!", f"'{mail_name}'!")
-
-    for name in workbook.findall(f"{T('definedNames')}/{T('definedName')}"):
-        rename_reference(name)
-    for name, path in book.sheets.items():
-        root = ET.fromstring(parts[path])
-        for formula in root.iter(T("f")):
-            rename_reference(formula)
-        if name == old_name:
-            daily, monthly = _summary_period_counts(config, items)
-            _apply_period_summary(root, book, config, daily, monthly)
-        parts[path] = xml_bytes(root, parts[path])
+    path=book.sheets[old_name]
+    root=ET.fromstring(parts[path])
+    daily, monthly = _summary_period_counts(config, items)
+    _apply_period_summary(root, book, config, daily, monthly)
+    parts[path] = xml_bytes(root, parts[path])
 
     calc = workbook.find(T("calcPr"))
     if calc is None:
@@ -1445,10 +1441,4 @@ def finalize_mail_summary(parts, book, config, items):
         if override.get("PartName") == "/xl/calcChain.xml":
             types.remove(override)
     parts["[Content_Types].xml"] = xml_bytes(types, parts["[Content_Types].xml"])
-    if "docProps/app.xml" in parts:
-        app = ET.fromstring(parts["docProps/app.xml"])
-        for title in app.iter("{http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes}lpstr"):
-            if title.text == old_name:
-                title.text = mail_name
-        parts["docProps/app.xml"] = xml_bytes(app, parts["docProps/app.xml"])
     return parts

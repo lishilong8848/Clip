@@ -39,7 +39,7 @@ def layout_identity(config):
                  for rack in config.get("inventory",[]))
     return digest([rooms,racks])
 
-EXPORT_FORMAT_VERSION = 2
+EXPORT_FORMAT_VERSION = 3
 
 
 def export_snapshot(config,operations):
@@ -587,6 +587,8 @@ class CabinetPowerService:
             return result
         business_ops=[op for op in snap["operations"] if op.get("events") or op.get("source_row")]
         derived=derive_records(config,business_ops); issues=derived["issues"]
+        powers=self._rack_powers(snap)
+        for rack in derived["racks"]: rack.update(powers[rack["room"]+"/"+rack["rack"]])
         rooms=[]
         for room in config["rooms"]:
             rr=[r for r in derived["racks"] if r["room"]==room["id"]]
@@ -614,6 +616,35 @@ class CabinetPowerService:
     def racks(self,scope):
         overview=self.overview(scope)
         return {"items":overview["racks"],"version":overview["version"]}
+
+    @staticmethod
+    def _power(value):
+        if value in (None, ""): return None
+        if isinstance(value,bool) or not isinstance(value,(str,int,float)):
+            raise CabinetError("机柜功率须为非负数字或留空")
+        try: value=float(value)
+        except ValueError: raise CabinetError("机柜功率须为非负数字或留空")
+        if not math.isfinite(value) or value<0: raise CabinetError("机柜功率须为非负数字或留空")
+        return value
+
+    def _rack_powers(self,snap):
+        if "rack_powers" not in snap:
+            histories={}
+            for op in snap["operations"]:
+                if not op.get("meta",{}).get("baseline_correction"):
+                    histories.setdefault((op["room"],op["rack"]),[]).append(op)
+            powers={}
+            for rack in snap["config"]["inventory"]:
+                key=(rack["room"],rack["rack"]); rows=histories.get(key,[])
+                power=rack.get("power")
+                if "power" not in rack:
+                    for op in sorted(rows,key=lambda op:(op.get("last_operation",""),op.get("ordinal",0),op["record_id"]),reverse=True):
+                        try: candidate=self._power(op.get("power"))
+                        except CabinetError: continue
+                        if candidate is not None: power=candidate; break
+                powers['/'.join(key)]={"power":power,"power_version":digest(["power" in rack,power,sorted((op["record_id"],op["version"]) for op in rows)])}
+            snap["rack_powers"]=powers
+        return snap["rack_powers"]
 
     def layout(self,scope,room_id):
         config=self.config(scope); room=next((r for r in config["rooms"] if r["id"]==room_id),None)
@@ -662,6 +693,7 @@ class CabinetPowerService:
             derived=derive_records(snap["config"],business_ops)
             state=next((r for r in derived["racks"] if (r["room"],r["rack"])==(query["room"],query["rack"])),None)
             if state is not None:
+                state.update(self._rack_powers(snap).get(query["room"]+"/"+query["rack"],{}))
                 events=[{**o,**e} for o in snap['operations'] if (o['room'],o['rack'])==(query['room'],query['rack']) for e in o['events']]
                 corrections=[e for e in events if e.get('meta',{}).get('baseline_correction') and e.get('result')=='成功']
                 compatible=[e for e in events if completed_state_event(e) and STATES.get(e.get('action'))==state['state']]
@@ -733,6 +765,8 @@ class CabinetPowerService:
         if op["room"] not in {r["id"] for r in self.config(scope)["rooms"]}: raise CabinetError("包间不属于当前楼栋")
         if op.get("rack_type") not in ("",*RACK_TYPES) and (not old or op.get('rack_type')!=old.get('rack_type')): raise CabinetError("机柜类型无效")
         config=self._snapshot(scope)["config"]
+        if "power" not in payload:
+            op["power"]=self._rack_powers(self._snapshot(scope)).get(op["room"]+"/"+op["rack"],{}).get("power")
         if not any((r["room"],r["rack"])==(op["room"],op["rack"]) for r in config["inventory"]):
             carrier_add=payload.get("add_inventory") is True and scope=="B" and op["room"] in ("216","247")
             if carrier_add:
@@ -844,6 +878,66 @@ class CabinetPowerService:
             if not old: op["meta"]["category"]=category
         return op
 
+    def _append_power_stages(self,scope,room,rack,power,stages,inventory=None):
+        snap=self._snapshot(scope)
+        inventory=inventory or next((copy.deepcopy(item) for item in snap["config"]["inventory"] if (item["room"],item["rack"])==(room,rack)),None)
+        if inventory is None: raise CabinetError("机柜不在当前包间目录中",404)
+        prior_power=inventory.get("power"); had_power="power" in inventory
+        inventory["power"]=power
+        existing={stage["record_id"] for stage in stages if stage["kind"]=="main"}
+        for op in snap["operations"]:
+            if (op["room"],op["rack"])!=(room,rack) or op["record_id"] in existing or op.get("meta",{}).get("baseline_correction"): continue
+            fields=op["raw_fields"]
+            stages.append({"kind":"main","power_only":True,"record_id":op["record_id"],
+                           "fields":{"机柜功率（W）":power},"before_subset":{key:fields.get(key) for key in ("机柜功率（W）","楼栋","包间系统名称","机架")}})
+        directory=next((stage for stage in stages if stage["kind"]=="directory"),None)
+        if directory is None:
+            directory={"kind":"directory","record_id":inventory.get("record_id",""),"fields":{}}
+            stages.append(directory)
+        if directory["record_id"]:
+            fields=self.directory(scope).get(directory["record_id"])["fields"]
+            raw=text_value(fields.get("布局资料"))
+            try: geometry=json.loads(raw) if raw else {}
+            except ValueError: raise CabinetError("机柜基础资料格式异常，请先核对",409)
+            if not isinstance(geometry,dict): raise CabinetError("机柜基础资料格式异常，请先核对",409)
+            if ("power" in geometry)!=had_power or geometry.get("power")!=prior_power:
+                raise CabinetError("云端机柜功率已变化，请刷新本楼资料后重试",409)
+            directory.setdefault("before_subset",{})["布局资料"]=fields.get("布局资料")
+        else:
+            geometry={"positions":inventory.get("positions",[]),"template_color":inventory.get("template_color","")}
+            directory.update(before=None,lookup_data_id=True)
+            directory["fields"].update({"数据标识":"rack_"+digest([scope,room,rack]),"类别":"机柜","楼栋":scope+"楼","包间":room,"名称":rack,"机柜类型":inventory.get("rack_type") or None,"数量":1})
+        geometry["power"]=power
+        directory["fields"]["布局资料"]=json.dumps(geometry,ensure_ascii=False)
+        return inventory
+
+    def save_rack_power(self,scope,payload,owner,defer=False):
+        oid=str(payload.get("operation_id",""))
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}",oid): raise CabinetError("缺少有效操作标识")
+        if "power" not in payload: raise CabinetError("缺少机柜功率字段")
+        power=self._power(payload["power"])
+        self.ensure_loaded(scope)
+        fingerprint=digest([owner,scope,"rack_power",payload])
+        with self.local.locked([scope]):
+            prior=self.local.document(scope,"write:"+oid)
+            if prior:
+                if prior.get("owner")!=owner or prior.get("request_hash")!=fingerprint: raise CabinetError("操作标识已用于其他内容或用户",409)
+                if defer: return self._queue_write(prior)
+                if self._write_finished(prior): return prior["inventory"]
+                return self._resume_write(prior)
+            if self.pending_writes(scope) or self.pending_rollbacks(scope): raise CabinetError("该楼有待完成的上传或回退，请先继续处理",409)
+            room=str(payload.get("room","")).strip(); rack=str(payload.get("rack","")).strip().upper()
+            profile=self._rack_powers(self._snapshot(scope)).get(room+"/"+rack)
+            if profile is None: raise CabinetError("机柜不在当前包间目录中",404)
+            if payload.get("expected_version")!=profile["power_version"]: raise CabinetError("机柜资料已变化，请重新打开后保存",409)
+            stages=[]
+            inventory=self._append_power_stages(scope,room,rack,power,stages)
+            journal={"operation_id":oid,"scope":scope,"old_scope":scope,"owner":owner,"request_hash":fingerprint,
+                     "request":{**copy.deepcopy(payload),"power_only":True},"record_id":"","rack_power":True,
+                     "stages":stages,"inventory":inventory,"status":"intent","created_at":time.time(),"error":""}
+            self.write("write:"+oid,journal)
+            return self._queue_write(journal) if defer else self._resume_write(journal)
+
     def save_operation(self,scope,payload,owner,record_id="",can_move_scope=False,defer=False,**_unused):
         oid=str(payload.get("operation_id",""))
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}",oid): raise CabinetError("缺少有效操作标识")
@@ -917,6 +1011,9 @@ class CabinetPowerService:
                     inventory["rack_type"]=payload["rack_type"]
                 else: inventory=None
             else: inventory=None
+            current_power=self._rack_powers(self._snapshot(scope)).get(op["room"]+"/"+op["rack"],{}).get("power")
+            if "power" in payload and (op.get("power")!=old.get("power") if old else self._power(op.get("power"))!=current_power):
+                inventory=self._append_power_stages(scope,op["room"],op["rack"],self._power(op.get("power")),stages,inventory)
             journal={"operation_id":oid,"scope":scope,"old_scope":old_scope,"owner":owner,"request_hash":fingerprint,"request":copy.deepcopy(payload),"record_id":record_id,"stages":stages,"inventory":inventory,"baseline_transfer":baseline_transfer,"status":"intent","created_at":time.time(),"error":""}
             self.write("write:"+oid,journal)
             if old_scope!=scope: self.local.document(old_scope,"write:"+oid,journal)
@@ -1200,12 +1297,15 @@ class CabinetPowerService:
             for stage in journal["stages"]:
                 stage_name=stage["kind"]; remote=main if stage_name=="main" else self.directory(scope)
                 journal.update(status='checking',error_stage=stage_name); self.write(key,journal)
-                if stage.get("verified"):
-                    current=remote.get(stage["record_id"])
-                    if not equivalent(stage["fields"],current["fields"]): raise CabinetError("已上传记录在恢复前发生版本冲突，请核对",409)
-                    if stage_name=="main": journal["record"]=current
-                    continue
                 current=remote.get(stage["record_id"]) if stage["record_id"] else None
+                if stage.get("power_only") and current:
+                    identity={key:value for key,value in stage["before_subset"].items() if key!="机柜功率（W）"}
+                    if not equivalent(identity,current["fields"]): raise CabinetError("机柜位置发生冲突，请先核对",409)
+                if stage.get("verified"):
+                    if not equivalent(stage["fields"],current["fields"]): raise CabinetError("已上传记录在恢复前发生版本冲突，请核对",409)
+                    if stage.get("power_only"): stage["record"]=current
+                    elif stage_name=="main": journal["record"]=current
+                    continue
                 if current is None and (stage.get("attempted") or stage.get("lookup_data_id")):
                     found=self.list_remote(remote,data_id=stage["fields"]["数据标识"])
                     if len(found)>1: raise CabinetError("云端操作标识重复，请核对",409)
@@ -1228,16 +1328,17 @@ class CabinetPowerService:
                 if not already_verified: current=remote.get(stage["record_id"])
                 if not equivalent(stage["fields"],current["fields"]): raise CabinetError("飞书回读尚未一致，请继续核验",409)
                 stage["verified"]=True
-                if stage_name=="main": journal["record"]=current; journal["record_id"]=current["record_id"]
+                if stage.get("power_only"): stage["record"]=current
+                elif stage_name=="main": journal["record"]=current; journal["record_id"]=current["record_id"]
                 elif journal.get("inventory"): journal["inventory"]["record_id"]=current["record_id"]
                 self.write(key,journal)
             stage_name="local_commit"; journal.update(status="local_pending",error="",error_stage=stage_name)
             self.write(key,journal)
             if journal["old_scope"]!=scope:
                 self.local.commit_operation(journal["old_scope"],journal,remove_id=journal["record_id"])
-            self.local.commit_operation(scope,journal,record=journal["record"],inventory=journal.get("inventory"),baseline_ids=journal.get("baseline_transfer",()),complete=True)
+            self.local.commit_operation(scope,journal,record=journal.get("record"),records=[stage["record"] for stage in journal["stages"] if stage.get("power_only")],inventory=journal.get("inventory"),baseline_ids=journal.get("baseline_transfer",()),complete=True)
             if journal["old_scope"]!=scope: self.local.commit_operation(journal["old_scope"],journal,complete=True)
-            return from_feishu(journal["record"])
+            return journal["inventory"] if journal.get("rack_power") else from_feishu(journal["record"])
         except Exception as exc:
             journal.update(error=str(exc),error_stage=stage_name,status="conflict" if isinstance(exc,CabinetError) and exc.status_code==409 and "冲突" in str(exc) else "pending")
             try: self.write(key,journal)
@@ -1263,6 +1364,7 @@ class CabinetPowerService:
         scope=journal['scope']; journal=self.local.document(scope,'write:'+oid)
         if defer and (self._write_active(journal) or self._write_finished(journal)): return self._write_receipt(journal)
         if journal["status"]=="completed" and journal["old_scope"]==journal["scope"]:
+            if journal.get("rack_power"): return journal["inventory"]
             return {"deleted":True,"record_id":journal["record_id"]} if journal.get("delete") else from_feishu(journal["record"])
         with self.local.locked([scope,journal["old_scope"]]):
             journal=self.local.document(scope,'write:'+oid)
@@ -1274,6 +1376,22 @@ class CabinetPowerService:
         if journal["old_scope"]!=journal["scope"] and not admin: raise CabinetError("跨楼操作需要管理员",403)
         scope=journal['scope']; journal=self.local.document(scope,'write:'+oid)
         with self.local.locked([scope,journal["old_scope"]]):
+            power_records=[]
+            for stage in journal["stages"]:
+                if stage.get("power_only"):
+                    record=self.remote_for(scope).get(stage["record_id"])
+                    identity={key:value for key,value in stage["before_subset"].items() if key!="机柜功率（W）"}
+                    if not equivalent(identity,record["fields"]): raise CabinetError("机柜记录已调整到其他位置，请先核对",409)
+                    power_records.append(record)
+            if journal.get("rack_power"):
+                inventory=copy.deepcopy(journal["inventory"])
+                fields=self.directory(scope).get(inventory["record_id"])["fields"]
+                geometry=json.loads(text_value(fields.get("布局资料")) or "{}")
+                inventory.pop("power",None)
+                if "power" in geometry: inventory["power"]=geometry["power"]
+                journal.update(status="cancelled",error="已载入云端版本，部分已上传的功率更正予以保留")
+                self.local.commit_operation(scope,journal,records=power_records,inventory=inventory)
+                return {"status":"cancelled","operation_id":oid}
             if journal.get("delete"):
                 stage=journal["stages"][0]; data_id=text_value((stage.get("before") or {}).get("数据标识"))
                 matches=self.list_remote(self.remote_for(scope),data_id=data_id)
@@ -1297,8 +1415,11 @@ class CabinetPowerService:
                 if not inventory.get("record_id"): raise CabinetError("机柜基础资料尚未创建，请继续完成原上传",409)
                 fields=self.directory(scope).get(inventory["record_id"])["fields"]
                 inventory["rack_type"]=text_value(fields.get("机柜类型"))
+                geometry=json.loads(text_value(fields.get("布局资料")) or "{}")
+                inventory.pop("power",None)
+                if "power" in geometry: inventory["power"]=geometry["power"]
             journal.update(status="cancelled",error="已载入云端版本，原提交保留在操作日志中")
-            self.local.commit_operation(scope,journal,record=current if current_scope==scope else None,inventory=inventory,remove_id=current["record_id"] if current and current_scope!=scope else "")
+            self.local.commit_operation(scope,journal,record=current if current_scope==scope else None,records=power_records,inventory=inventory,remove_id=current["record_id"] if current and current_scope!=scope else "")
             if journal["old_scope"]!=scope:
                 self.local.commit_operation(journal["old_scope"],journal,record=current if current_scope==journal["old_scope"] else None,remove_id=current["record_id"] if current and current_scope!=journal["old_scope"] else "")
             return {"status":"cancelled","operation_id":oid}

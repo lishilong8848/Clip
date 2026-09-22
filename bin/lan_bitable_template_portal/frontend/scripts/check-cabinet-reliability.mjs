@@ -75,6 +75,24 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
   }
+  const powerContext=await browser.newContext({viewport:{width:1366,height:900}});
+  page=await powerContext.newPage();
+  await page.goto(base+'/cabinet-power?scope=B');
+  await page.getByRole('button',{name:'原始平面图',exact:true}).click();
+  await page.locator('.room-sidebar button').filter({hasText:'302 包间'}).click();
+  await page.locator('.map-cell').filter({hasText:/^B04$/}).click();
+  await page.locator('.rack-power').getByText('16000 W',{exact:true}).waitFor();
+  await page.getByLabel('修改机柜功率',{exact:true}).click();
+  const powerDialog=page.getByRole('dialog',{name:'修改机柜功率',exact:true});
+  await powerDialog.getByLabel('机柜功率（W）',{exact:true}).fill('4000');
+  await page.screenshot({path:path.join(output,'rack-power-edit.png')});
+  await powerDialog.getByRole('button',{name:'保存',exact:true}).click();
+  await powerDialog.waitFor({state:'hidden'});
+  await page.locator('.rack-power').getByText('4000 W',{exact:true}).waitFor();
+  await page.screenshot({path:path.join(output,'rack-power-history.png')});
+  const corrected=await (await page.request.get(base+'/api/cabinet-power/operations?scope=B&room=302&rack=B04')).json();
+  assert(corrected.data.items.filter(op=>!op.meta?.baseline_correction).every(op=>op.power===4000));
+  await powerContext.close();
   const exportContext = await browser.newContext({ viewport: { width: 1366, height: 900 } });
   await exportContext.addInitScript(() => {
     Object.defineProperty(Crypto.prototype, "randomUUID", { value: undefined, configurable: true });

@@ -207,6 +207,8 @@ def install_cabinet_power_routes(app,controller,runtime):
             elif resource is not None: data=resource
             elif path in ("overview","rooms"): data=await asyncio.to_thread(service.overview,scope,query.get("summary")!="1")
             elif path=="racks": data=await asyncio.to_thread(service.racks,scope)
+            elif path=="rack-power" and request.method=="PATCH":
+                data=await asyncio.to_thread(service.save_rack_power,scope,payload,owner,defer=query.get('defer')=='1')
             elif path.startswith("rooms/") and path.endswith("/layout"): data=await asyncio.to_thread(service.layout,scope,path.split("/")[1])
             elif path=="operations" and request.method=="GET": data=await asyncio.to_thread(service.operations,scope,query)
             elif path.startswith("operations/") and path.count("/")==3 and "/evidence/" in path and request.method=="GET":
@@ -244,6 +246,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],
         "operations":["GET","POST"],"operations/{record_id}":["PATCH"],
+        "rack-power":["PATCH"],
         "operations/{record_id}/evidence/{image_id}":["GET"],"operations/{record_id}/documents/{file_id}":["GET"],"refresh":["POST"],
         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],

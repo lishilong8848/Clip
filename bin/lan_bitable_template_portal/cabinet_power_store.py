@@ -212,10 +212,11 @@ class CabinetStore:
             if changed: self._version(conn)
             return bool(changed)
 
-    def commit_operation(self, scope, journal, record=None, inventory=None, remove_id="", complete=False, baseline_ids=()):
+    def commit_operation(self, scope, journal, record=None, inventory=None, remove_id="", complete=False, baseline_ids=(), records=()):
         with self.connect(scope) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             if record: self._record(conn, record)
+            for item in records: self._record(conn, item)
             if inventory:
                 conn.execute("INSERT OR REPLACE INTO inventory VALUES(?,?,?)", (inventory["room"], inventory["rack"], encode(inventory)))
             if remove_id: conn.execute("DELETE FROM records WHERE record_id=?", (remove_id,))

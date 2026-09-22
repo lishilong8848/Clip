@@ -296,6 +296,106 @@ class CabinetPowerTests(unittest.TestCase):
     def tearDown(self):
         self.service.shutdown(); self.tmp.cleanup()
 
+    def test_rack_power_corrects_only_selected_cabinet_and_exports_all_its_records(self):
+        def profile(): return next(r for r in self.service.racks('B')['items'] if (r['room'],r['rack'])==('302','B04'))
+        rows=[op for op in self.service._snapshot('B')['operations'] if (op['room'],op['rack'])==('302','B04') and not op.get('meta',{}).get('baseline_correction')]
+        duplicate=copy.deepcopy(self.remote.records[rows[0]['record_id']])
+        duplicate['record_id']='recSecondPower'; duplicate['fields'].update({'来源行号':None,'数据标识':'power_duplicate_test'})
+        self.remote.records[duplicate['record_id']]=duplicate
+        self.service.do_refresh('B',{}, {})
+        before=copy.deepcopy(self.remote.records)
+        rows=[op for op in self.service._snapshot('B')['operations'] if (op['room'],op['rack'])==('302','B04') and not op.get('meta',{}).get('baseline_correction')]
+        self.assertGreater(len(rows),1)
+        expected_ids={op['record_id'] for op in rows}
+        payload={'room':'302','rack':'B04','power':4000,'expected_version':profile()['power_version'],'operation_id':uuid.uuid4().hex}
+        baseline=copy.deepcopy(self.service._snapshot('B')['config']['power_baseline'])
+        self.service.save_rack_power('B',payload,'owner')
+        self.service.save_rack_power('B',payload,'owner')
+        self.assertEqual(profile()['power'],4000)
+        for rid,record in self.remote.records.items():
+            expected=copy.deepcopy(before[rid])
+            if rid in expected_ids: expected['fields']['机柜功率（W）']=4000
+            self.assertEqual(record,expected,rid)
+        snap=self.service._snapshot('B')
+        self.assertEqual(snap['config']['power_baseline'],baseline)
+        self.assertTrue(all(op['power']==4000 for op in snap['operations'] if op['record_id'] in expected_ids))
+        book=Workbook(export_workbook((TEMPLATES/'B.xlsm').read_bytes(),snap['config'],snap['operations']))
+        self.assertIn('机柜上电汇总表',book.sheets)
+        self.assertFalse(any('（邮件）' in name for name in book.sheets))
+        for fmt in snap['config']['template_data']['formats']:
+            for _,row in book.rows(fmt['sheet']):
+                if row.get(fmt['room'])=='EA118-B3-2' and row.get(fmt['rack'])=='B04':
+                    self.assertEqual(row.get(fmt['power']),4000)
+        styles=ET.fromstring(book.archive.read('xl/styles.xml'))
+        xfs=styles.find(T('cellXfs'))
+        from openpyxl.styles.numbers import BUILTIN_FORMATS,is_date_format
+        from .lan_bitable_template_portal.cabinet_power_excel import coord
+        codes={**BUILTIN_FORMATS,**{int(node.get('numFmtId')):node.get('formatCode') for node in styles.find(T('numFmts'))}}
+        for fmt in snap['config']['template_data']['formats']:
+            for ref,cell in book.cells(fmt['sheet']).items():
+                col,rn=coord(ref)
+                if col==fmt['power'] and rn>fmt['header'] and book.value(cell) not in (None,''):
+                    self.assertFalse(is_date_format(codes.get(int(xfs[int(cell.get('s','0'))].get('numFmtId','0')),'')),ref)
+        self.service.do_refresh('B',{}, {})
+        self.assertEqual(profile()['power'],4000)
+        with self.assertRaisesRegex(CabinetError,'已变化'):
+            self.service.save_rack_power('B',{**payload,'operation_id':uuid.uuid4().hex},'owner')
+
+    def test_rack_power_without_history_zero_clear_and_new_operation_inheritance(self):
+        profile=lambda: next(r for r in self.service.racks('A')['items'] if (r['room'],r['rack'])==('203','A02'))
+        self.assertIsNone(profile()['power'])
+        count=len(self.remote.records)
+        for power in (4000,0,''):
+            self.service.save_rack_power('A',{'room':'203','rack':'A02','power':power,'expected_version':profile()['power_version'],'operation_id':uuid.uuid4().hex},'owner')
+            self.assertEqual(profile()['power'],None if power=='' else power)
+            self.assertEqual(len(self.remote.records),count)
+            self.service.do_refresh('A',{}, {})
+            self.assertEqual(profile()['power'],None if power=='' else power)
+        for value in (-1,True,{},'nan','inf'):
+            with self.assertRaises(CabinetError): self.service.save_rack_power('A',{'power':value,'operation_id':uuid.uuid4().hex},'owner')
+        self.service.save_rack_power('A',{'room':'203','rack':'A02','power':5000,'expected_version':profile()['power_version'],'operation_id':uuid.uuid4().hex},'owner')
+        saved=self.service.save_operation('A',{'room':'203','rack':'A02','rack_type':'网络机柜','groups':[{'action':'上正式电','actual':'2026-09-01 10:00:00','expected':'','result':'成功'}],'operation_id':uuid.uuid4().hex},'owner')
+        self.assertEqual(saved['power'],5000)
+
+    def test_rack_power_lost_response_local_failure_and_conflict_resume(self):
+        profile=lambda: next(r for r in self.service.racks('B')['items'] if (r['room'],r['rack'])==('302','B04'))
+        original=profile()['power']; oid=uuid.uuid4().hex
+        payload={'room':'302','rack':'B04','power':4000,'expected_version':profile()['power_version'],'operation_id':oid}
+        update=self.remote.update
+        def lost(rid,fields): update(rid,fields); raise TimeoutError('response lost')
+        with patch.object(self.remote,'update',side_effect=lost), self.assertRaises(TimeoutError):
+            self.service.save_rack_power('B',payload,'owner')
+        self.assertEqual(profile()['power'],original)
+        changed=self.service.local.document('B','write:'+oid)['stages'][0]['record_id']
+        self.remote.update(changed,{'机架':'B05'})
+        with self.assertRaisesRegex(CabinetError,'位置发生冲突'): self.service.resume_write('B',oid,'owner')
+        self.remote.update(changed,{'机架':'B04'})
+        with self.assertRaises(CabinetError): self.service.resume_write('B',oid,'another')
+        with patch.object(self.service.local,'commit_operation',side_effect=OSError('disk unavailable')), self.assertRaises(OSError):
+            self.service.resume_write('B',oid,'owner')
+        self.assertEqual(profile()['power'],original)
+        self.service._cache.clear()
+        self.service.resume_write('B',oid,'owner')
+        self.assertEqual(profile()['power'],4000)
+        payload.update(power=4500,expected_version=profile()['power_version'],operation_id=uuid.uuid4().hex)
+        with patch.object(self.remote,'update',side_effect=lost), self.assertRaises(TimeoutError):
+            self.service.save_rack_power('B',payload,'owner')
+        journal=self.service.local.document('B','write:'+payload['operation_id'])
+        changed=journal['stages'][0]['record_id']
+        self.remote.update(changed,{'机柜功率（W）':4700})
+        with self.assertRaises(CabinetError): self.service.resume_write('B',payload['operation_id'],'owner')
+        self.service.reconcile_write('B',payload['operation_id'],'owner')
+        self.assertFalse(self.service.pending_writes('B'))
+        self.assertEqual(next(op for op in self.service._snapshot('B')['operations'] if op['record_id']==changed)['power'],4700)
+
+    def test_record_power_editor_also_updates_other_records_for_that_rack(self):
+        rows=[op for op in self.service._snapshot('B')['operations'] if (op['room'],op['rack'])==('302','B04')]
+        old=next(op for op in rows if not op.get('meta',{}).get('baseline_correction'))
+        self.service.save_operation('B',{'power':4000,'operation_id':uuid.uuid4().hex,'expected_version':old['version']},'owner',old['record_id'])
+        for op in self.service._snapshot('B')['operations']:
+            if op['record_id'] in {row['record_id'] for row in rows if not row.get('meta',{}).get('baseline_correction')}:
+                self.assertEqual(op['power'],4000)
+
     def test_create_uses_stable_uuid4_client_token_helper(self):
         self.assertIn("_stable_uuid4_client_token",CabinetFeishu.create.__code__.co_names)
         remote=CabinetFeishu(); captured={}
@@ -687,7 +787,7 @@ class CabinetPowerTests(unittest.TestCase):
                 self.assertEqual(exported.value(cells["E38"]),1 if room=="203" else 0)
                 self.assertEqual(exported.value(cells["E39"]),27 if room=="203" else 28)
                 self.assertFalse(any(cell.get("t")=="e" or "#REF!" in cell.findtext(T("f"),"") for cell in cells.values()))
-            summary=dict(exported.rows("机柜上电汇总表（邮件）"))
+            summary=dict(exported.rows("机柜上电汇总表"))
             self.assertEqual(summary[13][2],1072)
             for row in (10,11,12):
                 self.assertEqual(summary[row][5],27 if row==10 else 28)
@@ -2403,11 +2503,11 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             original=(TEMPLATES/(scope+".xlsm")).read_bytes(); before=Workbook(original)
             ops=[from_feishu(r) for r in self.source_records if r["fields"]["楼栋"]==scope+"楼"]
             result=export_workbook(original,self.configs[scope],ops); after=Workbook(result)
-            self.assertEqual(list(after.sheets),["机柜上电汇总表（邮件）" if name=="机柜上电汇总表" else name for name in before.sheets])
+            self.assertEqual(list(after.sheets),list(before.sheets))
             self.assertEqual(before.archive.read("xl/vbaProject.bin"),after.archive.read("xl/vbaProject.bin"))
             for name in before.sheets:
                 original_merges=[x.get("ref") for x in before.sheet(name).iter(T("mergeCell"))]
-                exported_merges=[x.get("ref") for x in after.sheet("机柜上电汇总表（邮件）" if name=="机柜上电汇总表" else name).iter(T("mergeCell"))]
+                exported_merges=[x.get("ref") for x in after.sheet(name).iter(T("mergeCell"))]
                 self.assertTrue(set(original_merges)<=set(exported_merges),name)
                 if "平面图" not in name: self.assertEqual(original_merges,exported_merges)
             for fmt in self.models[scope]["formats"]:
@@ -2509,7 +2609,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     fields=to_fields(operation); fields["来源工作表"]=operation["source"]
                     operations.append(from_feishu({"record_id":f"recExport{scope}{index}","fields":fields}))
                 book=Workbook(export_workbook((TEMPLATES/(scope+".xlsm")).read_bytes(),config,operations))
-                rows=dict(book.rows("机柜上电汇总表（邮件）"))
+                rows=dict(book.rows("机柜上电汇总表"))
                 date_col,up_col,down_col={"A":(2,3,5),"B":(13,14,15),"C":(2,3,4),"D":(2,3,4),"E":(2,3,4)}[scope]
                 up=next(row for row in rows.values() if row.get(date_col)=="2027.1.2")
                 down=next(row for row in rows.values() if row.get(4 if scope=="A" else date_col)=="2027.1.3")
@@ -2536,7 +2636,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(added[0][0],1024)
         self.assertEqual(added[0][1][1],1023.0)
         self.assertEqual(max(rows),1024)
-        mail=dict(workbook.rows("机柜上电汇总表（邮件）"))
+        mail=dict(workbook.rows("机柜上电汇总表"))
         day=next(row for row in mail.values() if str(row.get(13))=="2026.9.20")
         self.assertEqual(day[14],1.0)
         self.assertFalse(any(str(value).startswith("系统新增上下电") for row in mail.values() for value in row.values()))
@@ -2544,7 +2644,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         operation["meta"]["batch_rows"]=[{"source":"notice","source_notice":{"target_record_id":"recNotice"}}]
         from_notice=Workbook(export_workbook((TEMPLATES/"B.xlsm").read_bytes(),config,
             [*snapshot["operations"],operation]))
-        day=next(row for row in dict(from_notice.rows("机柜上电汇总表（邮件）")).values()
+        day=next(row for row in dict(from_notice.rows("机柜上电汇总表")).values()
                  if str(row.get(13))=="2026.9.20")
         self.assertEqual(day[14],1.0)
 
@@ -2572,7 +2672,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             column=next(column for column,value in row.items() if label in str(value))
             return next(float(row[index]) for index in range(column+1,column+5) if isinstance(row.get(index),(int,float)))
 
-        for sheet in ("机柜上电汇总表（邮件）",):
+        for sheet in ("机柜上电汇总表",):
             self.assertEqual(metric(workbook,sheet,"测试电总数"),metric(original,sheet,"测试电总数")+1)
             self.assertEqual(metric(workbook,sheet,"正式电总数"),metric(original,sheet,"正式电总数")-1)
             before=sum("2026.9.20" in str(value) for row in original.rows(sheet) for value in row[1].values())
@@ -2648,7 +2748,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         scope="A"; original=(TEMPLATES/(scope+".xlsm")).read_bytes()
         ops=[from_feishu(record) for record in self.source_records if record["fields"]["楼栋"]==scope+"楼"]
         exported=Workbook(export_workbook(original,self.configs[scope],ops))
-        for sheet in ("机柜上电汇总表（邮件）",):
+        for sheet in ("机柜上电汇总表",):
             cells=exported.cells(sheet)
             row=next(number for number,values in exported.rows(sheet) if values.get(2)=="2025.5.17")
             self.assertIsNone(cells[f"E{row}"].get("t"),(sheet,f"E{row}"))
@@ -2674,9 +2774,9 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(result["cloud_upload_status"],"succeeded")
         saved=self.service.local.document("B","export:"+result["export_id"])
         workbook=Workbook(Path(saved["path"]).read_bytes())
-        self.assertIn("机柜上电汇总表（邮件）",workbook.sheets)
+        self.assertIn("机柜上电汇总表",workbook.sheets)
         self.assertFalse(any("每月阿里统计" in name or "（通告）" in name for name in workbook.sheets))
-        mail=dict(workbook.rows("机柜上电汇总表（邮件）"))
+        mail=dict(workbook.rows("机柜上电汇总表"))
         self.assertFalse(any(values.get(13)=="2026.9.18" for values in mail.values()))
         self.assertEqual(len(archive.records),1)
         self.assertEqual(next(iter(archive.records.values()))["fields"]["文件SHA256"],result["sha256"])

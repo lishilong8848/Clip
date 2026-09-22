@@ -25,11 +25,11 @@ def main():
             original=(INITIAL_TEMPLATES/(scope+'.xlsm')).read_bytes()
             generated=export_workbook(original,config,ops)
             before=Workbook(original); after=Workbook(generated)
-            expected_sheets=['机柜上电汇总表（邮件）' if name=='机柜上电汇总表' else name for name in before.sheets]
+            expected_sheets=list(before.sheets)
             assert list(after.sheets)==expected_sheets,(scope,list(after.sheets))
             assert before.archive.read('xl/vbaProject.bin')==after.archive.read('xl/vbaProject.bin')
             for name in before.sheets:
-                target='机柜上电汇总表（邮件）' if name=='机柜上电汇总表' else name
+                target=name
                 source_merges={x.get('ref') for x in before.sheet(name).iter(T('mergeCell'))}
                 target_merges={x.get('ref') for x in after.sheet(target).iter(T('mergeCell'))}
                 assert source_merges<=target_merges,(scope,name,'mergeCells')

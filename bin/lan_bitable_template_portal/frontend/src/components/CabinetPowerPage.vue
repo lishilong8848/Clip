@@ -125,6 +125,7 @@
       <section class="drawer modal" role="dialog" aria-modal="true" aria-label="机柜完整历史" tabindex="-1">
         <header><div><h2>{{ historyRoom }} / {{ historyRack }}</h2><p v-if="selectedRack">当前状态：{{ stateLabels[selectedRack.state] }} · {{ selectedRack.rack_type }}</p></div><button @click="historyOpen = false" aria-label="关闭历史"><X :size="20" /></button></header>
         <div class="drawer-body">
+          <div v-if="selectedRack" class="rack-power"><span>机柜功率 <strong>{{ selectedRack.power == null || selectedRack.power === '' ? '未填写' : selectedRack.power + ' W' }}</strong></span><button class="icon-button" title="修改机柜功率" aria-label="修改机柜功率" :disabled="saving" @click="openPowerEditor"><Pencil :size="16" /></button></div>
           <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}{{ selectedRack.latest_success.baseline_correction ? '（平面图基线校正）' : '' }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual || '未填写' }}</dd></div></dl>
           <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading">正在读取完整历史…</p>
@@ -140,17 +141,18 @@
       </section>
     </div>
     <div v-if="editorOpen" class="scrim editor-layer" :inert="discardDialogOpen || restoreDialogOpen || deleteRecordConfirmOpen">
-      <section class="editor modal" role="dialog" aria-modal="true" aria-label="编辑机柜记录" tabindex="-1">
-        <header><h2>{{ editingId ? '编辑机柜记录' : '新增机柜记录' }}</h2><button :disabled="saving" @click="closeEditor" aria-label="关闭编辑"><X :size="20" /></button></header>
+      <section class="editor modal" :class="{ 'power-editor': form.power_only }" role="dialog" aria-modal="true" :aria-label="form.power_only ? '修改机柜功率' : '编辑机柜记录'" tabindex="-1">
+        <header><h2>{{ form.power_only ? '修改机柜功率' : editingId ? '编辑机柜记录' : '新增机柜记录' }}</h2><button :disabled="saving" @click="closeEditor" aria-label="关闭编辑"><X :size="20" /></button></header>
         <form @submit.prevent="saveRecord(false)">
           <div class="editor-body"><fieldset class="editor-fields" :disabled="saving || moveLoading">
-            <div class="form-grid">
+            <div v-if="form.power_only" class="power-form"><p>{{ scope }}楼 · {{ form.room }} / {{ form.rack }}</p><label>机柜功率（W）<input v-model="form.power" type="number" min="0" step="any" autofocus /></label><p class="power-hint">同步更正该机柜全部上下电记录的功率；留空将清除功率。</p></div>
+            <template v-else><div class="form-grid">
               <label v-if="isAdmin && editingId">楼栋<select :value="form.scope || scope" :disabled="!!form.target_state" @change="changeRecordScope(($event.target as HTMLSelectElement).value)"><option v-for="s in ['A','B','C','D','E']" :key="s" :value="s">{{ s }}楼</option></select></label>
               <label>包间<select v-model="form.room" required :disabled="!!form.target_state"><option value="">请选择</option><option v-for="room in editorOverview.rooms || []" :key="room.id" :value="room.id">{{ room.id }}</option></select></label>
               <label>机架<input v-model="form.rack" required pattern="[A-Za-z][0-9]{2}" :disabled="!!form.target_state" list="rack-options" /><datalist id="rack-options"><option v-for="rack in editorRacks" :key="rack.rack" :value="rack.rack" /></datalist></label>
               <label>机柜类型<select v-model="form.rack_type"><option value="">未填写</option><option>网络机柜</option><option>服务器机柜</option></select></label>
               <small v-if="editingId">当前基础类型：{{ form.current_rack_type || '未填写' }}</small>
-              <label>功率（W）<input v-model="form.power" type="number" min="0" step="any" /></label>
+              <label>功率（W）<input v-model="form.power" type="number" min="0" step="any" /><small>修改将同步更正该机柜全部记录的功率</small></label>
               <label v-if="!editingId">工作表<select :value="form.source" @change="requestSheetChange"><option v-for="format in overview.sheet_formats || []" :key="format.sheet">{{ format.sheet }}</option></select></label>
             </div>
             <div class="section-title"><h3>{{ form.source || '操作明细' }}</h3><button type="button" @click="form.groups.push(newGroup())"><Plus :size="16" />添加一组</button></div>
@@ -164,6 +166,7 @@
               <div v-if="group.result === '失败' || imagesWithIds(group).length || documentsWithIds(group).length" class="group-evidence"><label v-if="group.result === '失败'">失败原因<input v-model="group.failure_reason" maxlength="1000" required placeholder="填写本次操作失败原因" /></label><div v-if="imagesWithIds(group).length" class="history-images"><button v-for="image in imagesWithIds(group)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + image.image_id.slice(0,8)" @click="previewEvidence = evidenceUrl(editingId,image.image_id,true)"><img :src="evidenceUrl(editingId,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div><div v-if="documentsWithIds(group).length" class="history-documents"><a v-for="file in documentsWithIds(group)" :key="file.file_id" :href="documentUrl(editingId,file.file_id)">{{ file.name }}</a></div></div>
             </div>
             <label v-if="form.original_scope && form.original_scope !== (form.scope || scope)" class="checkbox"><input v-model="form.confirm_scope_move" type="checkbox" required />将原 {{ form.original_scope }} 楼记录调整到 {{ form.scope }} 楼</label>
+            </template>
             <div v-if="saveError" class="notice danger" role="alert">{{ saveError }}</div>
             <div v-if="pendingWrites.some(p => p.operation_id === writeId)" class="actions"><button type="button" @click="resumePending(writeId)">继续核验</button><button type="button" @click="reconcilePending(writeId)">载入云端版本</button></div>
           </fieldset></div>
@@ -561,6 +564,13 @@ function openEditor(op?: Dict): void {
   if (!form.groups.length) form.groups = [newGroup()];
   writeId = ''; writeHash = ''; saveError.value = ''; editBaseline = JSON.stringify(form); discardDialogOpen.value = false; editorOpen.value = true; void focusModal();
 }
+function openPowerEditor(): void {
+  const rack=selectedRack.value; if (!rack || saving.value) return;
+  Object.keys(form).forEach(k=>delete form[k]);
+  Object.assign(form,{scope:props.scope,room:rack.room,rack:rack.rack,power:rack.power ?? '',expected_version:rack.power_version,power_only:true});
+  editingId.value=''; writeId=''; writeHash=''; saveError.value=''; editBaseline=JSON.stringify(form);
+  editorOpen.value=true; void focusModal();
+}
 const isResidualEmptyRecord = (op: Dict): boolean => !op.events?.length && !op.source_row;
 function requestDeleteEmptyRecord(op: Dict): void { openEditor(op); deleteRecordConfirmOpen.value = true; void focusModal(); }
 function changeEditorSheet(): void {
@@ -579,7 +589,7 @@ async function openStateSwitch(target: string): Promise<void> {
   if (rack.state !== 'off' && !activeRecord) { fail(new Error('找不到当前上电周期对应的台账记录，请刷新本楼资料后重试。')); return; }
   const existing = ['D','E'].includes(props.scope) ? rows.items?.[0] : (target !== 'off' ? activeRecord : undefined);
   openEditor(existing);
-  Object.assign(form, { room: rack.room, rack: rack.rack, rack_type: rack.rack_type, category: target === 'off' ? 'down' : 'up', target_state: target, expected_state: rack.state, expected_latest_time: rack.last_operation });
+  Object.assign(form, { room: rack.room, rack: rack.rack, rack_type: rack.rack_type, power: rack.power ?? '', category: target === 'off' ? 'down' : 'up', target_state: target, expected_state: rack.state, expected_latest_time: rack.last_operation });
   const group = { ...newGroup(), action: actions[rack.state + ':' + target] };
   if (existing && ['D','E'].includes(props.scope)) { form.primary_index = 0; form.groups = [group, ...(existing.groups || []).filter(groupHasBusinessData)]; }
   else if (existing) { form.primary_index = 0; form.groups = [...(existing.groups || []).filter(groupHasBusinessData), group]; }
@@ -601,7 +611,7 @@ async function saveRecord(confirmedDelete = false): Promise<void> {
   if (hash !== writeHash) { writeId = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''); writeHash = hash; }
   flushDraft();
   try {
-    saveStatus.value = await write((editingId.value ? 'operations/' + editingId.value : 'operations') + '?defer=1', { ...form, operation_id: writeId }, editingId.value ? 'PATCH' : 'POST');
+    saveStatus.value = await write((form.power_only ? 'rack-power' : editingId.value ? 'operations/' + editingId.value : 'operations') + '?defer=1', { ...form, operation_id: writeId }, form.power_only || editingId.value ? 'PATCH' : 'POST');
     saveStatus.value.operation_id = writeId; taskStorage.setItem(saveStorageKey,writeId); void pollSave(writeId);
   } catch (exc: any) {
     saveError.value = exc?.message || '提交结果待核实，输入已保留';
@@ -639,7 +649,7 @@ async function showSubmission(id: string): Promise<void> {
   try {
     const saved = await read('writes/' + id,{details:'1'}), payload = {...saved.request}; delete payload.operation_id;
     Object.keys(form).forEach(k => delete form[k]); Object.assign(form,payload); editingId.value = saved.record_id || ''; writeId = id; writeHash = JSON.stringify(form); editBaseline = writeHash;
-    form.groups ||= []; editorOpen.value = true;
+    if (!form.power_only) form.groups ||= []; editorOpen.value = true;
     if (form.scope && form.scope !== props.scope) moveOverview.value = await read('overview',{scope:form.scope});
     void focusModal();
   } catch (e) { fail(e); }
@@ -761,4 +771,7 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 .map-canvas{contain:layout paint style}
 .history-documents{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:8px;min-width:0}
 .history-documents a{max-width:100%;color:#175ebd;font-size:12px;overflow-wrap:anywhere}
+.rack-power{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:14px;border-bottom:1px solid #dce6f1;margin-bottom:14px;color:#526b83}
+.rack-power strong{margin-left:12px;color:#203650;font-size:17px;font-variant-numeric:tabular-nums}
+.power-editor{width:min(460px,96vw);height:auto}.power-form label{display:grid;gap:8px}.power-form p{margin:0 0 16px}.power-form .power-hint{font-size:12px;color:#63768c;line-height:1.6;margin:12px 0 0}
 </style>

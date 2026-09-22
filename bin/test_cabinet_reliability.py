@@ -10,7 +10,7 @@ from . import test_cabinet_power as base
 from .test_cabinet_power import FakeFeishu, MemoryStore, fixtures
 from .lan_bitable_template_portal.cabinet_power import CabinetPowerService,SNAPSHOT_KEY
 from .lan_bitable_template_portal.cabinet_power_data import from_feishu,to_fields,source_evidence,complete_source_record
-from .lan_bitable_template_portal.cabinet_power_excel import CabinetError,Workbook,T,export_workbook,map_state_baseline,derive_records,project_layout,calculate,POWER_SUMMARY_LABELS,COLORS,bounds,col_name,coord,text_value
+from .lan_bitable_template_portal.cabinet_power_excel import CabinetError,Workbook,T,export_workbook,map_state_baseline,derive_records,project_layout,calculate,POWER_SUMMARY_LABELS,COLORS,bounds,col_name,coord,text_value,dates
 
 
 class CabinetReliabilityTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class CabinetReliabilityTests(unittest.TestCase):
         self.service.do_refresh(scope,{},{})
         return self.service.snapshot(scope)
 
-    def test_latest_success_overrides_physical_colors_and_formula_totals(self):
+    def test_frozen_map_baseline_overrides_old_history_and_formula_totals(self):
         expected={'A':970,'B':1022,'C':970,'D':673,'E':402}
         for scope,count in expected.items():
             snap=self.install_colors(scope)
@@ -43,7 +43,7 @@ class CabinetReliabilityTests(unittest.TestCase):
             snap['config']['template_data']['summary_cells']={'bad':{'B4':99999,'C4':99999,'D4':99999}}
             self.assertEqual(derive_records(snap['config'],snap['operations'])['counts']['powered'],count)
         c=self.service.overview('C')['counts']
-        self.assertEqual((c['formal'],c['test'],c['off'],c['unknown']),(659,311,28,0))
+        self.assertEqual((c['formal'],c['test'],c['off'],c['unknown']),(939,31,28,0))
 
     def test_new_success_failure_correction_and_removal_after_color_baseline(self):
         snap=self.install_colors('D'); old=next(o for o in snap['operations'] if o['room']=='201' and o['rack']=='A01')
@@ -60,7 +60,7 @@ class CabinetReliabilityTests(unittest.TestCase):
     def test_c_map_room_and_building_counters_match_latest_success_on_page_and_export(self):
         snap=self.install_colors('C'); model=self.service.layout('C','202')['layout']; cells={c['ref']:c for c in model['cells']}
         room=next(r for r in self.service.overview('C')['rooms'] if r['id']=='202')['counts']
-        expected={'F39':170,'F40':room['test'],'F41':room['formal'],'F42':0,'F43':170,'F45':311,'F46':659,'F47':28,'F48':970,'F49':998}
+        expected={'F39':170,'F40':room['test'],'F41':room['formal'],'F42':0,'F43':170,'F45':31,'F46':939,'F47':28,'F48':970,'F49':998}
         for ref,count in expected.items(): self.assertEqual(cells[ref]['text'],str(count),ref)
         out=Workbook(export_workbook((base.TEMPLATES/'C.xlsm').read_bytes(),snap['config'],snap['operations']))
         exported=out.cells('202-M1机柜平面图')
@@ -116,18 +116,20 @@ class CabinetReliabilityTests(unittest.TestCase):
         for ref in ('E32','G32','H32','J32','H689','J690'):
             self.assertEqual(original.value(original.cells('机柜上下电时间统计').get(ref)),exported.value(exported.cells('机柜上下电时间统计').get(ref)),ref)
 
-    def test_carrier_counts_and_register_named_cabinet(self):
+    def test_carrier_maps_cover_all_cabinets_and_reject_extra_registration(self):
         overview=self.service.overview('B')
         rooms=[r for r in overview['rooms'] if r['carrier']]
         self.assertEqual(len(rooms),2)
         for room in rooms:
             self.assertEqual(room['counts']['off'],5)
-            self.assertEqual(room['unlocated'],5)
+            self.assertEqual(room['unlocated'],0)
             self.assertEqual(room['counts']['test'],1)
+            self.assertTrue(room['sheet'])
         payload={'operation_id':'carrier_new_12345678','room':'216','rack':'Z01','rack_type':'网络机柜','add_inventory':True,'groups':[]}
-        self.service.save_operation('B',payload,'owner')
+        with self.assertRaisesRegex(CabinetError,'达到原表登记总数'):
+            self.service.save_operation('B',payload,'owner')
         after=self.service.overview('B'); room=next(r for r in after['rooms'] if r['id']=='216')
-        self.assertEqual(room['unlocated'],4); self.assertEqual(room['counts']['off'],5)
+        self.assertEqual(room['unlocated'],0); self.assertEqual(room['counts']['off'],5)
         self.assertEqual(after['counts']['total'],1076)
 
     def row(self,scope='D'):
@@ -272,7 +274,9 @@ class CabinetReliabilityTests(unittest.TestCase):
 
     def test_clear_groups_does_not_restore_old_operations(self):
         old=self.row(); saved=self.service.save_operation('D',self.payload(old,groups=[]),'owner',old['record_id'])
-        self.assertEqual(saved['groups'],[]); self.assertEqual(saved['events'],[])
+        self.assertTrue(saved['deleted'])
+        self.assertNotIn(old['record_id'],self.remote.records)
+        self.assertFalse(any(op['record_id']==old['record_id'] for op in self.service.snapshot('D')['operations']))
 
     def test_failed_latest_operation_keeps_last_success(self):
         rack=next(r for r in self.service.overview('D')['racks'] if r['state']=='formal')
@@ -354,15 +358,18 @@ class CabinetReliabilityTests(unittest.TestCase):
         group={'id':'summary_new_event','action':'上正式电','actual':'2026-09-09 12:00:00','expected':'','result':'成功'}
         self.service.save_operation('D',self.payload(old,groups=[group,*old['groups']]),'owner',old['record_id'])
         snap=self.service.snapshot('D'); original=Path(snap['config']['path']).read_bytes(); before=Workbook(original)
-        after=Workbook(export_workbook(original,snap['config'],snap['operations'])); source_name='机柜上电汇总表'; name='机柜上电汇总表（邮件）'; cells=after.cells(name)
+        after=Workbook(export_workbook(original,snap['config'],snap['operations'])); source_name='机柜上电汇总表'; name='机柜上电汇总表'; cells=after.cells(name)
         self.assertEqual(after.value(cells['C10']),674)
         self.assertEqual(after.value(cells['C10']),sum(after.value(cells['C'+str(i)]) for i in range(4,10)))
         self.assertIsNotNone(cells['C10'].find(T('f')))
         self.assertEqual(cells['C10'].find(T('f')).attrib,before.cells(source_name)['C10'].find(T('f')).attrib)
         self.assertEqual(after.value(after.cells('201-M2机柜平面图 ')['F39']),145)
-        for ref,c in before.cells(source_name).items():
-            if int(''.join(filter(str.isdigit,ref)))>=12: self.assertEqual(before.value(c),after.value(cells[ref]),ref)
-        self.assertTrue(any(row.get(1)=='2026-09-09' and row.get(2)==1 for _,row in after.rows(name)))
+        day=next(row for _,row in after.rows(name) if row.get(2)=='2026.9.9')
+        self.assertEqual(day[3],1)
+        def september(row): return row.get(8)=='2026年9月' or dates(row.get(8)) and dates(row.get(8))[0].startswith('2026-09')
+        month=next(row for _,row in after.rows(name) if september(row))
+        previous=next(row for _,row in before.rows(source_name) if september(row))
+        self.assertEqual(month[9],previous[9]+1)
         new=copy.deepcopy(snap['operations'][0]); new.update(record_id='recStyleNew',meta={},source_row=None)
         after=Workbook(export_workbook(original,snap['config'],[*snap['operations'],new]))
         sheet=new['source']; last=max(r for r,row in after.rows(sheet) if row.get(4)==new['rack'])
