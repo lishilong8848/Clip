@@ -14,6 +14,7 @@ import json
 import math
 import posixpath
 import re
+import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
@@ -107,6 +108,14 @@ def dates(value):
     return result
 
 
+def export_time_text(value):
+    """Format timestamp text without inventing values for incomplete legacy dates."""
+    def display(match):
+        try: return dt.datetime(*[int(v or 0) for v in match.groups()]).strftime('%Y-%m-%d %H:%M')
+        except ValueError: return match.group()
+    return DATE_PATTERN.sub(display,value)
+
+
 def text_value(value):
     if isinstance(value, list):
         return "".join(str(v.get("text", "")) if isinstance(v, dict) else str(v) for v in value)
@@ -165,7 +174,9 @@ def export_groups(groups, count, category):
             actions = OP_PATTERN.findall(action_text)
             actuals = dates(group.get("actual"))
             expecteds = dates(group.get("expected"))
-            if len(actions) != len(actuals):
+            if not actions or len(actions) != len(actuals) or (text_value(group.get("expected")) and len(expecteds)!=len(actions)):
+                # Keep incomplete legacy groups verbatim rather than dropping or guessing a time.
+                events.append(tuple(text_value(group.get(key)) for key in ("action","expected","actual")))
                 continue
             for index, (action, actual) in enumerate(zip(actions, actuals)):
                 events.append((action, expecteds[index] if len(expecteds) == len(actions) else "", actual))
@@ -175,8 +186,7 @@ def export_groups(groups, count, category):
             result[key] = "\n".join(
                 f"{index}、{value}" if len(values) > 1 else value
                 for index, value in enumerate(values, 1)
-                if value
-            )
+            ) if any(values) else ""
         return result
 
     if category == "down" and groups[-1].get("action", "").startswith("下"):
@@ -797,6 +807,20 @@ def export_workbook(content, config, operations):
     expanded_shared={(name,ref):original_formulas[(name,ref)].text for (name,_),members in shared_groups.items() for ref,_ in members}
     styles=ET.fromstring(book.archive.read("xl/styles.xml"))
     fills=styles.find(T("fills")); xfs=styles.find(T("cellXfs")); painted={}
+    num_formats=styles.find(T('numFmts'))
+    if num_formats is None: num_formats=ET.Element(T('numFmts')); styles.insert(0,num_formats)
+    time_format=next((int(node.get('numFmtId')) for node in num_formats if node.get('formatCode')=='yyyy-mm-dd hh:mm'),None)
+    if time_format is None:
+        time_format=max([163,*[int(node.get('numFmtId')) for node in num_formats]])+1
+        ET.SubElement(num_formats,T('numFmt'),numFmtId=str(time_format),formatCode='yyyy-mm-dd hh:mm')
+    num_formats.set('count',str(len(num_formats)))
+    date_styles={}
+    def time_style(style):
+        if int(xfs[style].get('numFmtId','0'))==time_format: return style
+        if style not in date_styles:
+            xf=copy.deepcopy(xfs[style]); xf.set('numFmtId',str(time_format)); xf.set('applyNumberFormat','1')
+            date_styles[style]=len(xfs); xfs.append(xf); book.styles.append(copy.deepcopy(book.styles[style]))
+        return date_styles[style]
     def colored_style(style_id,state):
         key=(str(style_id or "0"),state)
         if key not in painted:
@@ -824,7 +848,7 @@ def export_workbook(content, config, operations):
         return cells[ref]
     def value_for_date(value):
         found=dates(value)
-        if len(found)==1:
+        if len(found)==1 and (isinstance(value,(int,float)) or DATE_PATTERN.fullmatch(str(value).strip())):
             return (dt.datetime.strptime(found[0],"%Y-%m-%d %H:%M:%S")-dt.datetime(1899,12,30)).total_seconds()/86400
         return value or ""
     for name,values in config.get("map_values",{}).items():
@@ -851,7 +875,7 @@ def export_workbook(content, config, operations):
             for col in row: write(name,f"{col_name(col)}{rn}","")
     max_cols={name:max(coord(ref)[0] for ref in cell_maps[name]) for name in formats}
     used=set()
-    group_cells={}
+    group_cells={}; grow_cells=set(); time_cells=set()
     for op in operations:
         if not op.get("events") and not op.get("source_row"):
             continue
@@ -903,12 +927,24 @@ def export_workbook(content, config, operations):
             for k,label in (("action","操作类型"),("expected","期望完成时间"),("actual","实际完成时间")):
                 source_col=sample_group.get(k) or sample_group["actual"]
                 width=next((c.get("width") for c in cols if int(c.get("min"))<=source_col<=int(c.get("max"))),"22")
+                # Templates may define unused columns through XFD; split that range before extending.
+                for definition in list(cols):
+                    left,right=int(definition.get('min')),int(definition.get('max'))
+                    if left<=new[k]<=right:
+                        cols.remove(definition)
+                        if left<new[k]:
+                            part=copy.deepcopy(definition); part.set('max',str(new[k]-1)); cols.append(part)
+                        if new[k]<right:
+                            part=copy.deepcopy(definition); part.set('min',str(new[k]+1)); cols.append(part)
                 ET.SubElement(cols,T("col"),min=str(new[k]),max=str(new[k]),width=width,customWidth="1")
+                cols[:]=sorted(cols,key=lambda node:int(node.get('min')))
                 sample=cell_maps[name].get(f"{col_name(source_col)}{fmt['header']}")
                 cell=write(name,f"{col_name(new[k])}{fmt['header']}",label)
                 if sample is not None: cell.set("s",sample.get("s","0"))
                 sample=cell_maps[name].get(f"{col_name(source_col)}{fmt['header']+1}")
-                if sample is not None: write(name,f"{col_name(new[k])}{fmt['header']+1}","").set("s",sample.get("s","0"))
+                style=int(sample.get('s','0')) if sample is not None else 0
+                if k!='action': style=time_style(style)
+                write(name,f"{col_name(new[k])}{fmt['header']+1}","").set('s',str(style))
         targets=[(rn,gmap,groups[i] if i<len(groups) else {}) for i,gmap in enumerate(fmt["groups"])]
         targets.extend((g["source_row"],fmt["groups"][g["source_group"]],g) for g in continuation_groups)
         for target_row,gmap,g in targets:
@@ -924,9 +960,12 @@ def export_workbook(content, config, operations):
                 if raw is not None and text_value(value)==raw_text: value=raw
                 elif kind!="action": value=value_for_date(value)
                 ref=f"{col_name(col)}{target_row}"
+                if kind!='action': time_cells.add((name,ref))
                 if meta.get("schema",0)<3 and ref in inherited_cells[name] and raw in (None,"") and value in (None,""): continue
                 if ref in inherited_cells[name] and g.get("source_resolved",{}).get(kind)==g.get(kind): value=inherited_cells[name][ref]
                 group_cells[(name,ref)]=value
+                if isinstance(value,str) and '\n' in value and text_value(value)!=text_value(raw):
+                    grow_cells.add((name,ref))
     # Retain unchanged source merges; split only a merge whose members were independently edited.
     for name in formats:
         merges=roots[name].find(T("mergeCells"))
@@ -943,7 +982,38 @@ def export_workbook(content, config, operations):
                 merges.remove(merge)
                 for ref,value in zip(refs,desired): group_cells[(name,ref)]=value
         merges.set("count",str(len(merges)))
-    for (name,ref),value in group_cells.items(): write(name,ref,value)
+    row_nodes={name:{int(row.get('r')):row for row in roots[name].find(T('sheetData'))} for name in formats}
+    wrapped_styles={}; row_heights={}
+    for (name,ref),value in group_cells.items():
+        if (name,ref) in time_cells and isinstance(value,str):
+            if DATE_PATTERN.fullmatch(value.strip()) and dates(value): value=value_for_date(value)
+            else:
+                rendered=export_time_text(value)
+                if rendered!=value and '\n' in value: grow_cells.add((name,ref))
+                value=rendered
+        cell=write(name,ref,value)
+        if (name,ref) in time_cells: cell.set('s',str(time_style(int(cell.get('s','0')))))
+        if (name,ref) not in grow_cells or not isinstance(value,str) or '\n' not in value: continue
+        style=int(cell.get('s','0'))
+        if not book.styles[style].get('wrap_text'):
+            if style not in wrapped_styles:
+                xf=copy.deepcopy(xfs[style]); alignment=xf.find(T('alignment'))
+                if alignment is None: alignment=ET.SubElement(xf,T('alignment'))
+                alignment.set('wrapText','1'); xf.set('applyAlignment','1')
+                wrapped_styles[style]=len(xfs); xfs.append(xf)
+                book.styles.append({**book.styles[style],'wrap_text':True})
+            cell.set('s',str(wrapped_styles[style]))
+        key=(name,coord(ref)[1])
+        font_size=float(book.styles[style].get('font_size',9))
+        cols=roots[name].find(T('cols'))
+        width=next((float(node.get('width','8.43')) for node in cols if int(node.get('min'))<=coord(ref)[0]<=int(node.get('max'))),8.43) if cols is not None else 8.43
+        capacity=max(1,width*11/font_size-2)
+        lines=sum(max(1,math.ceil(sum(2 if unicodedata.east_asian_width(char) in ('W','F') else 1 for char in line)/capacity)) for line in value.split('\n'))
+        height=min(409,4+lines*max(14,font_size*1.4))
+        row_heights[key]=max(row_heights.get(key,0),height)
+    for (name,rn),height in row_heights.items():
+        row=row_nodes[name][rn]
+        if height>float(row.get('ht','0')): row.set('ht',str(height)); row.set('customHeight','1')
     for name in formats:
         fmt=formats[name]; root=roots[name]; dimension=root.find(T("dimension"))
         merged_rows=set()
@@ -1098,7 +1168,7 @@ def export_workbook(content, config, operations):
             write(name,item["ref"],int(item["text"]) if item["text"].isdigit() else 0,preserve_formula=True)
     refresh_formula_caches(book,cell_maps,config,write)
     for (name,_),members in shared_groups.items():
-        if all(cell_maps[name][ref].findtext(T("f"))==expanded_shared[(name,ref)] and cell_maps[name][ref].find(T("f")) is not None for ref,_ in members):
+        if all(ref in cell_maps[name] and cell_maps[name][ref].findtext(T("f"))==expanded_shared[(name,ref)] and cell_maps[name][ref].find(T("f")) is not None for ref,_ in members):
             for ref,original in members:
                 cell=cell_maps[name][ref]; cell.remove(cell.find(T("f"))); cell.insert(0,original)
     fills.set("count",str(len(fills))); xfs.set("count",str(len(xfs)))

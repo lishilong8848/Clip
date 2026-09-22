@@ -24,6 +24,12 @@ from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_export_timestamp_text_uses_iso_minutes_and_keeps_missing_values(self):
+        from .lan_bitable_template_portal.cabinet_power_excel import export_time_text
+        self.assertEqual(export_time_text('1、2026/9/22 9:01:45\n2、\n3、2026年9月23日 08：02：59'),
+                         '1、2026-09-22 09:01\n2、\n3、2026-09-23 08:02')
+        self.assertEqual(export_time_text('时间未知 / 2026-99-22 09:01'),'时间未知 / 2026-99-22 09:01')
+
     def test_pasted_confirmation_text_accepts_minimal_full_markdown_and_wrapped_rows(self):
         from .lan_bitable_template_portal.cabinet_power_text import parse_confirmation_text
         minimal=['EA118-E2-2','A11','测试电转正式电','2026-09-16 16:02:59','2026-09-14 16:03:16']
@@ -2308,6 +2314,89 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(edited["groups"][0]["action"],"下正式电")
         self.assertEqual(to_fields(edited)["操作类型"],"下正式电")
 
+    def test_de_repeated_saves_expand_history_headers_dates_and_styles(self):
+        from .lan_bitable_template_portal.cabinet_power_excel import col_name, coord
+        from openpyxl.styles.numbers import BUILTIN_FORMATS
+        for scope in 'DE':
+            snapshot=self.service._snapshot(scope)
+            if scope=='D':
+                old=next(op for op in snapshot['operations'] if (op['room'],op['rack'])==('202','F12'))
+            else:
+                old=max(snapshot['operations'],key=lambda op:sum(bool(g.get('action')) for g in op['groups']))
+            count=len(snapshot['operations']); initial=copy.deepcopy(old['groups'])
+            for index,action in enumerate(('正式电转测试电','测试电转正式电','下正式电')):
+                prior_groups=copy.deepcopy(old['groups'])
+                group={'id':f'export_repeat_{scope}_{index}','action':action,'result':'成功',
+                       'expected':f'2026-09-21 {10+index:02}:00:00','actual':f'2026-09-21 {10+index:02}:01:00'}
+                old=self.service.save_operation(scope,{'operation_id':f'export_repeat_operation_{scope}_{index}',
+                    'expected_version':old['version'],'groups':[*old['groups'],group]},'owner',old['record_id'])
+                self.assertEqual(old['groups'][0],group)
+                self.assertEqual(old['groups'][1:],prior_groups)
+            snapshot=self.service._snapshot(scope)
+            self.assertEqual(len(snapshot['operations']),count)
+            before=Workbook((TEMPLATES/(scope+'.xlsm')).read_bytes())
+            after=Workbook(export_workbook((TEMPLATES/(scope+'.xlsm')).read_bytes(),snapshot['config'],snapshot['operations']))
+            fmt=snapshot['config']['template_data']['formats'][0]; sheet=fmt['sheet']
+            cells=after.cells(sheet); row=old['source_row']
+            styles=ET.fromstring(after.archive.read('xl/styles.xml')); xfs=styles.find(T('cellXfs'))
+            num_formats={**BUILTIN_FORMATS,**{int(node.get('numFmtId')):node.get('formatCode') for node in styles.iter(T('numFmt'))}}
+            self.assertEqual(after.value(cells[f'H{row}']),old['rack_type'])
+            self.assertEqual(after.value(cells[f'I{row}']),old['power'])
+            self.assertEqual(after.value(cells[f'J{row}']),'成功')
+            columns=sorted(coord(ref)[0] for ref,cell in cells.items() if coord(ref)[1]==fmt['header'] and after.value(cell)=='操作类型')
+            self.assertGreaterEqual(len(columns),len(initial)+3)
+            exported=[{'action':after.value(cells[f'{col_name(col)}{row}']),
+                       'expected':dates(after.value(cells[f'{col_name(col+1)}{row}'])),
+                       'actual':dates(after.value(cells[f'{col_name(col+2)}{row}']))} for col in columns[:len(old['groups'])]]
+            self.assertEqual(exported,[{'action':g.get('action',''),'expected':dates(g.get('expected')),'actual':dates(g.get('actual'))} for g in old['groups']])
+            for col in columns[len(fmt['groups']):]:
+                for offset,label in enumerate(('操作类型','期望完成时间','实际完成时间')):
+                    self.assertEqual(after.value(cells[f'{col_name(col+offset)}1']),label)
+                    key=('action','expected','actual')[offset]
+                    sample=f"{col_name(fmt['groups'][-1][key])}2"
+                    style=int(cells[f'{col_name(col+offset)}{row}'].get('s'))
+                    self.assertEqual(after.styles[style],before.styles[int(before.cells(sheet)[sample].get('s'))])
+                    if offset: self.assertEqual(num_formats[int(xfs[style].get('numFmtId'))],'yyyy-mm-dd hh:mm')
+                    width=next(node.get('width') for node in after.sheet(sheet).find(T('cols')) if int(node.get('min'))<=col+offset<=int(node.get('max')))
+                    source_col=fmt['groups'][-1][key]
+                    expected_width=next(node.get('width') for node in before.sheet(sheet).find(T('cols')) if int(node.get('min'))<=source_col<=int(node.get('max')))
+                    self.assertEqual(width,expected_width)
+            definitions=sorted(after.sheet(sheet).find(T('cols')),key=lambda node:int(node.get('min')))
+            self.assertTrue(all(int(left.get('max'))<int(right.get('min')) for left,right in zip(definitions,definitions[1:])))
+            self.assertEqual(after.archive.read('xl/vbaProject.bin'),before.archive.read('xl/vbaProject.bin'))
+
+    def test_abc_history_compression_preserves_empty_times_and_grows_rows(self):
+        for scope in 'ABC':
+            snapshot=self.service._snapshot(scope)
+            rack=snapshot['config']['inventory'][0]
+            for category in ('up','down'):
+                groups=[{'action':'上正式电','expected':'2026-09-20 09:00:00','actual':'2026-09-20 09:01:00'},
+                        {'action':'正式电转测试电','expected':'','actual':''},
+                        {'action':'测试电转正式电','expected':'','actual':'2026-09-20 11:01:00'},
+                        {'action':'正式电转测试电','expected':'2026-09-20 12:00:00','actual':'2026-09-20 12:01:00'},
+                        {'action':'测试电转正式电','expected':'2026-09-20 13:00:00','actual':'2026-09-20 13:01:00'}]
+                if category=='down': groups.append({'action':'下正式电','expected':'','actual':'2026-09-20 14:01:00'})
+                else: groups=groups[:3]
+                source=next(fmt['sheet'] for fmt in snapshot['config']['template_data']['formats']
+                            if ('下电' in fmt['sheet'] and '上下电' not in fmt['sheet'])==(category=='down'))
+                op={'record_id':f'recExport{scope}{category}','scope':scope,'room':rack['room'],'rack':rack['rack'],
+                    'system_name':system_name(scope,rack['room']),'source':source,'source_row':None,'rack_type':rack['rack_type'],
+                    'result':'成功','groups':groups,'meta':{'schema':3,'category':category},'category':category}
+                op=from_feishu({'record_id':op['record_id'],'fields':{**to_fields(op),'来源工作表':source}})
+                book=Workbook(export_workbook((TEMPLATES/(scope+'.xlsm')).read_bytes(),snapshot['config'],[op]))
+                row_number,row=next((n,r) for n,r in book.rows(source) if n>1 and r.get(4)==rack['rack'])
+                fmt=next(fmt for fmt in snapshot['config']['template_data']['formats'] if fmt['sheet']==source)
+                actions='\n'.join(str(row.get(g['action'],'')) for g in fmt['groups'])
+                self.assertEqual(Counter(re.findall('上正式电|正式电转测试电|测试电转正式电|下正式电',actions)),Counter(g['action'] for g in groups),(scope,category))
+                merged=str(row.get(fmt['groups'][1]['actual'],''))
+                self.assertIn('2、2026-09-20 11:01',merged,(scope,category))
+                self.assertNotIn('11:01:00',merged)
+                self.assertEqual([line.split('、',1)[0] for line in str(row[fmt['groups'][1]['action']]).splitlines()],
+                                 [line.split('、',1)[0] for line in merged.splitlines()])
+                sheet_row=next(r for r in book.sheet(source).find(T('sheetData')) if r.get('r')==str(row_number))
+                self.assertGreater(float(sheet_row.get('ht',0)),30,(scope,category))
+                if scope=='B' and category=='down': self.assertGreaterEqual(float(sheet_row.get('ht',0)),110)
+
     def test_original_export_preserves_all_five_formats_and_raw_rows(self):
         from openpyxl import load_workbook
         for scope in "ABCDE":
@@ -2323,10 +2412,23 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                 if "平面图" not in name: self.assertEqual(original_merges,exported_merges)
             for fmt in self.models[scope]["formats"]:
                 name=fmt["sheet"]; raw=dict(before.rows(name)); actual=dict(after.rows(name))
+                cells=after.cells(name)
+                date_cols={group[key] for group in fmt['groups'] for key in ('actual','expected') if group.get(key)}
+                styles=ET.fromstring(after.archive.read('xl/styles.xml')); xfs=styles.find(T('cellXfs'))
+                num_formats={int(node.get('numFmtId')):node.get('formatCode') for node in styles.iter(T('numFmt'))}
                 for rn,row in raw.items():
                     if rn<=fmt["header"] or not row.get(fmt["rack"]): continue
                     for col,value in row.items():
-                        self.assertEqual(actual[rn].get(col,""),value,(scope,name,rn,col))
+                        exported=actual[rn].get(col,"")
+                        if col in date_cols and dates(value):
+                            from .lan_bitable_template_portal.cabinet_power_excel import col_name,export_time_text
+                            style=int(cells[f'{col_name(col)}{rn}'].get('s','0'))
+                            self.assertEqual(num_formats[int(xfs[style].get('numFmtId'))],'yyyy-mm-dd hh:mm')
+                            if isinstance(value,str):
+                                if isinstance(exported,str): self.assertEqual(exported,export_time_text(value))
+                                else: self.assertEqual(dates(exported),dates(value))
+                                continue
+                        self.assertEqual(exported,value,(scope,name,rn,col))
             checked=load_workbook(io.BytesIO(result),keep_vba=True,data_only=True); checked.close()
 
     def test_notice_expected_time_stays_blank_through_confirmation_all_buildings(self):
