@@ -455,6 +455,65 @@ class CabinetPowerTests(unittest.TestCase):
         self.assertEqual(preview['rows'][1]['status'],'duplicate')
         self.assertEqual(service.store.list(None),[])
 
+    def test_batch_text_fill_only_changes_selected_existing_rows_with_audit(self):
+        service=self.service.batches
+        original={'scope':'E','room':'202','rack':'A11','action':'上正式电','expected':'','actual':'',
+                  'result':'失败','failure_reason':'保留原因','rack_type':'服务器机柜'}
+        sources=[{'id':'fill_text_sample','text':'EA118-E2-2 A11 测试电转正式电 2026-09-16 16:02:59 2026-09-14 16:03:16 A11 Success\nEA118-E2-2 A12 上正式电 2026-09-16 16:02:59 2026-09-14 16:03:16'}]
+        remote=copy.deepcopy(self.remote.records)
+        for source in ('manual','notice','image','pdf','text'):
+            with self.subTest(source=source):
+                batch=service.create_manual([original,original],'owner')
+                batch=service._change(batch['batch_id'],lambda batch:batch.update(source=source))
+                before=copy.deepcopy(service.get(batch['batch_id']))
+                preview=service.preview_text_fill(batch['batch_id'],{'sources':sources},'owner',['E'])
+                self.assertEqual(len(preview['rows'][0]['targets']),2)
+                self.assertEqual(preview['rows'][1]['issue'],'本批次无此机柜')
+                self.assertEqual(service.store.get(batch['batch_id']),before)
+                row_id=batch['rows'][1]['row_id']
+                payload={'version':preview['version'],'sources':sources,'rows':[{'text_id':sources[0]['id'],'text_row':1,'row_id':row_id}]}
+                saved=service.apply_text_fill(batch['batch_id'],payload,'owner',['E'])
+                row=saved['rows'][1]
+                self.assertEqual(len(saved['rows']),2)
+                self.assertEqual((row['action'],row['expected'],row['actual']),('测试电转正式电','2026-09-16 16:02:59','2026-09-14 16:03:16'))
+                for key in ('scope','room','rack','result','failure_reason','original','operation_id'):
+                    self.assertEqual(row[key],before['rows'][1][key],key)
+                self.assertEqual(saved['rows'][0]['expected'],'')
+                self.assertEqual([edit['field'] for edit in row['edits']],['action','expected','actual'])
+                self.assertTrue(all(edit['source']=='text_fill' and edit['raw_text'] for edit in row['edits']))
+                with self.assertRaises(CabinetError): service.apply_text_fill(batch['batch_id'],payload,'owner',['E'])
+                payload['version']=saved['version']
+                retried=service.apply_text_fill(batch['batch_id'],payload,'owner',['E'])
+                self.assertEqual(retried['rows'][1]['edits'],row['edits'])
+        self.assertEqual(self.remote.records,remote)
+
+    def test_batch_text_fill_rejects_mismatches_conflicts_permissions_and_locked_rows(self):
+        service=self.service.batches
+        batch=service.create_manual([{'scope':'E','room':'202','rack':'A11','result':'成功'},
+                                     {'scope':'E','room':'202','rack':'A12','result':'成功'}],'owner')
+        batch_id=batch['batch_id']; row_id=batch['rows'][0]['row_id']
+        sources=[{'id':'fill_guard_source','text':'EA118-E2-2 A11 上测试电 2026-09-16 16:02:59 2026-09-14 16:03:16'}]
+        payload={'version':batch['version'],'sources':sources,'rows':[{'text_id':sources[0]['id'],'text_row':1,'row_id':row_id}]}
+        for selections in ([{**payload['rows'][0],'row_id':batch['rows'][1]['row_id']}],payload['rows']*2,[{**payload['rows'][0],'row_id':'missing'}]):
+            with self.assertRaises(CabinetError): service.apply_text_fill(batch_id,{**payload,'rows':selections},'owner',['E'])
+            self.assertEqual(service.store.get(batch_id),batch)
+        with self.assertRaises(CabinetError): service.apply_text_fill(batch_id,payload,'owner',['A'])
+        with self.assertRaises(CabinetError): service.preview_text_fill(batch_id,{'sources':sources},'stranger',['A'])
+        with self.assertRaisesRegex(CabinetError,'缺少'): service.preview_text_fill(batch_id,{'sources':[{'id':'fill_incomplete','text':'EA118-E2-2 A11 上测试电'}]},'owner',['E'])
+        for status in ('queued','writing','completed','excluded_manual','excluded_cancelled','rollback_failed'):
+            batch=service._change(batch_id,lambda batch:batch['rows'][0].update(status=status))
+            payload['version']=batch['version']
+            preview=service.preview_text_fill(batch_id,{'sources':sources},'owner',['E'])
+            self.assertFalse(preview['rows'][0]['targets'][0]['editable'])
+            with self.assertRaises(CabinetError): service.apply_text_fill(batch_id,payload,'owner',['E'])
+        batch=service._change(batch_id,lambda batch:batch['rows'][0].update(status='rolled_back',operation_started=True))
+        payload['version']=batch['version']
+        saved=service.apply_text_fill(batch_id,payload,'owner',['E'])
+        self.assertEqual(saved['rows'][0]['actual'],'2026-09-14 16:03:16')
+        batch=service._change(batch_id,lambda batch:batch.update(source_notice={'deleted_at':'2026-09-23'}))
+        payload['version']=batch['version']
+        with self.assertRaises(CabinetError): service.apply_text_fill(batch_id,payload,'owner',['E'])
+
     def test_text_hundred_pastes_create_five_hundred_rows(self):
         text='EA118-E2-2 A11 测试电转正式电 2026-09-16 16:02:59 2026-09-14 16:03:16 A11 Success'
         sources=[{'id':f'text_large_{index:04d}','text':'\n'.join([text]*5)} for index in range(100)]

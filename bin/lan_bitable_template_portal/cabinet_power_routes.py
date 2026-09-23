@@ -91,6 +91,11 @@ def install_cabinet_power_routes(app,controller,runtime):
                 parts=path.split("/")
                 if len(parts)<2: raise CabinetError("接口不存在",404)
                 batch_id=parts[1]
+                if len(parts)==3 and parts[2] in ("text-preview","text-apply") and request.method=="POST":
+                    action=service.batches.preview_text_fill if parts[2]=="text-preview" else service.batches.apply_text_fill
+                    data=await asyncio.to_thread(action,batch_id,payload,owner,allowed,admin)
+                    if parts[2]=="text-apply": data=service.batches.visible(data,owner,allowed,admin)
+                    return controller._json_ok(request,session,data)
                 if len(parts)==3 and parts[2]=="status" and request.method=="GET":
                     data=await asyncio.to_thread(service.batches.status,batch_id,owner,allowed,admin)
                     return controller._json_ok(request,session,data)
@@ -242,6 +247,7 @@ def install_cabinet_power_routes(app,controller,runtime):
         "batches/{batch_id}/images/{image_id}/retry":["POST"],
         "batches/{batch_id}/images/{image_id}/correct":["POST"],
         "batches/text-preview":["POST"],
+        "batches/{batch_id}/text-preview":["POST"],"batches/{batch_id}/text-apply":["POST"],
         "batches/{batch_id}/images/{image_id}/restore":["POST"],
         "batches/{batch_id}/files/{file_id}/cleanup":["POST"],
         "buildings":["GET"],"overview":["GET"],"rooms":["GET"],"racks":["GET"],"rooms/{room_id}/layout":["GET"],

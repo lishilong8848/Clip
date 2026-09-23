@@ -1705,7 +1705,8 @@ class CabinetBatchService:
         self._refresh_summary(batch)
         return self.store.create(batch)
 
-    def text_preview(self, sources, allowed, patches=None, batch_id="preview"):
+    @staticmethod
+    def _parse_text_sources(sources):
         from .cabinet_power_text import parse_confirmation_text
         if not isinstance(sources, list) or not 1 <= len(sources) <= MAX_ROWS:
             raise CabinetError(f"每批须包含1至{MAX_ROWS}段粘贴文本", 400)
@@ -1720,6 +1721,10 @@ class CabinetBatchService:
             for index, candidate in enumerate(parse_confirmation_text(source["text"]), 1):
                 candidates[(source["id"], index)] = candidate
         if len(candidates) > MAX_ROWS: raise CabinetError("单批最多2000条机柜记录", 413)
+        return candidates
+
+    def text_preview(self, sources, allowed, patches=None, batch_id="preview"):
+        candidates = self._parse_text_sources(sources)
         if patches is None: patches=[{"text_id":key[0],"text_row":key[1]} for key in candidates]
         if not isinstance(patches, list) or not 1 <= len(patches) <= MAX_ROWS:
             raise CabinetError("请选择1至2000条识别记录", 400)
@@ -1752,6 +1757,70 @@ class CabinetBatchService:
         batch={"batch_id":batch_id,"source":"text","status":"pending","rows":rows,"files":[],"images":[],"error":""}
         self._validate_rows(batch); self._refresh_summary(batch)
         return batch
+
+    def preview_text_fill(self, batch_id, payload, owner, allowed, admin=False):
+        batch = self.visible(self.get(batch_id), owner, allowed, admin)
+        candidates = self._parse_text_sources(payload.get("sources"))
+        targets = {}
+        for row in batch.get("rows", []):
+            key = (row.get("scope"), row.get("room"), row.get("rack"))
+            targets.setdefault(key, []).append({
+                **{field: row.get(field, "") for field in ("row_id", "source_index", "action", "expected", "actual")},
+                "editable": bool(row["editable"] and self._proof_row_editable(row)),
+            })
+        rows = []
+        for (text_id, text_row), candidate in candidates.items():
+            permitted = admin or candidate["scope"] in allowed
+            matches = targets.get((candidate["scope"], candidate["room"], candidate["rack"]), []) if permitted else []
+            rows.append({**candidate, "text_id": text_id, "text_row": text_row, "targets": matches,
+                         "issue": "无楼栋权限" if not permitted else "本批次无此机柜" if not matches else
+                         "对应记录不可编辑" if not any(row["editable"] for row in matches) else ""})
+        return {"version": batch["version"], "rows": rows}
+
+    def apply_text_fill(self, batch_id, payload, owner, allowed, admin=False):
+        self.visible(self.get(batch_id), owner, allowed, admin)
+        candidates = self._parse_text_sources(payload.get("sources"))
+        selections = payload.get("rows")
+        version = payload.get("version")
+        if type(version) is not int or version < 1:
+            raise CabinetError("缺少有效批次版本", 400)
+        if not isinstance(selections, list) or not 1 <= len(selections) <= MAX_ROWS:
+            raise CabinetError("请选择需要回填的记录", 400)
+        requested = {}; used = set()
+        for selection in selections:
+            if (not isinstance(selection, dict) or not isinstance(selection.get("text_id"), str)
+                    or type(selection.get("text_row")) is not int or not isinstance(selection.get("row_id"), str)):
+                raise CabinetError("文本回填记录格式无效", 400)
+            key = (selection["text_id"], selection["text_row"])
+            if key not in candidates or key in used or selection["row_id"] in requested:
+                raise CabinetError("同一记录只能回填一次，请核对重复或冲突的文本", 400)
+            used.add(key)
+            requested[selection["row_id"]] = (key, candidates[key])
+
+        def apply(batch):
+            if batch.get("status") == "cancelled" or (batch.get("source_notice") or {}).get("deleted_at"):
+                raise CabinetError("批次已作废或来源通告已删除，不能回填", 409)
+            rows = {row["row_id"]: row for row in batch.get("rows", [])}
+            for row_id, (key, candidate) in requested.items():
+                row = rows.get(row_id)
+                if row is None: raise CabinetError("本批次不存在所选记录", 404)
+                if not admin and row.get("scope") not in allowed:
+                    raise CabinetError("无权修改该楼栋记录", 403)
+                if not self._proof_row_editable(row):
+                    raise CabinetError("所选记录已提交、作废或移除，请重新核对", 409)
+                if any(row.get(field) != candidate[field] for field in ("scope", "room", "rack")):
+                    raise CabinetError("识别机柜与目标记录不一致，不能回填", 400)
+                for field in ("action", "expected", "actual"):
+                    value = candidate[field]
+                    if value == str(row.get(field) or ""): continue
+                    row.setdefault("edits", []).append({
+                        "field": field, "before": row.get(field, ""), "after": value, "owner": owner, "at": now(),
+                        "source": "text_fill", "text_id": key[0], "text_row": key[1], "raw_text": candidate["raw_text"],
+                    })
+                    row[field] = value
+            if batch.pop("validation_error", False): batch["error"] = ""
+
+        return self._change(batch_id, apply, expected_version=version, validate=True, partial_rows=True)
 
     def create_text(self, payload, owner, allowed):
         if not isinstance(payload.get("rows"),list) or not payload["rows"]:

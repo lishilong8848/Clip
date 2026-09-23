@@ -112,7 +112,7 @@
       <div v-if="batch.blocking_warnings?.length" class="notice warning" role="alert"><AlertTriangle :size="18" /><span><b>通告明细需要核对</b><small v-for="warning in batch.blocking_warnings" :key="warning.code">{{ warning.message }}</small></span><strong v-if="batch.warnings_acknowledged" class="success-text">已人工核对</strong><button v-else :disabled="saving" @click="confirmDialog = 'warnings'">以当前明细为准</button></div>
       <div v-if="batch.stats?.duplicate" class="notice warning" role="alert"><AlertTriangle :size="18" /><span>发现 {{ batch.stats.duplicate }} 条重复记录，清空重叠不影响已保存台账。</span><button @click="confirmDialog = 'overlap'">清空重叠数据</button></div>
       <details v-if="batch.files?.length" class="source-files source-details" :open="batch.files.some((file: Dict) => file.error)"><summary>来源文件<span>{{ batch.files.length }} 份</span></summary><div v-for="file in batch.files" :key="file.file_id"><FileText :size="16" /><a v-if="batch.can_download_files && !file.cleaned_at" :href="api + '/batches/' + batch.batch_id + '/files/' + file.file_id">{{ file.name }}</a><span v-else>{{ file.name }}{{ file.cleaned_at ? '（已清理）' : '' }}</span><small>{{ file.processed_pages || 0 }}/{{ file.pages || 0 }} 页 · {{ statusLabel(file.status) }}</small><b v-if="file.error">{{ file.error }}</b><button v-if="batch.can_download_files && !file.cleaned_at && ['completed','cancelled'].includes(batch.status)" class="icon-button" title="清理原确认单" aria-label="清理原确认单" @click="requestFileCleanup(file.file_id)"><Trash2 :size="16" /></button></div></details>
-      <section class="evidence-section"><div class="evidence-upload" :class="{ dragging: evidenceDragging }" title="支持拖入截图或 Ctrl+V 粘贴" @dragover.prevent="evidenceDragging = true" @dragleave.prevent="evidenceDragging = false" @drop.prevent="dropEvidence"><div class="evidence-title"><h3>确认截图</h3><span>{{ activeImages.length }} 张</span></div><label class="file-command" title="选择、拖入或粘贴截图"><Upload :size="15" />选择图片<input ref="imageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple @change="selectEvidence" /></label><label class="file-command">选择文件夹<input type="file" accept="image/jpeg,image/png,image/webp" multiple webkitdirectory @change="selectEvidence" /></label><small v-if="uploadingEvidence">已上传 {{ imageUploadDone }}/{{ imageUploadTotal }} 张，正在识别…</small></div>
+      <section class="evidence-section"><div class="evidence-upload" :class="{ dragging: evidenceDragging }" title="支持拖入截图或 Ctrl+V 粘贴" @dragover.prevent="evidenceDragging = true" @dragleave.prevent="evidenceDragging = false" @drop.prevent="dropEvidence"><div class="evidence-title"><h3>确认截图</h3><span>{{ activeImages.length }} 张</span></div><label class="file-command" title="选择、拖入或粘贴截图"><Upload :size="15" />选择图片<input ref="imageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple @change="selectEvidence" /></label><label class="file-command">选择文件夹<input type="file" accept="image/jpeg,image/png,image/webp" multiple webkitdirectory @change="selectEvidence" /></label><button :disabled="saving || uploadingEvidence || !batch.rows?.some((row:Dict)=>row.editable && !String(row.status).startsWith('excluded_'))" @click="openTextFill"><ClipboardPaste :size="15" />粘贴文本识别</button><small v-if="uploadingEvidence">已上传 {{ imageUploadDone }}/{{ imageUploadTotal }} 张，正在识别…</small></div>
         <div v-if="activeImages.length" class="evidence-grid">
           <article v-for="image in pagedActiveImages" :key="image.image_id" class="evidence-item">
             <button class="image-button" :aria-label="'查看原图 ' + image.name" @click="openImage(image.image_id)"><img :src="imageUrl(image.image_id)" :alt="image.name" loading="lazy" /></button>
@@ -202,6 +202,7 @@
     <ConfirmDialog :open="discardOpen" tone="warning" title="放弃未保存的批次修改？" message="继续后，本页尚未保存的字段修改会丢失。" confirm-label="放弃修改" cancel-label="继续编辑" @resolve="resolveDiscard" />
     <ConfirmDialog :open="draftRestoreOpen" title="恢复未保存的批次更正？" message="检测到上次页面关闭前尚未成功保存的机柜字段。恢复后会继续自动保存；也可以丢弃草稿并使用服务器版本。" confirm-label="恢复更正" cancel-label="丢弃草稿" @resolve="resolveBatchDraft" />
     <div v-if="previewImage" class="image-preview" role="dialog" aria-modal="true" aria-label="确认截图原图" @click.self="previewImage = ''"><button class="image-close" aria-label="关闭原图" @click="previewImage = ''"><X :size="20" /></button><img :src="previewImage" alt="确认截图原图" /><div v-if="previewGallery.length > 1" class="preview-navigation"><button :disabled="previewIndex <= 0" aria-label="上一张证明" @click="moveProof(-1)"><ChevronLeft :size="20" /></button><span>{{ previewIndex + 1 }} / {{ previewGallery.length }}</span><button :disabled="previewIndex >= previewGallery.length - 1" aria-label="下一张证明" @click="moveProof(1)"><ChevronRight :size="20" /></button></div></div>
+    <CabinetBatchTextFill v-if="textFillOpen" ref="textFill" :batch-id="batchId" @close="closeTextFill" @applied="textFillApplied" />
   </main>
 </template>
 
@@ -214,6 +215,7 @@ import { navigate, registerNavigationGuard } from '../navigation';
 import type { ScopeOption } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
 import VnetBackButton from './VnetBackButton.vue';
+import CabinetBatchTextFill from './CabinetBatchTextFill.vue';
 
 const props = defineProps<{ scope: string; scopeOptions: ScopeOption[]; isAdmin: boolean; userId?: string }>();
 const api = '/api/cabinet-power';
@@ -238,6 +240,15 @@ const uploadingEvidence = ref(false), evidenceDragging = ref(false), imageUpload
 const imageSelections = reactive<Record<string,string>>({});
 const imageSearches = reactive<Record<string,string>>({});
 const saveConflicts = ref<Dict[]>([]), showProofPanel = ref(false);
+const textFillOpen = ref(false);
+const textFill = ref<InstanceType<typeof CabinetBatchTextFill>>();
+async function openTextFill():Promise<void> { if(await saveChanges())textFillOpen.value=true; }
+function closeTextFill():void { textFillOpen.value=false;void loadBatch(); }
+function textFillApplied(saved:Dict,count:number):void {
+  mergeBatchResponse(saved);syncImageSelections();persistBatchDraft();
+  textFillOpen.value=false;error.value='';message.value=`已回填并保存 ${count} 条待办记录，请核对后确认。`;
+  if(pollingActive())schedulePoll();
+}
 const correction = ref<Dict | null>(null), correctionDirectory = ref<Dict[]>([]);
 const imageInput = ref<HTMLInputElement>();
 const batch = ref<Dict>({}), list = ref<Dict>({}), baseline = new Map<string,string>();
@@ -648,10 +659,13 @@ async function loadList(page=1): Promise<void> {
 function pollingActive(status:Dict=batch.value):boolean{return ['recognizing','running'].includes(String(status.status||''))||(status.images||[]).some((item:Dict)=>!item.deleted_at&&item.status==='recognizing');}
 async function pollBatchStatus():Promise<void>{
   if(disposed||!batchId)return;
+  if(textFillOpen.value){schedulePoll();return;}
   try{
     const status=await read(`batches/${batchId}/status`,{},15000);
     if(Number(status.version)!==Number(batch.value.version)&&!saving.value&&!saveConflicts.value.length){
-      rebaseBatch(await read(`batches/${batchId}`));if(dirtyCount.value&&!saveConflicts.value.length)queueAutoSave();
+      const fresh=await read(`batches/${batchId}`);
+      if(!textFillOpen.value && Number(fresh.version)>=Number(batch.value.version))rebaseBatch(fresh);
+      if(dirtyCount.value&&!saveConflicts.value.length)queueAutoSave();
     }
     if(pollingActive(status)||Number(status.version)!==Number(batch.value.version))schedulePoll();
   }catch{if(pollingActive())window.clearTimeout(pollTimer),pollTimer=window.setTimeout(pollBatchStatus,4000);}
@@ -796,7 +810,7 @@ function closeImageOnEscape(event:KeyboardEvent):void{
   if(event.shiftKey&&(document.activeElement===nodes[0]||document.activeElement===document.querySelector('.row-editor-overlay .row-editor'))){event.preventDefault();nodes[nodes.length-1].focus();}
   else if(!event.shiftKey&&document.activeElement===nodes[nodes.length-1]){event.preventDefault();nodes[0].focus();}
 }
-onMounted(async()=>{window.addEventListener('paste',pasteFiles);window.addEventListener('keydown',closeImageOnEscape);window.addEventListener('pagehide',persistBatchDraft);removeGuard=registerNavigationGuard((_target,proceed)=>{if(!batchId&&textFragments.value.length){pendingNavigation=proceed;discardOpen.value=true;return false;}if(!dirtyCount.value&&!saving.value&&!saveConflicts.value.length)return true;void saveChanges().then(ok=>{if(ok&&!dirtyCount.value)proceed();else{pendingNavigation=proceed;discardOpen.value=true;}});return false;});if(batchId)await loadBatch();else if(mode!=='new')await loadList();else restoreTextDraft();if(mode==='new'&&createMode.value==='manual')await loadDirectory();});
+onMounted(async()=>{window.addEventListener('paste',pasteFiles);window.addEventListener('keydown',closeImageOnEscape);window.addEventListener('pagehide',persistBatchDraft);removeGuard=registerNavigationGuard((_target,proceed)=>{if(textFillOpen.value){textFill.value?.requestLeave(proceed);return false;}if(!batchId&&textFragments.value.length){pendingNavigation=proceed;discardOpen.value=true;return false;}if(!dirtyCount.value&&!saving.value&&!saveConflicts.value.length)return true;void saveChanges().then(ok=>{if(ok&&!dirtyCount.value)proceed();else{pendingNavigation=proceed;discardOpen.value=true;}});return false;});if(batchId)await loadBatch();else if(mode!=='new')await loadList();else restoreTextDraft();if(mode==='new'&&createMode.value==='manual')await loadDirectory();});
 onBeforeUnmount(()=>{persistBatchDraft();disposed=true;listAbort?.abort();window.clearTimeout(pollTimer);window.clearTimeout(saveTimer);window.removeEventListener('paste',pasteFiles);window.removeEventListener('keydown',closeImageOnEscape);window.removeEventListener('pagehide',persistBatchDraft);persistTextDraft();for(const url of imagePreviewUrls.values())URL.revokeObjectURL(url);imagePreviewUrls.clear();removeGuard?.();});
 </script>
 
