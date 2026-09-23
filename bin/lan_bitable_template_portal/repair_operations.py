@@ -79,10 +79,8 @@ def repair_mutation(kind):
                 )
                 if not operation.get("created"):
                     raise PortalError("原操作尚未核验完成，请先核验原提交。")
-                import psutil
                 context = {"service": self, "operation_id": operation_id, "kind": kind,
-                           "request": request, "checkpoint": {"phase": "preparing", "pid": os.getpid(),
-                           "process_started": psutil.Process().create_time()}}
+                           "request": request, "checkpoint": {"phase": "preparing", "pid": os.getpid()}}
                 self._repair_checkpoint(context, "started")
                 token = _current.set(context)
                 arguments.arguments["operation_id"] = ""
@@ -238,8 +236,7 @@ class RepairOperationsMixin:
                     fields = {**checkpoint.get("fields", {}), **checkpoint.get("pending_fields", {})}
                     if not fields:
                         raise PortalError("原保存字段为空，请重新填写后保存。")
-                    import psutil
-                    checkpoint.update(pid=os.getpid(), process_started=psutil.Process().create_time())
+                    checkpoint["pid"] = os.getpid()
                     self._state_store.update_repair_management_operation(operation_id, status="processing",
                         result={**saved, "checkpoint": checkpoint}, error="")
                     self._patch_record_fields(app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
@@ -273,15 +270,7 @@ class RepairOperationsMixin:
         pid = int((saved.get("checkpoint") or {}).get("pid") or 0)
         if pid == os.getpid():
             return not ignore_current and (str(self._state_store.db_path), operation_id) in _running
-        if not pid:
-            return False
-        import psutil
-        try:
-            return psutil.Process(pid).create_time() == saved.get("checkpoint", {}).get("process_started")
-        except psutil.NoSuchProcess:
-            return False
-        except psutil.AccessDenied:
-            return True
+        return False
 
     def _repair_checkpoint(self, context, status, error=""):
         checkpoint = context["checkpoint"]

@@ -9511,20 +9511,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
-        local_snapshot = self._state_store.get_repair_snapshot(
-            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
-            record_ids=[record_id],
-        )
-        local_record = next(
-            (
-                item
-                for item in (local_snapshot.get("records") or [])
-                if isinstance(item, dict)
-            ),
-            None,
-        )
-        if local_record is not None:
-            self._assert_repair_record_version(local_record, expected_version)
         _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         records = self._load_table_records_by_ids(
             app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -9537,10 +9523,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not records:
             raise PortalError("该维修跟进记录已不存在，请刷新后重试。")
         existing = records[0]
-        if local_record is None:
-            self._assert_repair_record_version(existing, expected_version)
-        else:
-            self._assert_repair_remote_unchanged(local_record, existing, meta_by_name)
         if summary_id not in self._repair_followup_parent_ids(existing):
             raise PortalError("该维修跟进记录不属于当前检修单。")
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)

@@ -1417,9 +1417,6 @@ async function saveRecord(): Promise<void> {
       createOperationId.value = createRepairOperationId("repair-followup");
     }
     const requestPayload = {
-      expected_version: editingRecordId.value
-        ? String(selectedRecord.value?.record_version || "")
-        : "",
       scope: props.scope || "ALL",
       summary_record_id: props.summaryRecordId,
       cmdb_record_ids: cmdbRecordIds.value,

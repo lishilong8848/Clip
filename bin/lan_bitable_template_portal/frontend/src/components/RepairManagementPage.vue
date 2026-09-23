@@ -791,7 +791,7 @@ const refreshingSources = ref(false);
 const repairSourceRefreshVersion = ref(0);
 const saveBusy = ref(false);
 const editingRecordId = ref("");
-const submission = useRepairSubmission(() => `project:${props.scope}:${editingRecordId.value || 'new'}`, (result) => {
+const submission = useRepairSubmission(() => `project:${props.scope}:${editingRecordId.value ? 'direct-update' : 'new'}`, (result) => {
   if (result.superseded) {
     void reloadLatestProject();
     return;
@@ -800,8 +800,6 @@ const submission = useRepairSubmission(() => `project:${props.scope}:${editingRe
   if (Object.prototype.hasOwnProperty.call(result, "source_event_id")) sourceEventId.value = String(result.source_event_id || "");
   if (Array.isArray(result.source_repair_ids)) selectedRepairIds.value = result.source_repair_ids.slice();
   createOperationId.value = "";
-  updateOperationId.value = "";
-  updateOperationPayloadKey = "";
   applySavedProjectRecord(editingRecordId.value, result.fields || {}, String(result.record_version || ""));
   refreshProjectsAfterSave();
   void loadProjectSyncStatus(editingRecordId.value);
@@ -861,8 +859,6 @@ const projectDrawerOpen = ref(false);
 const followupPanelMounted = ref(false);
 const projectDrawerRef = ref<HTMLElement | null>(null);
 const createOperationId = ref("");
-const updateOperationId = ref("");
-let updateOperationPayloadKey = "";
 const projectConflict = ref<{ message: string; recordId: string } | null>(null);
 const pendingRecordFocusId = ref("");
 const recordPage = ref(1);
@@ -2322,8 +2318,6 @@ function selectRecordNow(record: LooseDict, initialTab: WorkspaceTab = "project"
   messageText.value = "";
   prefillWarnings.value = [];
   createOperationId.value = "";
-  updateOperationId.value = "";
-  updateOperationPayloadKey = "";
   projectConflict.value = null;
   pendingRecordFocusId.value = "";
   followupHasUnsavedChanges.value = false;
@@ -3006,8 +3000,6 @@ function startCreateNow(): void {
   prefillLoading.value = false;
   messageText.value = "";
   createOperationId.value = "";
-  updateOperationId.value = "";
-  updateOperationPayloadKey = "";
   projectConflict.value = null;
   pendingRecordFocusId.value = "";
   followupHasUnsavedChanges.value = false;
@@ -3327,17 +3319,10 @@ async function saveRecord(): Promise<boolean> {
   }
   saving.value = true;
   try {
-    if (editingRecordId.value && submission.status.value === "failed") {
-      updateOperationId.value = "";
-      updateOperationPayloadKey = "";
-    }
     if (!editingRecordId.value && !createOperationId.value) {
       createOperationId.value = createRepairOperationId("repair-project");
     }
     const requestPayload = {
-      expected_version: editingRecordId.value
-        ? String(selectedRecord.value?.record_version || "")
-        : "",
       scope: props.scope || "ALL",
       source_event_id: sourceEventId.value,
       source_repair_ids: selectedRepairIds.value,
@@ -3345,27 +3330,15 @@ async function saveRecord(): Promise<boolean> {
       source_month: currentMonthKey(),
       fields: writablePayload(),
     };
-    if (editingRecordId.value) {
-      const nextPayloadKey = JSON.stringify(requestPayload);
-      if (
-        !updateOperationId.value
-        || updateOperationPayloadKey !== nextPayloadKey
-      ) {
-        updateOperationId.value = createRepairOperationId(
-          "repair-project-update",
-        );
-        updateOperationPayloadKey = nextPayloadKey;
-      }
-    }
     const body = JSON.stringify({
       ...requestPayload,
       operation_id: editingRecordId.value
-        ? updateOperationId.value
+        ? ""
         : createOperationId.value,
     });
     let savedPayload: LooseDict;
     if (editingRecordId.value) {
-      const updated = await submission.submit(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}`, {
+      const updated = await requestJson(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}`, {
         method: "PUT",
         body,
       });
@@ -3374,8 +3347,6 @@ async function saveRecord(): Promise<boolean> {
         return true;
       }
       savedPayload = updated;
-      updateOperationId.value = "";
-      updateOperationPayloadKey = "";
       const warnings = Array.isArray(updated.warnings) ? updated.warnings.filter(Boolean) : [];
       const syncedFollowupCount = Math.max(0, Number(updated.followup_synced_count || 0));
       const savedText = updated.followup_sync_pending
@@ -3649,33 +3620,6 @@ onDeactivated(() => {
   projectDrawerReturnFocus = null;
   projectModal?.release();
   projectModal = undefined;
-});
-
-let restoredFailureId = "";
-watch([() => submission.status.value, recordDetailLoading, () => fields.value.length], () => {
-  const pending = submission.pending.value;
-  if (!pending || !submission.overwrite.value || submission.status.value !== "failed"
-      || recordDetailLoading.value || !fields.value.length || restoredFailureId === pending.id) return;
-  try {
-    const request = JSON.parse(pending.body);
-    if (pending.path.split("/").pop() !== editingRecordId.value) return;
-    restoredFailureId = pending.id;
-    if (sourceEventId.value !== String(request.source_event_id || "")) {
-      selectedEvent.value = null;
-      eventTitle.value = "";
-    }
-    sourceEventId.value = String(request.source_event_id || "");
-    selectedRepairIds.value = Array.isArray(request.source_repair_ids) ? request.source_repair_ids.slice() : [];
-    selectedRepairRecords.value = selectedRepairRecords.value.filter(item => selectedRepairIds.value.includes(String(item.record_id)));
-    for (const [name, value] of Object.entries(request.fields || {})) {
-      const field = fields.value.find(item => item.field_name === name);
-      if (!field) continue;
-      if (isProjectWorkerField(field)) projectWorkerPeople.value = projectPeopleFromValue(value);
-      else fieldDraft[name] = repairDraftInputValue(field, value);
-      dirtyFieldNames.add(name);
-    }
-    hasUnsavedChanges.value = true;
-  } catch { /* The submitted request remains available through the copy button. */ }
 });
 
 watch(searchText, () => {

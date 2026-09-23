@@ -303,37 +303,41 @@ class RepairSnapshotCacheTests(unittest.TestCase):
         with self.assertRaises(PortalConflictError):
             service._assert_repair_record_version(record, "stale-version")
 
-    def test_stale_followup_version_stops_before_remote_write(self):
+    def test_stale_followup_version_does_not_block_direct_update(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MaintenancePortalService(enable_repair_snapshots=True)
             service._state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
-            service._state_store.replace_repair_snapshot(
-                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_FOLLOWUP_TABLE_ID,
-                records=[
-                    {
-                        "record_id": "rec_followup_stale",
-                        "parent_record_id": "rec_project_stale",
-                        "payload": {
-                            "record_id": "rec_followup_stale",
-                            "last_modified_time": "2",
-                            "raw_fields": {"维修进展描述": "服务器新版本"},
-                        },
-                    }
-                ],
-            )
+            parent = FieldMeta("parent", REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME, "Text", 1, False, {}, [], False)
+            progress = FieldMeta("progress", "维修进展描述", "Text", 1, False, {}, [], False)
+            metas = [parent, progress]
+            by_name = {item.field_name: item for item in metas}
+            service._ensure_repair_followup_parent_id_field = lambda: (metas, by_name)  # type: ignore[method-assign]
+            service._load_table_records_by_ids = lambda **_kwargs: [{  # type: ignore[method-assign]
+                "record_id": "rec_followup_stale",
+                "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_project_stale"},
+                "display_fields": {"维修进展描述": "服务器新版本"},
+            }]
+            service._ensure_repair_management_record_in_scope = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+                "record_id": "rec_project_stale", "raw_fields": {}, "display_fields": {},
+            }
+            service._prepare_repair_followup_fields = lambda **_kwargs: ({"维修进展描述": "浏览器填写"}, [])  # type: ignore[method-assign]
+            service._ensure_repair_followup_select_options = lambda fields, current: (metas, current)  # type: ignore[method-assign]
+            writes = []
             service._patch_record_fields = (  # type: ignore[method-assign]
-                lambda **_kwargs: self.fail("版本冲突时不应写飞书")
+                lambda **kwargs: writes.append(kwargs) or {"code": 0}
+            )
+            service._upsert_repair_snapshot_fields = lambda **_kwargs: None  # type: ignore[method-assign]
+            service._schedule_repair_sync_task = lambda *_args, **_kwargs: "sync"  # type: ignore[method-assign]
+
+            result = service.update_repair_followup_record(
+                "rec_followup_stale",
+                summary_record_id="rec_project_stale",
+                fields={"维修进展描述": "浏览器填写"},
+                expected_version="stale-version",
             )
 
-            with self.assertRaises(PortalConflictError):
-                service.update_repair_followup_record(
-                    "rec_followup_stale",
-                    summary_record_id="rec_project_stale",
-                    fields={"维修进展描述": "浏览器旧版本"},
-                    expected_version="stale-version",
-                )
+            self.assertEqual(result["record_id"], "rec_followup_stale")
+            self.assertEqual(writes[0]["record_id"], "rec_followup_stale")
 
     def test_project_update_operation_replays_without_second_write(self):
         with tempfile.TemporaryDirectory() as tmp:

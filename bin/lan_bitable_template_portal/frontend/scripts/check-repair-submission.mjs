@@ -131,29 +131,15 @@ try {
     await page.screenshot({ path: path.join(output, `${mode}-pending.png`), fullPage: true });
     assert(await page.locator("body").evaluate(node => node.scrollWidth <= innerWidth + 2));
   }
-  status = 'failed';
-  await page.evaluate(() => sessionStorage.setItem('repair-submission:project:A',JSON.stringify({
-    id:'interrupted-update',method:'PUT',path:'/api/repair-management/records/recSaved',body:JSON.stringify({
-      source_event_id:'recEvent',source_repair_ids:['recTarget'],fields:{'故障发生现象描述':'保存失败后保留的填写'}
-    })
-  })));
   await page.goto(base + '/__repair_check?mode=project-update');
-  await page.getByRole('button',{name:'更改事件检修关联',exact:true}).click();
-  await page.waitForFunction(() => [...document.querySelectorAll('textarea')].some(node => node.value === '保存失败后保留的填写'));
-  const reselect = page.getByRole('button',{name:'重新选择',exact:true});
-  assert.equal(await reselect.count(),2);
-  assert(await reselect.nth(0).isEnabled());
-  assert(await reselect.nth(1).isEnabled());
+  await page.locator('[data-field-name="故障发生现象描述"] textarea, [data-field-name="故障发生现象描述"] input').fill('直接覆盖保存');
   assert(await page.getByRole('button',{name:'保存修改',exact:true}).isEnabled());
   assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
-  assert.equal(await page.evaluate(()=>sessionStorage.getItem('repair-submission:project:A')),null);
   await page.screenshot({path:path.join(output,'project-update-editable.png'),fullPage:true});
   await page.getByRole('button',{name:'保存修改',exact:true}).click();
-  await page.locator('.submission-status').first().waitFor({state:'hidden'});
   await page.waitForFunction(() => document.body.textContent.includes('维修项目已保存'));
   assert.equal(writeOperations.length,2);
-  assert.notEqual(writeOperations[1],'interrupted-update');
-  assert.notEqual(writeOperations[1],writeOperations[0]);
+  assert.equal(writeOperations[1],'');
   await page.goto(base + '/__repair_check?mode=followup');
   await page.getByLabel('维修进展描述',{exact:true}).fill('直接保存的跟进填写');
   assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
@@ -164,7 +150,7 @@ try {
   await page.waitForFunction(() => document.body.textContent.includes('维修跟进记录已新增'));
   assert.equal(writeOperations.length,3);
   assert.deepEqual(errors, []);
-  console.log(`Repair project recovery and direct followup save passed; writes=${writes}.`);
+  console.log(`Repair create recovery and direct project/followup saves passed; writes=${writes}.`);
 } finally {
   await browser?.close();
   await vite.close();
