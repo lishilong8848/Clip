@@ -26,6 +26,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.portal_service import PortalConflictError  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalNotFoundError  # noqa: E402
 from lan_bitable_template_portal.portal_service import NOTICE_TEXT_TEMPLATES  # noqa: E402
 from lan_bitable_template_portal.portal_service import RECENT_MONTH_FILTER_LABEL  # noqa: E402
@@ -32891,6 +32892,102 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ],
         )
 
+    def test_repair_project_relation_failed_old_cleanup_is_retryable(self):
+        service = _TestMaintenancePortalService()
+        service._sync_repair_target_summary_id = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"synced": True, "warning": ""}
+        )
+        service._clear_repair_target_summary_id = (  # type: ignore[method-assign]
+            lambda **_kwargs: (_ for _ in ()).throw(PortalError("飞书超时"))
+        )
+        service._sync_repair_relation_business_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"warnings": []}
+        )
+        service._sync_repair_notice_relation_projection = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"warnings": []}
+        )
+        result = service._sync_repair_project_relations(
+            summary_record_id="rec_summary",
+            target_record_ids=["rec_new"],
+            previous_target_record_ids=["rec_old"],
+        )
+        self.assertTrue(service._repair_sync_warnings_require_retry(result["warnings"]))
+        self.assertEqual(result["cleared_target_results"][0]["target_record_id"], "rec_old")
+        self.assertIn("暂未清理", result["warnings"][0])
+
+    def test_repair_project_rebind_queues_old_target_cleanup_after_main_write(self):
+        service = _TestMaintenancePortalService()
+        relation = FieldMeta("fld_relation", "设备检修关联", "Text", 1, False, {}, [], False)
+        cmdb = FieldMeta("fld_cmdb", "CMDB唯一id", "Text", 1, False, {}, [], False)
+        reason = FieldMeta("fld_reason", "故障维修原因", "Text", 1, False, {}, [], False)
+        old = {"record_id": "rec_summary", "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+               "raw_fields": {REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: "rec_old",
+                              "CMDB唯一id": "old-id", "故障维修原因": "original"}, "display_fields": {}}
+        cloud = {**old, "raw_fields": {**old["raw_fields"], "CMDB唯一id": "new-id"}}
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([relation, cmdb, reason],
+                               {meta.field_name: meta for meta in (relation, cmdb, reason)}, [old])
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: old
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: [cloud]
+        )
+        service._sync_repair_target_summary_id = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"pending_write": True}
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [])
+        )
+        service._build_repair_management_prefill = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"fields": {}, "warnings": []}
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda _fields, metas, **_kwargs: (list(metas.values()), metas)
+        )
+        patches = []
+        snapshots = []
+        scheduled = []
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patches.append(kwargs["fields"])
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: snapshots.append(kwargs["fields"])
+        )
+        service._sync_repair_project_relations = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"warnings": ["旧检修目标关系暂未清理：飞书超时"],
+                               "cleared_target_results": [{"warning": "旧检修目标关系暂未清理：飞书超时"}]}
+        )
+        service._schedule_repair_sync_task = (  # type: ignore[method-assign]
+            lambda operation_type, **kwargs: scheduled.append((operation_type, kwargs)) or "queued"
+        )
+        service._sync_repair_management_workflow = (  # type: ignore[method-assign]
+            lambda **_kwargs: (False, [])
+        )
+        result = service.update_repair_management_record(
+            "rec_summary", {}, source_repair_ids=["rec_new"], replace_source_relations=True,
+            validate_required=False,
+        )
+        self.assertEqual(patches[0]["设备检修关联"], "rec_new")
+        self.assertNotIn("CMDB唯一id", patches[0])
+        self.assertEqual(snapshots[0]["CMDB唯一id"], "new-id")
+        self.assertTrue(result["relation_sync"]["sync_pending"])
+        self.assertEqual(scheduled[0][0], "project_relations_sync")
+        self.assertEqual(scheduled[0][1]["task_payload"]["before_fields"][REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME], "rec_old")
+        cloud["raw_fields"]["故障维修原因"] = "someone else's edit"
+        with self.assertRaisesRegex(PortalConflictError, "故障维修原因"):
+            service.update_repair_management_record(
+                "rec_summary", {}, source_repair_ids=["rec_new"], replace_source_relations=True,
+                validate_required=False,
+            )
+        cloud["raw_fields"]["故障维修原因"] = "original"
+        with self.assertRaisesRegex(PortalConflictError, "CMDB唯一id"):
+            service.update_repair_management_record(
+                "rec_summary", {"CMDB唯一id": "user-id"}, source_repair_ids=["rec_new"],
+                replace_source_relations=True, validate_required=False,
+            )
+
     def test_repair_project_relation_schedules_field_retry_after_transient_failure(self):
         service = _TestMaintenancePortalService()
         scheduled: list[dict[str, Any]] = []
@@ -34110,6 +34207,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "设备检修关联": ["rec_notice_1"],
                 },
             }
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: [service._ensure_repair_management_record_in_scope("rec_repair_1", "A")]
         )
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])
@@ -43410,6 +43510,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("EA118_C01机房+故障现象+检修", relaxed_html)
         self.assertNotIn("[故障现象]", building_html + relaxed_html)
         self.assertNotIn("【故障现象】", building_html + relaxed_html)
+        self.assertIn('<select name="level" required', building_html)
+        self.assertNotIn('value="超低"', building_html)
+        for level in ("低", "中", "高"):
+            self.assertIn(f'value="{level}"', building_html)
         self.assertRegex(
             building_html,
             r'<textarea name="spare_parts"[^>]*>无</textarea>',

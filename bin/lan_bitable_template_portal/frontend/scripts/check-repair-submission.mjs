@@ -39,9 +39,13 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
       if (!req.url.startsWith("/api/")) return next();
       res.setHeader("Content-Type", "application/json");
       if (req.url === "/api/test-submit") { writes++; res.writeHead(200); res.write('{"data":'); setTimeout(() => res.destroy(), 30); return; }
+      if (req.url === "/api/repair-management/records/recSaved" && req.method === "PUT") {
+        writes++;
+        res.end('{"data":{"record_id":"recSaved","fields":{}}}'); return;
+      }
       if (req.url.includes("/operations/")) {
         if (unavailable) { res.statusCode = 503; res.end('{"ok":false,"error":"核验暂时不可用"}'); return; }
-        res.end(JSON.stringify({ data: { status, retryable: status === "failed", error: status === "failed" ? "远端未写入" : "", result: status === "completed" ? { record_id: "recSaved", fields: {} } : null } })); return;
+        res.end(JSON.stringify({ data: { status, retryable: status === "failed", error: status === "failed" ? "云端未保留本次修改" : "", result: status === "completed" ? { record_id: "recSaved", fields: {} } : null } })); return;
       }
       res.end(JSON.stringify({ data: { records: [], fields: [], total: 0, items: [], scope_options: [{value:"A",label:"A楼"}], sources: [], tasks: [], pending_count: 0 } }));
     });
@@ -71,6 +75,16 @@ try {
   await page.getByText("已核验 recSaved", { exact: true }).waitFor();
   assert(await page.getByRole("button", { name: "保存记录", exact: true }).isEnabled());
   assert.equal(writes, 1);
+  status = "failed";
+  await page.evaluate(() => sessionStorage.setItem("repair-submission:test:A", JSON.stringify({
+    id: "repair-update", body: JSON.stringify({ operation_id: "repair-update", source_repair_ids: ["recTarget"] }),
+    path: "/api/repair-management/records/recSaved", method: "PUT",
+  })));
+  await page.reload();
+  await page.getByText("已核验 recSaved", { exact: true }).waitFor();
+  assert.equal(writes, 2);
+  await page.reload();
+  assert.equal(writes, 2);
   status = "processing";
   await page.evaluate(() => {
     const pending = JSON.stringify({ id: "pending-record", body: "{}", path: "unused", method: "POST" });
@@ -84,7 +98,7 @@ try {
     assert(await page.locator("body").evaluate(node => node.scrollWidth <= innerWidth + 2));
   }
   assert.deepEqual(errors, []);
-  console.log("Repair pending submission, response loss, reload recovery, query failure and desktop layouts passed; writes=1.");
+  console.log(`Repair pending submission, response loss, single retry, reload recovery and desktop layouts passed; writes=${writes}.`);
 } finally {
   await browser?.close();
   await vite.close();

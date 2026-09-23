@@ -216,7 +216,8 @@ class RepairOperationsMixin:
             return self._repair_public_result({**operation, "record_id": record_id, "result": result})
 
     def repair_operation_status(self, operation_id, *, recover=False):
-        from .portal_service import PortalError, PortalNotFoundError, REPAIR_SOURCE_APP_TOKEN
+        from .portal_service import (PortalError, PortalNotFoundError, REPAIR_SOURCE_APP_TOKEN,
+                                     REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS, REPAIR_SNAPSHOT_SOURCE_PROJECTS)
         operation = self._state_store.get_repair_management_operation(operation_id)
         if not operation:
             raise PortalNotFoundError("尚未收到该提交，请保留当前输入后继续核验。")
@@ -230,12 +231,31 @@ class RepairOperationsMixin:
             status = "failed" if checkpoint.get("phase") == "preparing" else "uncertain"
             changed = self._state_store.update_repair_management_operation(operation_id, status=status,
                 error="执行已中断，请继续核验原提交。", expected_updated_at=operation["updated_at"])
-            if not changed:
-                operation = self._state_store.get_repair_management_operation(operation_id)
-                saved = operation.get("result") or {}
-                checkpoint = saved.get("checkpoint") or {}
-                status = operation["status"]
-                running = self._repair_writer_alive(saved, operation_id)
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            saved = operation.get("result") or {}
+            checkpoint = saved.get("checkpoint") or {}
+            status = operation["status"]
+            running = self._repair_writer_alive(saved, operation_id)
+        if recover and not running and status == "uncertain" and checkpoint.get("record_id"):
+            if not checkpoint.get("delete") and operation["operation_type"] in ("project_update", "followup_update"):
+                source = REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS if operation["operation_type"] == "followup_update" else REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                snapshot = self._state_store.get_repair_snapshot(source, record_ids=[checkpoint["record_id"]])
+                local = next((item for item in snapshot.get("records", [])
+                              if item.get("record_id") == checkpoint["record_id"]), None)
+                expected = self._repair_logical_record_fields(checkpoint["table_id"], checkpoint.get("fields") or {})
+                if local and expected:
+                    meta = self._state_store.get_repair_snapshot_meta(source)
+                    by_name = {field.field_name: field for field in
+                               (self._repair_snapshot_field_meta(item) for item in meta.get("fields", []) if isinstance(item, dict))}
+                    actual = self._repair_logical_record_fields(checkpoint["table_id"],
+                        {**(local.get("display_fields") or {}), **(local.get("raw_fields") or {})})
+                    if all(key in actual and self._repair_followup_comparable_value(by_name.get(key), actual[key]) ==
+                           self._repair_followup_comparable_value(by_name.get(key), value)
+                           for key, value in expected.items()):
+                        checkpoint["phase"] = "remote_written"
+                        self._state_store.update_repair_management_operation(operation_id, status="remote_written",
+                            record_id=checkpoint["record_id"], result={**saved, "checkpoint": checkpoint})
+                        status = "remote_written"
         if recover and not running and status == "uncertain" and checkpoint.get("record_id"):
             try:
                 data = self._request_json("records/" + checkpoint["record_id"], app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -256,6 +276,29 @@ class RepairOperationsMixin:
                 self._state_store.update_repair_management_operation(operation_id, status="remote_written",
                     record_id=checkpoint["record_id"], result={**saved, "checkpoint": checkpoint})
                 status = "remote_written"
+            elif not checkpoint.get("delete") and operation["operation_type"] in ("project_update", "followup_update") and expected:
+                source = REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS if operation["operation_type"] == "followup_update" else REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                snapshot = self._state_store.get_repair_snapshot(source, record_ids=[checkpoint["record_id"]])
+                original = next((item for item in snapshot.get("records", [])
+                                 if item.get("record_id") == checkpoint["record_id"]), None)
+                if original:
+                    before = self._repair_logical_record_fields(
+                        checkpoint["table_id"],
+                        {**(original.get("display_fields") or {}), **(original.get("raw_fields") or {})},
+                    )
+                    comparable = lambda values, key: self._repair_followup_comparable_value(by_name.get(key), values.get(key))
+                    changed_keys = [key for key in expected
+                                    if comparable(expected, key) != comparable(before, key)]
+                    unchanged = all(comparable(fields, key) == comparable(before, key) for key in changed_keys)
+                    if changed_keys and unchanged:
+                        checkpoint["phase"] = "preparing"
+                        error = "云端未保留本次修改；请核对最新内容后重试原提交。"
+                        updated = self._state_store.update_repair_management_operation(
+                            operation_id, status="failed", result={**saved, "checkpoint": checkpoint},
+                            error=error, expected_updated_at=operation["updated_at"],
+                        )
+                        if updated:
+                            status = "failed"
         if recover and not running and status == "remote_written":
             self._recover_repair_write(self._state_store.get_repair_management_operation(operation_id))
             status = "completed"
@@ -268,12 +311,12 @@ class RepairOperationsMixin:
                 "error": operation.get("last_error") or "",
                 "result": self._repair_public_result(operation) if status in ("completed", "sync_pending") else None}
 
-    def _assert_repair_remote_unchanged(self, baseline, current, meta_by_name):
+    def _assert_repair_remote_unchanged(self, baseline, current, meta_by_name, *, ignored_fields=()):
         from .portal_service import PortalConflictError
         before = baseline.get("raw_fields") or baseline.get("display_fields") or {}
         after = current.get("raw_fields") or current.get("display_fields") or {}
         changed = [name for name, meta in meta_by_name.items()
-                   if not self._field_meta_is_readonly(meta)
+                   if name not in ignored_fields and not self._field_meta_is_readonly(meta)
                    and (name in before or name in after)
                    and self._repair_followup_comparable_value(meta, before.get(name)) !=
                        self._repair_followup_comparable_value(meta, after.get(name))]

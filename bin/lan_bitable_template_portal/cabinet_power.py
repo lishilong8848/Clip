@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, baseline_matches_inventory, calculate, derive_records, dates, digest, export_workbook, inventory_state_baseline, operation_key, system_name, text_value, project_layout,completed_state_event
@@ -24,7 +25,10 @@ TABLE_ID="tblPuXz8ONJQVrDe"
 EXPORT_ARCHIVE_APP_TOKEN="MliKbC3fXa8PXrsndKscmxjdn1g"
 EXPORT_ARCHIVE_TABLE_ID="tblghte5RCmMy24n"
 EXPORT_ARCHIVE_URL=f"https://vnet.feishu.cn/base/{EXPORT_ARCHIVE_APP_TOKEN}?table={EXPORT_ARCHIVE_TABLE_ID}&view=vewtV2DWdh"
-EXPORT_ARCHIVE_FIELDS={"导出标识":1,"批次标识":1,"楼栋":1,"文件名称":1,"数据版本":2,"导出时间":1,"文件SHA256":1,"导出人":1,"导出文件":17}
+EXPORT_ARCHIVE_FIELDS={"导出标识":1,"批次标识":1,"楼栋":1,"文件名称":1,"数据版本":2,"导出时间":1,"文件SHA256":1,"导出人":1,"上传文件":17,"子分类":3,"年度":3,"月份":3,"链接":1}
+EXPORT_ARCHIVE_CATEGORY="机柜上下电记录"
+EXPORT_BATCH_NAMESPACE="cabinet_export_batches"
+_ARCHIVE_THREAD_LOCK=threading.RLock()
 NAMESPACE="cabinet_power"
 DIRECTORY_NAME="机柜基础资料"
 INITIAL_TEMPLATES=Path(__file__).with_name("templates")/"cabinet_power"
@@ -44,6 +48,33 @@ EXPORT_FORMAT_VERSION = 3
 
 def export_snapshot(config,operations):
     return export_workbook((INITIAL_TEMPLATES/(config["scope"]+".xlsm")).read_bytes(),config,operations)
+
+
+@contextmanager
+def archive_file_lock(path):
+    with _ARCHIVE_THREAD_LOCK:
+        path.parent.mkdir(parents=True,exist_ok=True)
+        with path.open("a+b") as handle:
+            if not handle.seek(0,2): handle.write(b"0"); handle.flush()
+            deadline=time.monotonic()+120
+            while True:
+                handle.seek(0)
+                try:
+                    if os.name=="nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic()>=deadline: raise CabinetError("机柜月度归档正在写入，请稍后继续",409)
+                    time.sleep(.05)
+            try: yield
+            finally:
+                handle.seek(0)
+                if os.name=="nt": msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+                else: fcntl.flock(handle,fcntl.LOCK_UN)
 
 def lower_export_priority():
     if os.name != "nt":
@@ -201,6 +232,18 @@ class CabinetFeishu:
         if int(payload.get("code") or 0) or not token: raise CabinetError(f"机柜导出附件上传失败：{payload.get('msg') or '未返回文件标识'}")
         return token
 
+    def record_share_link(self,record_id):
+        if not re.fullmatch(r"rec[A-Za-z0-9]+",str(record_id or "")): raise CabinetError("归档记录ID无效")
+        import httpx
+        from upload_event_module.services.http_client import FeishuHttpClient
+        if self._http is None: self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
+        url=f"https://open.feishu.cn/open-apis/base/v3/bases/{self.app_token}/tables/{self.table_id}/records/share_links/batch"
+        data=self._http.request_json("POST",url,headers={"Authorization":"Bearer "+self.token()},json_payload={"record_ids":[record_id]},retries=0)
+        if data.get("code"): raise CabinetError(f"归档记录链接获取失败：{data.get('msg') or data['code']}")
+        link=str(((data.get("data") or {}).get("record_share_links") or {}).get(record_id) or "").strip()
+        if not link.startswith("https://"): raise CabinetError("归档记录链接获取失败：未返回有效链接")
+        return link
+
     def download_attachment(self,file_token):
         from urllib.parse import quote
         if not re.fullmatch(r"[A-Za-z0-9_-]{10,200}",str(file_token or "")):
@@ -251,6 +294,7 @@ class CabinetPowerService:
         self._bootstrap_lock=threading.Lock()
         self._export_schema_lock=threading.Lock()
         self._export_schema_ready=False
+        self._export_schema_year=""
         self._refresh_slots=threading.BoundedSemaphore(2)
         self._scope_locks={scope:threading.RLock() for scope in TOTALS}
         self._export_upload_locks={scope:threading.Lock() for scope in TOTALS}
@@ -258,6 +302,8 @@ class CabinetPowerService:
         self._pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-"+s) for s in TOTALS}
         self._upload_pools={s:ThreadPoolExecutor(max_workers=1,thread_name_prefix='cabinet-upload-'+s) for s in TOTALS}
         self._bootstrap_download_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-bootstrap")
+        self._archive_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-archive")
+        self._archive_running=set()
         self._bootstrap_batches={}
         self._writing=set()
         self._exports=None
@@ -268,6 +314,7 @@ class CabinetPowerService:
         if self._batches: self._batches.shutdown(wait=wait)
         for pool in self._upload_pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
         for pool in self._pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
+        self._archive_pool.shutdown(wait=wait,cancel_futures=not wait)
         self._bootstrap_download_pool.shutdown(wait=wait,cancel_futures=not wait)
         if self._exports: self._exports.shutdown(wait=wait,cancel_futures=not wait)
 
@@ -1428,83 +1475,205 @@ class CabinetPowerService:
     def _public_export(record):
         return {k:v for k,v in record.items() if k!="path"}
 
-    def ensure_export_archive_fields(self):
-        if self.export_remote is None or self._export_schema_ready: return bool(self.export_remote)
+    def ensure_export_archive_fields(self,year):
+        if self.export_remote is None: raise CabinetError("未配置机柜归档多维表")
+        if self._export_schema_ready and self._export_schema_year==year: return True
         with self._export_schema_lock:
-            if self._export_schema_ready: return True
+            if self._export_schema_ready and self._export_schema_year==year: return True
             fields={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
+            old=fields.get("导出文件"); renamed=fields.get("上传文件")
+            if old and renamed: raise CabinetError("归档表同时存在“导出文件”和“上传文件”，请先核对字段")
+            if old and not renamed:
+                if int(old.get("type") or 0)!=17: raise CabinetError("归档表“导出文件”不是附件字段")
+                try: self.export_remote.request("PUT",f"fields/{old['field_id']}",{"field_name":"上传文件","type":17})
+                except Exception:
+                    current={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
+                    if "上传文件" not in current or "导出文件" in current: raise
+                fields={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
             for name,kind in EXPORT_ARCHIVE_FIELDS.items():
                 current=fields.get(name)
                 if current and int(current.get("type") or 0)!=kind: raise CabinetError(f"导出归档表字段类型错误：{name}")
                 if current: continue
-                try: self.export_remote.request("POST","fields",{"field_name":name,"type":kind})
+                options={"子分类":[EXPORT_ARCHIVE_CATEGORY],"年度":[year],"月份":[f"{i:02d}" for i in range(1,13)]}.get(name)
+                body={"field_name":name,"type":kind}
+                if options: body["property"]={"options":[{"name":item} for item in options]}
+                try: self.export_remote.request("POST","fields",body)
                 except Exception:
                     current={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}.get(name)
                     if not current or int(current.get("type") or 0)!=kind: raise
-                fields[name]={"field_name":name,"type":kind}
+                fields={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
+            for name,options in (("子分类",[EXPORT_ARCHIVE_CATEGORY]),("年度",[year]),("月份",[f"{i:02d}" for i in range(1,13)])):
+                field=fields[name]; prop=copy.deepcopy(field.get("property") or {}); existing=prop.setdefault("options",[])
+                missing=[option for option in options if option not in {str(item.get("name") or "") for item in existing}]
+                if missing:
+                    existing.extend({"name":option} for option in missing)
+                    self.export_remote.request("PUT",f"fields/{field['field_id']}",{"field_name":name,"type":3,"property":prop})
             verified={str(item.get("field_name") or ""):item for item in self.export_remote.list_all("fields")}
             for name,kind in EXPORT_ARCHIVE_FIELDS.items():
                 if name not in verified or int(verified[name].get("type") or 0)!=kind: raise CabinetError(f"导出归档表字段回读未通过：{name}")
+            for name,options in (("子分类",[EXPORT_ARCHIVE_CATEGORY]),("年度",[year]),("月份",[f"{i:02d}" for i in range(1,13)])):
+                current={str(item.get("name") or "") for item in (verified[name].get("property") or {}).get("options",[])}
+                if not set(options)<=current: raise CabinetError(f"归档表单选字段选项回读未通过：{name}")
             self._export_schema_ready=True
+            self._export_schema_year=year
             return True
 
-    def _find_export_archive_record(self,eid):
-        records=self.export_remote.list_all(
-            filters="CurrentValue.[导出标识]="+json.dumps(eid,ensure_ascii=False)
-        )
-        for record in records:
-            if text_value((record.get("fields") or {}).get("导出标识"))==eid: return record
-        return None
+    def upload_export(self,scope,eid,owner=""):
+        raise CabinetError("单楼导出仅保存在本机，请使用一键导出/上传所有楼栋归档",409)
+
+    def _batch_record(self,batch_id):
+        return self.store.get_document(EXPORT_BATCH_NAMESPACE,batch_id)
+
+    def _save_batch_record(self,batch):
+        batch["updated_at"]=stamp()
+        self.store.put_document(EXPORT_BATCH_NAMESPACE,batch["batch_id"],batch)
 
     @staticmethod
-    def _verify_export_archive(record,eid,file_token):
-        fields=record.get("fields") or {}
-        tokens={str(item.get("file_token") or "") for item in fields.get("导出文件") or [] if isinstance(item,dict)}
-        if text_value(fields.get("导出标识"))!=eid or file_token not in tokens: raise CabinetError("导出归档回读核验失败")
+    def _public_batch_record(batch):
+        return {key:copy.deepcopy(value) for key,value in batch.items() if key not in ("pid","tokens")}
 
-    def upload_export(self,scope,eid,owner=""):
-        if scope not in TOTALS: raise CabinetError("楼栋无效")
-        with self._export_upload_locks[scope]:
+    def export_batch_status(self,batch_id,owner,admin=False):
+        batch=self._batch_record(batch_id)
+        if not batch: raise CabinetError("五楼导出批次不存在",404)
+        if not admin and batch.get("owner")!=owner: raise CabinetError("无权查看此导出批次",403)
+        result=self._public_batch_record(batch)
+        if batch.get("status")=="running" and not process_alive(batch.get("pid")):
+            result["status"]="interrupted"
+        return result
+
+    def start_export_batch(self,batch_id,owner,allowed,admin=False):
+        if set(TOTALS)-set(allowed): raise CabinetError("一键导出需要 A–E 五楼权限",403)
+        if not re.fullmatch(r"all_[a-f0-9]{32}",batch_id or ""): raise CabinetError("五楼导出批次标识无效")
+        with archive_file_lock(self.root/"archive.lock"):
+            batch=self._batch_record(batch_id)
+            if batch is None:
+                batch={"batch_id":batch_id,"owner":owner,"status":"pending","phase":"preparing",
+                       "items":{scope:{"scope":scope,"status":"pending"} for scope in TOTALS},
+                       "tokens":{},"created_at":stamp(),"cloud_record_id":"","archive_url":""}
+                self._save_batch_record(batch)
+            if not admin and batch.get("owner")!=owner: raise CabinetError("无权继续此导出批次",403)
+            if batch["status"]=="succeeded": return self._public_batch_record(batch)
+            if process_alive(batch.get("pid")) and (batch["pid"]!=os.getpid() or batch_id in self._archive_running):
+                return self._public_batch_record(batch)
+            batch.update(status="running",error="",pid=os.getpid())
+            self._save_batch_record(batch)
+            self._archive_running.add(batch_id)
+            try: self._archive_pool.submit(self._run_export_batch,batch_id)
+            except Exception:
+                self._archive_running.discard(batch_id)
+                batch.update(status="failed",error="服务正在停止，原批次可继续",pid=0)
+                self._save_batch_record(batch)
+                raise
+            return self._public_batch_record(batch)
+
+    def _run_export_batch(self,batch_id):
+        batch=self._batch_record(batch_id)
+        try:
+            if batch.get("phase") not in ("linking","verifying"):
+                for scope in TOTALS:
+                    item=batch["items"][scope]
+                    export=(item.get("result") or {}).get("export_id")
+                    saved=self.local.document(scope,"export:"+export) if export else None
+                    if item.get("status")=="succeeded" and saved and not saved.get("deleted") and Path(saved.get("path") or "").is_file(): continue
+                    job=self.job(scope,"export",batch["owner"],{"batch_id":batch_id})
+                    item.update(job_id=job["job_id"],status=job["status"],phase=job.get("phase",""),
+                                result=job.get("result") or item.get("result") or {},error="")
+                    self._save_batch_record(batch)
+                while True:
+                    running=False
+                    for scope in TOTALS:
+                        item=batch["items"][scope]
+                        if item.get("status") in ("succeeded","failed"): continue
+                        job=self.job_status(item["job_id"],scope)
+                        item.update(status=job["status"],phase=job.get("phase",""),error=job.get("error",""),result=job.get("result") or item.get("result") or {})
+                        running|=job["status"] in ("pending","running")
+                    self._save_batch_record(batch)
+                    if not running: break
+                    time.sleep(1)
+                failed=[scope for scope in TOTALS if batch["items"][scope]["status"]!="succeeded"]
+                if failed: raise CabinetError("以下楼栋导出失败，可继续原批次重试："+"、".join(failed))
+            self._archive_export_batch(batch)
+            batch.update(status="succeeded",phase="completed",error="")
+        except Exception as exc:
+            batch.update(status="failed",error=str(exc))
+        finally:
+            batch["pid"]=0
+            self._save_batch_record(batch)
+            self._archive_running.discard(batch_id)
+
+    def _archive_month_records(self,year,month):
+        return [record for record in self.export_remote.list_all() if all(
+            text_value((record.get("fields") or {}).get(name))==value
+            for name,value in (("子分类",EXPORT_ARCHIVE_CATEGORY),("年度",year),("月份",month)))]
+
+    @staticmethod
+    def _verify_archive_batch(record,batch):
+        fields=record.get("fields") or {}
+        tokens=[str(item.get("file_token") or "") for item in fields.get("上传文件") or [] if isinstance(item,dict)]
+        expected=[batch["tokens"][scope] for scope in TOTALS]
+        if (len(tokens)!=5 or sorted(tokens)!=sorted(expected) or text_value(fields.get("批次标识"))!=batch["batch_id"]
+                or any(text_value(fields.get(name))!=value for name,value in (("子分类",EXPORT_ARCHIVE_CATEGORY),("年度",batch["year"]),("月份",batch["month"])))):
+            raise CabinetError("月度归档回读核验失败，保留批次继续核验")
+
+    def _archive_export_batch(self,batch):
+        if self.export_remote is None: raise CabinetError("未配置机柜归档多维表")
+        if not batch.get("year"):
+            now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+            batch.update(year=f"{now.year:04d}",month=f"{now.month:02d}",upload_started_at=now.strftime("%Y-%m-%d %H:%M:%S"))
+            self._save_batch_record(batch)
+        year,month=batch["year"],batch["month"]
+        self.ensure_export_archive_fields(year)
+        if batch.get("phase") not in ("linking","verifying"):
+            batch["phase"]="uploading"; self._save_batch_record(batch)
+            for scope in TOTALS:
+                if batch["tokens"].get(scope): continue
+                eid=(batch["items"][scope].get("result") or {}).get("export_id")
+                exported=self.local.document(scope,"export:"+str(eid)) if eid else None
+                if not exported or exported.get("batch_id")!=batch["batch_id"] or exported.get("deleted") or not Path(exported.get("path") or "").is_file():
+                    raise CabinetError(f"{scope}楼导出文件已不可用，请继续原批次重新生成")
+                batch["tokens"][scope]=self.export_remote.upload_attachment(exported["path"],exported["filename"])
+                self._save_batch_record(batch)
+            with archive_file_lock(self.root/"archive.lock"):
+                matches=self._archive_month_records(year,month)
+                if len(matches)>1: raise CabinetError("本月存在多条机柜上下电归档记录，请人工核对后重试",409)
+                files=[self.local.document(scope,"export:"+batch["items"][scope]["result"]["export_id"]) for scope in TOTALS]
+                digest_value=digest([file["sha256"] for file in files])
+                fields={"导出标识":f"cabinet-power:{year}-{month}","批次标识":batch["batch_id"],"楼栋":"A-E楼",
+                        "文件名称":f"南通A-E楼机柜上下电_{year}{month}","导出时间":batch["upload_started_at"],
+                        "文件SHA256":digest_value,"导出人":batch["owner"],"子分类":EXPORT_ARCHIVE_CATEGORY,
+                        "年度":year,"月份":month,"上传文件":[{"file_token":batch["tokens"][scope]} for scope in TOTALS]}
+                if matches: cloud=self.export_remote.update(matches[0]["record_id"],fields)
+                else:
+                    try: cloud=self.export_remote.create(fields,f"archive:{year}-{month}")
+                    except Exception:
+                        found=self._archive_month_records(year,month)
+                        if len(found)!=1: raise
+                        cloud=found[0]
+                batch["cloud_record_id"]=str(cloud.get("record_id") or "")
+                if not batch["cloud_record_id"]: raise CabinetError("月度归档未返回记录ID")
+                self._verify_archive_batch(self.export_remote.get(batch["cloud_record_id"]),batch)
+                batch["phase"]="linking"; self._save_batch_record(batch)
+        record=self.export_remote.get(batch["cloud_record_id"])
+        self._verify_archive_batch(record,batch)
+        link=batch.get("archive_url") or self.export_remote.record_share_link(batch["cloud_record_id"])
+        if text_value((record.get("fields") or {}).get("链接"))!=link:
+            self.export_remote.update(batch["cloud_record_id"],{"链接":link})
+        batch["archive_url"]=link; batch["phase"]="verifying"; self._save_batch_record(batch)
+        self._verify_archive_batch(self.export_remote.get(batch["cloud_record_id"]),batch)
+        if text_value((self.export_remote.get(batch["cloud_record_id"]).get("fields") or {}).get("链接"))!=link:
+            raise CabinetError("月度归档链接回读核验失败")
+        for scope in TOTALS:
+            eid=batch["items"][scope]["result"]["export_id"]
             record=self.local.document(scope,"export:"+eid)
-            if not record: raise CabinetError("导出文件不存在",404)
-            path=Path(record.get("path") or "")
-            if record.get("deleted") or not path.is_file(): raise CabinetError("导出文件已清理或不可用",410)
-            record["archive_url"]=EXPORT_ARCHIVE_URL
-            if self.export_remote is None:
-                record.update(cloud_upload_status="skipped",cloud_upload_error="")
+            if record:
+                record.update(cloud_upload_status="succeeded",cloud_record_id=batch["cloud_record_id"],
+                              archive_url=link,archive_month=f"{year}-{month}",cloud_updated_at=stamp())
                 self.write("export:"+eid,record)
-                return self._public_export(record)
-            if record.get("cloud_upload_status")=="succeeded": return self._public_export(record)
-            record.update(cloud_upload_status="uploading",phase="uploading",cloud_upload_error="",cloud_updated_at=stamp())
-            self.write("export:"+eid,record)
-            try:
-                self.ensure_export_archive_fields()
-                file_token=str(record.get("cloud_file_token") or "")
-                if not file_token:
-                    file_token=self.export_remote.upload_attachment(path,record["filename"])
-                    record["cloud_file_token"]=file_token; record["cloud_updated_at"]=stamp()
-                    self.write("export:"+eid,record)
-                fields={
-                    "导出标识":eid,"批次标识":str(record.get("batch_id") or ""),"楼栋":scope+"楼",
-                    "文件名称":record["filename"],"数据版本":int(record.get("version") or 0),
-                    "导出时间":str(record.get("created_at") or ""),"文件SHA256":str(record.get("sha256") or ""),
-                    "导出人":str(record.get("owner") or owner or ""),"导出文件":[{"file_token":file_token}],
-                }
-                record["phase"]="archiving"; self.write("export:"+eid,record)
-                cloud=self.export_remote.get(record["cloud_record_id"]) if record.get("cloud_record_id") else self._find_export_archive_record(eid)
-                if cloud: cloud=self.export_remote.update(cloud["record_id"],fields)
-                else: cloud=self.export_remote.create(fields,"export:"+eid)
-                record["cloud_record_id"]=str(cloud.get("record_id") or "")
-                record.update(cloud_updated_at=stamp(),phase="verifying"); self.write("export:"+eid,record)
-                if not record["cloud_record_id"]: raise CabinetError("导出归档未返回记录ID")
-                self._verify_export_archive(self.export_remote.get(record["cloud_record_id"]),eid,file_token)
-                record.update(cloud_upload_status="succeeded",phase="completed",cloud_upload_error="",cloud_updated_at=stamp())
-            except Exception as exc:
-                record=self.local.document(scope,"export:"+eid) or record
-                self._export_schema_ready=False
-                record.update(cloud_upload_status="failed",cloud_upload_error=str(exc),cloud_updated_at=stamp(),archive_url=EXPORT_ARCHIVE_URL)
-            self.write("export:"+eid,record)
-            return self._public_export(record)
+            for previous in self.local.documents(scope,"export:"):
+                if (previous.get("export_id")!=eid and previous.get("archive_month")==f"{year}-{month}"
+                        and previous.get("cloud_upload_status")=="succeeded"):
+                    previous.update(cloud_upload_status="replaced",archive_url="")
+                    self.write("export:"+previous["export_id"],previous)
 
     def job(self,scope,kind,owner,payload):
         if scope not in TOTALS or kind not in ("refresh","export"): raise CabinetError("任务类型无效")
@@ -1597,16 +1766,19 @@ class CabinetPowerService:
         if batch_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}",batch_id): raise CabinetError("一键导出批次标识无效")
         eid=uuid.uuid4().hex; filename=f"南通{scope}栋机柜平面图及上下电数量汇总表_{dt.datetime.now():%Y%m%d_%H%M%S}.xlsm"
         path=self.atomic_file(Path("exports")/eid/filename,content)
-        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"export_format_version":EXPORT_FORMAT_VERSION,"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"pending","cloud_upload_error":"","archive_url":EXPORT_ARCHIVE_URL}
+        result={"export_id":eid,"scope":scope,"path":path,"filename":filename,"version":snap["version"],"export_format_version":EXPORT_FORMAT_VERSION,"created_at":stamp(),"sha256":hashlib.sha256(content).hexdigest(),"owner":str(job.get("owner") or ""),"batch_id":batch_id,"cloud_upload_status":"local_only","cloud_upload_error":"","archive_url":"","phase":"completed"}
         self.write("export:"+eid,result)
         if job.get("job_id"):
             job.update(phase="generated",result=self._public_export(result)); self.write("job:"+job["job_id"],job)
-        return self.upload_export(scope,eid,result["owner"])
+        return self._public_export(result)
 
     def cleanup_export(self,scope,eid):
         with self._export_upload_locks[scope]:
             record=self.local.document(scope,"export:"+eid)
             if not record: raise CabinetError("导出文件不存在",404)
+            batch_id=str(record.get("batch_id") or "")
+            batch=self._batch_record(batch_id) if batch_id.startswith("all_") else None
+            if batch and batch.get("status")=="running": raise CabinetError("五楼批次仍在处理，暂不能清理文件",409)
             path=Path(record["path"]).resolve(); directory=(self.root/"exports").resolve()
             if not path.is_relative_to(directory): raise CabinetError("导出路径无效")
             if path.exists(): path.unlink()

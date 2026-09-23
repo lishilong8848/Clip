@@ -218,6 +218,11 @@ class NoticeTemplateTests(unittest.TestCase):
         self.assertEqual(fields["故障原因"], "循环泵故障")
         self.assertEqual(fields["解决方案"], "更换循环泵")
 
+    def test_repair_urgency_does_not_turn_ultra_low_into_low(self):
+        handler = get_notice_handler("设备检修")
+        self.assertEqual(handler._match_level("超低"), "")
+        self.assertEqual(handler._match_level("低"), "低")
+
     def test_change_qt_upload_payload_defaults_to_i3_when_level_missing(self):
         payload = PortalRuntime._prepared_to_notice_payload(
             {

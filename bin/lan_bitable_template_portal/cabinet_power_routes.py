@@ -181,6 +181,19 @@ def install_cabinet_power_routes(app,controller,runtime):
                     service.batches.cleanup_evidence_cache if request.method=="POST" else service.batches.storage_status
                 )
                 return controller._json_ok(request,session,data)
+            if path=="export-batches" and request.method=="POST":
+                payload=await controller._read_json_request(request,max_bytes=4096)
+                data=await asyncio.to_thread(service.start_export_batch,str(payload.get("batch_id") or ""),owner,allowed,admin)
+                response=controller._json_ok(request,session,data); response.status_code=202
+                return response
+            if path.startswith("export-batches/"):
+                if set(TOTALS)-set(allowed): raise CabinetError("一键导出需要 A–E 五楼权限",403)
+                batch_id=path.split("/")[1]
+                if path.endswith("/resume") and request.method=="POST":
+                    data=await asyncio.to_thread(service.start_export_batch,batch_id,owner,allowed,admin)
+                else:
+                    data=await asyncio.to_thread(service.export_batch_status,batch_id,owner,admin)
+                return controller._json_ok(request,session,data)
             payload=await controller._read_json_request(request,max_bytes=512*1024) if request.method in ("POST","PATCH") else {}
             scope=str(payload.get("scope") or query.get("scope") or "")
             if path=="bootstrap":
@@ -254,7 +267,8 @@ def install_cabinet_power_routes(app,controller,runtime):
         "operations":["GET","POST"],"operations/{record_id}":["PATCH"],
         "rack-power":["PATCH"],
         "operations/{record_id}/evidence/{image_id}":["GET"],"operations/{record_id}/documents/{file_id}":["GET"],"refresh":["POST"],
-        "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
+         "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
+         "export-batches":["POST"],"export-batches/{batch_id}":["GET"],"export-batches/{batch_id}/resume":["POST"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],
         "writes/{operation_id}/reconcile":["POST"],
         "export-history":["GET"],"exports/{export_id}/upload":["POST"],"exports/{export_id}/cleanup":["POST"],

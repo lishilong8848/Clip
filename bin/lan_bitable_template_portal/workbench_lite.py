@@ -1590,8 +1590,10 @@ def _form_fields(work_type: str, draft: dict[str, Any], *, scope: str) -> str:
                 required=True,
             )
         )
-    if work_type in {"change", "repair"}:
-        primary_fields.append(field("level", "等级" if work_type == "change" else "紧急程度", draft.get("level")))
+    if work_type == "change":
+        primary_fields.append(field("level", "等级", draft.get("level")))
+    if work_type == "repair":
+        primary_fields.append(_select("level", "紧急程度", draft.get("level"), ("", "低", "中", "高"), required=True))
     notice_fields: list[str] = []
     if work_type in {"maintenance", "change", "adjust", "repair"}:
         notice_fields.extend([

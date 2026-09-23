@@ -32,7 +32,7 @@ class TestService(MaintenancePortalService):
 
     @repair_mutation("project_update")
     def update_test(self, fields, *, operation_id="", record_id="project", scope="A"):
-        self._patch_record_fields_exact(app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID, record_id=record_id, fields=fields)
+        self._patch_record_fields(app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID, record_id=record_id, fields=fields)
         self._upsert_repair_snapshot_fields(source_key="projects", record_id=record_id, fields=fields)
         return {"record_id": record_id, "fields": fields}
 
@@ -111,6 +111,81 @@ class SubmissionReliabilityTests(unittest.TestCase):
         self.service._load_table_fields = Mock(return_value=([], {}))
         state = self.service.repair_operation_status("update", recover=True)
         self.assertEqual(state["status"], "completed")
+        self.service._request_payload.assert_called_once()
+
+    def test_interrupted_update_recovers_from_confirmed_local_snapshot(self):
+        self.service._request_payload.side_effect = TimeoutError("response lost")
+        with self.assertRaises(TimeoutError):
+            self.service.update_test({"text": "new"}, operation_id="local-confirmed")
+        self.store.upsert_repair_snapshot_record(
+            "repair_projects", "project", {"record_id": "project", "raw_fields": {"text": "new"}},
+        )
+        state = self.service.repair_operation_status("local-confirmed", recover=True)
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["record_id"], "project")
+        self.service._request_json.assert_not_called()
+        self.service._request_payload.assert_called_once()
+
+    def test_unknown_update_is_retryable_only_when_cloud_matches_original_snapshot(self):
+        self.store.upsert_repair_snapshot_record(
+            "repair_projects", "project", {"record_id": "project", "raw_fields": {"text": "old"}},
+        )
+        self.service._request_payload.side_effect = TimeoutError("response lost")
+        with self.assertRaises(TimeoutError):
+            self.service.update_test({"text": "new"}, operation_id="update-unchanged")
+        interrupted = self.store.get_repair_management_operation("update-unchanged")
+        checkpoint = {**interrupted["result"]["checkpoint"], "pid": 0}
+        self.store.update_repair_management_operation(
+            "update-unchanged", status="processing",
+            result={**interrupted["result"], "checkpoint": checkpoint},
+        )
+        self.service._load_table_fields = Mock(return_value=([], {}))
+        self.service._request_json.side_effect = None
+        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": "old"}}}}
+        state = self.service.repair_operation_status("update-unchanged", recover=True)
+        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
+        self.assertEqual(self.store.get_repair_management_operation("update-unchanged")["result"]["checkpoint"]["phase"], "preparing")
+        self.service._request_payload.assert_called_once()
+
+        with self.assertRaises(TimeoutError):
+            self.service.update_test({"text": "new"}, operation_id="update-conflict")
+        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": "someone else"}}}}
+        state = self.service.repair_operation_status("update-conflict", recover=True)
+        self.assertEqual((state["status"], state["retryable"]), ("uncertain", False))
+        self.assertEqual(self.service._request_payload.call_count, 2)
+
+    def test_unwritten_repair_relation_mirror_is_retryable(self):
+        self.store.upsert_repair_snapshot_record(
+            "repair_projects", "project", {"record_id": "project", "raw_fields": {"设备检修关联-L": None}},
+        )
+        self.service._repair_physical_record_fields = MaintenancePortalService._repair_physical_record_fields
+        self.service._repair_logical_record_fields = MaintenancePortalService._repair_logical_record_fields
+        self.service._request_payload.side_effect = TimeoutError("response lost")
+        with self.assertRaises(TimeoutError):
+            self.service.update_test({"设备检修关联": "recTarget123"}, operation_id="link-update")
+        self.service._request_json.side_effect = None
+        self.service._request_json.return_value = {"data": {"record": {"fields": {
+            "设备检修关联": [{"table_id": "tblTarget", "text_arr": [], "type": "text"}],
+        }}}}
+        self.service._load_table_fields = Mock(return_value=([], {
+            "设备检修关联": FieldMeta("field", "设备检修关联", "Link", 21, False, {}, [], False),
+        }))
+        state = self.service.repair_operation_status("link-update", recover=True)
+        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
+        self.service._request_payload.assert_called_once()
+
+    def test_unrelated_cloud_change_does_not_hide_unwritten_requested_field(self):
+        self.store.upsert_repair_snapshot_record(
+            "repair_projects", "project", {"record_id": "project", "raw_fields": {"text": "old", "other": "before"}},
+        )
+        self.service._request_payload.side_effect = TimeoutError("response lost")
+        with self.assertRaises(TimeoutError):
+            self.service.update_test({"text": "new", "other": "before"}, operation_id="partial-cloud-change")
+        self.service._request_json.side_effect = None
+        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": "old", "other": "changed"}}}}
+        self.service._load_table_fields = Mock(return_value=([], {}))
+        state = self.service.repair_operation_status("partial-cloud-change", recover=True)
+        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
         self.service._request_payload.assert_called_once()
 
     def test_remote_change_detected_even_when_local_version_matches(self):

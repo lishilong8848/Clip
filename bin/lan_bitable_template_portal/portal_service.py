@@ -10045,7 +10045,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _repair_sync_warnings_require_retry(
         warnings: list[str] | tuple[str, ...],
     ) -> bool:
-        retry_markers = ("失败", "暂未同步", "暂未读取", "稍后重试")
+        retry_markers = ("失败", "暂未同步", "暂未读取", "暂未清理", "稍后重试")
         return any(
             marker in str(warning or "")
             for warning in (warnings or [])
@@ -16299,7 +16299,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         if not cloud_records:
             raise PortalError("云端维修项目已不存在，请刷新后核对。")
-        self._assert_repair_remote_unchanged(existing, cloud_records[0], meta_by_name)
+        self._assert_repair_remote_unchanged(
+            existing, cloud_records[0], meta_by_name,
+            ignored_fields=("CMDB唯一id",)
+            if "CMDB唯一id" not in fields and "CMDB唯一id-L" not in fields else (),
+        )
         existing = cloud_records[0]
         if not self._repair_management_record_in_scope(existing, scope):
             raise PortalError("当前账号无权修改该楼栋维修项目。")
@@ -16467,16 +16471,20 @@ class MaintenancePortalService(RepairOperationsMixin):
             record_id=summary_id,
             fields=prepared,
         )
+        snapshot_fields = dict(prepared)
+        if "CMDB唯一id" in existing_raw and "CMDB唯一id" not in snapshot_fields:
+            snapshot_fields["CMDB唯一id"] = existing_raw["CMDB唯一id"]
         self._upsert_repair_snapshot_fields(
             source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             record_id=summary_id,
-            fields=prepared,
+            fields=snapshot_fields,
         )
         relation_sync: dict[str, Any] = {
             "target_results": [],
             "projection": {},
             "warnings": [],
         }
+        relation_retry_needed = False
         if (
             effective_event_id
             or effective_repair_ids
@@ -16495,10 +16503,29 @@ class MaintenancePortalService(RepairOperationsMixin):
                     scope=scope,
                     sync_target_summary=repair_relation_changed,
                 )
+                relation_retry_needed = any(
+                    self._repair_sync_warnings_require_retry([result.get("warning", "")])
+                    for result in (
+                        list(relation_sync.get("target_results") or [])
+                        + list(relation_sync.get("cleared_target_results") or [])
+                    )
+                )
             except Exception as exc:
                 relation_sync["warnings"] = [
                     f"维修项目已保存，通告关联状态暂未同步：{exc}"
                 ]
+                relation_retry_needed = "已关联其他维修单" not in str(exc)
+        if relation_retry_needed:
+            relation_sync["sync_pending"] = bool(self._schedule_repair_sync_task(
+                "project_relations_sync",
+                summary_record_id=summary_id,
+                scope=scope,
+                target_record_id=existing_repair_target_id,
+                task_payload={"before_fields": {
+                    REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: existing_repair_target_id,
+                }},
+                error="；".join(relation_sync.get("warnings") or []),
+            ))
         followup_sync = {
             "synced_count": 0,
             "failed_count": 0,

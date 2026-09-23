@@ -8,7 +8,7 @@
         <button v-if="isAdmin" :disabled="serverStorageLoading" @click="loadServerStorage"><HardDrive :size="16" />{{ serverStorageLoading ? '读取缓存中' : '本地缓存' }}</button>
         <button @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
         <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
-        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || allExportItems.some(item => ['pending','running','checking','unknown'].includes(item.status))" :title="allExportItems.some(item => ['checking','unknown'].includes(item.status)) ? '请先核对未确认的导出任务' : ''" @click="startAllExports"><CloudUpload :size="16" />{{ allExportBusy ? '各楼正在导出' : '一键导出/上传所有楼栋' }}</button>
+        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || ['running','checking','interrupted','failed'].includes(allExportStatus)" @click="startAllExports"><CloudUpload :size="16" />{{ allExportBusy ? '各楼正在导出' : '一键导出/上传所有楼栋' }}</button>
         <template v-if="scope">
           <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />{{ pendingExportRequest ? '继续上次导出' : '导出' }}</button>
       <button :disabled="exportHistoryLoading" @click="showExports()"><History :size="16" />{{ exportHistoryLoading ? '读取历史中' : '导出历史' }}</button>
@@ -29,7 +29,7 @@
     <div v-if="loading && !bootstrapActive" class="notice" role="status"><Loader2 class="spin" :size="18" />正在读取台账…</div>
     <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ startingJob ? (startingKind === 'exports' ? '正在准备导出数据…' : '正在启动同步…') : job.kind === 'export' ? exportPhaseLabel(job.phase) : '正在同步飞书…' }}</div>
     <div v-if="job.status === 'failed'" class="notice danger">{{ job.error }}<button @click="startJob(job.kind === 'export' ? 'exports' : 'refresh')">重试</button></div>
-    <div v-if="exported.export_id" class="notice" :class="exported.cloud_upload_status === 'failed' ? 'danger' : 'success'"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a><button v-if="exported.cloud_upload_status === 'failed'" :disabled="exported._retrying" @click="retryExportUpload(exported)"><CloudUpload :size="16" />{{ exported._retrying ? '上传中' : '重试上传' }}</button></div>
+    <div v-if="exported.export_id" class="notice success"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a></div>
     <div v-if="scope && overview.export_state?.is_stale" class="notice danger" role="status"><TriangleAlert :size="18" /><span>最近导出已过期：{{ overview.export_state.stale_reason }}。请重新导出。</span></div>
     <div v-if="storageWarning" class="notice danger" role="status">{{ storageWarning }}</div>
     <div v-if="serverStorage.evidence_bytes !== undefined" class="notice" role="status"><HardDrive :size="18" /><span>确认截图 {{ formatBytes(serverStorage.evidence_bytes) }} · 缩略图 {{ formatBytes(serverStorage.thumbnail_bytes) }} · 原确认单 {{ formatBytes(serverStorage.import_bytes) }} · 导出文件 {{ formatBytes(serverStorage.export_bytes) }}</span><button :disabled="serverStorageLoading || !serverStorage.cloud_backed_files" @click="cacheCleanupOpen = true">清理已上云图片缓存</button></div>
@@ -37,20 +37,17 @@
     <div v-if="saving && !editorOpen" class="notice" role="status"><Loader2 class="spin" :size="16" /><span>{{ saveStepLabel }}</span><button v-if="saveStatus.operation_id" @click="showSubmission(saveStatus.operation_id)">查看提交内容</button></div>
     <div v-for="pending in pendingWrites.filter(p => !saving || p.operation_id !== saveStatus.operation_id)" :key="pending.operation_id" class="notice danger" role="alert"><span>{{ pending.status === 'conflict' ? '上传存在冲突' : '上传待完成' }}：{{ pending.error || pending.error_stage }}</span><button @click="showSubmission(pending.operation_id)">查看提交内容</button><button :disabled="saving" @click="resumePending(pending.operation_id)">继续核验</button><button :disabled="saving" @click="reconcilePending(pending.operation_id)">载入云端版本</button></div>
     <section v-if="allExportItems.length" class="all-export-panel" aria-live="polite">
-      <div class="section-title"><h3>全部楼栋导出/上传</h3><div class="all-export-meta"><span>{{ allExportCompleted }}/{{ allExportItems.length }} 栋完成</span><span v-if="allExportTime">导出时间：{{ allExportTime }}</span></div></div>
+      <div class="section-title"><h3>全部楼栋导出/上传</h3><div class="all-export-meta"><span>{{ allExportCompleted }}/5 栋生成</span><span v-if="allExportTime">导出时间：{{ allExportTime }}</span><span>{{ allExportStatusLabel }}</span><a v-if="allExportArchiveUrl" :href="allExportArchiveUrl" target="_blank" rel="noopener">打开归档记录</a><button v-if="['failed','interrupted','checking'].includes(allExportStatus)" :disabled="allExportBusy" @click="resumeAllExports">{{ allExportStatus === 'checking' ? '核验状态' : '继续原批次' }}</button></div></div>
       <div class="all-export-items"><div v-for="item in allExportItems" :key="item.scope">
         <strong>{{ item.scope }}楼</strong><span class="export-item-icon"><Loader2 v-if="['pending','running','checking'].includes(item.status)" class="spin" :size="16" /></span>
         <span>{{ allExportLabel(item) }}</span>
         <div class="export-item-actions">
           <a v-if="item.result?.export_id && !item.result?.deleted" :href="api + '/exports/' + item.result.export_id + '/download'"><Download :size="15" />下载</a>
-          <button v-if="item.status === 'checking'" :disabled="item._retrying" @click="retryAllExportStatus(item)"><RefreshCw :size="15" />{{ item._retrying ? '查询中' : '继续查询' }}</button>
-          <button v-if="['failed','unknown'].includes(item.status)" :disabled="item._retrying" @click="retryAllExportItem(item)"><RefreshCw :size="15" />{{ item._retrying ? '核验中' : item.status === 'unknown' ? '核验并继续' : '重试导出' }}</button>
-          <button v-if="item.result?.cloud_upload_status === 'failed' && !item.result?.deleted" :disabled="item.result._retrying" @click="retryExportUpload(item.result,item)"><CloudUpload :size="15" />{{ item.result._retrying ? '上传中' : '重试上传' }}</button>
         </div>
-        <small v-if="item.error || item.result?.cloud_upload_error">{{ item.error || item.result.cloud_upload_error }}</small>
+        <small v-if="item.error">{{ item.error }}</small>
       </div></div>
     </section>
-    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status">正在读取导出历史…</p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档表</a><button v-if="!['succeeded','skipped'].includes(String(item.cloud_upload_status || '')) && item.file_available !== false" :disabled="item._retrying" @click="retryExportUpload(item)">{{ item._retrying ? '上传中' : '重试上传' }}</button></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._retrying || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table><footer v-if="exportTotal > 20" class="pagination"><span>共 {{ exportTotal }} 个文件</span><button :disabled="exportPage <= 1 || exportHistoryLoading" @click="showExports(exportPage - 1)"><ChevronLeft :size="16" /></button><button v-for="page in paginationPages(exportPage,exportPageCount)" :key="page" class="page-number" :class="{active:page===exportPage}" :disabled="exportHistoryLoading" :aria-label="'导出历史第 ' + page + ' 页'" @click="showExports(page)">{{ page }}</button><button :disabled="exportPage >= exportPageCount || exportHistoryLoading" @click="showExports(exportPage + 1)"><ChevronRight :size="16" /></button></footer></section>
+    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status">正在读取导出历史…</p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档记录</a></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table><footer v-if="exportTotal > 20" class="pagination"><span>共 {{ exportTotal }} 个文件</span><button :disabled="exportPage <= 1 || exportHistoryLoading" @click="showExports(exportPage - 1)"><ChevronLeft :size="16" /></button><button v-for="page in paginationPages(exportPage,exportPageCount)" :key="page" class="page-number" :disabled="exportHistoryLoading" :aria-label="'导出历史第 ' + page + ' 页'" @click="showExports(page)">{{ page }}</button><button :disabled="exportPage >= exportPageCount || exportHistoryLoading" @click="showExports(exportPage + 1)"><ChevronRight :size="16" /></button></footer></section>
 
     <section v-if="!scope" class="buildings">
       <button v-for="building in buildings" :key="building.scope" class="building" :disabled="building.bootstrap_status !== 'succeeded'" @click="navigate('/cabinet-power?scope=' + building.scope)">
@@ -299,23 +296,22 @@ async function loadBatchCount(): Promise<void> { try { batchPendingCount.value =
 const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false), startingKind = ref(''), pendingExportRequest = ref('');
 const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false), exportHistoryLoading = ref(false), exportPage = ref(1), exportTotal = ref(0), cleanupTarget = ref<Dict | null>(null);
 const exportPageCount = computed(() => Math.max(1,Math.ceil(exportTotal.value/20)));
-function exportPhaseLabel(phase:string):string { return ({preparing:'正在准备导出数据…',generating:'正在生成表格…',generated:'表格已生成，正在准备上传…',uploading:'表格已生成，正在上传文件…',archiving:'正在写入云端归档…',verifying:'正在核验云端归档…',completed:'导出已完成'} as Dict)[phase] || '正在准备导出数据…'; }
-const allExportItems = ref<Dict[]>([]), allExportBusy = ref(false), allExportBatchId = ref(''), allExportStartedAt = ref('');
+function exportPhaseLabel(phase:string):string { return ({preparing:'正在准备导出数据…',generating:'正在生成表格…',completed:'导出已完成'} as Dict)[phase] || '正在准备导出数据…'; }
+const allExportItems = ref<Dict[]>([]), allExportBusy = ref(false), allExportBatchId = ref(''), allExportStartedAt = ref(''), allExportStatus = ref(''), allExportPhase = ref(''), allExportArchiveUrl = ref('');
 const busy = computed(() => startingJob.value || ['pending', 'running'].includes(job.value.status));
-const allExportReady = computed(() => Boolean(buildings.value.length) && buildings.value.every(item => item.bootstrap_status === 'succeeded'));
-const allExportCompleted = computed(() => allExportItems.value.filter(item => ['succeeded','failed'].includes(item.status)).length);
+const allExportReady = computed(() => 'ABCDE'.split('').every(scope => buildings.value.some(item => item.scope === scope && item.bootstrap_status === 'succeeded')));
+const allExportCompleted = computed(() => allExportItems.value.filter(item => item.status === 'succeeded').length);
 const resultExportTime = (item:Dict) => { const direct=String(item.result?.created_at || ''); if(direct)return direct; const match=String(item.result?.filename || '').match(/_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.xlsm$/i); return match ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}` : ''; };
 const allExportTime = computed(() => { const times=allExportItems.value.map(resultExportTime).filter(Boolean).sort(); return times.length ? times[0] === times[times.length-1] ? times[0] : `${times[0]} 至 ${times[times.length-1]}` : allExportStartedAt.value; });
 const storageKey = 'cabinet-job:' + props.scope;
 const exportRequestKey = 'cabinet-export-request:v1:' + props.scope + ':' + (props.userId || 'anonymous');
-const allExportStorageKey = 'cabinet-all-export:v1:' + (props.userId || 'anonymous');
-const cloudUploadLabel = (item: Dict) => ({ pending:'等待上传', uploading:'正在上传多维', succeeded:'已上传多维', failed:'上传失败', skipped:'未配置云端归档' }[String(item.cloud_upload_status || '')] || '等待上传');
+const allExportStorageKey = 'cabinet-all-export:v2:' + (props.userId || 'anonymous');
+const cloudUploadLabel = (item: Dict) => ({ local_only:'仅本地', succeeded:'已归档', replaced:'归档已被新批次覆盖', uploading:'正在归档' }[String(item.cloud_upload_status || '')] || '仅本地');
+const allExportStatusLabel = computed(() => allExportStatus.value === 'succeeded' ? '五楼已归档' : allExportStatus.value === 'failed' ? (allExportPhase.value === 'linking' ? '链接待补齐' : '批次未完成') : allExportStatus.value === 'checking' ? '状态待核验' : allExportStatus.value === 'interrupted' ? '任务已中断' : ({uploading:'正在上传五份文件',linking:'正在写入归档链接',verifying:'正在核验归档',preparing:'正在生成五楼表格'} as Dict)[allExportPhase.value] || '正在导出');
 function allExportLabel(item: Dict): string {
   if (item.result?.deleted) return '本地文件已清理';
   if (item.status === 'failed') return '导出失败';
-  if (item.status === 'unknown') return '启动状态待核验';
-  if (item.status === 'succeeded') return item.result?.cloud_upload_status === 'failed' ? '导出完成，上传失败' : item.result?.cloud_upload_status === 'skipped' ? '导出完成，未配置云端归档' : item.result?.cloud_upload_status === 'succeeded' ? '导出并上传完成' : '导出完成，归档状态待核对';
-  if (item.status === 'checking') return '状态暂未确认';
+  if (item.status === 'succeeded') return '文件已生成';
   return item.status === 'running' ? exportPhaseLabel(item.phase) : '等待执行';
 }
 async function startJob(path: string): Promise<void> {
@@ -346,102 +342,59 @@ async function pollJob(): Promise<void> {
 }
 function saveAllExportState(): void {
   if (!allExportBatchId.value) return;
-  const items = allExportItems.value.map(item => ({
-    scope:item.scope, job_id:item.job_id || '', status:item.status, error:item.error || '',
-    result:item.result?.export_id ? Object.fromEntries(['scope','export_id','filename','created_at','archive_url','cloud_upload_status','cloud_upload_error','deleted'].map(key => [key,item.result[key]])) : {},
-  }));
-  taskStorage.setItem(allExportStorageKey,JSON.stringify({batch_id:allExportBatchId.value,started_at:allExportStartedAt.value,items}));
+  taskStorage.setItem(allExportStorageKey,JSON.stringify({batch_id:allExportBatchId.value,started_at:allExportStartedAt.value}));
 }
-function finishAllExportRun(): void {
-  const running = allExportItems.value.filter(item => ['pending','running'].includes(item.status)).length;
-  const uncertain = allExportItems.value.filter(item => ['checking','unknown'].includes(item.status)).length;
-  const failures = allExportItems.value.filter(item => item.status === 'failed' || item.result?.cloud_upload_status === 'failed').length;
-  const archiveUnknown = allExportItems.value.filter(item => item.status === 'succeeded' && !['succeeded','failed','skipped'].includes(item.result?.cloud_upload_status)).length;
-  error.value = ''; message.value = '';
-  if (uncertain) error.value = `${uncertain} 栋导出状态尚未确认，请核验原请求，勿重新发起整批导出。`;
-  else if (running) message.value = `${running} 栋仍在导出，其余楼栋可独立操作。`;
-  else if (failures) error.value = `${failures} 栋上传或导出失败，可单独重试。`;
-  else if (archiveUnknown) error.value = `${archiveUnknown} 栋云端归档状态尚未确认，请查看各楼导出历史。`;
-  else if (allExportItems.value.some(item => item.result?.cloud_upload_status === 'skipped')) message.value = '所有楼栋已导出；未配置云端归档的楼栋未上传。';
-  else message.value = '所有楼栋均已导出并上传多维表。';
+function applyAllExportBatch(batch: Dict): void {
+  allExportStatus.value = String(batch.status || ''); allExportPhase.value = String(batch.phase || '');
+  allExportArchiveUrl.value = String(batch.archive_url || '');
+  allExportStartedAt.value = String(batch.created_at || allExportStartedAt.value);
+  allExportItems.value = 'ABCDE'.split('').map(scope => ({scope,...(batch.items?.[scope] || {status:'pending'})}));
+  if (batch.status === 'failed') error.value = String(batch.error || '五楼归档未完成，请继续原批次。');
+  if (batch.status === 'succeeded') { error.value = ''; message.value = '五楼表格已写入同一条多维归档记录。'; }
 }
-async function pollAllExport(item: Dict): Promise<void> {
-  let failures = 0;
-  while (!disposed) {
+async function pollAllExports(): Promise<void> {
+  if (!allExportBatchId.value || disposed) return;
+  allExportBusy.value = true;
+  while (!disposed && allExportBatchId.value) {
     try {
-      const current = await read('jobs/' + item.job_id,{ scope:item.scope });
-      Object.assign(item,{ status:current.status,phase:current.phase,error:current.error || '',result:current.result || item.result });
-      failures = 0; saveAllExportState();
-      if (!['pending','running'].includes(current.status)) return;
+      const batch = await read('export-batches/' + allExportBatchId.value,{},12000);
+      applyAllExportBatch(batch); saveAllExportState();
+      if (batch.status === 'interrupted') { await write('export-batches/' + allExportBatchId.value + '/resume',{}); continue; }
+      if (['failed','succeeded'].includes(batch.status)) break;
       await new Promise(resolve => setTimeout(resolve,1800));
     } catch (exc: any) {
-      item.status = 'checking'; item.error = exc?.status ? exc.message : '暂时无法读取任务状态，导出结果尚未确认'; saveAllExportState();
-      if (++failures >= 3) return;
-      await new Promise(resolve => setTimeout(resolve,4000));
+      allExportStatus.value = 'checking'; error.value = exc?.message || '批次状态暂未确认，请继续核验原批次。'; break;
     }
   }
-}
-async function startAllExportItem(item: Dict): Promise<void> {
-  item.status = 'pending'; item.error = ''; item.job_id = ''; saveAllExportState();
-  try {
-    const started = await write('exports',{ scope:item.scope,batch_id:allExportBatchId.value });
-    Object.assign(item,{ job_id:started.job_id,status:started.status || 'pending' }); saveAllExportState();
-    await pollAllExport(item);
-  } catch (exc: any) { const uncertain = !exc?.status || exc.status >= 500; item.status = uncertain ? 'unknown' : 'failed'; item.error = uncertain ? '启动响应未确认，原任务可能仍在执行；点击“核验并继续”恢复本楼请求' : exc.message; saveAllExportState(); }
+  allExportBusy.value = false;
 }
 function restoreAllExports(): void {
   const raw = taskStorage.getItem(allExportStorageKey);
   if (!raw) return;
   try {
     const saved = JSON.parse(raw);
-    const items = saved?.items;
-    if (!/^all_[a-f0-9]{32}$/.test(saved?.batch_id || '') || !Array.isArray(items) || items.length !== 5 ||
-        new Set(items.map((item: Dict) => item.scope)).size !== 5 || items.some((item: Dict) => !/^[A-E]$/.test(String(item.scope)) || item.job_id && !/^[a-f0-9]{32}$/.test(item.job_id))) throw new Error('无效导出状态');
+    if (!/^all_[a-f0-9]{32}$/.test(saved?.batch_id || '')) throw new Error('无效导出状态');
     allExportBatchId.value = saved.batch_id;
     allExportStartedAt.value = String(saved.started_at || '');
-    allExportItems.value = items;
-    const pending = items.filter((item: Dict) => ['pending','running','checking'].includes(item.status));
-    if (pending.length) {
-      allExportBusy.value = true;
-      void Promise.all(pending.map((item: Dict) => item.job_id ? pollAllExport(item) : startAllExportItem(item)))
-        .finally(() => { if (!disposed) { allExportBusy.value = false; finishAllExportRun(); } });
-    }
+    allExportItems.value = 'ABCDE'.split('').map(scope => ({scope,status:'pending'}));
+    void pollAllExports();
   } catch { taskStorage.removeItem(allExportStorageKey); }
 }
 async function startAllExports(): Promise<void> {
-  if (allExportBusy.value || !allExportReady.value || allExportItems.value.some(item => ['pending','running','checking','unknown'].includes(item.status))) return;
+  if (allExportBusy.value || !allExportReady.value || ['running','checking','interrupted','failed'].includes(allExportStatus.value)) return;
   allExportBatchId.value = 'all_' + randomHexId();
   allExportStartedAt.value = new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,19).replace('T',' ');
-  allExportItems.value = buildings.value.map(item => ({ scope:item.scope,status:'pending',error:'',result:{} }));
-  allExportBusy.value = true; error.value = ''; message.value = ''; saveAllExportState();
-  try { await Promise.all(allExportItems.value.map(startAllExportItem)); }
-  finally { if (!disposed) { allExportBusy.value = false; finishAllExportRun(); } }
+  allExportItems.value = 'ABCDE'.split('').map(scope => ({ scope,status:'pending',result:{} }));
+  allExportBusy.value = true; allExportStatus.value = 'running'; allExportPhase.value = 'preparing'; allExportArchiveUrl.value = ''; error.value = ''; message.value = ''; saveAllExportState();
+  try { applyAllExportBatch(await write('export-batches',{batch_id:allExportBatchId.value})); await pollAllExports(); }
+  catch (exc: any) { allExportBusy.value = false; allExportStatus.value = 'checking'; error.value = exc?.message || '批次启动结果待核验，请核验原批次。'; }
 }
-async function retryAllExportItem(item: Dict): Promise<void> {
-  if (item._retrying || !['failed','unknown'].includes(item.status)) return;
-  item._retrying = true;
-  try { await startAllExportItem(item); }
-  finally { item._retrying = false; if (!disposed) finishAllExportRun(); }
-}
-async function retryAllExportStatus(item: Dict): Promise<void> {
-  if (item._retrying || item.status !== 'checking' || !item.job_id) return;
-  item._retrying = true;
-  try { await pollAllExport(item); }
-  finally { item._retrying = false; if (!disposed) finishAllExportRun(); }
-}
-async function retryExportUpload(record: Dict, allItem?: Dict): Promise<void> {
-  if (record._retrying) return;
-  record._retrying = true;
-  record.cloud_upload_status = 'uploading'; record.cloud_upload_error = '';
+async function resumeAllExports(): Promise<void> {
+  if (!allExportBatchId.value || allExportBusy.value) return;
   try {
-    const result = await write('exports/' + record.export_id + '/upload',{ scope:record.scope });
-    Object.assign(record,result); if (allItem) allItem.result = result;
-    if (exported.value.export_id === result.export_id) exported.value = result;
-    const history = exportList.value.find(item => item.export_id === result.export_id); if (history) Object.assign(history,result);
-    if (result.cloud_upload_status === 'succeeded') message.value = `${result.scope}楼导出文件已上传多维表。`;
-    else error.value = result.cloud_upload_error || `${result.scope}楼导出文件仍未上传成功。`;
-  } catch (exc: any) { record.cloud_upload_status = 'failed'; record.cloud_upload_error = exc?.message || '上传失败'; fail(exc); }
-  finally { record._retrying = false; if (allItem) { saveAllExportState(); finishAllExportRun(); } }
+    if (allExportStatus.value !== 'checking') applyAllExportBatch(await write('export-batches/' + allExportBatchId.value + '/resume',{}));
+    await pollAllExports();
+  } catch (exc) { fail(exc); allExportStatus.value = 'checking'; allExportBusy.value = false; }
 }
 async function refresh(): Promise<void> { if (!initialDataLoaded || bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
 const query = reactive({ q: '', room: '', direction: '', from: '', to: '', sheet: '' }), onlyIssues = ref(false), records = ref<Dict>({}), recordsLoading = ref(false);

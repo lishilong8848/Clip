@@ -101,35 +101,26 @@ try {
   const exportErrors = [];
   page.on("pageerror", error => exportErrors.push(error.message));
   let lostExportResponse = false;
-  await page.route("**/api/cabinet-power/exports", async route => {
-    if (route.request().postDataJSON().scope !== "C" || lostExportResponse) return route.continue();
+  await page.route("**/api/cabinet-power/export-batches", async route => {
+    if (lostExportResponse) return route.continue();
     lostExportResponse = true;
     await route.fetch();
     return route.abort("connectionreset");
   });
   await page.goto(base + "/cabinet-power");
   await page.getByRole("button", { name: "一键导出/上传所有楼栋" }).click();
-  await page.getByRole("button", { name: "核验并继续" }).first().waitFor({ timeout: 120000 });
-  assert(lostExportResponse, "C building response loss was not simulated");
-  assert(await page.getByRole("button", { name: "核验并继续" }).first().isEnabled(), "C building retry must not wait for other buildings");
+  await page.getByRole("button", { name: "核验状态" }).waitFor({ timeout: 30000 });
+  assert(lostExportResponse, "batch response loss was not simulated");
   await page.screenshot({ path: path.join(output, "all-building-export-retry.png") });
   await page.reload();
-  await page.getByRole("button", { name: "核验并继续" }).first().waitFor({ timeout: 30000 });
-  await page.unroute("**/api/cabinet-power/exports");
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const buttons = page.getByRole("button", { name: "核验并继续" });
-    const count = await buttons.count();
-    if (!count) break;
-    let clicked = false;
-    for (let index = 0; index < count; index++) {
-      if (await buttons.nth(index).isEnabled()) { await buttons.nth(index).click(); clicked = true; break; }
-    }
-    await page.waitForTimeout(clicked ? 500 : 1000);
-  }
-  await page.getByText("所有楼栋均已导出并上传多维表。", { exact: true }).waitFor({ timeout: 120000 });
+  await page.unroute("**/api/cabinet-power/export-batches");
+  await page.getByText("五楼表格已写入同一条多维归档记录。", { exact: true }).waitFor({ timeout: 120000 });
   await page.getByText(/^导出时间：20\d{2}-\d{2}-\d{2}/).waitFor();
+  const archive = await (await page.request.get(base + "/__fixture/archive")).json();
+  assert.equal(archive.records.length, 1, "one batch must create one cloud record");
+  assert.equal(archive.records[0].fields["上传文件"].length, 5);
   const history = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=C")).json();
-  assert.equal(history.data.items.length, 1, "retry must reuse the original C building export");
+  assert.equal(history.data.items.length, 1, "recovery must reuse the original C building export");
   assert.deepEqual(exportErrors, []);
   await page.screenshot({ path: path.join(output, "all-building-export.png") });
   let lostSingleResponse = false;
@@ -159,7 +150,7 @@ try {
   await page.goto(base + "/cabinet-power?scope=B");
   await page.getByText("正在准备导出数据…", { exact: true }).waitFor({ timeout: 1500 });
   assert.equal(await page.getByRole("button", { name: "继续上次导出", exact: true }).isEnabled(), false, "restored export button must stay disabled");
-  await page.getByText("已上传多维", { exact: true }).waitFor({ timeout: 120000 });
+  await page.getByText("仅本地", { exact: true }).waitFor({ timeout: 120000 });
   const bHistory = await (await page.request.get(base + "/api/cabinet-power/export-history?scope=B")).json();
   assert.equal(bHistory.data.items.length, 2, "single-building retry must not create a duplicate export");
   const singleRecord = bHistory.data.items.find(item => item.batch_id?.startsWith("single_"));

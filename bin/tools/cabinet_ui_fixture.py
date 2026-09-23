@@ -60,6 +60,9 @@ def auth(): return {"ok":True,"data":{"logged_in":True,"user":{"name":"本地测
 @app.get('/api/health')
 def health(): return {"ok":True,"service":"clipflow_backend","instance_id":"cabinet-ui-fixture"}
 
+@app.get('/__fixture/archive')
+def archive(): return {"records":list(controller._cabinet_power.export_remote.records.values())}
+
 @app.get('/workbench-lite')
 def workbench(request:Request):
     from bin.lan_bitable_template_portal.workbench_lite import render_workbench_lite

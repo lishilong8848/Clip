@@ -2,7 +2,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { ApiError, requestJson, type Dict } from "../api/client";
 import { resilientStorage } from "../browserStorage";
 
-type Pending = { id: string; body: string; path: string; method: string };
+type Pending = { id: string; body: string; path: string; method: string; retried?: boolean };
 
 export function useRepairSubmission(key: () => string, recovered: (result: Dict) => void) {
   const pending = ref<Pending | null>(null);
@@ -40,6 +40,26 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
         clear();
         if (notify) recovered(result.result);
         return result.result;
+      }
+      const request = JSON.parse(item.body);
+      if (result.retryable && String(result.error || "").includes("云端未保留本次修改") && !item.retried && item.method === "PUT"
+          && item.path.startsWith("/api/repair-management/records/")
+          && Array.isArray(request.source_repair_ids) && request.source_repair_ids.length) {
+        item.retried = true;
+        storage.setItem(storageKey(), JSON.stringify(item));
+        status.value = "processing";
+        detail.value = "原提交未写入，正在继续保存检修关联。";
+        try {
+          const saved = await requestJson(item.path, { method: item.method, body: item.body });
+          if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
+          clear();
+          if (notify) recovered(saved);
+          return saved;
+        } catch (error) {
+          status.value = "uncertain";
+          detail.value = error instanceof Error ? `续写结果待核实：${error.message}` : "续写结果待核实。";
+          return null;
+        }
       }
       if (result.retryable) {
         status.value = "failed";

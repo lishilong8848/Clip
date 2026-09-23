@@ -270,6 +270,8 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
     def _match_level(self, value: str) -> str:
         if not value:
             return ""
+        if "超低" in value:
+            return ""
         for option in OVERHAUL_URGENCY_OPTIONS:
             if option == OPTION_SLASH:
                 continue

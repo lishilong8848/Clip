@@ -225,8 +225,9 @@ class FakeFeishu:
 
 class FakeExportFeishu:
     def __init__(self):
-        self.fields={"自动编号":{"field_name":"自动编号","type":1005}}
-        self.records={}; self.upload_calls=0; self.creates=0; self.fail_after_create=False; self.lock=threading.RLock()
+        self.fields={"自动编号":{"field_name":"自动编号","type":1005},
+                     "导出文件":{"field_name":"导出文件","field_id":"fldLegacyAttachment","type":17}}
+        self.records={}; self.upload_calls=0; self.creates=0; self.fail_after_create=False; self.fail_share=False; self.lock=threading.RLock()
     def list_all(self,path="records",filters=None):
         with self.lock:
             items=list(self.fields.values()) if path=="fields" else list(self.records.values())
@@ -237,15 +238,27 @@ class FakeExportFeishu:
     def request(self,method,path,body=None,params=None):
         if method=="POST" and path=="fields":
             with self.lock:
-                self.fields[body["field_name"]]={"field_name":body["field_name"],"type":body["type"],"field_id":"fld"+str(len(self.fields))}
+                self.fields[body["field_name"]]={"field_name":body["field_name"],"type":body["type"],"field_id":"fld"+str(len(self.fields)),"property":copy.deepcopy(body.get("property") or {})}
                 return {"field":copy.deepcopy(self.fields[body["field_name"]])}
+        if method=="PUT" and path.startswith("fields/"):
+            with self.lock:
+                old=next(name for name,field in self.fields.items() if field.get("field_id")==path.split("/")[1])
+                field=self.fields.pop(old)
+                field.update(field_name=body["field_name"],type=body["type"],property=copy.deepcopy(body.get("property") or {}))
+                self.fields[field["field_name"]]=field
+                if old!=field["field_name"]:
+                    for record in self.records.values():
+                        if old in record["fields"]: record["fields"][field["field_name"]]=record["fields"].pop(old)
+                return {"field":copy.deepcopy(field)}
         raise AssertionError((method,path,body,params))
     def upload_attachment(self,path,file_name):
         with self.lock: self.upload_calls+=1
         self.uploaded_path=Path(path); self.uploaded_name=file_name
-        return "file-export-token"
+        return "file-export-token-"+str(self.upload_calls)
     def create(self,fields,operation_id):
         with self.lock:
+            existing=next((record for record in self.records.values() if record.get("operation_id")==operation_id),None)
+            if existing: return copy.deepcopy(existing)
             self.creates+=1; rid="recExport"+str(self.creates)
             self.records[rid]={"record_id":rid,"fields":copy.deepcopy(fields),"operation_id":operation_id}
         if self.fail_after_create: raise TimeoutError("response lost")
@@ -255,6 +268,9 @@ class FakeExportFeishu:
             self.records[rid]["fields"].update(copy.deepcopy(fields)); return self.get(rid)
     def get(self,rid):
         with self.lock: return copy.deepcopy(self.records[rid])
+    def record_share_link(self,rid):
+        if self.fail_share: raise TimeoutError("share link unavailable")
+        return "https://vnet.feishu.cn/record/"+rid
 
 def fixtures(with_power_baseline=False):
     models={}; records=[]; directory=[]; configs={}
@@ -681,9 +697,9 @@ class CabinetPowerTests(unittest.TestCase):
     def test_export_ui_supports_cloud_retry_and_parallel_all_buildings(self):
         source=(Path(__file__).parent/"lan_bitable_template_portal/frontend/src/components/CabinetPowerPage.vue").read_text(encoding="utf-8")
         self.assertIn("一键导出/上传所有楼栋",source)
-        self.assertIn("await Promise.all(allExportItems.value.map",source)
-        self.assertIn("retryExportUpload",source)
-        self.assertIn("exports/' + record.export_id + '/upload",source)
+        self.assertIn("write('export-batches'",source)
+        self.assertIn("resumeAllExports",source)
+        self.assertNotIn("retryExportUpload",source)
 
     def test_all_source_rows_and_idle_cabinets_are_retained(self):
         counts={s:sum(r["fields"]["楼栋"]==s+"楼" for r in self.source_records) for s in "ABCDE"}
@@ -1796,29 +1812,25 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(len(calls),2)
         self.assertEqual(batch['rows'][0]['evidence_images'],[image['image_id']])
 
-    def test_export_is_downloadable_while_cloud_archive_upload_is_running(self):
+    def test_single_export_is_local_and_downloadable_without_cloud_write(self):
         from concurrent.futures import ThreadPoolExecutor
         self.service._exports=ThreadPoolExecutor(max_workers=1)
         archive=FakeExportFeishu();self.service.export_remote=archive;self.service._export_schema_ready=False
-        entered=threading.Event();release=threading.Event()
-        original=archive.upload_attachment
-        def upload(path,name):
-            entered.set();release.wait(5);return original(path,name)
-        with patch.object(archive,'upload_attachment',side_effect=upload),patch('bin.lan_bitable_template_portal.cabinet_power.export_snapshot',return_value=b'test-export'):
+        with patch('bin.lan_bitable_template_portal.cabinet_power.export_snapshot',return_value=b'test-export'):
             job=self.service.job('A','export','owner',{})
-            try:
-                self.assertTrue(entered.wait(5))
-                status=self.service.job_status(job['job_id'],'A')
-                self.assertEqual((status['status'],status['phase']),('running','uploading'))
-                export=self.service.local.document('A','export:'+status['result']['export_id'])
-                self.assertEqual(Path(export['path']).read_bytes(),b'test-export')
-            finally: release.set()
             deadline=time.time()+5
             while time.time()<deadline:
                 status=self.service.job_status(job['job_id'],'A')
-                if status['status']!='running': break
+                if status['status'] in ('succeeded','failed'): break
                 time.sleep(.02)
-        self.assertEqual(status['result']['cloud_upload_status'],'succeeded')
+        self.assertEqual(status['status'],'succeeded',status.get('error'))
+        export=self.service.local.document('A','export:'+status['result']['export_id'])
+        self.assertEqual(Path(export['path']).read_bytes(),b'test-export')
+        self.assertEqual(export['cloud_upload_status'],'local_only')
+        self.assertEqual((archive.upload_calls,archive.creates),(0,0))
+        with self.assertRaisesRegex(CabinetError,'单楼导出仅保存在本机'):
+            self.service.upload_export('A',export['export_id'],'owner')
+        self.assertEqual(status['result']['cloud_upload_status'],'local_only')
 
     def test_recovery_pages_old_unfinished_images_and_skips_live_worker(self):
         service=self.service.batches
@@ -2966,22 +2978,23 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             time.sleep(.02)
         self.assertEqual(state["status"],"succeeded",state.get("error"))
         result=state["result"]
-        self.assertEqual(result["cloud_upload_status"],"succeeded")
+        self.assertEqual(result["cloud_upload_status"],"local_only")
         saved=self.service.local.document("B","export:"+result["export_id"])
         workbook=Workbook(Path(saved["path"]).read_bytes())
         self.assertIn("机柜上电汇总表",workbook.sheets)
         self.assertFalse(any("每月阿里统计" in name or "（通告）" in name for name in workbook.sheets))
         mail=dict(workbook.rows("机柜上电汇总表"))
         self.assertFalse(any(values.get(13)=="2026.9.18" for values in mail.values()))
-        self.assertEqual(len(archive.records),1)
-        self.assertEqual(next(iter(archive.records.values()))["fields"]["文件SHA256"],result["sha256"])
+        self.assertEqual(len(archive.records),0)
 
     def _fake_export_file(self,scope,payload,job):
         eid=uuid.uuid4().hex
-        path=self.service.atomic_file(Path("exports")/eid/"test.xlsm",b"test")
-        export={"export_id":eid,"scope":scope,"path":path,"filename":"test.xlsm",
-                "version":payload["snapshot"]["version"],"export_format_version":EXPORT_FORMAT_VERSION,
-                "created_at":job["created_at"]}
+        content=(scope+str(job.get("batch_id") or "")).encode()
+        path=self.service.atomic_file(Path("exports")/eid/(scope+".xlsm"),content)
+        export={"export_id":eid,"scope":scope,"path":path,"filename":scope+".xlsm",
+                 "version":payload["snapshot"]["version"],"export_format_version":EXPORT_FORMAT_VERSION,
+                 "created_at":job["created_at"],"sha256":hashlib.sha256(content).hexdigest(),
+                 "owner":job.get("owner",""),"batch_id":job.get("batch_id",""),"cloud_upload_status":"local_only"}
         self.service.write("export:"+eid,export)
         return self.service._public_export(export)
 
@@ -3096,50 +3109,140 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.service.write("job:"+jid,job)
         self.assertEqual(self.service.job_status(jid)["status"],"failed")
 
-    def test_export_archive_schema_and_response_loss_retry_are_idempotent(self):
-        archive=FakeExportFeishu(); archive.fail_after_create=True
-        self.service.export_remote=archive; self.service._export_schema_ready=False
-        result=self.service.do_export("D",{"batch_id":"all_12345678"},{"owner":"owner-open-id"})
-        self.assertEqual(result["cloud_upload_status"],"failed")
-        self.assertTrue(Path(self.service.read("export:"+result["export_id"])["path"]).is_file())
-        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(1,1,1))
-        self.assertTrue(set(EXPORT_ARCHIVE_FIELDS)<=set(archive.fields))
-        archive.fail_after_create=False
-        retried=self.service.upload_export("D",result["export_id"],"owner-open-id")
-        self.assertEqual(retried["cloud_upload_status"],"succeeded")
-        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(1,1,1))
-        fields=next(iter(archive.records.values()))["fields"]
-        self.assertEqual((fields["楼栋"],fields["批次标识"],fields["导出人"]),("D楼","all_12345678","owner-open-id"))
-        self.assertEqual(fields["导出文件"],[{"file_token":"file-export-token"}])
+    def _wait_export_batch(self,batch_id,service=None):
+        service=service or self.service
+        deadline=time.time()+20
+        while time.time()<deadline:
+            status=service.export_batch_status(batch_id,"owner")
+            if status["status"] in ("succeeded","failed"): return status
+            time.sleep(.03)
+        self.fail("五楼导出批次未完成")
 
-    def test_export_cleanup_waits_for_upload_before_removing_file(self):
-        archive=FakeExportFeishu(); started=threading.Event(); release=threading.Event(); cleaned=threading.Event()
-        original_upload=archive.upload_attachment
-        def slow_upload(path,name):
-            started.set(); self.assertTrue(release.wait(5)); return original_upload(path,name)
-        archive.upload_attachment=slow_upload
+    def test_export_archive_schema_renames_attachment_without_losing_history(self):
+        archive=FakeExportFeishu()
+        archive.records["recLegacy"]={"record_id":"recLegacy","fields":{"导出文件":[{"file_token":"old-file"}]}}
         self.service.export_remote=archive
-        eid="cleanup-during-upload"
-        path=self.service.atomic_file(Path("exports")/eid/"test.xlsm",b"test")
-        self.service.write("export:"+eid,{"export_id":eid,"scope":"D","path":path,"filename":"test.xlsm",
-            "version":1,"created_at":"2026-09-18 20:00:00","sha256":"test","owner":"owner","batch_id":"",
-            "cloud_upload_status":"pending"})
-        uploads=[]
-        upload=threading.Thread(target=lambda:uploads.append(self.service.upload_export("D",eid,"owner")))
-        cleanup=threading.Thread(target=lambda:(self.service.cleanup_export("D",eid),cleaned.set()))
-        upload.start(); self.assertTrue(started.wait(5)); cleanup.start()
+        self.service.ensure_export_archive_fields("2026")
+        self.assertNotIn("导出文件",archive.fields)
+        self.assertEqual(archive.records["recLegacy"]["fields"]["上传文件"],[{"file_token":"old-file"}])
+        self.assertTrue(set(EXPORT_ARCHIVE_FIELDS)<=set(archive.fields))
+        self.assertEqual([option["name"] for option in archive.fields["月份"]["property"]["options"]],
+                         [f"{i:02d}" for i in range(1,13)])
+
+    def test_five_exports_use_one_monthly_record_and_replace_it(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive
+        self.service.do_export=self._fake_export_file
+        first="all_"+"a"*32; second="all_"+"b"*32
+        self.service.start_export_batch(first,"owner",list("ABCDE"))
+        saved=self._wait_export_batch(first)
+        self.assertEqual(saved["status"],"succeeded",saved.get("error"))
+        self.assertEqual((len(archive.records),archive.upload_calls),(1,5))
+        before=next(iter(archive.records.values()))
+        self.assertEqual(before["fields"]["子分类"],"机柜上下电记录")
+        self.assertEqual(len(before["fields"]["上传文件"]),5)
+        self.assertEqual(before["fields"]["链接"],saved["archive_url"])
+        self.service.start_export_batch(second,"owner",list("ABCDE"))
+        updated=self._wait_export_batch(second)
+        self.assertEqual(updated["status"],"succeeded",updated.get("error"))
+        self.assertEqual((len(archive.records),archive.upload_calls),(1,10))
+        after=next(iter(archive.records.values()))
+        self.assertEqual(after["record_id"],before["record_id"])
+        self.assertEqual(after["fields"]["批次标识"],second)
+        self.assertEqual(len(after["fields"]["上传文件"]),5)
+        old_eid=saved["items"]["A"]["result"]["export_id"]
+        self.assertEqual(self.service.local.document("A","export:"+old_eid)["cloud_upload_status"],"replaced")
+
+    def test_export_batch_creates_new_month_without_changing_prior_archive(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive
+        self.service.do_export=self._fake_export_file
+        now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        previous_month=now.replace(day=1)-dt.timedelta(days=1)
+        old={"record_id":"recPriorMonth","fields":{"子分类":"机柜上下电记录",
+             "年度":f"{previous_month.year:04d}","月份":f"{previous_month.month:02d}",
+             "上传文件":[{"file_token":"old-file"}]}}
+        archive.records[old["record_id"]]=copy.deepcopy(old)
+        batch_id="all_"+"9"*32
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        result=self._wait_export_batch(batch_id)
+        self.assertEqual(result["status"],"succeeded",result.get("error"))
+        self.assertEqual(len(archive.records),2)
+        self.assertEqual(archive.records[old["record_id"]],old)
+
+    def test_export_batch_retries_link_without_reupload_and_reconciles_create(self):
+        archive=FakeExportFeishu(); archive.fail_after_create=True; archive.fail_share=True
+        self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        batch_id="all_"+"c"*32
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        partial=self._wait_export_batch(batch_id)
+        self.assertEqual((partial["status"],partial["phase"]),("failed","linking"))
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+        archive.fail_share=False; archive.fail_after_create=False
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        recovered=self._wait_export_batch(batch_id)
+        self.assertEqual(recovered["status"],"succeeded",recovered.get("error"))
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+
+    def test_export_batch_waits_for_all_buildings_and_retries_only_failure(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive
+        failed=[]
+        def export(scope,payload,job):
+            if scope=="C" and not failed:
+                failed.append(scope); raise CabinetError("C楼暂时不可用")
+            return self._fake_export_file(scope,payload,job)
+        self.service.do_export=export
+        batch_id="all_"+"d"*32
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        first=self._wait_export_batch(batch_id)
+        self.assertEqual(first["status"],"failed")
+        self.assertEqual((archive.upload_calls,len(archive.records)),(0,0))
+        old_a=first["items"]["A"]["result"]["export_id"]
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        second=self._wait_export_batch(batch_id)
+        self.assertEqual(second["status"],"succeeded",second.get("error"))
+        self.assertEqual(second["items"]["A"]["result"]["export_id"],old_a)
+        self.assertEqual((archive.upload_calls,len(archive.records)),(5,1))
+
+    def test_export_batch_rejects_duplicate_month_rows_and_preserves_files(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        for index in range(2):
+            archive.records[f"recDuplicate{index}"]={"record_id":f"recDuplicate{index}","fields":{
+                "子分类":"机柜上下电记录","年度":f"{now.year:04d}","月份":f"{now.month:02d}"}}
+        batch_id="all_"+"f"*32
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        result=self._wait_export_batch(batch_id)
+        self.assertEqual(result["status"],"failed")
+        self.assertIn("多条",result["error"])
+        self.assertEqual(len(archive.records),2)
+        self.assertTrue(all(item["status"]=="succeeded" for item in result["items"].values()))
+
+    def test_export_batch_resume_on_new_service_reuses_uploaded_tokens(self):
+        archive=FakeExportFeishu(); archive.fail_share=True
+        self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        batch_id="all_"+"0"*32
+        self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
+        self.assertEqual(self._wait_export_batch(batch_id)["phase"],"linking")
+        fresh=CabinetPowerService(self.store,self.remote,self.tmp.name,export_remote=archive)
         try:
-            self.assertFalse(cleaned.wait(.1))
-            self.assertTrue(Path(path).is_file())
-        finally:
-            release.set(); upload.join(5); cleanup.join(5)
-        self.assertTrue(cleaned.is_set())
-        self.assertEqual(uploads[0]["cloud_upload_status"],"succeeded")
-        self.assertTrue(self.service.local.document("D","export:"+eid)["deleted"])
+            archive.fail_share=False
+            fresh.start_export_batch(batch_id,"owner",list("ABCDE"))
+            recovered=self._wait_export_batch(batch_id,fresh)
+            self.assertEqual(recovered["status"],"succeeded",recovered.get("error"))
+            self.assertEqual((archive.upload_calls,len(archive.records)),(5,1))
+        finally: fresh.shutdown()
+
+    def test_export_cleanup_refuses_running_batch(self):
+        eid="cleanup-during-batch"; batch_id="all_"+"e"*32
+        path=self.service.atomic_file(Path("exports")/eid/"test.xlsm",b"test")
+        self.service.write("export:"+eid,{"export_id":eid,"scope":"D","path":path,"filename":"test.xlsm","batch_id":batch_id})
+        self.store.put_document("cabinet_export_batches",batch_id,{"status":"running"})
+        with self.assertRaisesRegex(CabinetError,"批次仍在处理"):
+            self.service.cleanup_export("D",eid)
+        self.store.put_document("cabinet_export_batches",batch_id,{"status":"succeeded"})
+        self.service.cleanup_export("D",eid)
         self.assertFalse(Path(path).exists())
         history=next(item for item in self.service.export_history("D")["items"] if item["export_id"]==eid)
         self.assertFalse(history["file_available"])
-        self.assertEqual(history["cloud_upload_status"],"succeeded")
 
     def test_export_history_is_paged_in_sqlite_order(self):
         version=self.service.local.version("D")
