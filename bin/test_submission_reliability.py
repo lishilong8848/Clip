@@ -46,6 +46,7 @@ class SubmissionReliabilityTests(unittest.TestCase):
         self.service.first = "yes"
         for name in ("_auth_headers", "_upsert_repair_snapshot_fields", "_schedule_repair_sync_task"):
             setattr(self.service, name, Mock(return_value={}))
+        self.service._schedule_repair_sync_task.return_value = "sync-task"
         self.service._repair_physical_record_fields = lambda table, fields: fields
         self.service._repair_logical_record_fields = lambda table, fields: fields
         self.service._repair_snapshot_record_version = Mock(return_value="v2")
@@ -102,18 +103,21 @@ class SubmissionReliabilityTests(unittest.TestCase):
             self.service.create_test({"text": "one"}, operation_id="rejected")
         self.assertTrue(self.service.repair_operation_status("rejected")["retryable"])
 
-    def test_unknown_update_can_be_verified_without_resending(self):
+    def test_project_update_replays_same_record_without_readback(self):
         self.service._request_payload.side_effect = TimeoutError("response lost")
         with self.assertRaises(TimeoutError):
             self.service.update_test({"text": "one"}, operation_id="update")
-        self.service._request_json.side_effect = None
-        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": [{"text": "one", "type": "text"}]}}}}
-        self.service._load_table_fields = Mock(return_value=([], {}))
+        self.service._request_payload.side_effect = None
         state = self.service.repair_operation_status("update", recover=True)
         self.assertEqual(state["status"], "completed")
-        self.service._request_payload.assert_called_once()
+        self.assertEqual(self.service._request_payload.call_count, 2)
+        first, second = self.service._request_payload.call_args_list
+        self.assertEqual(first, second)
+        self.assertEqual(second.args[0], "PUT")
+        self.assertTrue(second.args[1].endswith("/records/project"))
+        self.service._request_json.assert_not_called()
 
-    def test_interrupted_update_recovers_from_confirmed_local_snapshot(self):
+    def test_interrupted_update_does_not_treat_cache_as_cloud_success(self):
         self.service._request_payload.side_effect = TimeoutError("response lost")
         with self.assertRaises(TimeoutError):
             self.service.update_test({"text": "new"}, operation_id="local-confirmed")
@@ -121,12 +125,16 @@ class SubmissionReliabilityTests(unittest.TestCase):
             "repair_projects", "project", {"record_id": "project", "raw_fields": {"text": "new"}},
         )
         state = self.service.repair_operation_status("local-confirmed", recover=True)
-        self.assertEqual(state["status"], "completed")
+        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
         self.assertEqual(state["record_id"], "project")
         self.service._request_json.assert_not_called()
-        self.service._request_payload.assert_called_once()
+        self.assertEqual(self.service._request_payload.call_count, 2)
+        self.service._request_payload.side_effect = None
+        result = self.service.update_test({"text": "new"}, operation_id="local-confirmed")
+        self.assertEqual(result["record_id"], "project")
+        self.assertEqual(self.service._request_payload.call_count, 3)
 
-    def test_unknown_update_is_retryable_only_when_cloud_matches_original_snapshot(self):
+    def test_interrupted_project_update_restarts_frozen_write(self):
         self.store.upsert_repair_snapshot_record(
             "repair_projects", "project", {"record_id": "project", "raw_fields": {"text": "old"}},
         )
@@ -139,19 +147,11 @@ class SubmissionReliabilityTests(unittest.TestCase):
             "update-unchanged", status="processing",
             result={**interrupted["result"], "checkpoint": checkpoint},
         )
-        self.service._load_table_fields = Mock(return_value=([], {}))
-        self.service._request_json.side_effect = None
-        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": "old"}}}}
+        self.service._request_payload.side_effect = None
         state = self.service.repair_operation_status("update-unchanged", recover=True)
-        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
-        self.assertEqual(self.store.get_repair_management_operation("update-unchanged")["result"]["checkpoint"]["phase"], "preparing")
-        self.service._request_payload.assert_called_once()
-
-        with self.assertRaises(TimeoutError):
-            self.service.update_test({"text": "new"}, operation_id="update-conflict")
-        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": "someone else"}}}}
-        state = self.service.repair_operation_status("update-conflict", recover=True)
-        self.assertEqual((state["status"], state["retryable"]), ("uncertain", False))
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(self.store.get_repair_management_operation("update-unchanged")["result"]["checkpoint"]["phase"], "remote_written")
+        self.service._request_json.assert_not_called()
         self.assertEqual(self.service._request_payload.call_count, 2)
 
     def test_unwritten_repair_relation_mirror_is_retryable(self):
@@ -163,35 +163,144 @@ class SubmissionReliabilityTests(unittest.TestCase):
         self.service._request_payload.side_effect = TimeoutError("response lost")
         with self.assertRaises(TimeoutError):
             self.service.update_test({"设备检修关联": "recTarget123"}, operation_id="link-update")
-        self.service._request_json.side_effect = None
-        self.service._request_json.return_value = {"data": {"record": {"fields": {
-            "设备检修关联": [{"table_id": "tblTarget", "text_arr": [], "type": "text"}],
-        }}}}
-        self.service._load_table_fields = Mock(return_value=([], {
-            "设备检修关联": FieldMeta("field", "设备检修关联", "Link", 21, False, {}, [], False),
-        }))
+        self.service._request_payload.side_effect = None
         state = self.service.repair_operation_status("link-update", recover=True)
-        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
-        self.service._request_payload.assert_called_once()
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(self.service._request_payload.call_args.kwargs["json_payload"]["fields"], {"设备检修关联-L": "recTarget123"})
+        self.service._request_json.assert_not_called()
 
-    def test_unrelated_cloud_change_does_not_hide_unwritten_requested_field(self):
-        self.store.upsert_repair_snapshot_record(
-            "repair_projects", "project", {"record_id": "project", "raw_fields": {"text": "old", "other": "before"}},
-        )
+    def test_old_project_retry_cannot_overwrite_later_save(self):
         self.service._request_payload.side_effect = TimeoutError("response lost")
         with self.assertRaises(TimeoutError):
-            self.service.update_test({"text": "new", "other": "before"}, operation_id="partial-cloud-change")
-        self.service._request_json.side_effect = None
-        self.service._request_json.return_value = {"data": {"record": {"fields": {"text": "old", "other": "changed"}}}}
-        self.service._load_table_fields = Mock(return_value=([], {}))
-        state = self.service.repair_operation_status("partial-cloud-change", recover=True)
-        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
+            self.service.update_test({"text": "old"}, operation_id="old-save")
+        self.service._request_payload.side_effect = None
+        self.service.update_test({"text": "latest"}, operation_id="new-save")
+        state = self.service.repair_operation_status("old-save", recover=True)
+        self.assertEqual(state["status"], "superseded")
+        replay = self.service.update_test({"text": "old"}, operation_id="old-save")
+        self.assertTrue(replay["superseded"])
+        self.assertEqual(self.service._request_payload.call_count, 2)
+        self.assertEqual(self.service._request_payload.call_args.kwargs["json_payload"]["fields"], {"text": "latest"})
+
+    def test_project_recovery_keeps_failed_relation_queue_retryable(self):
+        self.service._upsert_repair_snapshot_fields.side_effect = OSError("disk busy")
+        with self.assertRaises(OSError):
+            self.service.update_test({"text": "new"}, operation_id="recover-queue")
+        self.service._upsert_repair_snapshot_fields.side_effect = None
+        self.service._schedule_repair_sync_task.return_value = ""
+        state = self.service.repair_operation_status("recover-queue", recover=True)
+        self.assertEqual(state["status"], "failed")
+        self.assertTrue(state["retryable"])
+        self.service._schedule_repair_sync_task.return_value = "queued"
+        self.service.update_test({"text": "new"}, operation_id="recover-queue")
+        self.assertEqual(self.service.repair_operation_status("recover-queue")["status"], "completed")
         self.service._request_payload.assert_called_once()
+
+    def test_status_does_not_replay_active_project_writer(self):
+        def write(*args, **kwargs):
+            state = self.service.repair_operation_status("running", recover=True)
+            self.assertEqual(state["status"], "processing")
+            self.assertFalse(state["retryable"])
+            return {"code": 0}
+        self.service._request_payload.side_effect = write
+        self.service.update_test({"text": "new"}, operation_id="running")
+        self.service._request_payload.assert_called_once()
+
+    def test_new_save_retains_interrupted_old_backlink_cleanup(self):
+        @repair_mutation("project_update")
+        def save(self, fields, *, record_id="recProject", operation_id="", scope="A"):
+            self._remember_repair_project_fields({"record_id": record_id, "raw_fields": {"设备检修关联-L": "recOldRepair"}})
+            return self.update_test(fields, record_id=record_id)
+        self.service._request_payload.side_effect = TimeoutError("lost")
+        with self.assertRaises(TimeoutError):
+            save(self.service, {"text": "first"}, operation_id="first")
+        self.service._request_payload.side_effect = None
+        save(self.service, {"text": "second"}, operation_id="second")
+        queued = self.service._schedule_repair_sync_task.call_args
+        self.assertEqual(queued.args[0], "project_relations_sync")
+        self.assertEqual(queued.kwargs["target_record_id"], "recOldRepair")
+        self.assertEqual(queued.kwargs["task_payload"]["before_fields"]["设备检修关联-L"], "recOldRepair")
+
+    def test_relation_recovery_uses_latest_cloud_binding(self):
+        self.service.get_repair_management_record = Mock(return_value={"record": {
+            "record_id": "recProject", "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+            "raw_fields": {"关联事件单": "recNewEvent", "设备检修关联-L": "recNewRepair"}}})
+        self.service._sync_repair_project_relations = Mock(return_value={"warnings": []})
+        self.service._execute_repair_sync_task({"operation_type": "project_relations_sync", "summary_record_id": "recProject", "scope": "A",
+            "result": {"task_payload": {"before_fields": {"设备检修关联-L": "recOldRepair"}}}})
+        self.service.get_repair_management_record.assert_called_once_with("recProject", scope="A", force_refresh=True)
+        synced = self.service._sync_repair_project_relations.call_args.kwargs
+        self.assertEqual(synced["event_record_id"], "recNewEvent")
+        self.assertEqual(synced["target_record_ids"], ["recNewRepair"])
+        self.assertEqual(synced["previous_target_record_ids"], ["recOldRepair"])
 
     def test_remote_change_detected_even_when_local_version_matches(self):
         meta = FieldMeta("field", "text", "Text", 1, False, {}, [], False)
         with self.assertRaises(PortalConflictError):
             self.service._assert_repair_remote_unchanged({"raw_fields": {"text": "old"}}, {"raw_fields": {"text": "new"}}, {"text": meta})
+
+    def test_project_rebind_replaces_source_fields_and_removes_old_end_time(self):
+        names = ["关联事件单", "设备检修关联", "对应来源", "对应事件等级", "事件描述", "事件应急措施",
+                 "故障发生时间", "故障维修原因", "故障发生现象描述", "所属专业", "专业（推送消息用）",
+                 "所属数据中心/楼栋-使用", "维修开始时间", "维修结束时间（2026）", "检修通告名称",
+                 "随工人员（或我方维修人员）", "设备名称", "维修进展描述", "维修方"]
+        metas = [FieldMeta(str(i), name, "Text", 1, False, {}, [], False) for i, name in enumerate(names)]
+        by_name = {meta.field_name: meta for meta in metas}
+        old = {"record_id": "recProject", "source_table_id": REPAIR_MANAGEMENT_TABLE_ID, "record_version": "cloud-version", "raw_fields": {
+            **dict.fromkeys(names, "旧内容"), "关联事件单": "recOldEvent", "设备检修关联": "recOldRepair"},
+            "display_fields": {"所属数据中心/楼栋-使用": "南通A楼"}}
+        self.service._repair_management_snapshot_schema = Mock(return_value=(metas, by_name))
+        self.service._ensure_repair_management_record_in_scope = Mock(return_value=old)
+        self.service._load_table_records_by_ids = Mock(return_value=[old])
+        self.service._repair_management_record_in_scope = Mock(return_value=True)
+        self.service._repair_management_fields_in_scope = Mock(return_value=True)
+        self.service._load_repair_followups_for_summary = Mock(return_value=([], {}, []))
+        self.service._event_snapshot_record_for_repair = Mock(return_value={"record_id": "recNewEvent", "display_fields": {
+            "事件发现来源（统一）": "巡检", "事件等级": "I2", "机楼": "A楼", "专业": "暖通",
+            "事件发生时间": "2026-09-23 10:00", "告警描述": "新故障", "事件简述": "新事件"}})
+        self.service._load_repair_management_target_records_by_ids = Mock(return_value=([], {}, [{
+            "record_id": "recNewRepair", "raw_fields": {}, "display_fields": {"楼栋": "A楼",
+            "名称（标题）": "新检修", "维修设备": "新设备", "故障原因": "新原因", "维修方式": "自维"}}]))
+        self.service._repair_management_target_record_in_scope = Mock(return_value=True)
+        self.service._sync_repair_target_summary_id = Mock(return_value={"synced": True})
+        self.service._ensure_repair_followup_select_options = Mock(return_value=(metas, by_name))
+        self.service._sync_repair_project_relations = Mock(return_value={})
+        self.service._sync_repair_management_workflow = Mock(return_value=(False, []))
+        result = self.service.update_repair_management_record("recProject",
+            {"所属专业": "旧专业", "故障发生现象描述": "旧故障"}, scope="A", expected_version="stale",
+            source_event_id="recNewEvent", source_repair_ids=["recNewRepair"], replace_source_relations=True,
+            operation_id="rebind")
+        saved = result["fields"]
+        self.assertEqual(saved["关联事件单"], "recNewEvent")
+        self.assertEqual(saved["设备检修关联"], "recNewRepair")
+        self.assertEqual(saved["所属专业"], "暖通")
+        self.assertEqual(saved["故障发生现象描述"], "新故障")
+        self.assertEqual(saved["故障维修原因"], "新原因")
+        self.assertEqual(saved["检修通告名称"], "新检修")
+        self.assertEqual(saved["设备名称"], "新设备")
+        self.assertIsNone(saved["维修结束时间（2026）"])
+        self.assertIsNone(saved["事件应急措施"])
+        self.assertEqual(self.service._sync_repair_project_relations.call_args.kwargs["previous_target_record_ids"], ["recOldRepair"])
+        checkpoint = self.store.get_repair_management_operation("rebind")["result"]["checkpoint"]
+        self.assertEqual(checkpoint["before_fields"]["关联事件单"], "recOldEvent")
+
+    def test_project_rebind_copies_new_identity_to_existing_followups(self):
+        names = ["维修名称", "维修简述", "维修来源", "维修开始时间", "维修结束时间", "结束时间", "设备名称"]
+        metas = [FieldMeta(str(i), name, "Text", 1, False, {}, [], False) for i, name in enumerate(names)]
+        self.service._ensure_repair_followup_parent_id_field = Mock(return_value=(metas, {m.field_name: m for m in metas}))
+        self.service._ensure_repair_followup_select_options = Mock(return_value=(metas, {m.field_name: m for m in metas}))
+        result = self.service._sync_repair_followups_from_summary(summary_record_id="recProject",
+            summary_record={"display_fields": {"检修通告名称": "新检修", "维修名称": "旧名称",
+                "对应来源": "巡检发现", "维修开始时间": "2026-09-23 10:00", "设备名称": "汇总设备"}},
+            linked_followups=[{"record_id": "recFollowup", "raw_fields": {"维修汇总记录ID": "recProject",
+                "设备名称": "跟进填写设备", "随工人员（我方维修人员）": "测试操作人"}}])
+        self.assertEqual(result["synced_count"], 1)
+        fields = self.service._request_payload.call_args.kwargs["json_payload"]["fields"]
+        self.assertEqual(fields["维修名称"], "新检修")
+        self.assertEqual(fields["维修简述"], "2026/09/23 - 测试操作人")
+        self.assertEqual(fields["维修来源"], "巡检发现")
+        self.assertIsNone(fields["维修结束时间"])
+        self.assertNotIn("设备名称", fields)
 
     def test_due_task_after_twenty_delayed_tasks_is_processed(self):
         for index in range(21):

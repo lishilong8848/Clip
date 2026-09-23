@@ -16,8 +16,7 @@ def repair_mutation(kind):
     def decorate(function):
         signature = inspect.signature(function)
 
-        @wraps(function)
-        def run(self, *args, **kwargs):
+        def execute(self, *args, **kwargs):
             from .portal_service import PortalError
             arguments = signature.bind(self, *args, **kwargs)
             arguments.apply_defaults()
@@ -41,8 +40,12 @@ def repair_mutation(kind):
                 if existing:
                     if existing.get("payload_hash") != fingerprint or existing.get("operation_type") != kind:
                         raise PortalError("操作标识对应的提交内容已变化，请先核验原提交。")
+                    if kind == "project_update" and self._repair_project_update_superseded(existing):
+                        return {"record_id": request.get("record_id", ""), "superseded": True}
                     if existing["status"] in ("completed", "sync_pending") and existing.get("record_id"):
                         return self._repair_public_result(existing)
+                    if kind == "project_update" and (existing.get("result") or {}).get("checkpoint", {}).get("phase") in ("writing", "remote_written"):
+                        return self._resume_repair_project_update(existing, ignore_current=True)
                     if existing["status"] == "remote_written":
                         return self._recover_repair_write(existing)
                     saved = existing.get("result") or {}
@@ -67,6 +70,9 @@ def repair_mutation(kind):
                 token = _current.set(context)
                 arguments.arguments["operation_id"] = ""
                 result = function(*arguments.args, **arguments.kwargs)
+                if kind == "project_update" and context["checkpoint"].get("phase") == "remote_written":
+                    confirmed = self._repair_logical_record_fields(context["checkpoint"]["table_id"], context["checkpoint"].get("fields") or {})
+                    result["fields"] = {**result.get("fields", {}), **confirmed}
                 record_id = str(result.get("record_id") or "")
                 self._state_store.update_repair_management_operation(
                     operation_id, status="completed", record_id=record_id,
@@ -88,15 +94,96 @@ def repair_mutation(kind):
                     _current.reset(token)
                 with _guard:
                     _running.discard(key)
+
+        @wraps(function)
+        def run(self, *args, **kwargs):
+            if kind != "project_update":
+                return execute(self, *args, **kwargs)
+            arguments = signature.bind(self, *args, **kwargs)
+            arguments.apply_defaults()
+            with self._repair_management_record_lock(arguments.arguments.get("record_id", "")):
+                return execute(self, *args, **kwargs)
         return run
     return decorate
 
 
 class RepairOperationsMixin:
+    def _repair_project_update_superseded(self, operation):
+        latest = self._state_store.latest_repair_project_update(operation.get("summary_record_id") or "")
+        if operation["status"] != "superseded" and (not latest or latest["operation_id"] == operation["operation_id"]):
+            return False
+        self._state_store.update_repair_management_operation(operation["operation_id"], status="superseded",
+            error="已有较新的保存，本次旧提交已停止。")
+        return True
+
+    def _remember_repair_project_fields(self, record):
+        from .portal_service import PortalError, REPAIR_MANAGEMENT_TABLE_ID
+        context = _current.get()
+        if context and context["service"] is self:
+            context["checkpoint"]["before_fields"] = record.get("raw_fields") or record.get("display_fields") or {}
+            previous = self._state_store.latest_repair_project_update(
+                record["record_id"], exclude_operation_id=context["operation_id"])
+            checkpoint = ((previous or {}).get("result") or {}).get("checkpoint") or {}
+            if previous and previous["status"] not in ("completed", "superseded") and checkpoint.get("phase") in ("writing", "remote_written"):
+                before = checkpoint.get("before_fields") or {}
+                target = self._repair_target_record_id({"raw_fields": before, "source_table_id": REPAIR_MANAGEMENT_TABLE_ID})
+                if target and not self._schedule_repair_sync_task("project_relations_sync", summary_record_id=record["record_id"],
+                        scope=context["request"].get("scope") or "ALL", target_record_id=target,
+                        task_payload={"before_fields": before}):
+                    raise PortalError("旧关联清理任务未能保存，请稍后重新保存维修单。")
+
+    def _resume_repair_project_update(self, operation, *, ignore_current=False):
+        from .portal_service import PortalError, REPAIR_SOURCE_APP_TOKEN, REPAIR_MANAGEMENT_TABLE_ID
+        operation_id = operation["operation_id"]
+        with self._repair_management_record_lock(operation["summary_record_id"]):
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            saved = operation.get("result") or {}
+            checkpoint = saved.get("checkpoint") or {}
+            if self._repair_writer_alive(saved, operation_id, ignore_current=ignore_current):
+                raise PortalError("维修单正在保存，请稍候。")
+            if self._repair_project_update_superseded(operation):
+                return {"record_id": operation["summary_record_id"], "superseded": True}
+            if operation["status"] == "completed":
+                return self._repair_public_result(operation)
+            record_id = checkpoint.get("record_id")
+            if not record_id or checkpoint.get("table_id") != REPAIR_MANAGEMENT_TABLE_ID:
+                raise PortalError("原保存内容不完整，请重新保存维修单。")
+            key = (str(self._state_store.db_path), operation_id)
+            with _guard:
+                owns_running = key not in _running
+                _running.add(key)
+            try:
+                if checkpoint.get("phase") == "writing" or checkpoint.get("pending_fields"):
+                    fields = {**checkpoint.get("fields", {}), **checkpoint.get("pending_fields", {})}
+                    if not fields:
+                        raise PortalError("原保存字段为空，请重新填写后保存。")
+                    import psutil
+                    checkpoint.update(pid=os.getpid(), process_started=psutil.Process().create_time())
+                    self._state_store.update_repair_management_operation(operation_id, status="processing",
+                        result={**saved, "checkpoint": checkpoint}, error="")
+                    self._patch_record_fields(app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                        record_id=record_id, fields=fields)
+                    checkpoint.update(phase="remote_written", fields=fields)
+                    checkpoint.pop("pending_fields", None)
+                    self._state_store.update_repair_management_operation(operation_id, status="remote_written",
+                        record_id=record_id, result={**saved, "checkpoint": checkpoint}, error="")
+                return self._recover_repair_write(self._state_store.get_repair_management_operation(operation_id))
+            except Exception as exc:
+                self._state_store.update_repair_management_operation(operation_id, status="failed",
+                    result={**saved, "checkpoint": checkpoint}, error=f"保存未完成：{exc}。可修改后重新保存。")
+                raise
+            finally:
+                if owns_running:
+                    with _guard:
+                        _running.discard(key)
+
     @staticmethod
     def _repair_public_result(operation):
         result = {key: value for key, value in (operation.get("result") or {}).items()
                   if key not in ("request", "checkpoint")}
+        if operation.get("operation_type") == "project_update":
+            request = (operation.get("result") or {}).get("request") or {}
+            result.update({key: request[key] for key in ("source_event_id", "source_repair_ids") if key in request})
         return {**result, "record_id": operation.get("record_id") or result.get("record_id", ""),
                 "operation_id": operation["operation_id"], "idempotent_replay": True,
                 "remote_written": True}
@@ -159,7 +246,7 @@ class RepairOperationsMixin:
 
     def _recover_repair_write(self, operation):
         from .portal_service import (REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS, REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-                                     PortalError)
+                                     REPAIR_MANAGEMENT_TABLE_ID, PortalError)
         saved = operation.get("result") or {}
         checkpoint = saved.get("checkpoint") or {}
         record_id = str(operation.get("record_id") or checkpoint.get("record_id") or "")
@@ -199,10 +286,15 @@ class RepairOperationsMixin:
                                       "include_target_fields": False}, run_immediately=True)
             else:
                 event = request.get("source_event_id") or ""
-                self._schedule_repair_sync_task("project_relations_sync", summary_record_id=summary_id,
-                    scope=operation["scope"], task_payload={"before_fields": checkpoint.get("before_fields") or {}}, run_immediately=True)
-                self._schedule_repair_sync_task("summary_followup_copy_sync", summary_record_id=summary_id,
+                before_fields = checkpoint.get("before_fields") or {}
+                before_target = self._repair_target_record_id({"raw_fields": before_fields, "source_table_id": REPAIR_MANAGEMENT_TABLE_ID})
+                relation_task = self._schedule_repair_sync_task("project_relations_sync", summary_record_id=summary_id,
+                    scope=operation["scope"], target_record_id=before_target,
+                    task_payload={"before_fields": before_fields}, run_immediately=True)
+                followup_task = self._schedule_repair_sync_task("summary_followup_copy_sync", summary_record_id=summary_id,
                     scope=operation["scope"], run_immediately=True)
+                if operation["operation_type"] == "project_update" and (not relation_task or not followup_task):
+                    raise PortalError("维修单已写入，关联同步任务未能保存，请重新保存维修单。")
                 if event and operation["operation_type"] == "project_create" and request.get("sync_event_transfer_status", True):
                     self._schedule_repair_sync_task("event_transfer_sync", summary_record_id=summary_id,
                         scope=operation["scope"], task_payload={"event_record_id": event,
@@ -223,6 +315,8 @@ class RepairOperationsMixin:
             raise PortalNotFoundError("尚未收到该提交，请保留当前输入后继续核验。")
         if operation["operation_type"] not in {"project_create", "project_update", "followup_create", "followup_update", "followup_delete"}:
             raise PortalError("该操作不属于维修表单提交。")
+        if operation["operation_type"] == "project_update":
+            return self._repair_project_update_status(operation, recover=recover)
         saved = operation.get("result") or {}
         checkpoint = saved.get("checkpoint") or {}
         status = operation["status"]
@@ -310,6 +404,47 @@ class RepairOperationsMixin:
                 "remote_written": status in ("remote_written", "completed", "sync_pending"),
                 "error": operation.get("last_error") or "",
                 "result": self._repair_public_result(operation) if status in ("completed", "sync_pending") else None}
+
+    def _repair_project_update_status(self, operation, *, recover):
+        operation_id = operation["operation_id"]
+        if not operation.get("summary_record_id"):
+            self._state_store.update_repair_management_operation(operation_id, status="failed", error="原维修单标识不完整，请重新保存。")
+            return {"operation_id": operation_id, "scope": operation["scope"], "status": "failed", "retryable": True,
+                    "error": "原维修单标识不完整，请重新保存。", "result": None}
+        if self._repair_writer_alive(operation.get("result") or {}, operation_id):
+            return {"operation_id": operation_id, "scope": operation["scope"], "status": "processing", "error": "", "retryable": False}
+        with self._repair_management_record_lock(operation["summary_record_id"]):
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            saved = operation.get("result") or {}
+            checkpoint = saved.get("checkpoint") or {}
+            running = self._repair_writer_alive(saved, operation_id)
+            if not running and self._repair_project_update_superseded(operation):
+                return {"operation_id": operation_id, "scope": operation["scope"], "status": "superseded",
+                        "result": {"record_id": operation["summary_record_id"], "superseded": True}}
+            if recover and not running and operation["status"] in ("started", "processing", "uncertain", "remote_written"):
+                try:
+                    if checkpoint.get("phase") in ("writing", "remote_written"):
+                        self._resume_repair_project_update(operation)
+                    else:
+                        request = saved.get("request") or {}
+                        if not request.get("record_id"):
+                            raise ValueError("原保存内容不完整，请重新保存维修单")
+                        self._state_store.update_repair_management_operation(operation_id, status="failed")
+                        self.update_repair_management_record(**request, operation_id=operation_id)
+                except Exception as exc:
+                    current = self._state_store.get_repair_management_operation(operation_id)
+                    self._state_store.update_repair_management_operation(operation_id, status="failed",
+                        error=current.get("last_error") or f"保存未完成：{exc}。可修改后重新保存。")
+            elif not running and operation["status"] in ("started", "processing"):
+                self._state_store.update_repair_management_operation(operation_id, status="failed",
+                    error="保存已中断，可重新保存维修单。")
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            status = operation["status"]
+            return {"operation_id": operation_id, "scope": operation["scope"], "status": status,
+                    "retryable": status == "failed", "error": operation.get("last_error") or "",
+                    "record_id": operation.get("record_id") or operation["summary_record_id"],
+                    "remote_written": status in ("remote_written", "completed", "sync_pending"),
+                    "result": self._repair_public_result(operation) if status in ("completed", "sync_pending") else None}
 
     def _assert_repair_remote_unchanged(self, baseline, current, meta_by_name, *, ignored_fields=()):
         from .portal_service import PortalConflictError

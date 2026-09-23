@@ -379,6 +379,13 @@ REPAIR_MANAGEMENT_EVENT_AUTO_FIELD_NAMES = (
     "对应事件等级",
     "故障发生时间",
     "事件应急措施",
+    "故障维修原因",
+    "故障发生现象描述",
+    "所属专业",
+    "专业（推送消息用）",
+    "事件描述",
+    "所属数据中心/楼栋-使用",
+    "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
 )
 REPAIR_MANAGEMENT_EVENT_SOURCE_CONTROLLED_FIELD_NAMES = (
     "对应来源",
@@ -393,6 +400,10 @@ REPAIR_MANAGEMENT_REPAIR_AUTO_FIELD_NAMES = (
     "检修通告名称",
     "故障维修原因",
     "随工人员（或我方维修人员）",
+    "设备名称",
+    "维修进展描述",
+    "故障发生现象描述",
+    "维修方",
 )
 REPAIR_MANAGEMENT_REPAIR_SOURCE_CONTROLLED_FIELD_NAMES = (
     "所属数据中心/楼栋-使用",
@@ -735,7 +746,7 @@ REPAIR_FOLLOWUP_READ_FIELD_NAMES = (
 )
 REPAIR_FOLLOWUP_SUMMARY_COPY_MAPPINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("维修简述", ("维修名称",)),
-    ("维修名称", ("维修名称",)),
+    ("维修名称", ("检修通告名称", "维修名称", "事件描述")),
     ("区域", ("区域",)),
     (
         "所属数据中心",
@@ -781,6 +792,9 @@ REPAIR_FOLLOWUP_SUMMARY_COPY_MAPPINGS: tuple[tuple[str, tuple[str, ...]], ...] =
 # equipment details, costs, descriptions, or corrective actions.
 REPAIR_FOLLOWUP_REPAIR_NOTICE_SYNC_FIELD_NAMES = frozenset(
     {
+        "维修名称",
+        "维修简述",
+        "维修来源",
         "所属数据中心",
         "所属专业",
         "维修开始时间",
@@ -8592,6 +8606,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "维修开始时间",
                 "维修结束时间",
                 "结束时间",
+                "维修来源",
             }:
                 copied[target_name] = None
         return copied
@@ -8697,16 +8712,25 @@ class MaintenancePortalService(RepairOperationsMixin):
         for record in records:
             followup_id = str(record.get("record_id") or "").strip()
             try:
+                record_fields = dict(prepared)
+                brief_meta = meta_by_name.get("维修简述")
+                if brief_meta and not self._field_meta_is_readonly(brief_meta):
+                    start = self._repair_management_datetime_ms(record_fields.get("维修开始时间"))
+                    day = self._repair_management_datetime_text_from_ms(start, "%Y/%m/%d")
+                    workers = self._repair_management_plain_text(
+                        (record.get("display_fields") or {}).get("随工人员（我方维修人员）")
+                        or (record.get("raw_fields") or {}).get("随工人员（我方维修人员）"))
+                    record_fields["维修简述"] = f"{day} - {workers}" if day and workers else record_fields.get("维修名称") or day or None
                 self._patch_record_fields(
                     app_token=REPAIR_SOURCE_APP_TOKEN,
                     table_id=REPAIR_FOLLOWUP_TABLE_ID,
                     record_id=followup_id,
-                    fields=prepared,
+                    fields=record_fields,
                 )
                 self._upsert_repair_snapshot_fields(
                     source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
                     record_id=followup_id,
-                    fields=prepared,
+                    fields=record_fields,
                     parent_record_id=summary_id,
                 )
                 synced_ids.append(followup_id)
@@ -10177,7 +10201,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         scope = self._normalize_scope(operation.get("scope") or "ALL")
         if operation_type == "project_relations_sync":
-            current = self._ensure_repair_management_record_in_scope(summary_id, scope)
+            current = self.get_repair_management_record(summary_id, scope=scope, force_refresh=True)["record"]
             target = self._repair_target_record_id(current)
             before = self._repair_target_record_id({"raw_fields": task_payload.get("before_fields") or {},
                                                     "source_table_id": REPAIR_MANAGEMENT_TABLE_ID})
@@ -12643,6 +12667,14 @@ class MaintenancePortalService(RepairOperationsMixin):
                     followup_users,
                     overwrite=True,
                 )
+        source_field_names = set()
+        if event:
+            source_field_names.update(REPAIR_MANAGEMENT_EVENT_AUTO_FIELD_NAMES)
+        if selected_repairs:
+            source_field_names.update(REPAIR_MANAGEMENT_REPAIR_AUTO_FIELD_NAMES)
+        for name in source_field_names:
+            if name in meta_by_name:
+                result.setdefault(name, None)
         self._repair_management_prefill_put(
             result,
             meta_by_name,
@@ -12662,11 +12694,12 @@ class MaintenancePortalService(RepairOperationsMixin):
         warnings.extend(coerce_warnings)
         return {
             "fields": coerced,
+            "source_field_names": sorted(source_field_names),
             "warnings": list(dict.fromkeys(warnings)),
             "event": event,
             "event_context_missing": bool(event_id and not event),
             "repair_completed": repair_completed,
-            "repair_record_ids": requested_repair_ids,
+            "repair_record_ids": [str(item.get("record_id") or "") for item in selected_repairs],
             "followup_record_ids": requested_followup_ids,
             "repair_records": [
                 {
@@ -16291,7 +16324,6 @@ class MaintenancePortalService(RepairOperationsMixin):
             scope,
             meta_by_name=meta_by_name,
         )
-        self._assert_repair_record_version(existing, expected_version)
         cloud_records = self._load_table_records_by_ids(
             app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
             meta_by_name=meta_by_name, work_type=WORK_TYPE_REPAIR,
@@ -16299,14 +16331,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         if not cloud_records:
             raise PortalError("云端维修项目已不存在，请刷新后核对。")
-        self._assert_repair_remote_unchanged(
-            existing, cloud_records[0], meta_by_name,
-            ignored_fields=("CMDB唯一id",)
-            if "CMDB唯一id" not in fields and "CMDB唯一id-L" not in fields else (),
-        )
         existing = cloud_records[0]
         if not self._repair_management_record_in_scope(existing, scope):
             raise PortalError("当前账号无权修改该楼栋维修项目。")
+        self._remember_repair_project_fields(existing)
         existing_raw = existing.get("raw_fields") if isinstance((existing or {}).get("raw_fields"), dict) else {}
         existing_display = (
             existing.get("display_fields")
@@ -16342,6 +16370,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             (effective_repair_ids[0] if effective_repair_ids else "")
             != existing_repair_target_id
         )
+        event_relation_changed = effective_event_id != (existing_event_ids[0] if existing_event_ids else "")
         if repair_relation_changed and effective_repair_ids:
             for target_id in effective_repair_ids:
                 target_preflight = self._sync_repair_target_summary_id(
@@ -16380,6 +16409,18 @@ class MaintenancePortalService(RepairOperationsMixin):
                 allow_multiple_followups=True,
             )
         auto_fields = auto.get("fields") if isinstance(auto.get("fields"), dict) else {}
+        if event_relation_changed and effective_event_id and auto.get("event_context_missing"):
+            raise PortalError("新选择的事件无法读取，请重新选择后保存。")
+        if repair_relation_changed and effective_repair_ids and set(effective_repair_ids) != set(auto.get("repair_record_ids") or []):
+            raise PortalError("新选择的检修通告无法读取，请重新选择后保存。")
+        if repair_relation_changed and not effective_repair_ids:
+            for name in REPAIR_MANAGEMENT_REPAIR_AUTO_FIELD_NAMES:
+                if name in meta_by_name and not (effective_followup_ids and name in REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES):
+                    auto_fields.setdefault(name, None)
+        if event_relation_changed and not effective_event_id:
+            for name in ("对应来源", "对应事件等级", "事件描述", "事件应急措施"):
+                if name in meta_by_name:
+                    auto_fields[name] = None
         if effective_event_id and not bool(auto.get("event_context_missing")):
             for field_name in REPAIR_MANAGEMENT_EVENT_AUTO_FIELD_NAMES:
                 if field_name in meta_by_name:
@@ -16394,6 +16435,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                     auto_fields.setdefault(field_name, None)
         auto["fields"] = auto_fields
         merged = {**(auto.get("fields") or {}), **cleaned}
+        if event_relation_changed or repair_relation_changed:
+            for name in auto.get("source_field_names") or []:
+                if name in meta_by_name:
+                    merged[name] = auto_fields.get(name)
         merged = self._apply_repair_management_source_controlled_fields(
             merged,
             auto_fields,
@@ -20361,6 +20406,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         update_result = self.update_repair_management_record(
             summary_id,
             {},
+            operation_id="repair-bind-" + uuid.uuid4().hex,
             source_event_id=event_ids[0] if event_ids else "",
             source_repair_ids=[target_id],
             replace_source_relations=False,
@@ -20526,6 +20572,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         update_result = self.update_repair_management_record(
             source_record_id,
             {},
+            operation_id="repair-bind-" + uuid.uuid4().hex,
             source_event_id=event_record_id,
             source_repair_ids=(
                 [target_record_id]

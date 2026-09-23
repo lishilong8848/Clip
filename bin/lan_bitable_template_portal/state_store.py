@@ -13448,6 +13448,17 @@ class LanPortalStateStore:
                 ).fetchone()
         return self._repair_management_operation_payload(row, created=False)
 
+    def latest_repair_project_update(self, record_id: str, *, exclude_operation_id: str = "") -> dict[str, Any] | None:
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            row = conn.execute(
+                "SELECT * FROM repair_management_operations "
+                "WHERE operation_type='project_update' AND summary_record_id=? AND operation_id<>? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (self._text(record_id), self._text(exclude_operation_id)),
+            ).fetchone()
+        return self._repair_management_operation_payload(row, created=False)
+
     def list_repair_management_operations(
         self,
         *,

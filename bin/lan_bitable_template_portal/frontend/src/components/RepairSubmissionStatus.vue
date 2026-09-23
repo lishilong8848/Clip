@@ -2,8 +2,8 @@
   <section class="submission-status" role="status" aria-live="polite">
     <div class="submission-main">
       <Clock3 :size="17" aria-hidden="true" />
-      <span>{{ failed ? '本次未写入，请保留填写后重新提交。' : text }}</span>
-      <button type="button" :disabled="checking" @click="$emit('check')"><RefreshCw :size="15" />{{ checking ? '核验中' : '核验结果' }}</button>
+      <span>{{ failed ? (overwrite ? '保存未完成，填写已保留，可修改后重新保存。' : '本次未写入，请保留填写后重新提交。') : text }}</span>
+      <button v-if="!failed || !overwrite" type="button" :disabled="checking" @click="$emit('check')"><RefreshCw :size="15" />{{ overwrite ? (checking ? '保存中' : '继续保存') : (checking ? '核验中' : '核验结果') }}</button>
       <button type="button" title="复制原提交内容" @click="$emit('copy')"><Copy :size="15" />保留填写</button>
       <button v-if="failed" type="button" @click="$emit('dismiss')">返回修改</button>
     </div>
@@ -13,7 +13,7 @@
 
 <script setup lang="ts">
 import { Clock3, Copy, RefreshCw } from "lucide-vue-next";
-defineProps<{ text: string; detail: string; checking: boolean; failed: boolean }>();
+defineProps<{ text: string; detail: string; checking: boolean; failed: boolean; overwrite?: boolean }>();
 defineEmits<{ check: []; copy: []; dismiss: [] }>();
 </script>
 

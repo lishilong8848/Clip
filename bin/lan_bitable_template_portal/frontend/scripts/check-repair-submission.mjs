@@ -9,6 +9,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(root, "../../../output/playwright/repair-submission");
 await mkdir(output, { recursive: true });
 let writes = 0, status = "processing", unavailable = false, browser;
+const projectFields = {"故障发生时间":"2026-09-18 09:27", "故障维修原因":"过滤器堵塞", "故障发生现象描述":"压差过大",
+  "所属专业":"暖通", "所属数据中心/楼栋-使用":"南通A楼", "关联事件单":"recEvent", "设备检修关联":"recTarget", "检修通告名称":"测试检修"};
+const project = {record_id:"recSaved",title:"测试维修单",source_event_id:"recEvent",source_repair_ids:["recTarget"],
+  raw_fields:projectFields,display_fields:projectFields,record_version:"v1",building_codes:["A"],followup_count:0};
+const projectMeta = Object.keys(projectFields).map(field_name => ({field_name,field_id:field_name,field_type:1,ui_type:"Text",editable:!['关联事件单','设备检修关联','检修通告名称'].includes(field_name)}));
 const entry = `
 import {createApp,h,ref} from 'vue';
 import {useRepairSubmission} from '/src/composables/useRepairSubmission.ts';
@@ -20,10 +25,10 @@ const mode=new URLSearchParams(location.search).get('mode');
 createApp({setup(){
  const result=ref('');
  const task=useRepairSubmission(()=> 'test:A', r=> result.value='已核验 '+r.record_id);
- const submit=async()=>{try{await task.submit('/api/test-submit',{method:'POST',body:JSON.stringify({operation_id:'stable-id',fields:{text:'test'}})})}catch{}};
- return ()=>mode==='project'?h(Projects,{scope:'A',scopeOptions:[{value:'A',label:'A楼'}]}):mode==='followup'?h(Followups,{scope:'A',summaryRecordId:'recProject',summaryTitle:'隔离维修跟进',embedded:false}):h('main',{style:'max-width:1000px;margin:40px auto'},[
- h('h2','维修提交恢复检查'),h('button',{disabled:!!task.pending.value,onClick:submit},'保存记录'),
- task.pending.value&&h(Status,{text:task.message.value,detail:task.detail.value,checking:task.checking.value,failed:task.status.value==='failed',onCheck:task.check,onCopy:task.copyInput,onDismiss:task.dismissFailed}),
+ const submit=async()=>{try{const update=mode==='update';await task.submit(update?'/api/repair-management/records/recSaved':'/api/test-submit',{method:update?'PUT':'POST',body:JSON.stringify({operation_id:'stable-id',fields:{text:'test'}})})}catch{}};
+ return ()=>mode.startsWith('project')?h(Projects,{scope:'A',focusRecordId:mode==='project-update'?'recSaved':'',scopeOptions:[{value:'A',label:'A楼'}]}):mode==='followup'?h(Followups,{scope:'A',summaryRecordId:'recProject',summaryTitle:'隔离维修跟进',embedded:false}):h('main',{style:'max-width:1000px;margin:40px auto'},[
+ h('h2','维修提交恢复检查'),h('button',{disabled:!!task.pending.value&&!(task.overwrite.value&&task.status.value==='failed'),onClick:submit},'保存记录'),
+ task.pending.value&&h(Status,{text:task.message.value,detail:task.detail.value,overwrite:task.overwrite.value,checking:task.checking.value,failed:task.status.value==='failed',onCheck:task.check,onCopy:task.copyInput,onDismiss:task.dismissFailed}),
  h('p',result.value)]);
 }}).mount('#app');`;
 const vite = await createServer({ configFile: path.join(root, "vite.config.ts"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
@@ -43,9 +48,12 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
         writes++;
         res.end('{"data":{"record_id":"recSaved","fields":{}}}'); return;
       }
+      if (req.url.startsWith('/api/repair-management/records') && req.method === 'GET') {
+        res.end(JSON.stringify({data:{record:project,records:[project],fields:projectMeta,total:1}})); return;
+      }
       if (req.url.includes("/operations/")) {
         if (unavailable) { res.statusCode = 503; res.end('{"ok":false,"error":"核验暂时不可用"}'); return; }
-        res.end(JSON.stringify({ data: { status, retryable: status === "failed", error: status === "failed" ? "云端未保留本次修改" : "", result: status === "completed" ? { record_id: "recSaved", fields: {} } : null } })); return;
+        res.end(JSON.stringify({ data: { status, retryable: status === "failed", error: status === "failed" ? "保存未完成，可修改后重新保存。" : "", result: status === "completed" ? { record_id: "recSaved", fields: {} } : null } })); return;
       }
       res.end(JSON.stringify({ data: { records: [], fields: [], total: 0, items: [], scope_options: [{value:"A",label:"A楼"}], sources: [], tasks: [], pending_count: 0 } }));
     });
@@ -80,9 +88,14 @@ try {
     id: "repair-update", body: JSON.stringify({ operation_id: "repair-update", source_repair_ids: ["recTarget"] }),
     path: "/api/repair-management/records/recSaved", method: "PUT",
   })));
-  await page.reload();
-  await page.getByText("已核验 recSaved", { exact: true }).waitFor();
-  assert.equal(writes, 2);
+  await page.goto(base + '/__repair_check?mode=update');
+  await page.getByText("保存未完成，填写已保留，可修改后重新保存。", { exact: true }).waitFor();
+  assert(await page.getByRole('button',{name:'保存记录',exact:true}).isEnabled());
+  assert.equal(await page.getByText('待核实',{exact:false}).count(),0);
+  assert.equal(writes, 1);
+  await page.getByRole('button',{name:'保存记录',exact:true}).click();
+  await page.locator('.submission-status').waitFor({state:'hidden'});
+  assert.equal(writes,2);
   await page.reload();
   assert.equal(writes, 2);
   status = "processing";
@@ -97,8 +110,25 @@ try {
     await page.screenshot({ path: path.join(output, `${mode}-pending.png`), fullPage: true });
     assert(await page.locator("body").evaluate(node => node.scrollWidth <= innerWidth + 2));
   }
+  status = 'failed';
+  await page.evaluate(() => sessionStorage.setItem('repair-submission:project:A',JSON.stringify({
+    id:'interrupted-update',method:'PUT',path:'/api/repair-management/records/recSaved',body:JSON.stringify({
+      source_event_id:'recEvent',source_repair_ids:['recTarget'],fields:{'故障发生现象描述':'保存失败后保留的填写'}
+    })
+  })));
+  await page.goto(base + '/__repair_check?mode=project-update');
+  await page.getByRole('button',{name:'更改事件检修关联',exact:true}).click();
+  await page.waitForFunction(() => [...document.querySelectorAll('textarea')].some(node => node.value === '保存失败后保留的填写'));
+  const reselect = page.getByRole('button',{name:'重新选择',exact:true});
+  assert.equal(await reselect.count(),2);
+  assert(await reselect.nth(0).isEnabled());
+  assert(await reselect.nth(1).isEnabled());
+  assert(await page.getByRole('button',{name:'保存修改',exact:true}).isEnabled());
+  assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
+  assert.equal(await page.evaluate(()=>sessionStorage.getItem('repair-submission:project:A')),null);
+  await page.screenshot({path:path.join(output,'project-update-editable.png'),fullPage:true});
   assert.deepEqual(errors, []);
-  console.log(`Repair pending submission, response loss, single retry, reload recovery and desktop layouts passed; writes=${writes}.`);
+  console.log(`Repair creation protection, update recovery, editable failures, per-record migration and desktop layouts passed; writes=${writes}.`);
 } finally {
   await browser?.close();
   await vite.close();

@@ -4,7 +4,7 @@ import { resilientStorage } from "../browserStorage";
 
 type Pending = { id: string; body: string; path: string; method: string; retried?: boolean };
 
-export function useRepairSubmission(key: () => string, recovered: (result: Dict) => void) {
+export function useRepairSubmission(key: () => string, recovered: (result: Dict) => void, legacyKey?: () => string) {
   const pending = ref<Pending | null>(null);
   const checking = ref(false);
   const detail = ref("");
@@ -14,7 +14,10 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
   let disposed = false;
   let submitting = false;
   const storageKey = () => `repair-submission:${key()}`;
-  const message = computed(() => status.value === "remote_written"
+  const overwrite = computed(() => pending.value?.method === "PUT" && pending.value.path.startsWith("/api/repair-management/records/"));
+  const message = computed(() => overwrite.value
+    ? "正在保存维修单及关联信息，连接恢复后自动继续。"
+    : status.value === "remote_written"
     ? "多维已保存，正在恢复本地显示和关联同步。"
     : status.value === "uncertain" ? "写入结果待核实，请勿重新新增同一条记录。"
     : "原提交正在核验，可离开本页，返回后继续核验。"
@@ -36,46 +39,46 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
       if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
       status.value = String(result.status || "");
       detail.value = String(result.error || "");
-      if (result.result && ["completed", "sync_pending"].includes(status.value)) {
+      if (result.result && ["completed", "sync_pending", "superseded"].includes(status.value)) {
         clear();
         if (notify) recovered(result.result);
         return result.result;
-      }
-      const request = JSON.parse(item.body);
-      if (result.retryable && String(result.error || "").includes("云端未保留本次修改") && !item.retried && item.method === "PUT"
-          && item.path.startsWith("/api/repair-management/records/")
-          && Array.isArray(request.source_repair_ids) && request.source_repair_ids.length) {
-        item.retried = true;
-        storage.setItem(storageKey(), JSON.stringify(item));
-        status.value = "processing";
-        detail.value = "原提交未写入，正在继续保存检修关联。";
-        try {
-          const saved = await requestJson(item.path, { method: item.method, body: item.body });
-          if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
-          clear();
-          if (notify) recovered(saved);
-          return saved;
-        } catch (error) {
-          status.value = "uncertain";
-          detail.value = error instanceof Error ? `续写结果待核实：${error.message}` : "续写结果待核实。";
-          return null;
-        }
       }
       if (result.retryable) {
         status.value = "failed";
         detail.value ||= "本次未写入，可保留填写后重新提交。";
       }
     } catch (error) {
-      if (currentKey === key()) detail.value = error instanceof Error ? error.message : "暂时无法核验，原提交已保留。";
+      if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
+      detail.value = error instanceof Error ? error.message : "服务暂时无法连接，填写已保留。";
+      if (overwrite.value && error instanceof ApiError && error.status === 404) {
+        if (item.retried) status.value = "failed";
+        else {
+          item.retried = true;
+          storage.setItem(storageKey(), JSON.stringify(item));
+          try {
+            const result = await requestJson(item.path, { method: item.method, body: item.body });
+            if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
+            clear();
+            if (notify) recovered(result);
+            return result;
+          } catch (retryError) {
+            if (currentKey === key()) detail.value = retryError instanceof Error ? retryError.message : "保存暂未完成。";
+          }
+        }
+      }
     } finally {
-      checking.value = false;
-      clearTimeout(timer);
-      if (!disposed && pending.value && status.value !== "failed") timer = setTimeout(() => { void check(); }, 10000);
+      if (currentKey === key()) {
+        checking.value = false;
+        clearTimeout(timer);
+        if (!disposed && pending.value && status.value !== "failed") timer = setTimeout(() => { void check(); }, 10000);
+      }
     }
     return null;
   }
 
   async function submit(path: string, options: { method: string; body: string }): Promise<Dict> {
+    if (overwrite.value && status.value === "failed") clear();
     if (pending.value) throw new Error("请先核验上次提交。");
     const body = JSON.parse(options.body);
     const originalKey = key();
@@ -84,6 +87,7 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
     storage.setItem(storageKey(), JSON.stringify(pending.value));
     submitting = true;
     status.value = "processing";
+    detail.value = "";
     try {
       const result = await requestJson(path, options);
       if (disposed || originalKey !== key()) {
@@ -93,7 +97,7 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
       clear();
       return result;
     } catch (error) {
-      submitting = false;
+      if (originalKey === key()) submitting = false;
       if (disposed || originalKey !== key()) throw error;
       // A definite pre-handler validation error cannot have performed a write.
       if (error instanceof ApiError && [401, 403, 422].includes(error.status)) clear();
@@ -103,7 +107,7 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
       }
       throw error;
     } finally {
-      submitting = false;
+      if (originalKey === key()) submitting = false;
     }
   }
 
@@ -122,9 +126,22 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
     pending.value = null;
     status.value = "";
     detail.value = "";
+    checking.value = false;
+    submitting = false;
+    if (legacyKey && !storage.getItem(storageKey())) {
+      const oldKey = `repair-submission:${legacyKey()}`;
+      try {
+        const old = JSON.parse(storage.getItem(oldKey) || "null") as Pending | null;
+        const target = old?.method === "PUT" ? old.path.split("/").pop() : "new";
+        if (old && key().endsWith(`:${target}`)) {
+          storage.setItem(storageKey(), JSON.stringify(old));
+          storage.removeItem(oldKey);
+        }
+      } catch { /* Invalid old drafts are not submitted again. */ }
+    }
     try { pending.value = JSON.parse(storage.getItem(storageKey()) || "null"); } catch { /* Invalid browser draft is not a submitted record. */ }
     if (pending.value) timer = setTimeout(() => { void check(); }, 0);
   }, { immediate: true });
   onBeforeUnmount(() => { disposed = true; clearTimeout(timer); });
-  return { pending, checking, status, message, detail, submit, check, dismissFailed, copyInput };
+  return { pending, checking, status, message, detail, overwrite, submit, check, dismissFailed, copyInput };
 }

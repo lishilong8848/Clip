@@ -25,7 +25,7 @@
       </div>
     </div>
 
-    <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
+    <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" :overwrite="submission.overwrite.value" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
     <MessageBanner v-if="messageText && !projectDrawerOpen" :tone="messageTone" :text="messageText" />
     <div v-if="hasAnyUnsavedChanges && !projectDrawerOpen" class="page-unsaved-notice" role="status" aria-live="polite">
       <AlertCircle :size="16" aria-hidden="true" />
@@ -272,7 +272,7 @@
           </div>
 
           <div class="project-drawer-body">
-            <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
+            <RepairSubmissionStatus v-if="submission.pending.value" :text="submission.message.value" :detail="submission.detail.value" :checking="submission.checking.value" :failed="submission.status.value === 'failed'" :overwrite="submission.overwrite.value" @check="submission.check()" @copy="submission.copyInput()" @dismiss="dismissFailedSubmission" />
             <MessageBanner v-if="messageText" :tone="messageTone" :text="messageText" />
             <section v-if="projectConflict" class="project-conflict" role="alert">
               <div>
@@ -786,8 +786,15 @@ const serverUpdatePending = ref(false);
 const refreshingSources = ref(false);
 const repairSourceRefreshVersion = ref(0);
 const saveBusy = ref(false);
-const submission = useRepairSubmission(() => `project:${props.scope}`, (result) => {
+const editingRecordId = ref("");
+const submission = useRepairSubmission(() => `project:${props.scope}:${editingRecordId.value || 'new'}`, (result) => {
+  if (result.superseded) {
+    void reloadLatestProject();
+    return;
+  }
   editingRecordId.value = String(result.record_id || "");
+  if (Object.prototype.hasOwnProperty.call(result, "source_event_id")) sourceEventId.value = String(result.source_event_id || "");
+  if (Array.isArray(result.source_repair_ids)) selectedRepairIds.value = result.source_repair_ids.slice();
   createOperationId.value = "";
   updateOperationId.value = "";
   updateOperationPayloadKey = "";
@@ -795,8 +802,8 @@ const submission = useRepairSubmission(() => `project:${props.scope}`, (result) 
   refreshProjectsAfterSave();
   void loadProjectSyncStatus(editingRecordId.value);
   showMessage("维修单已保存；关联状态单独在后台同步。", "success");
-});
-const saving = computed({ get: () => saveBusy.value || Boolean(submission.pending.value), set: (value: boolean) => { saveBusy.value = value; } });
+}, () => `project:${props.scope}`);
+const saving = computed({ get: () => saveBusy.value || Boolean(submission.pending.value && !(submission.overwrite.value && submission.status.value === 'failed')), set: (value: boolean) => { saveBusy.value = value; } });
 function dismissFailedSubmission() {
   if (submission.status.value !== "failed") return;
   createOperationId.value = "";
@@ -823,7 +830,6 @@ const virtualRecordRows = computed(() => recordVirtualizer.value.getVirtualItems
 const recordVirtualTotalSize = computed(() => recordVirtualizer.value.getTotalSize());
 const total = ref(0);
 const selectedRecord = ref<LooseDict | null>(null);
-const editingRecordId = ref("");
 const fieldDraft = reactive<Record<string, string>>({});
 const projectWorkerPeople = ref<LooseDict[]>([]);
 const eventLoading = ref(false);
@@ -984,7 +990,8 @@ const unsavedNoticeText = computed(() => {
     : "维修单信息有未保存修改";
 });
 const projectSaveStateText = computed(() => {
-  if (submission.pending.value && !saveBusy.value) return "待核实";
+  if (submission.overwrite.value && submission.status.value === "failed") return "保存失败";
+  if (submission.pending.value && !saveBusy.value) return submission.overwrite.value ? "保存中" : "待核实";
   if (saving.value) return "保存中";
   if (missingRequiredEditableFields.value.length) return `缺 ${missingRequiredEditableFields.value.length} 项`;
   if (hasUnsavedChanges.value) return "有未保存修改";
@@ -1004,6 +1011,7 @@ const projectSaveStateIcon = computed(() => {
   return CheckCircle2;
 });
 const saveDisabledReason = computed(() => {
+  if (submission.overwrite.value && submission.status.value === "failed") return "按当前填写重新保存";
   if (submission.pending.value && !saveBusy.value) return "请先核验原提交";
   if (saving.value) return "正在保存";
   if (prefillLoading.value) return "关联字段正在填入";
@@ -2280,6 +2288,11 @@ async function applyCombinedPrefill(
           sourceControlledNames.add(name);
         });
       }
+      const savedRepairIds = (selectedRecord.value?.source_repair_ids || []) as string[];
+      if (eventRecordId !== String(selectedRecord.value?.source_event_id || "")
+          || repairRecordIds.join() !== savedRepairIds.join()) {
+        for (const name of payload.source_field_names || []) sourceControlledNames.add(String(name));
+      }
       sourceControlledNames.forEach((name) => dirtyFieldNames.delete(name));
       replacePrefillFields(nextFields, true, sourceControlledNames);
     }
@@ -3318,6 +3331,10 @@ async function saveRecord(): Promise<boolean> {
   }
   saving.value = true;
   try {
+    if (editingRecordId.value && submission.status.value === "failed") {
+      updateOperationId.value = "";
+      updateOperationPayloadKey = "";
+    }
     if (!editingRecordId.value && !createOperationId.value) {
       createOperationId.value = createRepairOperationId("repair-project");
     }
@@ -3356,6 +3373,10 @@ async function saveRecord(): Promise<boolean> {
         method: "PUT",
         body,
       });
+      if (updated.superseded) {
+        await reloadLatestProject();
+        return true;
+      }
       savedPayload = updated;
       updateOperationId.value = "";
       updateOperationPayloadKey = "";
@@ -3402,7 +3423,9 @@ async function saveRecord(): Promise<boolean> {
     return true;
   } catch (error: unknown) {
     if (submission.pending.value) {
-      showMessage("本次提交结果仍在核验，请勿重复新增。", "warning");
+      showMessage(submission.overwrite.value
+        ? submission.status.value === "failed" ? submission.detail.value || "保存失败，可修改后重新保存。" : "维修单正在保存，连接恢复后自动继续。"
+        : "本次提交结果仍在核验，请勿重复新增。", "warning");
     } else if (!captureProjectConflict(error)) {
       showMessage(error instanceof Error ? error.message : "保存失败。", "failed");
     }
@@ -3632,6 +3655,33 @@ onDeactivated(() => {
   projectDrawerReturnFocus = null;
   projectModal?.release();
   projectModal = undefined;
+});
+
+let restoredFailureId = "";
+watch([() => submission.status.value, recordDetailLoading, () => fields.value.length], () => {
+  const pending = submission.pending.value;
+  if (!pending || !submission.overwrite.value || submission.status.value !== "failed"
+      || recordDetailLoading.value || !fields.value.length || restoredFailureId === pending.id) return;
+  try {
+    const request = JSON.parse(pending.body);
+    if (pending.path.split("/").pop() !== editingRecordId.value) return;
+    restoredFailureId = pending.id;
+    if (sourceEventId.value !== String(request.source_event_id || "")) {
+      selectedEvent.value = null;
+      eventTitle.value = "";
+    }
+    sourceEventId.value = String(request.source_event_id || "");
+    selectedRepairIds.value = Array.isArray(request.source_repair_ids) ? request.source_repair_ids.slice() : [];
+    selectedRepairRecords.value = selectedRepairRecords.value.filter(item => selectedRepairIds.value.includes(String(item.record_id)));
+    for (const [name, value] of Object.entries(request.fields || {})) {
+      const field = fields.value.find(item => item.field_name === name);
+      if (!field) continue;
+      if (isProjectWorkerField(field)) projectWorkerPeople.value = projectPeopleFromValue(value);
+      else fieldDraft[name] = repairDraftInputValue(field, value);
+      dirtyFieldNames.add(name);
+    }
+    hasUnsavedChanges.value = true;
+  } catch { /* The submitted request remains available through the copy button. */ }
 });
 
 watch(searchText, () => {

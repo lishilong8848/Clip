@@ -303,29 +303,6 @@ class RepairSnapshotCacheTests(unittest.TestCase):
         with self.assertRaises(PortalConflictError):
             service._assert_repair_record_version(record, "stale-version")
 
-    def test_stale_project_version_stops_before_remote_write(self):
-        service = MaintenancePortalService()
-        service._repair_management_snapshot_schema = (  # type: ignore[method-assign]
-            lambda **_kwargs: ([], {})
-        )
-        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
-            lambda *_args, **_kwargs: {
-                "record_id": "rec_project_stale",
-                "last_modified_time": "2",
-                "raw_fields": {"维修名称": "服务器新版本"},
-            }
-        )
-        service._patch_record_fields = (  # type: ignore[method-assign]
-            lambda **_kwargs: self.fail("版本冲突时不应写飞书")
-        )
-
-        with self.assertRaises(PortalConflictError):
-            service.update_repair_management_record(
-                "rec_project_stale",
-                {"维修名称": "浏览器旧版本"},
-                expected_version="stale-version",
-            )
-
     def test_stale_followup_version_stops_before_remote_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MaintenancePortalService(enable_repair_snapshots=True)

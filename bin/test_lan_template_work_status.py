@@ -32941,7 +32941,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             lambda *_args, **_kwargs: ([], {}, [])
         )
         service._build_repair_management_prefill = (  # type: ignore[method-assign]
-            lambda **_kwargs: {"fields": {}, "warnings": []}
+            lambda **_kwargs: {"fields": {}, "warnings": [], "repair_record_ids": ["rec_new"]}
         )
         service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
             lambda _fields, metas, **_kwargs: (list(metas.values()), metas)
@@ -32976,17 +32976,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(scheduled[0][0], "project_relations_sync")
         self.assertEqual(scheduled[0][1]["task_payload"]["before_fields"][REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME], "rec_old")
         cloud["raw_fields"]["故障维修原因"] = "someone else's edit"
-        with self.assertRaisesRegex(PortalConflictError, "故障维修原因"):
-            service.update_repair_management_record(
-                "rec_summary", {}, source_repair_ids=["rec_new"], replace_source_relations=True,
-                validate_required=False,
-            )
-        cloud["raw_fields"]["故障维修原因"] = "original"
-        with self.assertRaisesRegex(PortalConflictError, "CMDB唯一id"):
-            service.update_repair_management_record(
-                "rec_summary", {"CMDB唯一id": "user-id"}, source_repair_ids=["rec_new"],
-                replace_source_relations=True, validate_required=False,
-            )
+        service.update_repair_management_record(
+            "rec_summary", {"故障维修原因": "本次保存", "CMDB唯一id": "user-id"},
+            source_repair_ids=["rec_new"], replace_source_relations=True, validate_required=False,
+        )
+        self.assertIsNone(patches[-1]["故障维修原因"])
+        self.assertNotIn("CMDB唯一id", patches[-1])
 
     def test_repair_project_relation_schedules_field_retry_after_transient_failure(self):
         service = _TestMaintenancePortalService()
@@ -33858,6 +33853,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: {"record_id": "rec_repair_1", "raw_fields": {}}
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [service._ensure_repair_management_record_in_scope()]
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])
         )
@@ -33991,6 +33987,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: existing
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [existing]
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [linked_followup])
         )
@@ -34067,6 +34064,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: existing
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [existing]
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [linked_followup])
         )
@@ -34154,6 +34152,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [service._ensure_repair_management_record_in_scope()]
+        service._ensure_repair_followup_select_options = lambda _fields, metas, **_kwargs: (list(metas.values()), metas)
         service._patch_record_fields = (  # type: ignore[method-assign]
             lambda **_kwargs: self.fail("required-field validation must run before patch")
         )
@@ -34572,6 +34572,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         }
 
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
+        service._load_repair_management_project_records = lambda **_kwargs: (metas, {meta.field_name: meta for meta in metas}, [])
         service._event_snapshot_record_for_repair = (  # type: ignore[method-assign]
             lambda **_kwargs: event
         )
@@ -38319,9 +38320,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: {
                 "record_id": "rec_summary",
+                "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
                 "raw_fields": {"设备检修关联": '["rec_repair"]'},
             }
         )
+        service._load_repair_management_project_records = lambda **_kwargs: (metas, meta_by_name, [])
+        service._load_table_records_by_ids = lambda **_kwargs: [service._ensure_repair_management_record_in_scope()]
         service._build_repair_management_prefill = (  # type: ignore[method-assign]
             lambda **_kwargs: {
                 "fields": {"设备检修关联": '["rec_repair"]', "设备使用年限": 4},
