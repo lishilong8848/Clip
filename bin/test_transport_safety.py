@@ -91,6 +91,62 @@ class TransportSafetyTests(unittest.TestCase):
             self.assertIn("ClipFlow_patch_only.zip", tracked)
             self.assertEqual(git("--git-dir", remote, "show", "master:updates/latest_patch.json"), json.dumps(manifest))
 
+    def test_upload_pushes_when_commit_reports_failure_after_creating_commit(self):
+        def git(*args, cwd=None):
+            return subprocess.run(
+                ["git", *map(str, args)], cwd=cwd, check=True,
+                capture_output=True, text=True,
+            ).stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, source, build = (root / name for name in ("remote.git", "source", "build"))
+            git("init", "--bare", "--initial-branch=master", remote)
+            git("init", "-b", "master", source)
+            git("-C", source, "config", "user.name", "Package Test")
+            git("-C", source, "config", "user.email", "package@example.invalid")
+            (source / "updates" / "patches").mkdir(parents=True)
+            (source / "updates" / "latest_patch.json").write_text("{}", encoding="utf-8")
+            git("-C", source, "add", ".")
+            git("-C", source, "commit", "-m", "initial")
+            git("-C", source, "remote", "add", "origin", remote)
+            git("-C", source, "push", "origin", "master")
+
+            build.mkdir()
+            name = "ClipFlow_V2_20260923_171740_patch_only.zip"
+            archive = build / name
+            archive.write_bytes(b"patch")
+            manifest = {
+                "target_version": "ClipFlow_V2_20260923_171740",
+                "target_patch_version": 435,
+                "zip_name": name,
+                "zip_size": archive.stat().st_size,
+                "zip_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }
+            manifest_path = build / "latest_patch.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            original_run = portable_packaging._run_cmd
+
+            def commit_succeeds_but_reports_failure(args, **kwargs):
+                result = original_run(args, **kwargs)
+                return False if args[:2] == ["git", "commit"] and result else result
+
+            with patch.object(portable_packaging, "BUILD_DIR", build), patch.object(
+                portable_packaging, "_run_cmd", side_effect=commit_succeeds_but_reports_failure
+            ), patch.dict(os.environ, {
+                "GIT_AUTHOR_NAME": "Package Test", "GIT_AUTHOR_EMAIL": "package@example.invalid",
+                "GIT_COMMITTER_NAME": "Package Test", "GIT_COMMITTER_EMAIL": "package@example.invalid",
+            }):
+                self.assertTrue(portable_packaging._upload_patch_to_gitee(
+                    archive, manifest_path, repo_url=remote.as_uri(), branch="master",
+                    subdir="updates/patches", manifest_repo_path="updates/latest_patch.json",
+                ))
+
+            self.assertEqual(
+                json.loads(git("--git-dir", remote, "show", "master:updates/latest_patch.json")),
+                manifest,
+            )
+
     def test_packaging_checks_published_manifest_and_zip_hash(self):
         content = b"patch-content"
         manifest = {

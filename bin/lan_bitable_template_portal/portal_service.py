@@ -4352,6 +4352,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not isinstance(fields, dict) or not fields:
             raise PortalError("创建多维记录字段不能为空。")
         fields = self._repair_physical_record_fields(table_id, fields)
+        client_token = self._repair_create_client_token(table_id, fields)
         url = (
             f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
             f"{app_token}/tables/{table_id}/records"
@@ -4363,11 +4364,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 url,
                 context="飞书记录创建",
                 headers={**self._auth_headers(), "Content-Type": "application/json"},
+                **({"params": {"client_token": client_token}} if client_token else {}),
                 json_payload={"fields": fields},
                 http_client=self._write_http_client,
             )
 
-        checkpoint = self._repair_before_write(table_id, fields)
+        checkpoint = self._repair_before_write(table_id, fields, client_token=client_token)
         payload = do_create()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
             refresh_feishu_token()
@@ -9318,10 +9320,8 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
-        existing = self.get_repair_followup_records(
-            summary_record_id=summary_id,
-            scope=scope,
-            limit=1,
+        _metas, _meta_by_name, existing_followups = self._load_repair_followups_for_summary(
+            summary_id, limit=1,
         )
         source_fields = dict(fields or {})
         emergency_submitted = (
@@ -9333,7 +9333,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         source_fields.setdefault(
             "是否本维修单第一次提交跟进记录",
-            "否" if int(existing.get("total") or 0) else "是",
+            "否" if existing_followups else "是",
         )
         _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         if REPAIR_FOLLOWUP_EVENT_EMERGENCY_FIELD_NAME not in meta_by_name:
@@ -9395,53 +9395,49 @@ class MaintenancePortalService(RepairOperationsMixin):
                 },
                 "include_target_fields": False,
             }
-            try:
-                shared_sync = self._sync_repair_followup_event_emergency(
-                    summary_record_id=summary_id,
-                    value=emergency_value,
-                    scope=scope,
-                )
-                shared_warnings = [
-                    str(item or "").strip()
-                    for item in (shared_sync.get("warnings") or [])
-                    if str(item or "").strip()
-                ]
-                response["warnings"] = list(
-                    dict.fromkeys(
-                        [
-                            *response["warnings"],
-                            *shared_warnings,
-                        ]
-                    )
-                )
-                if self._repair_sync_warnings_require_retry(shared_warnings):
-                    self._schedule_repair_sync_task(
-                        "relation_field_sync",
-                        summary_record_id=summary_id,
-                        scope=scope,
-                        target_record_id="event_emergency",
-                        task_payload=emergency_retry_payload,
-                        error="；".join(shared_warnings),
-                    )
-                    response["summary_sync_pending"] = True
-            except Exception as exc:
-                response["warnings"] = list(
-                    dict.fromkeys(
-                        [
-                            *response["warnings"],
-                            f"跟进记录已保存，事件应急措施暂未同步：{exc}",
-                        ]
-                    )
-                )
+            deferred_task = (
                 self._schedule_repair_sync_task(
                     "relation_field_sync",
                     summary_record_id=summary_id,
                     scope=scope,
                     target_record_id="event_emergency",
                     task_payload=emergency_retry_payload,
-                    error=str(exc),
+                    run_immediately=True,
                 )
+                if self._repair_secondary_sync_deferred else ""
+            )
+            if deferred_task:
                 response["summary_sync_pending"] = True
+            else:
+                try:
+                    shared_sync = self._sync_repair_followup_event_emergency(
+                        summary_record_id=summary_id,
+                        value=emergency_value,
+                        scope=scope,
+                    )
+                    shared_warnings = [
+                        str(item or "").strip()
+                        for item in (shared_sync.get("warnings") or [])
+                        if str(item or "").strip()
+                    ]
+                    response["warnings"] = list(dict.fromkeys([*response["warnings"], *shared_warnings]))
+                    if self._repair_sync_warnings_require_retry(shared_warnings):
+                        self._schedule_repair_sync_task(
+                            "relation_field_sync", summary_record_id=summary_id, scope=scope,
+                            target_record_id="event_emergency", task_payload=emergency_retry_payload,
+                            error="；".join(shared_warnings),
+                        )
+                        response["summary_sync_pending"] = True
+                except Exception as exc:
+                    response["warnings"].append(
+                        f"跟进记录已保存，事件应急措施暂未同步：{exc}"
+                    )
+                    self._schedule_repair_sync_task(
+                        "relation_field_sync", summary_record_id=summary_id, scope=scope,
+                        target_record_id="event_emergency", task_payload=emergency_retry_payload,
+                        error=str(exc),
+                    )
+                    response["summary_sync_pending"] = True
         if self._repair_secondary_sync_deferred:
             task_id = self._schedule_repair_sync_task(
                 "followup_summary_sync",
@@ -9604,41 +9600,44 @@ class MaintenancePortalService(RepairOperationsMixin):
                 },
                 "include_target_fields": False,
             }
-            try:
-                shared_sync = self._sync_repair_followup_event_emergency(
-                    summary_record_id=summary_id,
-                    value=emergency_value,
-                    scope=scope,
+            deferred_task = (
+                self._schedule_repair_sync_task(
+                    "relation_field_sync", summary_record_id=summary_id, scope=scope,
+                    target_record_id="event_emergency", task_payload=emergency_retry_payload,
+                    run_immediately=True,
                 )
-                shared_warnings = [
-                    str(item or "").strip()
-                    for item in (shared_sync.get("warnings") or [])
-                    if str(item or "").strip()
-                ]
-                warnings.extend(shared_warnings)
-                if self._repair_sync_warnings_require_retry(shared_warnings):
-                    self._schedule_repair_sync_task(
-                        "relation_field_sync",
+                if self._repair_secondary_sync_deferred else ""
+            )
+            if deferred_task:
+                emergency_sync_pending = True
+            else:
+                try:
+                    shared_sync = self._sync_repair_followup_event_emergency(
                         summary_record_id=summary_id,
+                        value=emergency_value,
                         scope=scope,
-                        target_record_id="event_emergency",
-                        task_payload=emergency_retry_payload,
-                        error="；".join(shared_warnings),
+                    )
+                    shared_warnings = [
+                        str(item or "").strip()
+                        for item in (shared_sync.get("warnings") or [])
+                        if str(item or "").strip()
+                    ]
+                    warnings.extend(shared_warnings)
+                    if self._repair_sync_warnings_require_retry(shared_warnings):
+                        self._schedule_repair_sync_task(
+                            "relation_field_sync", summary_record_id=summary_id, scope=scope,
+                            target_record_id="event_emergency", task_payload=emergency_retry_payload,
+                            error="；".join(shared_warnings),
+                        )
+                        emergency_sync_pending = True
+                except Exception as exc:
+                    warnings.append(f"跟进记录已更新，事件应急措施暂未同步：{exc}")
+                    self._schedule_repair_sync_task(
+                        "relation_field_sync", summary_record_id=summary_id, scope=scope,
+                        target_record_id="event_emergency", task_payload=emergency_retry_payload,
+                        error=str(exc),
                     )
                     emergency_sync_pending = True
-            except Exception as exc:
-                warnings.append(
-                    f"跟进记录已更新，事件应急措施暂未同步：{exc}"
-                )
-                self._schedule_repair_sync_task(
-                    "relation_field_sync",
-                    summary_record_id=summary_id,
-                    scope=scope,
-                    target_record_id="event_emergency",
-                    task_payload=emergency_retry_payload,
-                    error=str(exc),
-                )
-                emergency_sync_pending = True
         if self._repair_secondary_sync_deferred:
             task_id = self._schedule_repair_sync_task(
                 "followup_summary_sync",

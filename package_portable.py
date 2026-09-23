@@ -2188,7 +2188,10 @@ def _upload_patch_to_gitee(
 
 
 
-        if not _run_cmd(["git", "add", "--", patch_repo_name, manifest_name], cwd=temp_repo):
+        if not _run_cmd(
+            ["git", "add", "--sparse", "-f", "--", patch_repo_name, manifest_name],
+            cwd=temp_repo,
+        ):
             log("Gitee 上传失败：无法暂存补丁文件。")
             return False
 
@@ -2213,10 +2216,33 @@ def _upload_patch_to_gitee(
             )
 
             if ok and not status_output.strip():
-
-                log("Gitee 上传：没有可提交的变更。")
-
-                return True
+                ok, head_manifest = _run_cmd_capture(
+                    ["git", "show", f"HEAD:{manifest_name}"], cwd=temp_repo
+                )
+                try:
+                    head_payload = json.loads(head_manifest) if ok else {}
+                except (TypeError, ValueError):
+                    head_payload = {}
+                patch_exists = _run_cmd(
+                    ["git", "cat-file", "-e", f"HEAD:{patch_repo_name}"],
+                    cwd=temp_repo,
+                    log_output_on_error=False,
+                )
+                expected_payload = json.loads(
+                    latest_manifest_path.read_text(encoding="utf-8")
+                )
+                if not patch_exists or any(
+                    head_payload.get(key) != expected_payload.get(key)
+                    for key in ("target_patch_version", "zip_name", "zip_sha256")
+                ):
+                    log("Gitee 上传失败：暂存区为空，但当前提交不包含本次补丁。")
+                    return False
+                pushed = _run_cmd(["git", "push", "origin", branch], cwd=temp_repo)
+                if pushed:
+                    log("Gitee 上传：本次补丁已提交，已补做远端推送。")
+                    return True
+                log("Gitee 上传失败：补做远端推送失败。")
+                return False
 
             log("Gitee 上传失败：提交变更失败。")
 
@@ -2284,7 +2310,7 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
     expected_hash = str(manifest["zip_sha256"]).lower()
     expected_size = int(manifest["zip_size"])
     last_error = ""
-    for attempt in range(5):
+    for attempt in range(10):
         try:
             manifest_request = Request(
                 manifest_url + ("&" if "?" in manifest_url else "?")
@@ -2313,8 +2339,8 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
             return
         except (URLError, OSError, ValueError, RuntimeError) as exc:
             last_error = str(exc)
-            if attempt < 4:
-                time.sleep(3)
+            if attempt < 9:
+                time.sleep(5)
     raise RuntimeError(f"Gitee 已推送但下载核验失败，暂不要通知用户更新：{last_error}")
 
 

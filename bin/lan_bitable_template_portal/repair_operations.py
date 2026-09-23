@@ -43,7 +43,24 @@ def repair_mutation(kind):
                     if kind == "project_update" and self._repair_project_update_superseded(existing):
                         return {"record_id": request.get("record_id", ""), "superseded": True}
                     if existing["status"] in ("completed", "sync_pending") and existing.get("record_id"):
+                        if (kind == "followup_create" and not self._repair_secondary_sync_deferred
+                                and (existing.get("result") or {}).get("summary_sync_pending")):
+                            try:
+                                self._sync_repair_management_from_followup(
+                                    summary_record_id=existing["summary_record_id"],
+                                    followup_record_id=existing["record_id"], scope=existing["scope"])
+                            except Exception:
+                                pass
+                            else:
+                                result = {**(existing.get("result") or {}), "summary_sync_pending": False, "warnings": []}
+                                self._state_store.update_repair_management_operation(operation_id, status="completed",
+                                    result=result, error="")
+                                existing = self._state_store.get_repair_management_operation(operation_id)
                         return self._repair_public_result(existing)
+                    if kind == "followup_create" and existing["status"] == "uncertain":
+                        checkpoint = (existing.get("result") or {}).get("checkpoint") or {}
+                        if checkpoint.get("phase") == "writing" and checkpoint.get("client_token"):
+                            return self._resume_repair_followup_create(existing, ignore_current=True)
                     if kind == "project_update" and (existing.get("result") or {}).get("checkpoint", {}).get("phase") in ("writing", "remote_written"):
                         return self._resume_repair_project_update(existing, ignore_current=True)
                     if existing["status"] == "remote_written":
@@ -108,6 +125,64 @@ def repair_mutation(kind):
 
 
 class RepairOperationsMixin:
+    @staticmethod
+    def _repair_create_client_token(table_id, fields):
+        context = _current.get()
+        if not context or context["kind"] != "followup_create":
+            return ""
+        from upload_event_module.services.feishu_service import _stable_uuid4_client_token
+        payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str)
+        return _stable_uuid4_client_token(f"repair-followup:{table_id}:{context['operation_id']}:{payload}")
+
+    def _resume_repair_followup_create(self, operation, *, ignore_current=False):
+        from .portal_service import PortalError, REPAIR_SOURCE_APP_TOKEN, REPAIR_FOLLOWUP_TABLE_ID
+        operation_id = operation["operation_id"]
+        summary_id = operation.get("summary_record_id") or ""
+        with self._repair_management_record_lock(summary_id):
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            saved = operation.get("result") or {}
+            checkpoint = saved.get("checkpoint") or {}
+            if operation["status"] == "completed":
+                return self._repair_public_result(operation)
+            if self._repair_writer_alive(saved, operation_id, ignore_current=ignore_current):
+                raise PortalError("跟进记录仍在保存，请稍候。")
+            if time.time() - float(operation.get("created_at") or 0) >= 3600:
+                raise PortalError("原跟进提交已超过自动续做时限，请先核对多维记录。")
+            fields = checkpoint.get("fields") or {}
+            token = checkpoint.get("client_token") or ""
+            if checkpoint.get("phase") != "writing" or checkpoint.get("table_id") != REPAIR_FOLLOWUP_TABLE_ID or not fields or not token:
+                raise PortalError("原跟进提交缺少可安全续做的信息。")
+            key = (str(self._state_store.db_path), operation_id)
+            with _guard:
+                owns_running = key not in _running
+                _running.add(key)
+            try:
+                url = (f"https://open.feishu.cn/open-apis/bitable/v1/apps/{REPAIR_SOURCE_APP_TOKEN}"
+                       f"/tables/{REPAIR_FOLLOWUP_TABLE_ID}/records")
+                payload = self._request_payload("POST", url, context="飞书跟进记录续做",
+                    headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    params={"client_token": token}, json_payload={"fields": fields},
+                    http_client=self._write_http_client)
+                if int(payload.get("code") or 0):
+                    raise PortalError(f"飞书跟进记录续做失败: code={payload.get('code')}, msg={payload.get('msg') or 'unknown'}")
+                record_id = self._created_record_id(payload)
+                if not record_id:
+                    raise PortalError("飞书未返回跟进记录 ID，保存结果仍未确认。")
+                checkpoint.update(phase="remote_written", record_id=record_id)
+                self._state_store.update_repair_management_operation(operation_id, status="remote_written",
+                    record_id=record_id, result={**saved, "checkpoint": checkpoint}, error="")
+                return self._recover_repair_write(self._state_store.get_repair_management_operation(operation_id))
+            except Exception as exc:
+                latest = self._state_store.get_repair_management_operation(operation_id)
+                if latest["status"] != "remote_written":
+                    self._state_store.update_repair_management_operation(operation_id, status="uncertain",
+                        result={**saved, "checkpoint": checkpoint}, error=str(exc))
+                raise
+            finally:
+                if owns_running:
+                    with _guard:
+                        _running.discard(key)
+
     def _repair_project_update_superseded(self, operation):
         latest = self._state_store.latest_repair_project_update(operation.get("summary_record_id") or "")
         if operation["status"] != "superseded" and (not latest or latest["operation_id"] == operation["operation_id"]):
@@ -145,9 +220,15 @@ class RepairOperationsMixin:
                 return {"record_id": operation["summary_record_id"], "superseded": True}
             if operation["status"] == "completed":
                 return self._repair_public_result(operation)
-            record_id = checkpoint.get("record_id")
-            if not record_id or checkpoint.get("table_id") != REPAIR_MANAGEMENT_TABLE_ID:
-                raise PortalError("原保存内容不完整，请重新保存维修单。")
+            request = saved.get("request") or {}
+            record_id = str(checkpoint.get("record_id") or request.get("record_id") or operation["summary_record_id"] or "").strip()
+            table_id = str(checkpoint.get("table_id") or REPAIR_MANAGEMENT_TABLE_ID).strip()
+            if (not record_id or record_id != operation["summary_record_id"]
+                    or table_id != REPAIR_MANAGEMENT_TABLE_ID):
+                raise PortalError("原保存目标与当前维修单不一致，请重新打开维修单")
+            if not checkpoint.get("fields") and not checkpoint.get("pending_fields"):
+                raise PortalError("原保存缺少写入字段，请按当前填写重新保存维修单")
+            checkpoint.update(record_id=record_id, table_id=table_id)
             key = (str(self._state_store.db_path), operation_id)
             with _guard:
                 owns_running = key not in _running
@@ -210,7 +291,7 @@ class RepairOperationsMixin:
             result={"request": context["request"], "checkpoint": checkpoint}, error=error,
         )
 
-    def _repair_before_write(self, table_id, fields, record_id="", *, delete=False):
+    def _repair_before_write(self, table_id, fields, record_id="", *, delete=False, client_token=""):
         from .portal_service import REPAIR_FOLLOWUP_TABLE_ID, REPAIR_MANAGEMENT_TABLE_ID
         context = _current.get()
         if not context or context["service"] is not self:
@@ -226,6 +307,8 @@ class RepairOperationsMixin:
             return context
         context["checkpoint"].update(phase="writing", table_id=table_id, fields=fields,
                                      record_id=record_id, delete=delete, started_at=time.time())
+        if client_token:
+            context["checkpoint"]["client_token"] = client_token
         self._repair_checkpoint(context, "processing")
         return context
 
@@ -330,6 +413,71 @@ class RepairOperationsMixin:
             checkpoint = saved.get("checkpoint") or {}
             status = operation["status"]
             running = self._repair_writer_alive(saved, operation_id)
+        if (recover and not running and status == "uncertain"
+                and operation["operation_type"] == "followup_create"
+                and checkpoint.get("phase") == "writing" and not checkpoint.get("client_token")
+                and time.time() - float(operation.get("created_at") or 0) > 60
+                and operation.get("summary_record_id")):
+            try:
+                _metas, meta_by_name, current = self._load_repair_followups_for_summary(
+                    operation["summary_record_id"], limit=None, force_refresh=True)
+            except Exception:
+                pass
+            else:
+                checkpoint["legacy_checked"] = True
+                expected = self._repair_logical_record_fields(
+                    checkpoint.get("table_id") or "", checkpoint.get("fields") or {})
+                matches = []
+                for item in current:
+                    actual = self._repair_logical_record_fields(
+                        checkpoint.get("table_id") or "",
+                        {**(item.get("display_fields") or {}), **(item.get("raw_fields") or {})},
+                    )
+                    if expected and all(
+                        key in actual
+                        and self._repair_followup_comparable_value(meta_by_name.get(key), actual[key])
+                        == self._repair_followup_comparable_value(meta_by_name.get(key), value)
+                        for key, value in expected.items()
+                    ):
+                        matches.append(item)
+                matched_record_id = (
+                    str(matches[0].get("record_id") or "").strip()
+                    if len(matches) == 1 else ""
+                )
+                if matched_record_id:
+                    status = "remote_written"
+                    checkpoint.update(phase="remote_written", record_id=matched_record_id)
+                elif not current:
+                    status = "failed"
+                    checkpoint["phase"] = "preparing"
+                else:
+                    status = "uncertain"
+                self._state_store.update_repair_management_operation(operation_id, status=status,
+                    record_id=matched_record_id,
+                    result={**saved, "checkpoint": checkpoint},
+                    error=("" if matched_record_id else
+                           "已有跟进记录，但未能唯一匹配原提交，请核对后再新增。" if current else
+                           "未发现已写入的跟进记录，可以重新保存。"))
+                operation = self._state_store.get_repair_management_operation(operation_id)
+                saved = operation.get("result") or {}
+                checkpoint = saved.get("checkpoint") or {}
+                status = operation["status"]
+        if (recover and not running and status == "uncertain"
+                and operation["operation_type"] == "followup_create"
+                and checkpoint.get("phase") == "writing" and checkpoint.get("client_token")
+                and time.time() - float(operation.get("created_at") or 0) < 3600
+                and not checkpoint.get("recovery_attempted")):
+            checkpoint["recovery_attempted"] = True
+            self._state_store.update_repair_management_operation(operation_id, status="uncertain",
+                result={**saved, "checkpoint": checkpoint})
+            try:
+                self._resume_repair_followup_create(operation)
+            except Exception:
+                pass
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            saved = operation.get("result") or {}
+            checkpoint = saved.get("checkpoint") or {}
+            status = operation["status"]
         if recover and not running and status == "uncertain" and checkpoint.get("record_id"):
             if not checkpoint.get("delete") and operation["operation_type"] in ("project_update", "followup_update"):
                 source = REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS if operation["operation_type"] == "followup_update" else REPAIR_SNAPSHOT_SOURCE_PROJECTS
@@ -432,9 +580,8 @@ class RepairOperationsMixin:
                         self._state_store.update_repair_management_operation(operation_id, status="failed")
                         self.update_repair_management_record(**request, operation_id=operation_id)
                 except Exception as exc:
-                    current = self._state_store.get_repair_management_operation(operation_id)
                     self._state_store.update_repair_management_operation(operation_id, status="failed",
-                        error=current.get("last_error") or f"保存未完成：{exc}。可修改后重新保存。")
+                        error=f"保存未完成：{exc}。可修改后重新保存。")
             elif not running and operation["status"] in ("started", "processing"):
                 self._state_store.update_repair_management_operation(operation_id, status="failed",
                     error="保存已中断，可重新保存维修单。")

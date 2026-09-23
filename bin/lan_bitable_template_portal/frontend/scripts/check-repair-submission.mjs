@@ -8,12 +8,14 @@ import { chromium } from "playwright";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(root, "../../../output/playwright/repair-submission");
 await mkdir(output, { recursive: true });
-let writes = 0, status = "processing", unavailable = false, browser;
+let writes = 0, operationRecoveries = 0, status = "processing", unavailable = false, browser;
+const writeOperations = [];
 const projectFields = {"故障发生时间":"2026-09-18 09:27", "故障维修原因":"过滤器堵塞", "故障发生现象描述":"压差过大",
   "所属专业":"暖通", "所属数据中心/楼栋-使用":"南通A楼", "关联事件单":"recEvent", "设备检修关联":"recTarget", "检修通告名称":"测试检修"};
 const project = {record_id:"recSaved",title:"测试维修单",source_event_id:"recEvent",source_repair_ids:["recTarget"],
   raw_fields:projectFields,display_fields:projectFields,record_version:"v1",building_codes:["A"],followup_count:0};
 const projectMeta = Object.keys(projectFields).map(field_name => ({field_name,field_id:field_name,field_type:1,ui_type:"Text",editable:!['关联事件单','设备检修关联','检修通告名称'].includes(field_name)}));
+const followupMeta = [{field_name:'维修进展描述',field_id:'progress',field_type:1,ui_type:'Text',editable:true}];
 const entry = `
 import {createApp,h,ref} from 'vue';
 import {useRepairSubmission} from '/src/composables/useRepairSubmission.ts';
@@ -28,7 +30,8 @@ createApp({setup(){
  const submit=async()=>{try{const update=mode==='update';await task.submit(update?'/api/repair-management/records/recSaved':'/api/test-submit',{method:update?'PUT':'POST',body:JSON.stringify({operation_id:'stable-id',fields:{text:'test'}})})}catch{}};
  return ()=>mode.startsWith('project')?h(Projects,{scope:'A',focusRecordId:mode==='project-update'?'recSaved':'',scopeOptions:[{value:'A',label:'A楼'}]}):mode==='followup'?h(Followups,{scope:'A',summaryRecordId:'recProject',summaryTitle:'隔离维修跟进',embedded:false}):h('main',{style:'max-width:1000px;margin:40px auto'},[
  h('h2','维修提交恢复检查'),h('button',{disabled:!!task.pending.value&&!(task.overwrite.value&&task.status.value==='failed'),onClick:submit},'保存记录'),
- task.pending.value&&h(Status,{text:task.message.value,detail:task.detail.value,overwrite:task.overwrite.value,checking:task.checking.value,failed:task.status.value==='failed',onCheck:task.check,onCopy:task.copyInput,onDismiss:task.dismissFailed}),
+ task.pending.value&&task.status.value!=='failed'&&h(Status,{text:task.message.value,checking:task.checking.value,onCheck:task.check}),
+ task.pending.value&&task.status.value==='failed'&&h('p','保存失败，请重新保存。'),
  h('p',result.value)]);
 }}).mount('#app');`;
 const vite = await createServer({ configFile: path.join(root, "vite.config.ts"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
@@ -46,12 +49,31 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
       if (req.url === "/api/test-submit") { writes++; res.writeHead(200); res.write('{"data":'); setTimeout(() => res.destroy(), 30); return; }
       if (req.url === "/api/repair-management/records/recSaved" && req.method === "PUT") {
         writes++;
-        res.end('{"data":{"record_id":"recSaved","fields":{}}}'); return;
+        let body = "";
+        req.on("data", chunk => { body += chunk; });
+        req.on("end", () => {
+          writeOperations.push(JSON.parse(body).operation_id);
+          res.end('{"data":{"record_id":"recSaved","fields":{}}}');
+        });
+        return;
+      }
+      if (req.url === '/api/repair-management/followups' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+          writeOperations.push(JSON.parse(body).operation_id);
+          res.end(JSON.stringify({data:{record_id:'recNewFollowup',fields:{'维修进展描述':'恢复后的跟进填写'}}}));
+        });
+        return;
+      }
+      if (req.url.startsWith('/api/repair-management/followups') && req.method === 'GET') {
+        res.end(JSON.stringify({data:{records:[],fields:followupMeta,total:0,shared_fields:{}}})); return;
       }
       if (req.url.startsWith('/api/repair-management/records') && req.method === 'GET') {
         res.end(JSON.stringify({data:{record:project,records:[project],fields:projectMeta,total:1}})); return;
       }
       if (req.url.includes("/operations/")) {
+        if (req.method === 'POST') operationRecoveries++;
         if (unavailable) { res.statusCode = 503; res.end('{"ok":false,"error":"核验暂时不可用"}'); return; }
         res.end(JSON.stringify({ data: { status, retryable: status === "failed", error: status === "failed" ? "保存未完成，可修改后重新保存。" : "", result: status === "completed" ? { record_id: "recSaved", fields: {} } : null } })); return;
       }
@@ -74,22 +96,22 @@ try {
   await page.locator(".submission-status").waitFor();
   assert(await page.getByRole("button", { name: "保存记录", exact: true }).isDisabled());
   unavailable = true;
-  await page.getByRole("button", { name: "核验结果", exact: true }).click();
-  await page.getByText("处理详情", { exact: true }).click();
-  await page.getByText("核验暂时不可用", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
+  await page.getByRole("button", { name: "刷新状态", exact: true }).waitFor();
   assert.equal(writes, 1);
   unavailable = false; status = "completed";
-  await page.getByRole("button", { name: "核验结果", exact: true }).click();
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
   await page.getByText("已核验 recSaved", { exact: true }).waitFor();
   assert(await page.getByRole("button", { name: "保存记录", exact: true }).isEnabled());
   assert.equal(writes, 1);
+  assert.equal(operationRecoveries, 0);
   status = "failed";
   await page.evaluate(() => sessionStorage.setItem("repair-submission:test:A", JSON.stringify({
     id: "repair-update", body: JSON.stringify({ operation_id: "repair-update", source_repair_ids: ["recTarget"] }),
     path: "/api/repair-management/records/recSaved", method: "PUT",
   })));
   await page.goto(base + '/__repair_check?mode=update');
-  await page.getByText("保存未完成，填写已保留，可修改后重新保存。", { exact: true }).waitFor();
+  await page.getByText("保存失败，请重新保存。", { exact: true }).waitFor();
   assert(await page.getByRole('button',{name:'保存记录',exact:true}).isEnabled());
   assert.equal(await page.getByText('待核实',{exact:false}).count(),0);
   assert.equal(writes, 1);
@@ -127,6 +149,28 @@ try {
   assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
   assert.equal(await page.evaluate(()=>sessionStorage.getItem('repair-submission:project:A')),null);
   await page.screenshot({path:path.join(output,'project-update-editable.png'),fullPage:true});
+  await page.getByRole('button',{name:'保存修改',exact:true}).click();
+  await page.locator('.submission-status').first().waitFor({state:'hidden'});
+  await page.waitForFunction(() => document.body.textContent.includes('维修项目已保存'));
+  assert.equal(writeOperations.length,2);
+  assert.notEqual(writeOperations[1],'interrupted-update');
+  assert.notEqual(writeOperations[1],writeOperations[0]);
+  status = 'failed';
+  await page.evaluate(() => sessionStorage.setItem('repair-submission:followup:A:recProject',JSON.stringify({
+    id:'old-followup',method:'POST',path:'/api/repair-management/followups',body:JSON.stringify({
+      operation_id:'old-followup',summary_record_id:'recProject',fields:{'维修进展描述':'恢复后的跟进填写'}
+    })
+  })));
+  await page.goto(base + '/__repair_check?mode=followup');
+  await page.waitForFunction(() => [...document.querySelectorAll('textarea,input')].some(node => node.value === '恢复后的跟进填写'));
+  assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
+  assert.equal(await page.getByText('处理详情',{exact:true}).count(),0);
+  const followupSave = page.getByRole('button',{name:'继续保存',exact:true}).last();
+  assert(await followupSave.isEnabled());
+  await followupSave.click();
+  await page.waitForFunction(() => document.body.textContent.includes('维修跟进记录已新增'));
+  assert.equal(writeOperations.length,3);
+  assert.notEqual(writeOperations[2],'old-followup');
   assert.deepEqual(errors, []);
   console.log(`Repair creation protection, update recovery, editable failures, per-record migration and desktop layouts passed; writes=${writes}.`);
 } finally {

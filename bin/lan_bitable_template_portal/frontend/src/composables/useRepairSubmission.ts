@@ -10,32 +10,35 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
   const detail = ref("");
   const status = ref("");
   const storage = resilientStorage("sessionStorage", () => { detail.value = "浏览器未允许保存提交标识，请勿关闭本页。"; });
-  let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   let submitting = false;
   const storageKey = () => `repair-submission:${key()}`;
   const overwrite = computed(() => pending.value?.method === "PUT" && pending.value.path.startsWith("/api/repair-management/records/"));
-  const message = computed(() => overwrite.value
-    ? "正在保存维修单及关联信息，连接恢复后自动继续。"
-    : status.value === "remote_written"
-    ? "多维已保存，正在恢复本地显示和关联同步。"
-    : status.value === "uncertain" ? "写入结果待核实，请勿重新新增同一条记录。"
-    : "原提交正在核验，可离开本页，返回后继续核验。"
-  );
+  const message = computed(() => {
+    if (status.value === "failed") {
+      if (detail.value.includes("原保存内容不完整")) return "上次保存已中断，请按当前填写重新保存。";
+      return detail.value || "保存失败，请按当前填写重新保存。";
+    }
+    if (status.value === "remote_written") return "多维已保存，正在更新页面。";
+    if (status.value === "uncertain") return "保存响应超时，请点击下方“继续保存”。";
+    return overwrite.value ? "维修单正在保存。" : "跟进记录正在保存。";
+  });
 
   function clear() {
     storage.removeItem(storageKey());
     pending.value = null;
-    clearTimeout(timer);
   }
 
-  async function check(notify = true): Promise<Dict | null> {
+  async function check(notify = true, recover = false): Promise<Dict | null> {
     const item = pending.value;
     const currentKey = key();
     if (!item || checking.value || disposed || submitting) return null;
     checking.value = true;
     try {
-      const result = await requestJson(`/api/repair-management/operations/${encodeURIComponent(item.id)}`, { method: "POST" });
+      const result = await requestJson(`/api/repair-management/operations/${encodeURIComponent(item.id)}`, {
+        method: recover ? "POST" : "GET",
+        timeoutMs: recover ? 90_000 : 15_000,
+      });
       if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
       status.value = String(result.status || "");
       detail.value = String(result.error || "");
@@ -57,7 +60,7 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
           item.retried = true;
           storage.setItem(storageKey(), JSON.stringify(item));
           try {
-            const result = await requestJson(item.path, { method: item.method, body: item.body });
+            const result = await requestJson(item.path, { method: item.method, body: item.body, timeoutMs: 90_000 });
             if (disposed || currentKey !== key() || pending.value?.id !== item.id) return null;
             clear();
             if (notify) recovered(result);
@@ -70,16 +73,18 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
     } finally {
       if (currentKey === key()) {
         checking.value = false;
-        clearTimeout(timer);
-        if (!disposed && pending.value && status.value !== "failed") timer = setTimeout(() => { void check(); }, 10000);
       }
     }
     return null;
   }
 
   async function submit(path: string, options: { method: string; body: string }): Promise<Dict> {
-    if (overwrite.value && status.value === "failed") clear();
-    if (pending.value) throw new Error("请先核验上次提交。");
+    if (pending.value && status.value !== "failed") {
+      const recovered = await check(false, true);
+      if (recovered) return recovered;
+      if (status.value !== "failed") throw new Error(message.value);
+    }
+    if (pending.value) clear();
     const body = JSON.parse(options.body);
     const originalKey = key();
     const originalStorageKey = storageKey();
@@ -89,7 +94,7 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
     status.value = "processing";
     detail.value = "";
     try {
-      const result = await requestJson(path, options);
+      const result = await requestJson(path, { ...options, timeoutMs: 90_000 });
       if (disposed || originalKey !== key()) {
         storage.removeItem(originalStorageKey);
         throw new Error("原页面提交已保存，返回原页面可查看记录。");
@@ -111,18 +116,7 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
     }
   }
 
-  function dismissFailed() {
-    if (status.value === "failed") clear();
-  }
-
-  async function copyInput() {
-    try {
-      if (pending.value) await navigator.clipboard.writeText(JSON.stringify(JSON.parse(pending.value.body), null, 2));
-    } catch { detail.value = "浏览器未允许复制，原填写仍保存在本页提交记录中。"; }
-  }
-
   watch(key, () => {
-    clearTimeout(timer);
     pending.value = null;
     status.value = "";
     detail.value = "";
@@ -140,8 +134,8 @@ export function useRepairSubmission(key: () => string, recovered: (result: Dict)
       } catch { /* Invalid old drafts are not submitted again. */ }
     }
     try { pending.value = JSON.parse(storage.getItem(storageKey()) || "null"); } catch { /* Invalid browser draft is not a submitted record. */ }
-    if (pending.value) timer = setTimeout(() => { void check(); }, 0);
+    if (pending.value) void check();
   }, { immediate: true });
-  onBeforeUnmount(() => { disposed = true; clearTimeout(timer); });
-  return { pending, checking, status, message, detail, overwrite, submit, check, dismissFailed, copyInput };
+  onBeforeUnmount(() => { disposed = true; });
+  return { pending, checking, status, message, detail, overwrite, submit, check };
 }
