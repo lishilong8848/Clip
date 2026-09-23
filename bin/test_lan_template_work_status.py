@@ -6382,9 +6382,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             enqueue_project.call_args.kwargs["event_record_id"],
             "rec-event-transfer",
         )
+        queued_fields = enqueue_project.call_args.kwargs["remote_fields"]
+        self.assertEqual(queued_fields["告警描述"], "E楼压缩机高压报警")
+        self.assertTrue(queued_fields["是否转检修"])
+        self.assertIn("事件结束时间", queued_fields)
         self.assertEqual(
-            enqueue_project.call_args.kwargs["remote_fields"],
-            remote_fields,
+            queued_fields["事件结束截图"],
+            [{"file_token": "event-end-token"}],
         )
 
     def test_qt_event_end_superseded_by_update_does_not_queue_repair_project(self):
@@ -16735,6 +16739,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "work_type": "repair",
                         "notice_type": "设备检修",
                         "manual": "1",
+                        "manual_binding_choice": "unbound",
                         "manual_id": "manual:lite",
                         "record_id": "manual:lite",
                         "title": "EA118_C01机房A楼测试故障检修",
@@ -19176,10 +19181,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "repairEventSourceRecordId(form) !== sourceRecordIdAtStart",
             html,
         )
-        self.assertIn(
-            "resetRepairEventSelection(form, workType === 'repair', sourceId)",
-            html,
-        )
+        self.assertIn("resetRepairEventSelection(\n        form,", html)
+        self.assertIn("workType === 'repair',\n        sourceRecordId", html)
         self.assertNotIn(
             "setFormValue(form, 'source_record_id', candidate.event_record_id",
             html,
@@ -35427,6 +35430,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
         service._load_table_records = fake_load_records  # type: ignore[method-assign]
+        service._search_table_records = fake_load_records  # type: ignore[method-assign]
         with (
             patch.object(config_module.config, "app_token", "app_current"),
             patch.object(config_module.config, "table_id_shijian", "tblj9XJLq5QzTAqX"),

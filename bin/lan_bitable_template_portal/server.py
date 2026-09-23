@@ -13899,6 +13899,36 @@ class PortalRuntime:
         event_lock_key = ""
         event_lock_owner = ""
         if repair_project_request and target_end_confirmed:
+            find_active_items = getattr(
+                cls.state_store,
+                "find_qt_active_items",
+                None,
+            )
+            later_active = callable(find_active_items) and any(
+                row.get("deleted_at") is None
+                and str(row.get("notice_type") or "").strip() == "事件通告"
+                for row in find_active_items(
+                    active_item_id=str(data.get("active_item_id") or "").strip(),
+                    record_id=target_record_id,
+                )
+            )
+            if later_active:
+                target_end_confirmed = False
+                success = False
+                result = "结束回读校验失败：已被后续更新覆盖，通告仍在进行中。"
+                active_projection_warning = "未创建转检修维修单。"
+                robot_result = {
+                    "remote_written": True,
+                    "remote_verified": False,
+                    "robot_sent": False,
+                    "robot_skipped": True,
+                    "last_robot_error": "",
+                }
+                cls._finish_superseded_event_robot(
+                    operation,
+                    "本次结束已被后续更新覆盖。",
+                )
+        if repair_project_request and target_end_confirmed:
             try:
                 repair_project_queue_id = cls.enqueue_event_repair_project(
                     **repair_project_request

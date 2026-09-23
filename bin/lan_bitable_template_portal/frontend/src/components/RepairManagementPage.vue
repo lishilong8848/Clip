@@ -880,6 +880,7 @@ let repairStreamPollTimer: ReturnType<typeof setInterval> | undefined;
 let repairStreamLastActivityAt = 0;
 let repairStreamCursor = 0;
 let repairStreamPollInFlight = false;
+const recentlySavedProjects = new Map<string, number>();
 let repairPageActive = false;
 let skipNextSearchReload = false;
 let recordsRequestVersion = 0;
@@ -1045,18 +1046,26 @@ const repairHealthPendingCount = computed(() => Math.max(
   0,
   Number((repairHealth.value?.sync as LooseDict | undefined)?.pending_count || 0),
 ));
+const selectedProjectSyncPending = computed(() => (
+  String(projectSyncStatus.value?.status || "") === "pending"
+));
 const repairHealthIntegrityCount = computed(() => Math.max(
   0,
-  Number((repairHealth.value?.integrity as LooseDict | undefined)?.issue_count || 0),
+  selectedProjectSyncPending.value
+    ? 0
+    : Number((repairHealth.value?.integrity as LooseDict | undefined)?.issue_count || 0),
 ));
 const repairHealthRepairableCount = computed(() => Math.max(
   0,
-  Number(
-    (repairHealth.value?.integrity as LooseDict | undefined)
-      ?.repairable_issue_count || 0,
-  ),
+  selectedProjectSyncPending.value
+    ? 0
+    : Number(
+      (repairHealth.value?.integrity as LooseDict | undefined)
+        ?.repairable_issue_count || 0,
+    ),
 ));
 const repairHealthManualReviewCount = computed(() => {
+  if (selectedProjectSyncPending.value) return 0;
   const integrity = repairHealth.value?.integrity as LooseDict | undefined;
   const count = (
     integrity && Object.prototype.hasOwnProperty.call(integrity, "manual_review_count")
@@ -2587,6 +2596,9 @@ function sortRepairProjectPage(items: LooseDict[]): LooseDict[] {
 function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
   const recordId = String(patch.record_id || "").trim();
   if (!recordId) return true;
+  const protectedUntil = recentlySavedProjects.get(recordId) || 0;
+  if (protectedUntil > Date.now()) return false;
+  if (protectedUntil) recentlySavedProjects.delete(recordId);
   clearRecordDetailCache(recordId);
   const existingIndex = records.value.findIndex(
     (item) => String(item.record_id || "").trim() === recordId,
@@ -2595,11 +2607,12 @@ function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
   const merged = mergeProjectSummary(existing, patch);
   const matches = repairRecordMatchesCurrentView(merged);
   if (existingIndex >= 0 && matches) {
-    records.value = sortRepairProjectPage(
-      records.value.map((item, index) => (
-        index === existingIndex ? merged : item
-      )),
-    );
+    const updated = records.value.map((item, index) => (
+      index === existingIndex ? merged : item
+    ));
+    records.value = repairProjectWorkflowRank(existing) === repairProjectWorkflowRank(merged)
+      ? updated
+      : sortRepairProjectPage(updated);
   } else if (existingIndex >= 0 && !matches) {
     records.value = records.value.filter(
       (item) => String(item.record_id || "").trim() !== recordId,
@@ -2874,12 +2887,16 @@ async function loadProjectSyncStatus(recordId: string): Promise<void> {
       `/api/repair-management/sync-status?${params.toString()}`,
     );
     if (normalizedRecordId !== editingRecordId.value) return;
+    const previousStatus = String(projectSyncStatus.value?.status || "");
+    const nextStatus = String(payload.status || "");
     projectSyncStatus.value = payload;
-    if (String(payload.status || "") === "pending" && projectDrawerOpen.value) {
+    if (nextStatus === "pending" && projectDrawerOpen.value) {
       syncStatusTimer = window.setTimeout(() => {
         syncStatusTimer = undefined;
         void loadProjectSyncStatus(normalizedRecordId);
       }, 3000);
+    } else if (previousStatus === "pending") {
+      await loadRepairHealth();
     }
   } catch {
     if (normalizedRecordId === editingRecordId.value) {
@@ -3239,6 +3256,11 @@ function applySavedProjectRecord(
 ): void {
   const normalizedRecordId = String(recordId || "").trim();
   if (!normalizedRecordId) return;
+  const now = Date.now();
+  recentlySavedProjects.forEach((until, id) => {
+    if (until <= now) recentlySavedProjects.delete(id);
+  });
+  recentlySavedProjects.set(normalizedRecordId, now + 5000);
   const existing = (
     selectedRecord.value
     && String(selectedRecord.value.record_id || "").trim() === normalizedRecordId
@@ -3276,11 +3298,12 @@ function applySavedProjectRecord(
     (item) => String(item.record_id || "").trim() === normalizedRecordId,
   );
   if (existingIndex >= 0) {
-    records.value = sortRepairProjectPage(
-      records.value.map((item, index) => (
-        index === existingIndex ? savedRecord : item
-      )),
-    );
+    const updated = records.value.map((item, index) => (
+      index === existingIndex ? savedRecord : item
+    ));
+    records.value = repairProjectWorkflowRank(existing) === repairProjectWorkflowRank(savedRecord)
+      ? updated
+      : sortRepairProjectPage(updated);
   } else {
     records.value = sortRepairProjectPage([savedRecord, ...records.value]);
     total.value = Math.max(records.value.length, total.value + 1);
@@ -3317,6 +3340,7 @@ async function saveRecord(): Promise<boolean> {
     await focusFirstMissingField();
     return false;
   }
+  const wasEditing = Boolean(editingRecordId.value);
   saving.value = true;
   try {
     if (!editingRecordId.value && !createOperationId.value) {
@@ -3347,6 +3371,12 @@ async function saveRecord(): Promise<boolean> {
         return true;
       }
       savedPayload = updated;
+      if (
+        Boolean(updated.followup_sync_pending)
+        || Boolean((updated.relation_sync as LooseDict | undefined)?.sync_pending)
+      ) {
+        projectSyncStatus.value = { status: "pending", pending_count: 1 };
+      }
       const warnings = Array.isArray(updated.warnings) ? updated.warnings.filter(Boolean) : [];
       const syncedFollowupCount = Math.max(0, Number(updated.followup_synced_count || 0));
       const savedText = updated.followup_sync_pending
@@ -3385,7 +3415,7 @@ async function saveRecord(): Promise<boolean> {
     sourceExpanded.value = false;
     recordPage.value = 1;
     invalidateRepairStatus();
-    refreshProjectsAfterSave();
+    if (!wasEditing) refreshProjectsAfterSave();
     void loadProjectSyncStatus(editingRecordId.value);
     return true;
   } catch (error: unknown) {

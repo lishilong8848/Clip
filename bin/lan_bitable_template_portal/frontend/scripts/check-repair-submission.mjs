@@ -13,7 +13,8 @@ const writeOperations = [];
 const projectFields = {"故障发生时间":"2026-09-18 09:27", "故障维修原因":"过滤器堵塞", "故障发生现象描述":"压差过大",
   "所属专业":"暖通", "所属数据中心/楼栋-使用":"南通A楼", "关联事件单":"recEvent", "设备检修关联":"recTarget", "检修通告名称":"测试检修"};
 const project = {record_id:"recSaved",title:"测试维修单",source_event_id:"recEvent",source_repair_ids:["recTarget"],
-  raw_fields:projectFields,display_fields:projectFields,record_version:"v1",building_codes:["A"],followup_count:0};
+  raw_fields:projectFields,display_fields:projectFields,record_version:"v1",building_codes:["A"],followup_count:0,last_modified_time:"1"};
+const project2 = {...project,record_id:"recStable",title:"固定位置维修单",last_modified_time:"2"};
 const projectMeta = Object.keys(projectFields).map(field_name => ({field_name,field_id:field_name,field_type:1,ui_type:"Text",editable:!['关联事件单','设备检修关联','检修通告名称'].includes(field_name)}));
 const followupMeta = [{field_name:'维修进展描述',field_id:'progress',field_type:1,ui_type:'Text',editable:true}];
 const entry = `
@@ -45,6 +46,13 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
         res.end('<html lang="zh-CN"><head><meta charset="utf-8"><style>*{box-sizing:border-box}body{font-family:"Microsoft YaHei",sans-serif;background:#eef3f8}</style></head><body><div id="app"></div><script type="module" src="/__repair_check.js"></script></body></html>'); return;
       }
       if (!req.url.startsWith("/api/")) return next();
+      if (req.url.startsWith('/api/repair-management/stream')) {
+        res.setHeader('Content-Type','text/event-stream');
+        setTimeout(() => res.write(`event: repair_change\ndata: ${JSON.stringify({cursor:1,changes:[{
+          entity_type:'project',action:'update',record_id:'recSaved',payload:{record_patch:{...project,last_modified_time:'9999999999999'}}
+        }]})}\n\n`),30);
+        return;
+      }
       res.setHeader("Content-Type", "application/json");
       if (req.url === "/api/test-submit") { writes++; res.writeHead(200); res.write('{"data":'); setTimeout(() => res.destroy(), 30); return; }
       if (req.url === "/api/repair-management/records/recSaved" && req.method === "PUT") {
@@ -52,8 +60,9 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
         let body = "";
         req.on("data", chunk => { body += chunk; });
         req.on("end", () => {
-          writeOperations.push(JSON.parse(body).operation_id);
-          res.end('{"data":{"record_id":"recSaved","fields":{}}}');
+          const payload = JSON.parse(body);
+          writeOperations.push(payload.operation_id);
+          res.end(JSON.stringify({data:{record_id:"recSaved",fields:payload.fields || {}}}));
         });
         return;
       }
@@ -70,7 +79,7 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
         res.end(JSON.stringify({data:{records:[],fields:followupMeta,total:0,shared_fields:{}}})); return;
       }
       if (req.url.startsWith('/api/repair-management/records') && req.method === 'GET') {
-        res.end(JSON.stringify({data:{record:project,records:[project],fields:projectMeta,total:1}})); return;
+        res.end(JSON.stringify({data:{record:project,records:[project2,project],fields:projectMeta,total:2}})); return;
       }
       if (req.url.includes("/operations/")) {
         if (req.method === 'POST') operationRecoveries++;
@@ -128,6 +137,8 @@ try {
   for (const mode of ["project"]) {
     await page.goto(base + `/__repair_check?mode=${mode}`);
     await page.locator(".submission-status").first().waitFor();
+    await page.waitForTimeout(100);
+    assert.deepEqual((await page.locator('.record-title').allTextContents()).slice(0,2), ['固定位置维修单','测试维修单']);
     await page.screenshot({ path: path.join(output, `${mode}-pending.png`), fullPage: true });
     assert(await page.locator("body").evaluate(node => node.scrollWidth <= innerWidth + 2));
   }
@@ -138,6 +149,8 @@ try {
   await page.screenshot({path:path.join(output,'project-update-editable.png'),fullPage:true});
   await page.getByRole('button',{name:'保存修改',exact:true}).click();
   await page.waitForFunction(() => document.body.textContent.includes('维修项目已保存'));
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator('[data-field-name="故障发生现象描述"] textarea, [data-field-name="故障发生现象描述"] input').inputValue(),'直接覆盖保存');
   assert.equal(writeOperations.length,2);
   assert.equal(writeOperations[1],'');
   await page.goto(base + '/__repair_check?mode=followup');
