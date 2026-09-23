@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 from contextvars import ContextVar
+from dataclasses import asdict
 import datetime as dt
 import hashlib
 import html
@@ -6396,6 +6397,24 @@ class PortalRuntime:
             cls.cabinet_notice_worker_thread = None
 
     @classmethod
+    def _enqueue_qt_power_notice(
+        cls, data: dict, request: dict, operation_id: str, target_record_id: str, action: str,
+    ) -> None:
+        if data.get("notice_type") not in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
+            return
+        try:
+            cls.enqueue_cabinet_notice_batch(
+                {**data, "work_type": WORK_TYPE_POWER,
+                 "action": {"upload": "start", "upload_replace": "update"}.get(action, action),
+                 "operation_id": operation_id,
+                 "response_time": str(request.get("response_time") or data.get("response_time") or ""),
+                 "text": str(data.get("text") or data.get("content") or "")},
+                job_id=operation_id, target_record_id=target_record_id, request_payload=request,
+            )
+        except Exception as exc:
+            log_warning(f"通告已成功，上下电待办投递待恢复: {operation_id}: {exc}")
+
+    @classmethod
     def enqueue_cabinet_notice_batch(
         cls,
         prepared: dict[str, Any] | None,
@@ -8298,6 +8317,13 @@ class PortalRuntime:
                     lock_key = f"{work_type}:payload:{digest}"
         if not lock_key:
             return "", "", ""
+        held = _request_notice_locks.get()
+        for held_key, held_owner in held or ():
+            if held_key == lock_key:
+                renew = getattr(cls.state_store, "renew_notice_operation_lock", None)
+                if callable(renew) and not renew(lock_key, held_owner):
+                    return lock_key, "", "通告操作锁已过期，未使用旧数据写入，请重新提交。"
+                return lock_key, held_owner, ""
         acquire_lock = getattr(cls.state_store, "acquire_notice_operation_lock", None)
         if not callable(acquire_lock):
             acquire_lock = getattr(
@@ -8325,10 +8351,17 @@ class PortalRuntime:
         )
         if not ok:
             return lock_key, "", str(result or "该通告正在处理，请稍后再试。")
-        held = _request_notice_locks.get()
         if held is not None:
             held.append((lock_key, result))
         return lock_key, result, ""
+
+    @classmethod
+    def _check_request_notice_locks(cls) -> None:
+        renew = getattr(cls.state_store, "renew_notice_operation_lock", None)
+        if callable(renew):
+            for key, owner in tuple(_request_notice_locks.get() or ()):
+                if not renew(key, owner):
+                    raise PortalError("通告操作锁已过期，未使用旧数据写入，请重新提交。")
 
     @classmethod
     def _release_event_operation_lock(cls, lock_key: str, owner: str) -> None:
@@ -8348,6 +8381,9 @@ class PortalRuntime:
                 )
             if callable(release_lock):
                 release_lock(lock_key, owner)
+            held = _request_notice_locks.get()
+            if held is not None and (lock_key, owner) in held:
+                held.remove((lock_key, owner))
         except Exception as exc:
             log_warning(f"通告操作锁释放失败: {exc}")
 
@@ -8571,7 +8607,76 @@ class PortalRuntime:
         }
         if robot_error:
             result["message_warning"] = f"多维已上传，群消息发送失败：{robot_error}"
+        if getattr(payload, "_clipflow_robot_background", False):
+            result["robot_pending"] = True
         return result
+
+    @classmethod
+    def _stage_notice_robot_delivery(
+        cls, operation_id: str, notice_type: str, payload: NoticePayload,
+    ) -> None:
+        operation = cls._get_notice_remote_operation(operation_id) or {}
+        if not operation:
+            return
+        payload.operation_id = operation_id
+        payload._clipflow_defer_robot_message = True
+        payload._clipflow_robot_background = True
+        if not (operation.get("result") or {}).get("robot_delivery_state"):
+            cls._mark_notice_remote_operation(
+                operation_id, status=operation["status"],
+                result={"robot_background": True, "robot_delivery_state": "pending",
+                        "robot_message_uuid": cls._event_robot_message_uuid(operation_id),
+                        "robot_payload": asdict(payload), "robot_notice_type": notice_type},
+            )
+
+    @classmethod
+    def process_notice_robot_messages(cls) -> None:
+        # Completion queues these atomically; messaging never re-enters upload.
+        for task in cls.state_store.lease_outbox_events("notice_robot", limit=3, lease_seconds=900):
+            operation_id = str(task["payload"].get("operation_id") or "")
+            key, owner = f"notice_robot:{operation_id}", uuid.uuid4().hex
+            acquired, _ = cls.state_store.acquire_notice_operation_lock(key, owner=owner, action="robot", ttl_seconds=900)
+            if not acquired:
+                continue
+            operation = {}
+            try:
+                operation = cls._get_notice_remote_operation(operation_id) or {}
+                previous = operation.get("result") or {}
+                if previous.get("robot_delivery_state") in {"sent", "skipped", "superseded"}:
+                    cls.state_store.mark_outbox_event(task["id"], "done")
+                    continue
+                if operation.get("status") != "completed":
+                    raise RuntimeError("通告尚未完成本地同步，群消息暂缓发送。")
+                reason, error = (
+                    cls._event_robot_retry_guard(operation, check_remote=False)
+                    if previous.get("robot_notice_type") == "事件通告" else ("", "")
+                )
+                if error:
+                    raise RuntimeError(error)
+                if reason:
+                    cls._finish_superseded_event_robot(operation, reason)
+                else:
+                    result = send_robot_message_by_payload(
+                        previous["robot_notice_type"], NoticePayload(**previous["robot_payload"]),
+                        message_uuid=previous["robot_message_uuid"],
+                    )
+                    if not (result.get("robot_sent") or result.get("robot_skipped")):
+                        raise RuntimeError(result.get("last_robot_error") or "群消息未确认发送成功。")
+                    cls._mark_notice_remote_operation(
+                        operation_id, status="completed",
+                        result={**result, "robot_delivery_state": "sent" if result.get("robot_sent") else "skipped"},
+                    )
+                cls.state_store.mark_outbox_event(task["id"], "done")
+            except Exception as exc:
+                marked = cls.state_store.mark_outbox_event(task["id"], "pending", error=str(exc), max_attempts=8) or {}
+                if operation:
+                    cls._mark_notice_remote_operation(
+                        operation_id, status=operation["status"],
+                        result={"last_robot_error": str(exc), "robot_delivery_state": "failed" if marked.get("status") == "failed" else "pending"},
+                    )
+                log_warning(f"通告写入不受影响，群消息后台发送失败: {operation_id}: {exc}")
+            finally:
+                cls.state_store.release_notice_operation_lock(key, owner)
 
     @staticmethod
     def _event_robot_message_uuid(operation_id: str) -> str:
@@ -8983,11 +9088,12 @@ class PortalRuntime:
         )
 
     @classmethod
-    def _event_robot_retry_guard(cls, operation: dict) -> tuple[str, str]:
+    def _event_robot_retry_guard(cls, operation: dict, *, check_remote: bool = True) -> tuple[str, str]:
         """Return ``(superseded_reason, retry_error)`` before a delayed send."""
 
         operation_id = str(operation.get("operation_id") or "").strip()
         operation_type = str(operation.get("operation_type") or "").strip()
+        notice_type = str((operation.get("request") or {}).get("notice_type") or "事件通告")
         target_record_id = str(
             operation.get("target_record_id")
             or (operation.get("result") or {}).get("record_id")
@@ -9006,7 +9112,7 @@ class PortalRuntime:
             if not seen_current:
                 continue
             newer_request = dict(newer.get("request") or {})
-            if str(newer_request.get("notice_type") or "").strip() != "事件通告":
+            if str(newer_request.get("notice_type") or "").strip() != notice_type:
                 continue
             newer_type = str(newer.get("operation_type") or "").strip()
             if newer_type not in {"update", "end", "delete"}:
@@ -9021,10 +9127,9 @@ class PortalRuntime:
             if newer_status in {"executing", "remote_written"}:
                 return "", "后续事件操作仍在核验，已暂缓旧消息补发。"
 
-        ok_query, query_result = query_record_by_id(
-            target_record_id,
-            "事件通告",
-        )
+        if not check_remote:
+            return "", ""
+        ok_query, query_result = query_record_by_id(target_record_id, "事件通告")
         if not ok_query:
             if cls._remote_record_not_found(query_result):
                 return "目标记录已不存在。", ""
@@ -11286,8 +11391,13 @@ class PortalRuntime:
                 extra_file_tokens=image_extra_file_tokens,
                 ali_confirmation_file_tokens=ali_tokens,
             )
+            remote_operation_id = str(prepared.get("_remote_operation_id") or "")
+            cls._stage_notice_robot_delivery(remote_operation_id, notice_type, payload)
             ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
+            if ok and record_id and remote_operation_id:
+                cls._mark_notice_remote_operation(remote_operation_id, status="remote_written",
+                    target_record_id=record_id, result={"record_id": record_id, "written_fields": dict(getattr(payload, "_clipflow_written_fields", {}) or {})})
             if not ok and start_undo_id:
                 cls.state_store.mark_notice_undo_action(
                     start_undo_id,
@@ -11456,12 +11566,17 @@ class PortalRuntime:
             existing_extra_file_tokens=existing_extra_tokens,
             existing_response_time=existing_response_time if action == "update" else "",
         )
+        remote_operation_id = str(prepared.get("_remote_operation_id") or "")
+        cls._stage_notice_robot_delivery(remote_operation_id, notice_type, payload)
         ok, result = update_bitable_record_by_payload(record_id, notice_type, payload)
         if ok:
             written = dict(getattr(payload, "_clipflow_written_fields", {}) or {})
             if written:
                 prepared["_accepted_target_fields"] = {**fields, **written}
                 prepared["_accepted_target_at"] = time.time()
+            if remote_operation_id:
+                cls._mark_notice_remote_operation(remote_operation_id, status="remote_written",
+                    target_record_id=record_id, result={"record_id": record_id, "written_fields": written})
             cls._mark_local_notice_images_target_written(prepared)
         if not ok and checkpoint_id:
             cls.state_store.mark_notice_undo_action(
@@ -11486,6 +11601,7 @@ class PortalRuntime:
         operation_id = str(operation_id or "").strip()
         if not operation_id:
             return False, "远端写入缺少操作编号。", ""
+        prepared["_remote_operation_id"] = operation_id
         target_record_id = str(
             prepared.get("target_record_id")
             or (
@@ -12196,7 +12312,7 @@ class PortalRuntime:
         try:
             return cls._execute_local_notice_upload(request_payload)
         finally:
-            for key, owner in reversed(held):
+            for key, owner in reversed(tuple(held)):
                 cls._release_event_operation_lock(key, owner)
             _request_notice_locks.reset(token)
 
@@ -12339,6 +12455,15 @@ class PortalRuntime:
                     data["record_id"] = target_record_id
                     data["_is_placeholder_record"] = False
                     data["binding_status"] = "bound"
+        # Read cumulative fields only while owning the same lock used for writing.
+        lock_target = target_record_id or record_id
+        if action_type in {"update", "end", "upload_replace"} and lock_target and not is_local_record_id(lock_target):
+            _, _, lock_error = cls._acquire_event_operation_lock(
+                data, action_type=action_type, target_record_id=lock_target, record_id=record_id,
+            )
+            if lock_error:
+                return {"ok": False, "name": "结束" if action_type == "end" else "更新",
+                        "message": lock_error, "record_id": record_id, "real_record_id": ""}
         if action_type in {"update", "end"} and not target_record_id:
             if record_id and not is_local_record_id(record_id):
                 ok_query, query_result = (
@@ -12638,6 +12763,7 @@ class PortalRuntime:
         )
 
         notice_payload = cls._prepared_to_notice_payload(data)
+        notice_payload._clipflow_write_guard = cls._check_request_notice_locks
         notice_payload.file_tokens = file_tokens or None
         notice_payload.extra_file_tokens = extra_file_tokens or None
         notice_payload.response_time = str(payload.get("response_time") or "").strip() or None
@@ -12679,6 +12805,7 @@ class PortalRuntime:
                     or data.get("operation_id")
                     or f"qt_upload:{fallback_operation_key}"
                 ).strip()
+                notice_payload.operation_id = operation_id
                 if resume_remote_written and operation_id == request_operation_id:
                     operation = {
                         **resume_operation,
@@ -12839,6 +12966,7 @@ class PortalRuntime:
                         message=str(message or target),
                         robot_result=robot_result,
                     )
+                    cls._enqueue_qt_power_notice(data, payload, operation_id, target, "start")
                     return {
                         "ok": True,
                         "name": "上传",
@@ -12937,6 +13065,8 @@ class PortalRuntime:
                         else None
                     ),
                 )
+                if notice_type != "事件通告":
+                    cls._stage_notice_robot_delivery(operation_id, notice_type, notice_payload)
                 success, result = create_bitable_record_by_payload(
                     notice_type,
                     notice_payload,
@@ -12971,8 +13101,10 @@ class PortalRuntime:
                         status="completed",
                         target_record_id=real_record_id,
                         observed_record_version=str(data.get("record_version") or ""),
-                        result={"record_id": real_record_id, "message": str(result or "")},
+                        result={"record_id": real_record_id, "message": str(result or ""),
+                                "local_projection_completed": True},
                     )
+                    cls._enqueue_qt_power_notice(data, payload, operation_id, real_record_id, "start")
                 else:
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -13096,6 +13228,7 @@ class PortalRuntime:
                     or data.get("operation_id")
                     or f"qt_archive:{uuid.uuid4().hex}"
                 ).strip()
+                notice_payload.operation_id = archive_operation_id
                 archive_operation = cls._begin_notice_remote_operation(
                     operation_id=archive_operation_id,
                     operation_type="upload_replace",
@@ -13297,6 +13430,7 @@ class PortalRuntime:
             or data.get("operation_id")
             or f"qt_{action_type}:{fallback_operation_key}"
         ).strip()
+        notice_payload.operation_id = operation_id
         if resume_remote_written and operation_id == request_operation_id:
             operation = {
                 **resume_operation,
@@ -13419,6 +13553,8 @@ class PortalRuntime:
                                 else None
                             ),
                         )
+                        if notice_type != "事件通告":
+                            cls._stage_notice_robot_delivery(operation_id, notice_type, notice_payload)
                         success, result = update_bitable_record_by_payload(
                             target_record_id,
                             notice_type,
@@ -13455,18 +13591,6 @@ class PortalRuntime:
                         event_lock_key = ""
                         event_lock_owner = ""
                         raise
-                    finally:
-                        if notice_type != "事件通告":
-                            cls._release_event_operation_lock(
-                                event_lock_key,
-                                event_lock_owner,
-                            )
-                            event_lock_key = ""
-                            event_lock_owner = ""
-        if notice_type != "事件通告":
-            cls._release_event_operation_lock(event_lock_key, event_lock_owner)
-            event_lock_key = ""
-            event_lock_owner = ""
         updated_record_version = ""
         if success and notice_type != "事件通告" and not resume_remote_written:
             written = dict(getattr(notice_payload, "_clipflow_written_fields", {}) or {})
@@ -13538,12 +13662,13 @@ class PortalRuntime:
                 cls._rebase_remote_record_version(data, "")
                 cls._mark_notice_remote_operation(
                     operation_id,
-                    status="completed",
+                    status="remote_written",
                     target_record_id=target_record_id,
                     observed_record_version=updated_record_version,
                     result={
                         "record_id": target_record_id,
                         "message": str(result or ""),
+                        "written_fields": dict(getattr(notice_payload, "_clipflow_written_fields", {}) or {}),
                     },
                 )
         if not success:
@@ -13622,7 +13747,7 @@ class PortalRuntime:
                 "_last_upload_error": "",
                 "binding_status": "bound",
             }
-            if notice_type == "事件通告" and event_lock_owner:
+            if event_lock_owner:
                 projection_lock_key = event_lock_key
                 projection_lock_owner = event_lock_owner
                 projection_lock_error = ""
@@ -13784,6 +13909,11 @@ class PortalRuntime:
                     f"事件已正常结束，但转检修任务创建失败：{exc}"
                 )
         if notice_type != "事件通告":
+            if success:
+                cls._mark_notice_remote_operation(
+                    operation_id, status="completed", target_record_id=target_record_id,
+                    result={"local_projection_completed": True},
+                )
             robot_result = (
                 cls._robot_result_from_notice_payload(notice_payload)
                 if success
@@ -13855,16 +13985,8 @@ class PortalRuntime:
             message=result_message,
             robot_result=robot_result,
         )
-        if success and notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
-            cls.enqueue_cabinet_notice_batch(
-                {**data, "work_type": WORK_TYPE_POWER,
-                 "action": {"upload": "start", "upload_replace": "update"}.get(action_type, action_type),
-                 "notice_type": notice_type, "operation_id": operation_id,
-                 "response_time": str(payload.get("response_time") or data.get("response_time") or ""),
-                 "text": str(data.get("text") or data.get("content") or "")},
-                job_id=operation_id, target_record_id=target_record_id,
-                request_payload=payload,
-            )
+        if success:
+            cls._enqueue_qt_power_notice(data, payload, operation_id, target_record_id, action_type)
         return {
             "ok": bool(success),
             "name": action_name,
@@ -14961,6 +15083,7 @@ class PortalRuntime:
                             )
                         else:
                             try:
+                                prepared["_remote_operation_id"] = remote_operation_id
                                 ok, result_message, remote_record_id = (
                                     cls._execute_backend_prepared_upload(prepared)
                                 )

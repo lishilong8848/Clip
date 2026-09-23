@@ -808,6 +808,9 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
     request = request_builder.build()
 
     def do_create(token: str):
+        guard = getattr(payload, "_clipflow_write_guard", None)
+        if callable(guard):
+            guard()
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.create(request, option)
 
@@ -1202,6 +1205,9 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     )
 
     def do_update(token: str):
+        guard = getattr(payload, "_clipflow_write_guard", None)
+        if callable(guard):
+            guard()
         option = lark.RequestOption.builder().user_access_token(token).build()
         return client.bitable.v1.app_table_record.update(request, option)
 

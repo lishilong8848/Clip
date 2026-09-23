@@ -8573,12 +8573,22 @@ class FastAPIPortalController:
                             command_payload,
                         )
                     except Exception as exc:
+                        operation_id = str(command_payload.get("operation_id") or data_dict.get("operation_id") or "")
+                        operation = {}
+                        try:
+                            operation = PortalRuntime._get_notice_remote_operation(operation_id) or {}
+                        except Exception as status_exc:
+                            log_warning(f"Qt 上传异常后的操作状态读取失败: {status_exc}")
+                        saved_result = operation.get("result") or {}
+                        remote_written = operation.get("status") in {"remote_written", "completed"}
+                        saved_target = str(operation.get("target_record_id") or saved_result.get("record_id") or "")
                         finish_business_audit(
                             PortalRuntime.state_store,
                             audit_id,
                             success=False,
                             error=str(exc),
                             error_stage="execute",
+                            remote_written=remote_written,
                         )
                         fail_record_id = str(
                             data_dict.get("target_record_id")
@@ -8592,9 +8602,13 @@ class FastAPIPortalController:
                             "data": {
                                 "ok": False,
                                 "name": action_name_map.get(command, "上传"),
-                                "message": str(exc),
+                                "message": (f"多维已写入，本地同步待继续：{exc}" if remote_written else str(exc)),
                                 "record_id": fail_record_id,
-                                "real_record_id": "",
+                                "real_record_id": saved_target if remote_written else "",
+                                "target_record_id": saved_target,
+                                "operation_id": operation_id,
+                                "remote_written": remote_written,
+                                "retry_same_operation": remote_written or operation.get("status") == "executing" or bool(saved_result.get("retry_same_operation")),
                             },
                         }
                     finish_business_audit(
@@ -13162,6 +13176,8 @@ class FastAPIPortalController:
         )
         scheduler.add_job(PortalRuntime.process_source_end_sync, "interval", seconds=30,
                           id="notice_source_finalize", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(PortalRuntime.process_notice_robot_messages, "interval", seconds=5,
+                          id="notice_robot", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(
             self._run_scheduled_sqlite_maintenance,
             "interval",

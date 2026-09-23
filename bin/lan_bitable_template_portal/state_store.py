@@ -594,6 +594,18 @@ class LanPortalStateStore:
     def release_notice_operation_lock(self, lock_key: str, owner: str = "") -> bool:
         return self.release_event_notice_operation_lock(lock_key, owner)
 
+    def renew_notice_operation_lock(self, lock_key: str, owner: str) -> bool:
+        now = time.time()
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            cursor = conn.execute(
+                "UPDATE event_notice_operation_locks SET lease_until=?, updated_at=? "
+                "WHERE lock_key=? AND owner=? AND lease_until>?",
+                (now + 180, now, lock_key, owner, now),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
     @classmethod
     def _notice_remote_operation_payload(
         cls, row: sqlite3.Row | None
@@ -772,6 +784,14 @@ class LanPortalStateStore:
                     "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
                     (normalized_operation_id,),
                 ).fetchone()
+                if (status == "completed" and result_payload.get("robot_background")
+                        and result_payload.get("robot_delivery_state") == "pending"):
+                    self._enqueue_outbox_event_locked(
+                        conn, channel="notice_robot",
+                        payload={"operation_id": normalized_operation_id,
+                                 "idempotency_key": f"notice_robot:{normalized_operation_id}"},
+                        now=now,
+                    )
                 conn.commit()
         return self._notice_remote_operation_payload(row) or {}
 

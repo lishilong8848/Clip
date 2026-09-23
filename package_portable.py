@@ -1529,7 +1529,7 @@ def _run_packaging_preflight_tests() -> None:
 
     subprocess.run(
         [sys.executable, "-m", "unittest", "bin.test_submission_reliability",
-         "bin.test_event_remote_atomicity", "bin.test_notice_undo",
+         "bin.test_event_remote_atomicity", "bin.test_notice_upload_reliability", "bin.test_notice_undo",
          "bin.test_repair_snapshot_cache", "bin.test_process_lifetime"],
         cwd=PROJECT_ROOT,
         check=True,
