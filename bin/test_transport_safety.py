@@ -273,6 +273,71 @@ class TransportSafetyTests(unittest.TestCase):
                     self.assertTrue((assets / "new.js").exists())
                     self.assertTrue((assets / "shared.js").exists())
 
+    def test_patch_extraction_uses_short_staging_and_cleans_failed_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / "app"
+            updater = RemotePatchUpdater(app, app / "bin/data/remote_patch", "")
+            name = "ClipFlow_V2_20260923_082137_patch_only"
+            rel = "bin/lan_bitable_template_portal/frontend/dist/assets/VnetBackButton.vue_vue_type_script_setup_true_lang-HbkUmn7D.js"
+            archive = updater.data_dir / f"{name}.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr(f"{name}/{rel}", "// complete")
+            extracted_paths = []
+            extract = zipfile.ZipFile.extract
+
+            def bounded_extract(zf, info, path, *args, **kwargs):
+                target = Path(path) / info.filename
+                extracted_paths.append(target)
+                if len(str(target).encode("utf-16-le")) // 2 >= 260:
+                    raise FileNotFoundError(2, "No such file or directory", str(target))
+                return extract(zf, info, path, *args, **kwargs)
+
+            with patch.object(zipfile.ZipFile, "extract", bounded_extract):
+                result = updater._extract_patch_dir(archive)
+            self.assertEqual((result / rel).read_text(), "// complete")
+            self.assertFalse(any(path.is_relative_to(updater.data_dir) for path in extracted_paths))
+            self.assertEqual(list(app.glob(".patch-*")), [])
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr(f"{name}/{rel}", "// partial")
+                zf.writestr("../outside.txt", "unsafe")
+            with self.assertRaisesRegex(RuntimeError, "unsafe path"):
+                updater._extract_patch_dir(archive)
+            self.assertEqual((result / rel).read_text(), "// complete")
+            self.assertEqual(list(app.glob(".patch-*")), [])
+
+    def test_patch_extraction_rejects_ambiguous_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "app"
+            updater = RemotePatchUpdater(app, Path(tmp) / "data", "")
+            archive = Path(tmp) / "ambiguous.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("a_patch_only/bin/app.py", "a")
+                zf.writestr("b_patch_only/bin/app.py", "b")
+            with self.assertRaisesRegex(RuntimeError, "multiple"):
+                updater._extract_patch_dir(archive)
+            self.assertEqual(list(app.iterdir()), [])
+
+    def test_packaging_rejects_legacy_long_paths_without_deleting_previous_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp)
+            previous = build / "previous_patch_only.zip"
+            previous.write_bytes(b"previous archive")
+            patch_dir = build / "ClipFlow_V2_20260923_082137_patch_only"
+            bad = patch_dir / FRONTEND_DIST / "assets/VnetBackButton.vue_vue_type_script_setup_true_lang-HbkUmn7D.js"
+            bad.parent.mkdir(parents=True)
+            bad.write_text("// too long", encoding="utf-8")
+            with patch.object(portable_packaging, "BUILD_DIR", build):
+                with self.assertRaisesRegex(RuntimeError, "补丁路径过长"):
+                    portable_packaging._zip_patch_dir(patch_dir)
+                self.assertEqual(previous.read_bytes(), b"previous archive")
+                bad.rename(bad.with_name("c-HbkUmn7D.js"))
+                archive = portable_packaging._zip_patch_dir(patch_dir)
+            with zipfile.ZipFile(archive) as zf:
+                prefix = ("C:/Users/HP/Desktop/ClipFlow_portable_20260204_125611/"
+                          f"bin/data/remote_patch/.extract_{archive.stem}/")
+                self.assertTrue(all(len(prefix + path) < 260 for path in zf.namelist()))
+
     def test_frontend_missing_new_asset_rejected_without_removing_old_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, overlay = Path(tmp) / "app", Path(tmp) / "patch"
@@ -357,6 +422,7 @@ class TransportSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             excluded = [
+                ".patch-staging/ClipFlow_patch_only/bin/runtime.py",
                 "bin/test_feature.py",
                 "bin/tests/test_feature.py",
                 "bin/tools/audit_cabinet.py",

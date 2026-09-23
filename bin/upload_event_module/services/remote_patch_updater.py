@@ -157,12 +157,11 @@ class RemotePatchUpdater:
         return target_zip
 
     def _extract_patch_dir(self, zip_path: Path) -> Path:
-        extract_root = self.data_dir / f".extract_{zip_path.stem}"
-        if extract_root.exists():
-            shutil.rmtree(extract_root, ignore_errors=True)
-        extract_root.mkdir(parents=True, exist_ok=True)
-
-        try:
+        app_root = self.app_root.resolve()
+        app_root.mkdir(parents=True, exist_ok=True)
+        # Do not repeat the version under bin/data: old Windows runtimes hit MAX_PATH.
+        with tempfile.TemporaryDirectory(prefix=".patch-", dir=app_root) as temporary:
+            extract_root = Path(temporary)
             with zipfile.ZipFile(zip_path, "r") as zf:
                 for info in zf.infolist():
                     rel = Path(info.filename.replace("\\", "/"))
@@ -173,27 +172,21 @@ class RemotePatchUpdater:
                     if stat.S_ISLNK(mode):
                         raise RuntimeError("patch zip contains an unsupported symbolic link")
                     zf.extract(info, extract_root)
-        except Exception:
-            shutil.rmtree(extract_root, ignore_errors=True)
-            raise
 
-        candidates = [
-            p
-            for p in extract_root.rglob("*")
-            if p.is_dir() and p.name.endswith("_patch_only")
-        ]
-        if not candidates:
-            shutil.rmtree(extract_root, ignore_errors=True)
-            raise RuntimeError("zip does not contain *_patch_only directory")
-
-        candidates.sort(key=lambda p: len(p.parts))
-        selected = candidates[0]
-        target_dir = self.app_root / selected.name
-        if target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
-        shutil.move(str(selected), str(target_dir))
-        shutil.rmtree(extract_root, ignore_errors=True)
-        return target_dir
+            candidates = [p for p in extract_root.rglob("*")
+                          if p.is_dir() and p.name.endswith("_patch_only")]
+            if not candidates:
+                raise RuntimeError("zip does not contain *_patch_only directory")
+            if len(candidates) != 1:
+                raise RuntimeError("zip contains multiple *_patch_only directories")
+            selected = candidates[0]
+            target_dir = app_root / selected.name
+            if not target_dir.resolve().is_relative_to(app_root):
+                raise RuntimeError("patch target contains an unsafe path")
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            selected.replace(target_dir)
+            return target_dir
 
     def prepare_remote_patch(self, manifest: dict) -> Path:
         zip_path = self._download_zip(manifest)

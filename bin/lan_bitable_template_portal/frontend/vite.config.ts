@@ -10,5 +10,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/index-[hash].js",
+        chunkFileNames: "assets/c-[hash].js",
+        assetFileNames: "assets/a-[hash][extname]",
+      },
+    },
   },
 });

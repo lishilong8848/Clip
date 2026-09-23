@@ -1256,7 +1256,7 @@ def _is_development_only_path(path: Path, root: Path) -> bool:
     parts = tuple(part.lower() for part in rel.parts)
     if not parts:
         return False
-    if parts[0] in {".codex-audit", ".pytest_cache", "docs"}:
+    if parts[0] in {".codex-audit", ".pytest_cache", "docs"} or parts[0].startswith(".patch-"):
         return True
     if parts[:2] == ("bin", "tests"):
         return True
@@ -1900,6 +1900,15 @@ def _cleanup_old_patch_zips() -> int:
 def _zip_patch_dir(patch_dir: Path) -> Path:
 
     zip_path = BUILD_DIR / f"{patch_dir.name}.zip"
+
+    # Older clients extract below this layout. Reserve 64 characters for the install root.
+    legacy_prefix = "x" * 64 + f"/bin/data/remote_patch/.extract_{zip_path.stem}/"
+    for src in patch_dir.rglob("*"):
+        if not src.is_file():
+            continue
+        member = f"{patch_dir.name}/{src.relative_to(patch_dir).as_posix()}"
+        if len((legacy_prefix + member).encode("utf-16-le")) // 2 >= 260:
+            raise RuntimeError(f"补丁路径过长，旧版 Windows 更新器无法解压；请缩短产物文件名: {member}")
 
     removed = _cleanup_old_patch_zips()
 
