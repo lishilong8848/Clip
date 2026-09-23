@@ -124,9 +124,8 @@ try {
   await page.evaluate(() => {
     const pending = JSON.stringify({ id: "pending-record", body: "{}", path: "unused", method: "POST" });
     sessionStorage.setItem("repair-submission:project:A", pending);
-    sessionStorage.setItem("repair-submission:followup:A:recProject", pending);
   });
-  for (const mode of ["project", "followup"]) {
+  for (const mode of ["project"]) {
     await page.goto(base + `/__repair_check?mode=${mode}`);
     await page.locator(".submission-status").first().waitFor();
     await page.screenshot({ path: path.join(output, `${mode}-pending.png`), fullPage: true });
@@ -155,24 +154,17 @@ try {
   assert.equal(writeOperations.length,2);
   assert.notEqual(writeOperations[1],'interrupted-update');
   assert.notEqual(writeOperations[1],writeOperations[0]);
-  status = 'failed';
-  await page.evaluate(() => sessionStorage.setItem('repair-submission:followup:A:recProject',JSON.stringify({
-    id:'old-followup',method:'POST',path:'/api/repair-management/followups',body:JSON.stringify({
-      operation_id:'old-followup',summary_record_id:'recProject',fields:{'维修进展描述':'恢复后的跟进填写'}
-    })
-  })));
   await page.goto(base + '/__repair_check?mode=followup');
-  await page.waitForFunction(() => [...document.querySelectorAll('textarea,input')].some(node => node.value === '恢复后的跟进填写'));
+  await page.getByLabel('维修进展描述',{exact:true}).fill('直接保存的跟进填写');
   assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
   assert.equal(await page.getByText('处理详情',{exact:true}).count(),0);
-  const followupSave = page.getByRole('button',{name:'继续保存',exact:true}).last();
+  const followupSave = page.getByRole('button',{name:'新增跟进记录',exact:true}).last();
   assert(await followupSave.isEnabled());
   await followupSave.click();
   await page.waitForFunction(() => document.body.textContent.includes('维修跟进记录已新增'));
   assert.equal(writeOperations.length,3);
-  assert.notEqual(writeOperations[2],'old-followup');
   assert.deepEqual(errors, []);
-  console.log(`Repair creation protection, update recovery, editable failures, per-record migration and desktop layouts passed; writes=${writes}.`);
+  console.log(`Repair project recovery and direct followup save passed; writes=${writes}.`);
 } finally {
   await browser?.close();
   await vite.close();

@@ -5,8 +5,6 @@ import unittest
 import io
 import logging
 import queue
-import sqlite3
-from contextlib import closing
 from logging.handlers import QueueHandler
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -106,61 +104,13 @@ class SubmissionReliabilityTests(unittest.TestCase):
         token = first.kwargs["params"]["client_token"]
         self.assertEqual(len(token), 36)
         self.service._request_payload.side_effect = None
-        status = self.service.repair_operation_status("safe-create", recover=True)
-        self.assertEqual(status["status"], "completed")
+        result = self.service.create_test({"text": "one"}, operation_id="safe-create")
+        self.assertEqual(result["record_id"], "remote1")
         second = self.service._request_payload.call_args
         self.assertEqual(second.kwargs["json_payload"], first.kwargs["json_payload"])
         self.assertEqual(second.kwargs["params"]["client_token"], token)
         self.service._request_json.assert_not_called()
         self.assertEqual(self.service.first, "yes")
-
-    def test_legacy_followup_create_unlocks_only_when_remote_parent_is_empty(self):
-        self.service._request_payload.side_effect = TimeoutError("response lost")
-        with self.assertRaises(TimeoutError):
-            self.service.create_test({"text": "one"}, operation_id="legacy-followup")
-        old = self.store.get_repair_management_operation("legacy-followup")
-        checkpoint = dict(old["result"]["checkpoint"])
-        checkpoint.pop("client_token")
-        self.store.update_repair_management_operation("legacy-followup", status="uncertain",
-            result={**old["result"], "checkpoint": checkpoint})
-        with closing(sqlite3.connect(self.store.db_path)) as conn:
-            conn.execute("UPDATE repair_management_operations SET created_at=? WHERE operation_id=?",
-                (time.time() - 120, "legacy-followup"))
-            conn.commit()
-        self.service._load_repair_followups_for_summary = Mock(return_value=([], {}, []))
-        state = self.service.repair_operation_status("legacy-followup", recover=True)
-        self.assertEqual((state["status"], state["retryable"]), ("failed", True))
-        self.service._load_repair_followups_for_summary.assert_called_once_with("project", limit=None, force_refresh=True)
-        self.service._request_payload.assert_called_once()
-        self.service._request_payload.side_effect = None
-        self.service.create_test({"text": "one"}, operation_id="fresh-followup")
-        self.assertEqual(self.service._request_payload.call_count, 2)
-
-    def test_legacy_followup_create_recovers_unique_matching_remote_record(self):
-        self.service._request_payload.side_effect = TimeoutError("response lost")
-        with self.assertRaises(TimeoutError):
-            self.service.create_test({"text": "one"}, operation_id="legacy-matched")
-        old = self.store.get_repair_management_operation("legacy-matched")
-        checkpoint = dict(old["result"]["checkpoint"])
-        checkpoint.pop("client_token")
-        checkpoint["legacy_checked"] = True
-        self.store.update_repair_management_operation("legacy-matched", status="uncertain",
-            result={**old["result"], "checkpoint": checkpoint})
-        with closing(sqlite3.connect(self.store.db_path)) as conn:
-            conn.execute("UPDATE repair_management_operations SET created_at=? WHERE operation_id=?",
-                (time.time() - 120, "legacy-matched"))
-            conn.commit()
-        self.service._load_repair_followups_for_summary = Mock(return_value=([], {}, [
-            {"record_id": "remote-existing", "raw_fields": {"text": "one", "first": "yes"}}
-        ]))
-
-        state = self.service.repair_operation_status("legacy-matched", recover=True)
-
-        self.assertEqual((state["status"], state["record_id"]), ("completed", "remote-existing"))
-        self.service._request_payload.assert_called_once()
-        self.service._upsert_repair_snapshot_fields.assert_called_with(
-            source_key="repair_followups", record_id="remote-existing", fields={"text": "one", "first": "yes"},
-            parent_record_id="project")
 
     def test_interrupted_before_write_is_retryable_not_permanently_started(self):
         self.store.begin_repair_management_operation("interrupted", operation_type="project_update", scope="A", payload_hash="h")

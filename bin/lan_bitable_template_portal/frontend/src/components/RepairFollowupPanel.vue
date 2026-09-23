@@ -462,8 +462,6 @@ const page = ref(1);
 const deleteDialogOpen = ref(false);
 const creatingNewFollowup = ref(false);
 const createOperationId = ref("");
-const updateOperationId = ref("");
-let updateOperationPayloadKey = "";
 const deleteOperationId = ref("");
 let deleteOperationRecordId = "";
 const conflictState = ref<{ message: string; recordId: string } | null>(null);
@@ -954,8 +952,6 @@ function resolveDiscardConfirmation(confirmed: boolean): void {
 
 function startCreate(): void {
   createOperationId.value = "";
-  updateOperationId.value = "";
-  updateOperationPayloadKey = "";
   deleteOperationId.value = "";
   deleteOperationRecordId = "";
   conflictState.value = null;
@@ -977,8 +973,6 @@ function requestStartCreate(): void {
 
 function selectRecord(record: LooseDict): void {
   createOperationId.value = "";
-  updateOperationId.value = "";
-  updateOperationPayloadKey = "";
   deleteOperationId.value = "";
   deleteOperationRecordId = "";
   conflictState.value = null;
@@ -1431,22 +1425,10 @@ async function saveRecord(): Promise<void> {
       cmdb_record_ids: cmdbRecordIds.value,
       fields: buildFields(),
     };
-    if (editingRecordId.value) {
-      const nextPayloadKey = JSON.stringify(requestPayload);
-      if (
-        !updateOperationId.value
-        || updateOperationPayloadKey !== nextPayloadKey
-      ) {
-        updateOperationId.value = createRepairOperationId(
-          "repair-followup-update",
-        );
-        updateOperationPayloadKey = nextPayloadKey;
-      }
-    }
     const body = JSON.stringify({
       ...requestPayload,
       operation_id: editingRecordId.value
-        ? updateOperationId.value
+        ? ""
         : createOperationId.value,
     });
     const payload = wasEditing
@@ -1457,8 +1439,6 @@ async function saveRecord(): Promise<void> {
       : await requestJson("/api/repair-management/followups", { method: "POST", body });
     editingRecordId.value = String(payload.record_id || editingRecordId.value || "");
     createOperationId.value = "";
-    updateOperationId.value = "";
-    updateOperationPayloadKey = "";
     if (!wasEditing) page.value = 1;
     const warnings = Array.isArray(payload.warnings)
       ? payload.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)

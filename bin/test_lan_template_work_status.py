@@ -31009,7 +31009,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             False,
         )
         scheduled: list[tuple[str, dict]] = []
-        emergency_syncs: list[dict[str, Any]] = []
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: summary
         )
@@ -31047,8 +31046,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
         service._sync_repair_followup_event_emergency = (  # type: ignore[method-assign]
-            lambda **kwargs: emergency_syncs.append(dict(kwargs))
-            or {"warnings": []}
+            lambda **_kwargs: self.fail(
+                "运行时新增跟进不应同步等待事件应急措施回写"
+            )
         )
 
         result = service.create_repair_followup_record(
@@ -31062,11 +31062,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(result["record_id"], "rec-runtime-followup")
         self.assertTrue(result["summary_sync_pending"])
-        self.assertEqual(len(scheduled), 1)
-        self.assertEqual(scheduled[0][0], "followup_summary_sync")
-        self.assertTrue(scheduled[0][1]["run_immediately"])
+        self.assertEqual([item[0] for item in scheduled], [
+            "relation_field_sync", "followup_summary_sync",
+        ])
+        self.assertTrue(all(item[1]["run_immediately"] for item in scheduled))
+        self.assertEqual(scheduled[0][1]["target_record_id"], "event_emergency")
         self.assertEqual(result["fields"]["事件应急措施"], "切换备用设备")
-        self.assertEqual(emergency_syncs[0]["value"], "切换备用设备")
 
     def test_repair_followup_records_support_offset_pagination(self):
         service = _TestMaintenancePortalService()
@@ -37219,19 +37220,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "运行时跟进保存不应同步等待维修项目汇总"
             )
         )
+        service._sync_repair_followup_event_emergency = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail(
+                "运行时跟进保存不应同步等待事件应急措施回写"
+            )
+        )
 
         result = service.update_repair_followup_record(
             "rec-runtime-followup",
             summary_record_id="rec-runtime-summary",
-            fields={"维修进展描述": "已完成检查"},
+            fields={"维修进展描述": "已完成检查", "事件应急措施": "启用备用设备"},
             scope="A",
         )
 
         self.assertTrue(result["summary_sync_pending"])
         self.assertEqual(result["fields"]["维修进展描述"], "已完成检查")
-        self.assertEqual(len(scheduled), 1)
-        self.assertEqual(scheduled[0][0], "followup_summary_sync")
-        self.assertTrue(scheduled[0][1]["run_immediately"])
+        self.assertEqual(result["fields"]["事件应急措施"], "启用备用设备")
+        self.assertEqual([item[0] for item in scheduled], [
+            "relation_field_sync", "followup_summary_sync",
+        ])
+        self.assertTrue(all(item[1]["run_immediately"] for item in scheduled))
 
     def test_repair_followup_update_syncs_physical_event_emergency_field(self):
         service = _TestMaintenancePortalService()
