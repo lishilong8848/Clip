@@ -516,6 +516,9 @@ class CriticalGuardHelperTests(unittest.TestCase):
         self.assertEqual(width, 360)
         self.assertEqual(height, 64)
         self.assertEqual(rows, 1)
+        with Image.open(io.BytesIO(output)) as printed:
+            self.assertEqual(printed.mode, "RGBA")
+            self.assertEqual(set(printed.getchannel("A").getdata()), {0, 255})
 
     def test_second_and_third_check_sheets_keep_template_style_and_signatures(self) -> None:
         from openpyxl import load_workbook

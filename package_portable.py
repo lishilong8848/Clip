@@ -1454,6 +1454,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
         PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "process_lifetime.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "signature_print.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "repair_operations.py",
         PROJECT_ROOT / "bin" / "test_submission_reliability.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",

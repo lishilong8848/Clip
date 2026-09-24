@@ -804,6 +804,9 @@ class DrillManagementTests(unittest.TestCase):
                 drawing = archive.read("xl/drawings/drawing1.xml")
                 self.assertEqual(drawing.count(b"cxnSp"), 10)
                 self.assertIn(b"drill_signature_", b"\n".join(name.encode() for name in archive.namelist()))
+                first_signature = next(name for name in archive.namelist() if "drill_signature_" in name)
+                with Image.open(io.BytesIO(archive.read(first_signature))) as printed:
+                    self.assertEqual(set(printed.getchannel("A").getdata()), {0, 255})
             workbook = _parse_workbook(output_path)
             record = next(item for item in workbook["sheets"] if item["name"] == "本月记录")
             assessment = next(item for item in workbook["sheets"] if item["name"] == "评估表")

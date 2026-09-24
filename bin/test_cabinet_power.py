@@ -3195,6 +3195,8 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         first=self._wait_export_batch(batch_id)
         self.assertEqual(first["status"],"failed")
         self.assertEqual((archive.upload_calls,len(archive.records)),(0,0))
+        self.assertNotIn("导出文件",archive.fields)
+        self.assertTrue({"上传文件","子分类","年度","月份","链接"}<=set(archive.fields))
         old_a=first["items"]["A"]["result"]["export_id"]
         self.service.start_export_batch(batch_id,"owner",list("ABCDE"))
         second=self._wait_export_batch(batch_id)

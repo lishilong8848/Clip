@@ -21,6 +21,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
+from .signature_print import print_signature_png
+
 
 DRILL_DEFINITION_NAMESPACE = "drill_definition"
 DRILL_EXECUTION_NAMESPACE = "drill_execution"
@@ -38,7 +40,7 @@ DRILL_MAX_SIGNATURE_PIXELS = 16_000_000
 DRILL_MAX_PREVIEW_IMAGE_BYTES = 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES_BYTES = 2 * 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES = 20
-DRILL_GENERATION_RULE_VERSION = 2
+DRILL_GENERATION_RULE_VERSION = 3
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -1889,6 +1891,9 @@ def _patch_workbook(
                 for (signer, content, _source_size), (x, y, width, height) in zip(
                     prepared, positions
                 ):
+                    content = print_signature_png(
+                        content, (max(1, round(width)), max(1, round(height)))
+                    )
                     digest = hashlib.sha256(content).hexdigest()
                     media_name = f"xl/media/drill_signature_{digest}.png"
                     suffix = 0
@@ -2047,15 +2052,28 @@ def _verify_generated_workbook(
             expected_count = sum(len(item.get("signers") or []) for item in placements)
             if len(generated_anchors) != expected_count:
                 raise DrillError(f"工作表“{sheet_name}”生成文件中的签名图片数量不正确（应有 {expected_count}，实际 {len(generated_anchors)}）。")
-            expected_hashes = Counter(
-                hashlib.sha256(signatures[record_id]).hexdigest()
-                for record_id in [
-                    str(person.get("record_id") or "")
-                    for item in placements
-                    for person in item.get("signers") or []
-                    if str(person.get("record_id") or "")
+            expected_hashes: Counter[str] = Counter()
+            for placement in placements:
+                signers = [
+                    item for item in placement.get("signers") or []
+                    if str(item.get("record_id") or "")
                 ]
-            )
+                _row1, _col1, _row2, _col2, area_width, area_height = _row_col_pixels(
+                    sheet, str(placement["range"])
+                )
+                sizes = [
+                    _image_dimensions(signatures[str(signer["record_id"])])
+                    for signer in signers
+                ]
+                positions = drill_signature_layout(
+                    sizes, area_width, area_height, str(placement.get("layout") or "")
+                )
+                for signer, (_x, _y, width, height) in zip(signers, positions):
+                    content = print_signature_png(
+                        signatures[str(signer["record_id"])],
+                        (max(1, round(width)), max(1, round(height))),
+                    )
+                    expected_hashes[hashlib.sha256(content).hexdigest()] += 1
             used_relationships = set()
             actual_hashes: Counter[str] = Counter()
             for anchor in generated_anchors:

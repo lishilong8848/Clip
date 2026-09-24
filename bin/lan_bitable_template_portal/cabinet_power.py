@@ -1569,6 +1569,8 @@ class CabinetPowerService:
     def _run_export_batch(self,batch_id):
         batch=self._batch_record(batch_id)
         try:
+            now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+            self.ensure_export_archive_fields(str(batch.get("year") or f"{now.year:04d}"))
             if batch.get("phase") not in ("linking","verifying"):
                 for scope in TOTALS:
                     item=batch["items"][scope]

@@ -194,6 +194,7 @@ from lan_bitable_template_portal.drill_management import (
     drill_signature_layout,
     normalize_drill_signature_png,
 )
+from lan_bitable_template_portal.signature_print import print_signature_image
 from upload_event_module.config import config
 from upload_event_module.core.parser import extract_event_info, is_notice_confirmed_ended
 from upload_event_module.services.service_registry import check_token_status
@@ -10962,9 +10963,9 @@ class FastAPIPortalController:
             for image, (left, top, image_width, image_height) in zip(
                 prepared, positions
             ):
-                resized = image.resize(
+                resized = print_signature_image(
+                    image,
                     (max(1, round(image_width)), max(1, round(image_height))),
-                    Image.Resampling.LANCZOS,
                 )
                 canvas.alpha_composite(resized, (round(left), round(top)))
             output = io.BytesIO()

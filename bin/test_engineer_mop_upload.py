@@ -683,6 +683,7 @@ class EngineerMopUploadTests(unittest.TestCase):
     def test_generated_mop_signatures_fit_single_and_merged_cells(self):
         import io
         from openpyxl import Workbook, load_workbook
+        from openpyxl.styles import PatternFill
         from PIL import Image, ImageDraw
 
         signature = Image.new("RGBA", (320, 150), "white")
@@ -701,6 +702,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                 sheet.title = "MOP"
                 sheet.merge_cells("A2:B2")
                 sheet["A2"] = "维护实施人："
+                sheet["C2"].fill = PatternFill("solid", fgColor="CCE8F0")
                 sheet.column_dimensions["C"].width = 3
                 sheet.column_dimensions["D"].width = 5
                 sheet.row_dimensions[2].height = 12
@@ -719,6 +721,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                 signed = output["MOP"]
                 self.assertEqual(result["inserted"], count)
                 self.assertEqual(signed["A2"].value, "维护实施人：")
+                self.assertEqual(signed["C2"].fill.fgColor.rgb[-6:], "CCE8F0")
                 self.assertEqual(signed.row_dimensions[2].height, 12)
                 self.assertEqual(len(signed._images), 1)
                 anchor = signed._images[0].anchor
@@ -730,6 +733,9 @@ class EngineerMopUploadTests(unittest.TestCase):
                 self.assertLessEqual(anchor._from.rowOff + anchor.ext.cy, height * 9525)
                 self.assertGreaterEqual(anchor._from.colOff, 0)
                 self.assertGreaterEqual(anchor._from.rowOff, 0)
+                with Image.open(io.BytesIO(signed._images[0]._data())) as printed:
+                    self.assertEqual(printed.mode, "RGBA")
+                    self.assertEqual(set(printed.getchannel("A").getdata()), {0, 255})
                 output.close()
 
     def test_mop_preview_includes_row_heights_for_signature_preview(self):

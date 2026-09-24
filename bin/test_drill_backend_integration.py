@@ -297,9 +297,10 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         upload.assert_not_called()
 
     def test_print_signature_cells_receive_one_composite_image(self):
-        from PIL import Image
+        from PIL import Image, ImageDraw
 
         image = Image.new("RGBA", (24, 12), (0, 0, 0, 0))
+        ImageDraw.Draw(image).line((2, 10, 22, 2), fill=(0, 0, 0, 255), width=2)
         output = io.BytesIO()
         image.save(output, format="PNG")
         previous_service = PortalRuntime.service

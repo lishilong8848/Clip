@@ -61,6 +61,7 @@ from .signature_crypto import (
     SignatureCryptoManager,
     encrypted_signature_file_name,
 )
+from .signature_print import print_signature_image
 from .repair_status_index import (
     build_repair_status_source_signature,
     repair_completed_at_seconds,
@@ -41060,7 +41061,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 padding = min(2, (cell_width - 1) // 2, (cell_height - 1) // 2)
                 max_signature_width = max(1, cell_width - padding * 2)
                 max_signature_height = max(1, cell_height - padding * 2)
-                role_images = []
+                role_sources = []
                 for signature in role_signatures:
                     source = str(signature.get("source") or "").strip()
                     temp_id = str(signature.get("temp_id") or "").strip()
@@ -41071,31 +41072,40 @@ class MaintenancePortalService(RepairOperationsMixin):
                         image_bytes, _content_type = self.external_signature_image_bytes(record_id=record_id)
                     else:
                         image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
-                    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-                    max_width, max_height = max_signature_width, max_signature_height
-                    ratio = min(max_width / max(1, image.width), max_height / max(1, image.height), 1.0)
-                    if ratio < 1.0:
-                        image = image.resize(
-                            (max(1, int(image.width * ratio)), max(1, int(image.height * ratio))),
-                            Image.Resampling.LANCZOS,
-                        )
-                    role_images.append(image)
-                if not role_images:
+                    with Image.open(io.BytesIO(image_bytes)) as source_image:
+                        role_sources.append(source_image.convert("RGBA"))
+                if not role_sources:
                     continue
-                gap = 4
-                combined_width = max(1, sum(image.width for image in role_images) + gap * (len(role_images) - 1))
+                gap = min(4, max(0, (max_signature_width - len(role_sources)) // max(1, len(role_sources) - 1)))
+                available_width = max_signature_width - gap * (len(role_sources) - 1)
+                if available_width < len(role_sources):
+                    raise PortalError("签名栏位太窄，无法放下所选签名。")
+                base_sizes = []
+                for image in role_sources:
+                    scale = min(
+                        max_signature_width / image.width,
+                        max_signature_height / image.height,
+                        1.0,
+                    )
+                    base_sizes.append((max(1, int(image.width * scale)), max(1, int(image.height * scale))))
+                shrink = min(1.0, available_width / sum(width for width, _height in base_sizes))
+                role_images = [
+                    print_signature_image(
+                        image,
+                        (max(1, int(width * shrink)), max(1, int(height * shrink))),
+                    )
+                    for image, (width, height) in zip(role_sources, base_sizes)
+                ]
+                combined_width = sum(image.width for image in role_images) + gap * (len(role_images) - 1)
                 combined_height = max(1, max(image.height for image in role_images))
-                combined = Image.new("RGBA", (combined_width, combined_height), (255, 255, 255, 0))
+                combined = Image.new("RGBA", (combined_width, combined_height), (0, 0, 0, 0))
                 offset_x = 0
                 for image in role_images:
-                    combined.alpha_composite(image, (offset_x, max(0, (combined_height - image.height) // 2)))
-                    offset_x += image.width + gap
-                ratio = min(max_signature_width / combined.width, max_signature_height / combined.height, 1.0)
-                if ratio < 1:
-                    combined = combined.resize(
-                        (max(1, int(combined.width * ratio)), max(1, int(combined.height * ratio))),
-                        Image.Resampling.LANCZOS,
+                    combined.alpha_composite(
+                        image,
+                        (offset_x, max(0, (combined_height - image.height) // 2)),
                     )
+                    offset_x += image.width + gap
                 temp = tempfile.NamedTemporaryFile(delete=False, suffix=".png", prefix="clipflow_mop_signature_")
                 temp.close()
                 combined.save(temp.name, format="PNG")

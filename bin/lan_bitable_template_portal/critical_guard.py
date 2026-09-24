@@ -15,6 +15,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .signature_print import print_signature_image
+
 
 CRITICAL_GUARD_TEMPLATE_NAME = "重保戒备检查表.xlsx"
 CRITICAL_GUARD_SCOPE_CODES = ("A", "B", "C", "D", "E")
@@ -732,6 +734,8 @@ def _rendered_image_is_usable(path: Path) -> bool:
 
 def _compose_critical_guard_signatures(
     signatures: list[dict[str, Any]] | None,
+    *,
+    max_width_px: int | None = None,
 ) -> tuple[bytes, int, int, int]:
     from PIL import Image
 
@@ -745,12 +749,12 @@ def _compose_critical_guard_signatures(
         return b"", 0, 0, 0
     columns = min(4, len(items))
     rows = math.ceil(len(items) / columns)
-    slot_width = 180
+    slot_width = min(180, max(1, int(max_width_px) // columns)) if max_width_px else 180
     slot_height = 64
     canvas = Image.new(
         "RGBA",
         (slot_width * columns, slot_height * rows),
-        (255, 255, 255, 0),
+        (0, 0, 0, 0),
     )
     resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
     for index, item in enumerate(items):
@@ -759,7 +763,8 @@ def _compose_critical_guard_signatures(
         y1 = row_index * slot_height
         try:
             signature = Image.open(io.BytesIO(bytes(item["image_bytes"]))).convert("RGBA")
-            signature.thumbnail((slot_width - 18, 58), resampling)
+            signature.thumbnail((max(1, slot_width - 18), 58), resampling)
+            signature = print_signature_image(signature, signature.size)
         except Exception as exc:
             raise CriticalGuardError("检查人签名图片不可用，请重新签名。") from exc
         canvas.alpha_composite(
@@ -1089,17 +1094,19 @@ def _write_check_sheet(
     )
 
     image_handles: list[Any] = []
+    available_width_px = sum(
+        _excel_column_width_pixels(
+            ws.column_dimensions[get_column_letter(column)].width
+            or float(getattr(ws.sheet_format, "defaultColWidth", None) or 8.43)
+        )
+        for column in range(signature_start_col, signature_end_col + 1)
+    )
     signature_png, original_width, original_height, _signature_rows = (
-        _compose_critical_guard_signatures(signatures)
+        _compose_critical_guard_signatures(
+            signatures, max_width_px=max(1, int(available_width_px - 8.0))
+        )
     )
     if signature_png:
-        available_width_px = sum(
-            _excel_column_width_pixels(
-                ws.column_dimensions[get_column_letter(column)].width
-                or float(getattr(ws.sheet_format, "defaultColWidth", None) or 8.43)
-            )
-            for column in range(signature_start_col, signature_end_col + 1)
-        )
         # Do not enlarge a handwritten signature. Only shrink a crowded signer
         # set to the actual merged-cell width of the source template.
         signature_width_px = max(1, int(min(float(original_width), max(1.0, available_width_px - 8.0))))
@@ -2426,6 +2433,7 @@ def render_critical_guard_image(
             try:
                 signature = Image.open(io.BytesIO(bytes(item["image_bytes"]))).convert("RGBA")
                 signature.thumbnail((max(40, slot_width - 24), 72))
+                signature = print_signature_image(signature, signature.size)
                 image.paste(
                     signature,
                     (
