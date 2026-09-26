@@ -37,10 +37,11 @@ DRILL_MAX_SOURCE_CELLS = DRILL_MAX_SOURCE_ROWS * DRILL_MAX_SOURCE_COLUMNS
 DRILL_MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 DRILL_MAX_SIGNATURE_DIMENSION = 4096
 DRILL_MAX_SIGNATURE_PIXELS = 16_000_000
+DRILL_MIN_SIGNATURE_SLOT_HEIGHT_PX = 48
 DRILL_MAX_PREVIEW_IMAGE_BYTES = 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES_BYTES = 2 * 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES = 20
-DRILL_GENERATION_RULE_VERSION = 3
+DRILL_GENERATION_RULE_VERSION = 4
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -1255,7 +1256,12 @@ def _derived_values(
                 "sheet_type": "record",
                 "range": f"{step_mapping['executor_col']}{row}",
                 "layout": "vertical",
-                "signers": [item for item in signers if item],
+                "signature_slots": int(step["signature_slots"]),
+                "signers": [
+                    {**item, "slot_index": index}
+                    for index, item in enumerate(signers)
+                    if item
+                ],
             }
         )
     return {
@@ -1287,14 +1293,15 @@ def _validate_execution(definition: dict[str, Any], execution: dict[str, Any]) -
     step_signers = execution.get("step_signers") if isinstance(execution.get("step_signers"), dict) else {}
     for step in definition.get("configuration", {}).get("steps") or []:
         row = int(step.get("row") or 0)
-        assigned = [str(item or "") for item in step_signers.get(str(row), []) if str(item or "")]
+        slots = [str(item or "") for item in step_signers.get(str(row), [])]
+        assigned = [item for item in slots if item]
         if len(assigned) > int(step.get("signature_slots") or 0):
             errors.append(f"第 {row} 行步骤最多选择 {int(step.get('signature_slots') or 0)} 名执行人。")
             continue
         if len(assigned) != len(set(assigned)) or any(item not in selected for item in assigned):
             errors.append(f"第 {row} 行步骤执行人必须来自参演人员且不能重复。")
-        if "ECC" in str(step.get("location") or "").upper() and assigned and assigned[0] != commander["record_id"]:
-            errors.append(f"第 {row} 行包含 ECC，指挥人必须位于第一个签名位。")
+        if "ECC" in str(step.get("location") or "").upper() and commander["record_id"] not in assigned:
+            errors.append(f"第 {row} 行 ECC 步骤需选择指挥人签名。")
     return errors
 
 
@@ -1305,6 +1312,21 @@ def _row_col_pixels(sheet: dict[str, Any], reference: str) -> tuple[int, int, in
     width = sum(max(12.0, float(widths.get(col, sheet.get("default_col_width") or 8.43)) * 7.0 + 5.0) for col in range(col1, col2 + 1))
     height = sum(max(12.0, float(heights.get(row, sheet.get("default_row_height") or 15.0)) * 96.0 / 72.0) for row in range(row1, row2 + 1))
     return row1, col1, row2, col2, width, height
+
+
+def _ensure_step_signature_row_heights(
+    sheet: dict[str, Any], steps: list[dict[str, Any]],
+) -> dict[int, float]:
+    updated: dict[int, float] = {}
+    heights = sheet.setdefault("row_heights", {})
+    for step in steps:
+        row, slots = int(step["row"]), int(step["signature_slots"])
+        minimum = DRILL_MIN_SIGNATURE_SLOT_HEIGHT_PX * slots
+        if _row_col_pixels(sheet, f"A{row}")[5] < minimum:
+            points = minimum * 72 / 96
+            heights[row] = points
+            updated[row] = points
+    return updated
 
 
 def _marker_pixels(sheet: dict[str, Any], marker: ET.Element) -> tuple[int, int, float, float]:
@@ -1521,14 +1543,21 @@ def drill_signature_layout(
     area_width: float,
     area_height: float,
     layout: str,
+    *,
+    slot_count: int = 0,
+    slot_indices: list[int] | None = None,
 ) -> list[tuple[float, float, float, float]]:
     if str(layout or "").strip().lower() != "vertical":
         return _horizontal_signature_layout(image_sizes, area_width, area_height)
     if not image_sizes:
         return []
-    slot_height = area_height / len(image_sizes)
+    slots = max(len(image_sizes), slot_count)
+    slot_height = area_height / slots
     positions = []
     for index, (source_width, source_height) in enumerate(image_sizes):
+        slot_index = slot_indices[index] if slot_indices and index < len(slot_indices) else index
+        if not 0 <= slot_index < slots:
+            raise DrillError("演练签名位置超出步骤签名人数。")
         padding = min(5.0, area_width * 0.08, slot_height * 0.08)
         scale = min(
             max(1.0, area_width - padding * 2) / source_width,
@@ -1538,7 +1567,7 @@ def drill_signature_layout(
         positions.append(
             (
                 (area_width - width) / 2,
-                index * slot_height + (slot_height - height) / 2,
+                slot_index * slot_height + (slot_height - height) / 2,
                 width,
                 height,
             )
@@ -1787,6 +1816,86 @@ def _is_drill_signature_anchor(anchor: ET.Element) -> bool:
     return properties is not None and str(properties.attrib.get("name") or "").startswith("演练签名-")
 
 
+def _step_signature_bounds(
+    sheet: dict[str, Any], reference: str,
+) -> tuple[int, int, float, float, float, float]:
+    row, col, _last_row, _last_col, width, height = _row_col_pixels(sheet, reference)
+    marker = ET.Element(f"{{{_XDR_NS}}}from")
+    for tag, value in (("col", col - 1), ("colOff", 0), ("row", row - 1), ("rowOff", 0)):
+        ET.SubElement(marker, f"{{{_XDR_NS}}}{tag}").text = str(value)
+    _row_zero, _col_zero, left, top = _marker_pixels(sheet, marker)
+    return row, col, left, top, width, height
+
+
+def _is_step_signature_divider(
+    anchor: ET.Element,
+    sheet: dict[str, Any],
+    bounds: list[tuple[int, int, float, float, float, float]],
+) -> bool:
+    if anchor.find(f"{{{_XDR_NS}}}cxnSp") is None:
+        return False
+    properties = anchor.find(f".//{{{_XDR_NS}}}cNvPr")
+    if properties is not None and str(properties.attrib.get("name") or "").startswith("演练步骤分隔线-"):
+        return True
+    start = anchor.find(f"{{{_XDR_NS}}}from")
+    end = anchor.find(f"{{{_XDR_NS}}}to")
+    if start is None or end is None:
+        return False
+    start_row, start_col, _x1, y1 = _marker_pixels(sheet, start)
+    end_row, end_col, _x2, y2 = _marker_pixels(sheet, end)
+    if abs(y2 - y1) > 3:
+        return False
+    for row, col, _left, _top, _width, _height in bounds:
+        if start_row == end_row == row - 1 and min(start_col, end_col) <= col - 1 <= max(start_col, end_col):
+            return True
+    return False
+
+
+def _append_step_signature_divider(
+    drawing_root: ET.Element,
+    *,
+    shape_id: int,
+    row: int,
+    col: int,
+    index: int,
+    left: float,
+    top: float,
+    width: float,
+    y_offset: float,
+) -> None:
+    inset = min(3.0, width / 10)
+    start_x, end_x = left + inset, left + width - inset
+    anchor = ET.SubElement(drawing_root, f"{{{_XDR_NS}}}twoCellAnchor")
+    for marker_name, x_offset in (("from", inset), ("to", width - inset)):
+        marker = ET.SubElement(anchor, f"{{{_XDR_NS}}}{marker_name}")
+        for tag, value in (
+            ("col", col - 1), ("colOff", round(x_offset * _EMU_PER_PIXEL)),
+            ("row", row - 1), ("rowOff", round(y_offset * _EMU_PER_PIXEL)),
+        ):
+            ET.SubElement(marker, f"{{{_XDR_NS}}}{tag}").text = str(value)
+    connector = ET.SubElement(anchor, f"{{{_XDR_NS}}}cxnSp")
+    nonvisual = ET.SubElement(connector, f"{{{_XDR_NS}}}nvCxnSpPr")
+    ET.SubElement(nonvisual, f"{{{_XDR_NS}}}cNvPr", {
+        "id": str(shape_id), "name": f"演练步骤分隔线-{row}-{index}",
+    })
+    ET.SubElement(nonvisual, f"{{{_XDR_NS}}}cNvCxnSpPr")
+    properties = ET.SubElement(connector, f"{{{_XDR_NS}}}spPr")
+    transform = ET.SubElement(properties, f"{{{_A_NS}}}xfrm")
+    ET.SubElement(transform, f"{{{_A_NS}}}off", {
+        "x": str(round(start_x * _EMU_PER_PIXEL)),
+        "y": str(round((top + y_offset) * _EMU_PER_PIXEL)),
+    })
+    ET.SubElement(transform, f"{{{_A_NS}}}ext", {
+        "cx": str(round((end_x - start_x) * _EMU_PER_PIXEL)), "cy": "0",
+    })
+    geometry = ET.SubElement(properties, f"{{{_A_NS}}}prstGeom", {"prst": "line"})
+    ET.SubElement(geometry, f"{{{_A_NS}}}avLst")
+    line = ET.SubElement(properties, f"{{{_A_NS}}}ln", {"w": "12700"})
+    fill = ET.SubElement(line, f"{{{_A_NS}}}solidFill")
+    ET.SubElement(fill, f"{{{_A_NS}}}srgbClr", {"val": "000000"})
+    ET.SubElement(anchor, f"{{{_XDR_NS}}}clientData")
+
+
 def _patch_workbook(
     source_path: Path,
     output_path: Path,
@@ -1807,6 +1916,19 @@ def _patch_workbook(
             record_sheet["path"]: ET.fromstring(archive.read(record_sheet["path"])),
             assessment_sheet["path"]: ET.fromstring(archive.read(assessment_sheet["path"])),
         }
+        for row, points in _ensure_step_signature_row_heights(
+            record_sheet, configuration.get("steps") or []
+        ).items():
+            row_node = next(
+                (
+                    item for item in sheet_roots[record_sheet["path"]].findall(f".//{{{_MAIN_NS}}}row")
+                    if item.attrib.get("r") == str(row)
+                ),
+                None,
+            )
+            if row_node is None:
+                raise DrillError(f"演练步骤第 {row} 行在模板中不存在。")
+            row_node.attrib.update({"ht": f"{points:g}", "customHeight": "1"})
         styles_root = ET.fromstring(archive.read("xl/styles.xml"))
         for reference, value in (derived.get("record_values") or {}).items():
             _set_inline_text(sheet_roots[record_sheet["path"]], reference, value)
@@ -1858,8 +1980,16 @@ def _patch_workbook(
                 ) > 1,
             )
             drawing_paths.append(drawing_path)
+            step_bounds = [
+                _step_signature_bounds(
+                    current_sheet, f"{step_mapping['executor_col']}{int(step['row'])}"
+                )
+                for step in configuration.get("steps") or []
+            ] if sheet_type == "record" else []
             for anchor in list(drawing_root):
-                if _is_drill_signature_anchor(anchor):
+                if _is_drill_signature_anchor(anchor) or (
+                    step_bounds and _is_step_signature_divider(anchor, current_sheet, step_bounds)
+                ):
                     drawing_root.remove(anchor)
             existing_ids = [
                 int(item.attrib.get("id") or 0)
@@ -1867,6 +1997,17 @@ def _patch_workbook(
                 if str(item.attrib.get("id") or "").isdigit()
             ]
             shape_id = max(existing_ids or [0]) + 1
+            for step, (row, col, left, top, width, height) in zip(
+                configuration.get("steps") or [], step_bounds
+            ):
+                slots = int(step["signature_slots"])
+                for index in range(1, slots):
+                    _append_step_signature_divider(
+                        drawing_root, shape_id=shape_id, row=row, col=col,
+                        index=index, left=left, top=top, width=width,
+                        y_offset=height * index / slots,
+                    )
+                    shape_id += 1
             image_relations: dict[str, str] = {}
             for placement in placements:
                 signers = [item for item in placement.get("signers") or [] if str(item.get("record_id") or "")]
@@ -1887,6 +2028,11 @@ def _patch_workbook(
                     area_width,
                     area_height,
                     str(placement.get("layout") or ""),
+                    slot_count=int(placement.get("signature_slots") or 0),
+                    slot_indices=[
+                        int(signer.get("slot_index", index))
+                        for index, (signer, _content, _size) in enumerate(prepared)
+                    ],
                 )
                 for (signer, content, _source_size), (x, y, width, height) in zip(
                     prepared, positions
@@ -2052,6 +2198,36 @@ def _verify_generated_workbook(
             expected_count = sum(len(item.get("signers") or []) for item in placements)
             if len(generated_anchors) != expected_count:
                 raise DrillError(f"工作表“{sheet_name}”生成文件中的签名图片数量不正确（应有 {expected_count}，实际 {len(generated_anchors)}）。")
+            if sheet_type == "record":
+                step_mapping = configuration["mapping"]["steps"]
+                bounds = [
+                    _step_signature_bounds(sheet, f"{step_mapping['executor_col']}{int(step['row'])}")
+                    for step in configuration.get("steps") or []
+                ]
+                dividers = [
+                    anchor for anchor in drawing_root
+                    if _is_step_signature_divider(anchor, sheet, bounds)
+                ]
+                expected_dividers = sum(int(step["signature_slots"]) - 1 for step in configuration.get("steps") or [])
+                if len(dividers) != expected_dividers:
+                    raise DrillError("生成文件中的步骤签名分隔线数量不正确。")
+                for step, (_row, _col, _left, _top, _width, height) in zip(
+                    configuration.get("steps") or [], bounds
+                ):
+                    row, slots = int(step["row"]), int(step["signature_slots"])
+                    for index in range(1, slots):
+                        name = f"演练步骤分隔线-{row}-{index}"
+                        matches = [
+                            anchor for anchor in dividers
+                            if (properties := anchor.find(f".//{{{_XDR_NS}}}cNvPr")) is not None
+                            and properties.attrib.get("name") == name
+                        ]
+                        if len(matches) != 1:
+                            raise DrillError(f"第 {row} 行步骤签名分隔线缺失。")
+                        marker = matches[0].find(f"{{{_XDR_NS}}}from")
+                        actual = int(marker.findtext(f"{{{_XDR_NS}}}rowOff") or 0) / _EMU_PER_PIXEL if marker is not None else -1
+                        if abs(actual - height * index / slots) > 1:
+                            raise DrillError(f"第 {row} 行步骤签名分隔线位置不正确。")
             expected_hashes: Counter[str] = Counter()
             for placement in placements:
                 signers = [
@@ -2066,7 +2242,12 @@ def _verify_generated_workbook(
                     for signer in signers
                 ]
                 positions = drill_signature_layout(
-                    sizes, area_width, area_height, str(placement.get("layout") or "")
+                    sizes, area_width, area_height, str(placement.get("layout") or ""),
+                    slot_count=int(placement.get("signature_slots") or 0),
+                    slot_indices=[
+                        int(signer.get("slot_index", index))
+                        for index, signer in enumerate(signers)
+                    ],
                 )
                 for signer, (_x, _y, width, height) in zip(signers, positions):
                     content = print_signature_png(
@@ -2142,6 +2323,19 @@ def _preview_cell_styles(
 
 
 def _sheet_preview_model(sheet: dict[str, Any], *, sheet_type: str, derived: dict[str, Any], generated_current: bool) -> dict[str, Any]:
+    if sheet_type == "record":
+        sheet = {**sheet, "row_heights": dict(sheet.get("row_heights") or {})}
+        _ensure_step_signature_row_heights(
+            sheet,
+            [
+                {
+                    "row": _cell_parts(str(item["range"]))[0],
+                    "signature_slots": item["signature_slots"],
+                }
+                for item in derived.get("signature_cells") or []
+                if item.get("layout") == "vertical" and item.get("signature_slots")
+            ],
+        )
     values = dict(sheet.get("cells") or {})
     values.update(derived.get(f"{sheet_type}_values") or {})
     significant = [
@@ -2170,10 +2364,14 @@ def _sheet_preview_model(sheet: dict[str, Any], *, sheet_type: str, derived: dic
         {
             "range": item["range"],
             "layout": item.get("layout"),
+            "signature_slots": item.get("signature_slots"),
             "width_px": round(_row_col_pixels(sheet, str(item["range"]))[4]),
             "height_px": round(_row_col_pixels(sheet, str(item["range"]))[5]),
             "signers": [
-                {key: str(person.get(key) or "") for key in ("record_id", "name")}
+                {
+                    **{key: str(person.get(key) or "") for key in ("record_id", "name")},
+                    **({"slot_index": int(person["slot_index"])} if "slot_index" in person else {}),
+                }
                 for person in item.get("signers") or []
             ],
         }

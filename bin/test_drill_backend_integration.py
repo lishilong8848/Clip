@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import os
 import sys
@@ -318,9 +319,10 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                             "layout": "vertical",
                             "width_px": 100,
                             "height_px": 120,
+                            "signature_slots": 3,
                             "signers": [
-                                {"record_id": "rec-1", "name": "甲"},
-                                {"record_id": "rec-2", "name": "乙"},
+                                {"record_id": "rec-1", "name": "甲", "slot_index": 0},
+                                {"record_id": "rec-2", "name": "乙", "slot_index": 2},
                             ],
                         }
                     ]
@@ -331,6 +333,10 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             PortalRuntime.service = previous_service
         data_url = model["signature_cells"][0]["image_data_url"]
         self.assertTrue(data_url.startswith("data:image/png;base64,"))
+        with Image.open(io.BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as preview:
+            self.assertEqual(preview.getpixel((4, 40))[3], 255)
+            self.assertEqual(preview.getpixel((4, 80))[3], 255)
+            self.assertEqual(preview.getpixel((50, 60))[3], 0)
 
     def test_draft_can_save_incomplete_but_generate_cannot(self):
         controller = object.__new__(FastAPIPortalController)
@@ -416,6 +422,50 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                 controller._validate_drill_people_payload(
                     "E", definition, execution, require_complete=False, require_signatures=False,
                 )
+
+    def test_step_signer_slots_keep_empty_middle_position(self):
+        controller = object.__new__(FastAPIPortalController)
+        people = [
+            {"record_id": "a", "name": "甲", "has_signature": True},
+            {"record_id": "b", "name": "乙", "has_signature": True},
+        ]
+        definition = {"configuration": {"steps": [{"row": 14, "location": "机房", "signature_slots": 3}]}}
+        execution = {
+            "commander": people[0], "participants": people,
+            "step_signers": {"14": ["a", "", "b"]},
+        }
+        with patch.object(controller, "_drill_people", return_value=people):
+            controller._validate_drill_people_payload(
+                "A", definition, execution, require_complete=True, require_signatures=True,
+            )
+        self.assertEqual(execution["step_signers"]["14"], ["a", "", "b"])
+
+    def test_ecc_step_accepts_commander_in_any_signature_slot(self):
+        controller = object.__new__(FastAPIPortalController)
+        people = [
+            {"record_id": "a", "name": "指挥人", "has_signature": True},
+            {"record_id": "b", "name": "执行人", "has_signature": True},
+        ]
+        definition = {"configuration": {"steps": [{"row": 19, "location": "ECC", "signature_slots": 3}]}}
+        with patch.object(controller, "_drill_people", return_value=people):
+            for assigned in (["b", "a"], ["b", "", "a"]):
+                execution = {
+                    "commander": people[0], "participants": people,
+                    "step_signers": {"19": assigned},
+                }
+                controller._validate_drill_people_payload(
+                    "A", definition, execution, require_complete=True, require_signatures=True,
+                )
+                self.assertEqual(execution["step_signers"]["19"], assigned)
+            for assigned in ([], ["b", ""]):
+                execution = {
+                    "commander": people[0], "participants": people,
+                    "step_signers": {"19": assigned},
+                }
+                with self.assertRaisesRegex(PortalError, "任意签名位选择指挥人"):
+                    controller._validate_drill_people_payload(
+                        "A", definition, execution, require_complete=True, require_signatures=True,
+                    )
 
     def test_drill_jobs_use_the_dedicated_single_worker_executor(self):
         controller = object.__new__(FastAPIPortalController)

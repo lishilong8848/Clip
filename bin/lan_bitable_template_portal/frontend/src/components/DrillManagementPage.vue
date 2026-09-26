@@ -418,10 +418,14 @@
                         :label="`步骤${stepIndex(step)}执行人${slot}`"
                         :model-value="personOptionLabel(stepSignerIds(step.row)[slot - 1] || '')"
                         :options="stepSignerOptionLabels(step.row, slot - 1)"
+                        :error="eccStepSignerError(step)"
                         :disabled="busy"
                         @update:model-value="updateStepSigner(step, slot - 1, $event)"
                       />
                     </label>
+                    <small v-if="eccStepSignerError(step)" class="step-signer-hint" aria-live="polite">
+                      {{ eccStepSignerError(step) }}
+                    </small>
                   </div>
                 </article>
                 <div v-if="!executionSteps.length" class="empty-inline">模板没有可执行步骤，请联系管理员检查配置。</div>
@@ -1058,7 +1062,7 @@ function ensureExecutionSelectionShape(): void {
   for (const step of executionSteps.value) {
     const key = String(step.row);
     const count = Math.max(1, Number(step.signature_slots || 1));
-    const ids = arrayFrom(execution.value.step_signers[key]).map(String).filter(Boolean).slice(0, count);
+    const ids = arrayFrom(execution.value.step_signers[key]).map((item) => String(item || "")).slice(0, count);
     while (ids.length < count) ids.push("");
     execution.value.step_signers[key] = ids;
   }
@@ -1180,6 +1184,10 @@ function stepSignerOptionLabels(row: unknown, slot: number): string[] {
 
 function updateStepSigner(step: Dict, slot: number, label: string): void {
   if (!execution.value) return;
+  if (isEccStep(step)) {
+    if (/ECC/i.test(error.value) && error.value.includes("指挥人")) error.value = "";
+    if (/ECC/i.test(message.value) && message.value.includes("指挥人")) message.value = "";
+  }
   if (label === blankStepSignerOption) {
     const ids = stepSignerIds(step.row);
     ids[slot] = "";
@@ -1204,6 +1212,11 @@ function isEccStep(step: Dict): boolean {
   return /ECC/i.test(String(step.location || ""));
 }
 
+function eccStepSignerError(step: Dict): string {
+  if (!isEccStep(step) || stepSignerIds(step.row).includes(commanderId.value)) return "";
+  return `步骤 ${stepIndex(step)}（ECC）需包含指挥人签名，可在任意签名位选择。`;
+}
+
 function stepIndex(step: Dict): number {
   return executionSteps.value.findIndex((item) => String(item.row) === String(step.row)) + 1;
 }
@@ -1225,6 +1238,8 @@ function validateExecution(): string[] {
     const needed = Math.max(1, Number(step.signature_slots || 1));
     const ids = stepSignerIds(step.row).filter(Boolean);
     if (ids.length > needed || new Set(ids).size !== ids.length) errors.push(`步骤 ${stepIndex(step)} 最多选择 ${needed} 名不同的执行人`);
+    const eccError = eccStepSignerError(step);
+    if (eccError) errors.push(eccError);
   }
   if (missingSignaturePeople.value.length) errors.push(`${missingSignaturePeople.value.map(personName).join("、")}尚未保存签名`);
   return errors;
@@ -1273,7 +1288,9 @@ async function generateWorkbook(): Promise<void> {
   if (!execution.value || generating.value) return;
   const validation = validateExecution();
   if (validation.length) {
-    setNotice(validation[0], "warning");
+    if (!executionSteps.value.some((step) => validation[0] === eccStepSignerError(step))) {
+      setNotice(validation[0], "warning");
+    }
     return;
   }
   if (dirty.value && !(await saveDraft({ quiet: true }))) return;
@@ -2223,6 +2240,7 @@ details.locked { opacity: .75; }
 .step-copy span { color: #1e63ff; font-size: 11px; font-weight: 850; }
 .step-copy p { margin: 4px 0 0; color: #334155; font-size: 13px; line-height: 1.55; }
 .signer-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.step-signer-hint { grid-column: 1 / -1; color: #b42318; font-size: 12px; line-height: 1.4; }
 .signature-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .drill-signature-canvas { position: relative; min-height: 360px; overflow: hidden; border: 1px dashed #93c5fd; border-radius: 18px; background: linear-gradient(90deg, rgba(37,99,235,.05) 1px, transparent 1px), linear-gradient(rgba(37,99,235,.05) 1px, transparent 1px), #fff; background-size: 22px 22px; touch-action: none; user-select: none; }
 .drill-signature-canvas canvas { position: relative; z-index: 2; display: block; width: 100%; height: min(56vh, 520px); min-height: 360px; cursor: crosshair; touch-action: none; }

@@ -10867,20 +10867,20 @@ class FastAPIPortalController:
                 self._drill_person_record_id(item)
                 for item in (step_signers.get(row) or [])
             ]
-            values = [item for item in values if item]
+            selected = [item for item in values if item]
             if len(values) > slots:
                 raise PortalError(
                     f"演练步骤第 {row or '?'} 行最多选择 {slots} 名执行人。"
                 )
-            if len(values) != len(set(values)):
+            if len(selected) != len(set(selected)):
                 raise PortalError(f"演练步骤第 {row or '?'} 行不能重复选择同一人。")
-            if any(item not in participant_set for item in values):
+            if any(item not in participant_set for item in selected):
                 raise PortalError(
                     f"演练步骤第 {row or '?'} 行执行人必须来自参演人员。"
                 )
-            if require_complete and values and "ECC" in str(step.get("location") or "").upper() and values[0] != commander_id:
+            if require_complete and "ECC" in str(step.get("location") or "").upper() and commander_id not in selected:
                 raise PortalError(
-                    f"演练步骤第 {row or '?'} 行位置包含 ECC，第一位必须是指挥人。"
+                    f"演练步骤第 {row or '?'} 行位置包含 ECC，请在任意签名位选择指挥人。"
                 )
             normalized_step_signers[row] = values
 
@@ -10920,7 +10920,7 @@ class FastAPIPortalController:
         *,
         required: bool,
     ) -> dict[str, Any]:
-        from PIL import Image
+        from PIL import Image, ImageDraw
 
         result = dict(model or {})
         cells = [
@@ -10932,14 +10932,15 @@ class FastAPIPortalController:
             signers = [
                 item for item in (cell.get("signers") or []) if isinstance(item, dict)
             ]
-            if not signers:
+            layout = str(cell.get("layout") or "grid").strip().lower()
+            slots = max(len(signers), int(cell.get("signature_slots") or 0)) if layout == "vertical" else 0
+            if not signers and slots <= 1:
                 continue
             width = max(48, min(1600, int(cell.get("width_px") or 320)))
             height = max(32, min(1000, int(cell.get("height_px") or 96)))
-            layout = str(cell.get("layout") or "grid").strip().lower()
             canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
             prepared = []
-            for signer in signers:
+            for index, signer in enumerate(signers):
                 record_id = str(signer.get("record_id") or "").strip()
                 try:
                     signature_bytes = PortalRuntime.service.drill_signature_image_bytes(
@@ -10949,18 +10950,20 @@ class FastAPIPortalController:
                     with Image.open(io.BytesIO(signature_bytes)) as source:
                         image = source.convert("RGBA")
                         image.load()
-                        prepared.append(image)
+                        prepared.append((image, int(signer.get("slot_index", index))))
                 except Exception as exc:
                     if required:
                         name = str(signer.get("name") or record_id or "未知人员")
                         raise PortalError(f"无法读取{name}的签名：{exc}") from exc
             positions = drill_signature_layout(
-                [(image.width, image.height) for image in prepared],
+                [(image.width, image.height) for image, _slot_index in prepared],
                 width,
                 height,
                 layout,
+                slot_count=slots,
+                slot_indices=[slot_index for _image, slot_index in prepared],
             )
-            for image, (left, top, image_width, image_height) in zip(
+            for (image, _slot_index), (left, top, image_width, image_height) in zip(
                 prepared, positions
             ):
                 resized = print_signature_image(
@@ -10968,6 +10971,11 @@ class FastAPIPortalController:
                     (max(1, round(image_width)), max(1, round(image_height))),
                 )
                 canvas.alpha_composite(resized, (round(left), round(top)))
+            if slots > 1:
+                draw = ImageDraw.Draw(canvas)
+                for index in range(1, slots):
+                    y = round(height * index / slots)
+                    draw.line((3, y, width - 3, y), fill=(0, 0, 0, 255), width=1)
             output = io.BytesIO()
             canvas.save(output, format="PNG", optimize=True)
             cell["image_data_url"] = (

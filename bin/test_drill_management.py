@@ -27,11 +27,13 @@ from lan_bitable_template_portal.drill_management import (  # noqa: E402
     DrillManagementService,
     _horizontal_signature_layout,
     _parse_workbook,
+    _row_col_pixels,
     _verify_generated_workbook,
     _derived_values,
     _validate_execution,
     build_time_chain,
     detect_drill_configuration,
+    drill_signature_layout,
     normalize_drill_signature_png,
     parse_duration_minutes,
 )
@@ -284,6 +286,17 @@ class DrillManagementTests(unittest.TestCase):
             self.assertEqual(_validate_execution(definition, execution), [])
         too_many = {**base, "step_signers": {"14": ["p1", "p2", "p3", "p4"]}}
         self.assertIn("最多选择 3 名执行人", "".join(_validate_execution(definition, too_many)))
+        ecc_definition = {"configuration": {"steps": [{"row": 14, "signature_slots": 3, "location": "ECC"}]}}
+        for selected in (["p1"], ["p2", "p1"], ["p2", "", "p1"]):
+            self.assertEqual(
+                _validate_execution(ecc_definition, {**base, "step_signers": {"14": selected}}),
+                [],
+            )
+        for selected in ([], ["p2", "p3"]):
+            self.assertIn(
+                "需选择指挥人签名",
+                "".join(_validate_execution(ecc_definition, {**base, "step_signers": {"14": selected}})),
+            )
 
     def _ready_drill(self, service: DrillManagementService, source: bytes) -> tuple[dict, dict, dict]:
         definition = service.create_definition(name="回归演练", year=2026, month=9, file_name="test.xlsx", source=source)
@@ -348,6 +361,90 @@ class DrillManagementTests(unittest.TestCase):
                     self.assertEqual(sum(len(root.findall('.//{*}cxnSp')) for root in drawings), 5)
                     self.assertEqual(sum(1 for root in drawings for prop in root.findall('.//{*}cNvPr') if prop.attrib.get('name') == '测试Logo'), 1)
                 reused = output.read_bytes()
+
+    def test_changed_step_signature_slots_replace_template_dividers(self) -> None:
+        source = _replace_zip_part(
+            _fixture_xlsx(), "xl/worksheets/sheet1.xml",
+            lambda content: content.replace(b'<row r="14" ht="90"', b'<row r="14" ht="20"')
+            .replace(b'<row r="15" ht="120"', b'<row r="15" ht="30"'),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(
+                LanPortalStateStore(Path(temporary) / "state.sqlite3"),
+                data_root=Path(temporary) / "drills",
+            )
+            definition = service.create_definition(
+                name="签名分区", year=2026, month=9, file_name="test.xlsx", source=source,
+            )
+            configuration = dict(definition["configuration"])
+            configuration["steps"] = [
+                {**step, "signature_slots": {14: 2, 15: 3}.get(step["row"], step["signature_slots"])}
+                for step in configuration["steps"]
+            ]
+            definition = service.save_configuration(
+                definition["drill_id"], configuration, expected_version=definition["version"],
+            )
+            definition = service.publish(definition["drill_id"], expected_version=definition["version"])
+            people = [{"record_id": f"p{index}", "name": f"人员{index}"} for index in range(1, 4)]
+            service.save_execution(
+                definition["drill_id"], "A",
+                {
+                    "drill_date": "2026-09-03", "first_start_time": "09:00",
+                    "commander": people[0], "participants": people,
+                    "step_signers": {
+                        str(step["row"]): [person["record_id"] for person in people[:step["signature_slots"]]]
+                        for step in definition["configuration"]["steps"]
+                    },
+                },
+                expected_version=0,
+            )
+            result = service.generate(
+                definition["drill_id"], "A",
+                signatures={person["record_id"]: _signature_png() for person in people},
+            )
+            output = Path(result["generated"]["path"])
+            record = _parse_workbook(output)["sheets"][0]
+            self.assertGreaterEqual(record["row_heights"][14], 72)
+            self.assertGreaterEqual(record["row_heights"][15], 108)
+            self.assertGreaterEqual(result["print_models"]["record"]["row_heights"]["13"], 96)
+            self.assertGreaterEqual(result["print_models"]["record"]["row_heights"]["14"], 144)
+            for row, expected in ((13, 0), (14, 1), (15, 2)):
+                dividers = [
+                    line for line in record["connectors"]
+                    if line["from_row"] == row - 1 and line["to_row"] == row - 1
+                    and min(line["from_col"], line["to_col"]) <= 7 <= max(line["from_col"], line["to_col"])
+                ]
+                self.assertEqual(len(dividers), expected, f"H{row}")
+            with zipfile.ZipFile(output) as archive:
+                drawing = ET.fromstring(archive.read(record["drawing_path"]))
+            for row, slots in ((14, 2), (15, 3)):
+                area_height = _row_col_pixels(record, f"H{row}")[5]
+                for index in range(1, slots):
+                    name = f"演练步骤分隔线-{row}-{index}"
+                    divider = next(
+                        anchor for anchor in drawing
+                        if any(item.attrib.get("name") == name for item in anchor.findall(".//{*}cNvPr"))
+                    )
+                    marker = divider.find("{*}from")
+                    offset = int(marker.findtext("{*}rowOff") or 0) / 9525
+                    self.assertAlmostEqual(offset, area_height * index / slots, delta=1)
+                images = [
+                    anchor for anchor in drawing
+                    if any(item.attrib.get("name", "").startswith("演练签名-") for item in anchor.findall(".//{*}cNvPr"))
+                    and (marker := anchor.find("{*}from")) is not None
+                    and marker.findtext("{*}row") == str(row - 1)
+                    and marker.findtext("{*}col") == "7"
+                ]
+                self.assertEqual(len(images), slots)
+                centers = sorted(
+                    int(anchor.find("{*}from").findtext("{*}rowOff") or 0) / 9525
+                    + int(anchor.find("{*}ext").attrib["cy"]) / 9525 / 2
+                    for anchor in images
+                )
+                for index, center in enumerate(centers):
+                    self.assertGreater(center, area_height * index / slots)
+                    self.assertLess(center, area_height * (index + 1) / slots)
+            self.assertEqual(Path(definition["source"]["path"]).read_bytes(), source)
 
     def test_shared_drawing_is_detached_for_record_and_assessment_signatures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -563,6 +660,14 @@ class DrillManagementTests(unittest.TestCase):
         crowded = _horizontal_signature_layout([(160, 50)] * 10, 200, 40)
         self.assertLessEqual(crowded[-1][0] + crowded[-1][2], 200)
         self.assertTrue(all(width < 20 for _x, _y, width, _height in crowded))
+
+    def test_vertical_signatures_keep_an_empty_middle_slot(self) -> None:
+        placements = drill_signature_layout(
+            [(160, 50), (160, 50)], 160, 144, "vertical",
+            slot_count=3, slot_indices=[0, 2],
+        )
+        self.assertLess(placements[0][1] + placements[0][3], 48)
+        self.assertGreaterEqual(placements[1][1], 96)
 
     def test_new_drawing_is_inserted_before_later_worksheet_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
