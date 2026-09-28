@@ -13,6 +13,7 @@
           <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />{{ pendingExportRequest ? '继续上次导出' : '导出' }}</button>
       <button :disabled="exportHistoryLoading" @click="showExports()"><History :size="16" />{{ exportHistoryLoading ? '读取历史中' : '导出历史' }}</button>
         </template>
+        <button v-if="isAdmin" title="月度自动归档设置" class="schedule-button" @click="openExportSchedule"><Settings2 :size="16" />设置</button>
       </div>
     </header>
     <div v-if="error" class="notice danger" role="alert">{{ error }}<button @click="error = ''" aria-label="关闭错误"><X :size="16" /></button></div>
@@ -186,6 +187,28 @@
     <ConfirmDialog :open="Boolean(cleanupTarget)" tone="danger" title="清理导出文件？" message="清理后无法再次从本机下载此文件；机柜台账和已上传的云端归档不受影响。" confirm-label="清理文件" cancel-label="保留文件" @resolve="resolveExportCleanup" />
     <ConfirmDialog :open="restoreDialogOpen" title="恢复未保存的机柜记录？" message="检测到上次未完成的填写。" confirm-label="恢复编辑" cancel-label="丢弃草稿" @resolve="restoreDraft" />
     <ConfirmDialog :open="cacheCleanupOpen" tone="warning" title="清理本地图片缓存？" message="仅清理已成功上传飞书的本地原图和缩略图；机柜记录、云端附件及再次查看时的自动回填不受影响。" confirm-label="清理缓存" cancel-label="取消" @resolve="resolveCacheCleanup" />
+    <div v-if="exportScheduleOpen" class="scrim" @click.self="exportScheduleOpen = false">
+      <section class="modal export-schedule-modal" role="dialog" aria-modal="true" aria-label="机柜月度自动归档设置" tabindex="-1">
+        <header><h2>月度自动归档</h2><button aria-label="关闭设置" @click="exportScheduleOpen = false"><X :size="18" /></button></header>
+        <form @submit.prevent="saveExportSchedule">
+          <div class="export-schedule-body">
+            <p v-if="exportScheduleLoading">正在读取设置…</p>
+            <template v-else>
+              <label class="checkbox"><input v-model="exportSchedule.enabled" type="checkbox" />每月自动导出 A–E 楼并上传多维</label>
+              <div class="export-schedule-fields">
+                <label>每月日期 <input v-model.number="exportSchedule.day" type="number" min="1" max="31" required :disabled="!exportSchedule.enabled" /></label>
+                <label>开始时间 <input v-model="exportSchedule.time" type="time" required :disabled="!exportSchedule.enabled" /></label>
+              </div>
+              <p class="schedule-note">北京时间执行。设为 29–31 日时，短月在最后一天执行；程序关闭期间错过的任务会在下次启动后开始。</p>
+              <p v-if="exportSchedule.enabled && exportSchedule.next_run_at">下次计划：{{ exportSchedule.next_run_at }}</p>
+              <p v-if="exportSchedule.current_month_batch">本月批次：{{ scheduleBatchLabel(exportSchedule.current_month_batch) }}<button v-if="['failed','interrupted'].includes(exportSchedule.current_month_batch.status)" type="button" :disabled="exportScheduleSaving" @click="resumeScheduledBatch">继续本月批次</button></p>
+              <p v-if="exportScheduleError" class="danger-text" role="alert">{{ exportScheduleError }}</p>
+            </template>
+          </div>
+          <footer><button type="button" @click="exportScheduleOpen = false">关闭</button><button class="primary" type="submit" :disabled="exportScheduleLoading || exportScheduleSaving">{{ exportScheduleSaving ? '保存中…' : '保存设置' }}</button></footer>
+        </form>
+      </section>
+    </div>
     <div v-if="previewEvidence" class="evidence-preview" role="dialog" aria-modal="true" aria-label="上下电确认截图原图" @click.self="previewEvidence = ''"><button aria-label="关闭原图" @click="previewEvidence = ''"><X :size="20" /></button><img :src="previewEvidence" alt="上下电确认截图原图" /></div>
   </main>
 </template>
@@ -193,7 +216,7 @@
 <script setup lang="ts">
 import { randomHexId, resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Settings2, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { navigate, registerNavigationGuard } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -203,6 +226,29 @@ const api = '/api/cabinet-power';
 const read = (path: string, params: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs, signal });
 const write = (path: string, data: Dict, method = 'POST') => requestJson(api + '/' + path, { method, body: JSON.stringify({ ...data, scope: data.scope || props.scope }), timeoutMs: 90000 });
 const storageWarning = ref('');
+const exportScheduleOpen = ref(false), exportScheduleLoading = ref(false), exportScheduleSaving = ref(false), exportScheduleError = ref('');
+const exportSchedule = reactive<Dict>({ enabled:false, day:1, time:'02:00', next_run_at:'', current_month_batch:null });
+const scheduleBatchLabel = (batch: Dict) => ({ succeeded:'已归档', failed:'失败', interrupted:'待继续', running:'正在执行', pending:'等待执行' }[String(batch.status)] || String(batch.status));
+async function openExportSchedule(): Promise<void> {
+  exportScheduleOpen.value = true; exportScheduleLoading.value = true; exportScheduleError.value = '';
+  await nextTick(); document.querySelector<HTMLElement>('.export-schedule-modal button')?.focus();
+  try { Object.assign(exportSchedule, await read('export-schedule')); }
+  catch (exc: any) { exportScheduleError.value = exc?.message || '设置读取失败'; }
+  finally { exportScheduleLoading.value = false; }
+}
+async function saveExportSchedule(): Promise<void> {
+  exportScheduleSaving.value = true; exportScheduleError.value = '';
+  try { Object.assign(exportSchedule, await write('export-schedule', { enabled:exportSchedule.enabled, day:exportSchedule.day, time:exportSchedule.time }, 'PUT')); message.value = '月度自动归档设置已保存'; exportScheduleOpen.value = false; }
+  catch (exc: any) { exportScheduleError.value = exc?.message || '设置保存失败'; }
+  finally { exportScheduleSaving.value = false; }
+}
+async function resumeScheduledBatch(): Promise<void> {
+  const id = String(exportSchedule.current_month_batch?.batch_id || ''); if (!id) return;
+  exportScheduleSaving.value = true; exportScheduleError.value = '';
+  try { await write('export-batches/' + id + '/resume', {}); Object.assign(exportSchedule, await read('export-schedule')); }
+  catch (exc: any) { exportScheduleError.value = exc?.message || '批次继续失败'; }
+  finally { exportScheduleSaving.value = false; }
+}
 const serverStorage = ref<Dict>({}), serverStorageLoading = ref(false), cacheCleanupOpen = ref(false);
 const formatBytes = (value:unknown) => { const bytes=Number(value||0); return bytes<1024*1024 ? `${Math.ceil(bytes/1024)} KiB` : `${(bytes/1024/1024).toFixed(1)} MiB`; };
 async function loadServerStorage():Promise<void>{serverStorageLoading.value=true;try{serverStorage.value=await read('storage');}catch(exc){fail(exc);}finally{serverStorageLoading.value=false;}}
@@ -631,10 +677,10 @@ async function resolveExportCleanup(confirmed: boolean): Promise<void> {
 }
 function keyboard(e: KeyboardEvent): void {
   if (previewEvidence.value) { if (e.key === 'Escape') { e.preventDefault(); previewEvidence.value = ''; } else if (e.key === 'Tab') { e.preventDefault(); document.querySelector<HTMLElement>('.evidence-preview>button')?.focus(); } return; }
-  if (!editorOpen.value && !historyOpen.value && !discardDialogOpen.value && !restoreDialogOpen.value) return;
-  if (e.key === 'Escape') { e.preventDefault(); if (discardDialogOpen.value) resolveDiscardConfirmation(false); else if (restoreDialogOpen.value) restoreDraft(false); else if (editorOpen.value) closeEditor(); else historyOpen.value = false; return; }
+  if (!editorOpen.value && !historyOpen.value && !discardDialogOpen.value && !restoreDialogOpen.value && !exportScheduleOpen.value) return;
+  if (e.key === 'Escape') { e.preventDefault(); if (exportScheduleOpen.value) exportScheduleOpen.value = false; else if (discardDialogOpen.value) resolveDiscardConfirmation(false); else if (restoreDialogOpen.value) restoreDraft(false); else if (editorOpen.value) closeEditor(); else historyOpen.value = false; return; }
   if (e.key !== 'Tab') return;
-  const modal = document.querySelector('.cabinet-page .confirm-modal') || document.querySelector(editorOpen.value ? '.editor-layer .modal' : '.scrim .modal');
+  const modal = document.querySelector('.cabinet-page .confirm-modal') || document.querySelector(exportScheduleOpen.value ? '.export-schedule-modal' : editorOpen.value ? '.editor-layer .modal' : '.scrim .modal');
   const nodes = Array.from(modal?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]') || []);
   const first = nodes[0], last = nodes[nodes.length - 1];
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
@@ -727,4 +773,5 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 .rack-power{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:14px;border-bottom:1px solid #dce6f1;margin-bottom:14px;color:#526b83}
 .rack-power strong{margin-left:12px;color:#203650;font-size:17px;font-variant-numeric:tabular-nums}
 .power-editor{width:min(460px,96vw);height:auto}.power-form label{display:grid;gap:8px}.power-form p{margin:0 0 16px}.power-form .power-hint{font-size:12px;color:#63768c;line-height:1.6;margin:12px 0 0}
+.actions .schedule-button{margin-left:auto}.export-schedule-modal{width:min(430px,94vw);height:auto;max-height:calc(100dvh - 48px);border-radius:8px}.export-schedule-modal form{min-height:0;overflow:auto}.export-schedule-body{padding:20px;display:grid;gap:16px}.export-schedule-body p{margin:0;line-height:1.5}.export-schedule-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.export-schedule-fields label{display:grid;gap:6px;min-width:0}.export-schedule-fields input{width:100%;box-sizing:border-box}.schedule-note{color:#61768b;font-size:12px}.export-schedule-modal footer{display:flex;justify-content:flex-end;gap:8px;padding:16px 20px;border-top:1px solid #dce6f1}
 </style>

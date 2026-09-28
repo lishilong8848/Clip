@@ -2532,8 +2532,12 @@ def _detail_form(
                 else f"manual:lite:{scope}:{work}:{uuid.uuid4().hex}"
             )
         )
+    parsed_keys_attr = (
+        f' data-parsed-keys="{_e(_json_dumps(list(parsed_draft)))}"'
+        if work != "event" and parsed_draft else ""
+    )
     return f"""
-      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
+      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}"{parsed_keys_attr}>
         {datalists}
         <input type="hidden" name="scope" value="{_e(scope)}">
         <input type="hidden" name="source_month" value="{_e(source_month)}">
@@ -6308,13 +6312,13 @@ def render_workbench_lite(
       'impact', 'discovery', 'symptom', 'reason', 'solution', 'spare_parts',
       'progress'
     ];
-    function applyRepairNoticeDraft(form, draft) {{
+    function applyRepairNoticeDraft(form, draft, fillEmptyOnly = false) {{
       if (!form || !draft || typeof draft !== 'object') return 0;
       let filledCount = 0;
       for (const key of liteRepairNoticeDraftFields) {{
         const value = normalizeRepairEventPrefillValue(key, draft[key]);
         const field = form.querySelector(`[name="${{CSS.escape(key)}}"]`);
-        if (!field || String(field.value || '') === value) continue;
+        if (!field || String(field.value || '') === value || (fillEmptyOnly && String(field.value || '').trim())) continue;
         field.value = value;
         filledCount += 1;
       }}
@@ -6427,7 +6431,7 @@ def render_workbench_lite(
           ? result.draft
           : {{}};
         setManualBindingChoice(form, 'bind', candidate);
-        const filledCount = applyRepairNoticeDraft(form, draft);
+        const filledCount = applyRepairNoticeDraft(form, draft, Boolean(form.dataset.parsedKeys));
         setFormValue(
           form,
           'repair_management_record_id',
@@ -9122,8 +9126,20 @@ def render_workbench_lite(
       const pasteForm = event.target.closest('.paste-drawer form,.paste-box form');
       if (pasteForm) {{
         event.preventDefault();
-        if (!(await prepareLiteNavigation())) return;
-        setLiteFormDirty(false);
+        const previousForm = document.getElementById('lite-notice-form');
+        const previousWork = previousForm ? previewValue(previousForm, 'work_type') : '';
+        const keepManual = previousForm?.dataset.detailMode === 'manual' && previousWork !== 'event';
+        const previousValues = keepManual ? captureNoticeFormValues(previousForm) : null;
+        const previousBinding = keepManual ? {{
+          choice: previewValue(previousForm, 'manual_binding_choice'),
+          source_record_id: previewValue(previousForm, 'source_record_id'),
+          title: previousForm.querySelector('#lite-manual-binding-status')?.textContent || '',
+          manual_id: previewValue(previousForm, 'manual_id'),
+        }} : null;
+        if (!keepManual) {{
+          if (!(await prepareLiteNavigation())) return;
+          setLiteFormDirty(false);
+        }}
         const submitter = event.submitter;
         if (submitter) submitter.disabled = true;
         try {{
@@ -9136,7 +9152,33 @@ def render_workbench_lite(
           if (handleLiteAuthRequired(response, null, html)) return;
           if (!response.ok) throw new Error(html || '解析失败');
           const nextDoc = new DOMParser().parseFromString(html, 'text/html');
+          const nextForm = nextDoc.querySelector('#lite-notice-form');
+          const sameManualWork = previousValues && nextForm?.dataset.detailMode === 'manual'
+              && previewValue(nextForm, 'work_type') === previousWork
+              && previewValue(nextForm, 'scope') === previewValue(previousForm, 'scope');
+          if (sameManualWork) {{
+            const parsedKeys = new Set(JSON.parse(nextForm.dataset.parsedKeys || '[]'));
+            for (const [name, value] of Object.entries(previousValues)) {{
+              if (!parsedKeys.has(name) && value) setFormValue(nextForm, name, value);
+            }}
+            if (previousBinding?.manual_id) setFormValue(nextForm, 'manual_id', previousBinding.manual_id);
+          }}
+          const previousBuildings = String(previousValues?.building_codes || '').split(',').filter(Boolean).sort();
+          const nextBuildings = nextForm ? selectedBuildingCodes(nextForm).sort() : [];
+          const bindingBuildingsMatch = !previousBuildings.length || !nextBuildings.length
+            || previousBuildings.join(',') === nextBuildings.join(',');
           applyLiteDocument(nextDoc, canonicalLiteUrlFromDocument(nextDoc, location.href), true);
+          const activeForm = document.getElementById('lite-notice-form');
+          if (sameManualWork && previousBinding && activeForm === nextForm && activeForm.querySelector('[data-manual-source-binding]')) {{
+            if (previousBinding.choice === 'unbound') setManualBindingChoice(activeForm, 'unbound');
+            else if (previousBinding.choice === 'bind' && previousBinding.source_record_id && bindingBuildingsMatch) {{
+              setManualBindingChoice(activeForm, 'bind', {{
+                source_record_id: previousBinding.source_record_id,
+                title: previousBinding.title,
+              }});
+            }}
+          }}
+          if (keepManual) setLiteFormDirty(false);
         }} catch (error) {{
           showLiteError(error && error.message ? error.message : '解析失败');
           if (submitter) submitter.disabled = false;

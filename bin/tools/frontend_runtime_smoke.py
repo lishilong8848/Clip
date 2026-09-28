@@ -2981,8 +2981,26 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await leftBind.waitFor();
             await leftBind.click();
             await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'bind' && Boolean(document.querySelector('[name="source_record_id"]')?.value));
+            const boundSourceBeforeParse = await bindingPage.locator('#lite-notice-form [name="source_record_id"]').inputValue();
+            await bindingPage.locator('#lite-notice-form [name="location"]').fill('解析前填写的位置');
+            await bindingPage.locator('#lite-paste-toggle').click();
+            await bindingPage.locator('form[action="/workbench-lite/parse"] textarea[name="paste_text"]').fill(`【维保通告】状态：开始
+【名称】A楼解析后绑定检查
+【内容】解析的新内容`);
+            await bindingPage.getByRole('button', {{ name: '解析到当前通告' }}).click();
+            await bindingPage.waitForFunction(() => document.querySelector('#lite-notice-form [name="title"]')?.value === 'A楼解析后绑定检查');
+            if (await bindingPage.locator('#lite-notice-form [name="source_record_id"]').inputValue() !== boundSourceBeforeParse
+                || await bindingPage.locator('#lite-notice-form [name="manual_binding_choice"]').inputValue() !== 'bind'
+                || await bindingPage.locator('#lite-notice-form [name="location"]').inputValue() !== '解析前填写的位置') {{
+              throw new Error('pasted notice lost existing planned-source binding or manually filled fields');
+            }}
             await bindingPage.locator('[data-manual-binding-mode="unbound"]').first().click();
             await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'unbound');
+            await bindingPage.locator('[data-manual-quick-source]').first().click();
+            await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'bind');
+            if (await bindingPage.locator('#lite-notice-form [name="title"]').inputValue() !== 'A楼解析后绑定检查') {{
+              throw new Error('binding a planned notice erased parsed notice fields');
+            }}
             await bindingPage.locator('#lite-notice-drawer-close').click();
             await bindingPage.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'));
             if (await bindingPage.locator('[data-bind-current-manual]:visible').count()) throw new Error('manual source bind actions remained visible after closing drawer');

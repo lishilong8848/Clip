@@ -28237,6 +28237,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     parsed_action=action,
                 )
                 self.assertIn('name="manual_binding_required" value="1"', detail_html)
+                self.assertIn('data-parsed-keys=', detail_html)
                 self.assertIn("绑定已有计划通告", detail_html)
                 self.assertIn("不绑定，作为独立通告", detail_html)
 

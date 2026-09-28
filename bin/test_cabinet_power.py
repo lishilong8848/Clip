@@ -3152,6 +3152,33 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         old_eid=saved["items"]["A"]["result"]["export_id"]
         self.assertEqual(self.service.local.document("A","export:"+old_eid)["cloud_upload_status"],"replaced")
 
+    def test_monthly_export_schedule_runs_once_and_freezes_archive_month(self):
+        beijing=dt.timezone(dt.timedelta(hours=8))
+        now=dt.datetime(2026,2,27,23,0,tzinfo=beijing)
+        self.assertIsNone(self.service.start_scheduled_export_if_due(now))
+        with self.assertRaises(CabinetError):
+            self.service.save_export_schedule({"enabled":True,"day":0,"time":"02:00"},"admin")
+        self.service.save_export_schedule({"enabled":True,"day":31,"time":"09:30"},"admin")
+        self.assertEqual(self.service.export_schedule(now)["next_run_at"],"2026-02-28 09:30")
+        self.assertIsNone(self.service.start_scheduled_export_if_due(now))
+        calls=[]
+        def start(batch_id,owner,allowed,admin=False,archive_period=""):
+            calls.append((batch_id,owner,allowed,admin,archive_period))
+            self.service._save_batch_record({"batch_id":batch_id,"owner":owner,"status":"succeeded"})
+            return {"batch_id":batch_id,"status":"succeeded"}
+        with patch.object(self.service,"start_export_batch",side_effect=start):
+            due=dt.datetime(2026,2,28,9,30,tzinfo=beijing)
+            first=self.service.start_scheduled_export_if_due(due)
+            repeated=self.service.start_scheduled_export_if_due(due+dt.timedelta(hours=1))
+            self.assertEqual((repeated["batch_id"],repeated["status"]),
+                             (first["batch_id"],first["status"]))
+            self.service.start_scheduled_export_if_due(dt.datetime(2026,3,31,9,30,tzinfo=beijing))
+        self.assertEqual(len(calls),2)
+        self.assertEqual(self.service.export_schedule(due)["next_run_at"],"2026-03-31 09:30")
+        self.assertEqual((calls[0][1],set(calls[0][2]),calls[0][3],calls[0][4]),
+                         ("admin",set("ABCDE"),True,"2026-02"))
+        self.assertNotEqual(calls[0][0],calls[1][0])
+
     def test_export_batch_creates_new_month_without_changing_prior_archive(self):
         archive=FakeExportFeishu(); self.service.export_remote=archive
         self.service.do_export=self._fake_export_file

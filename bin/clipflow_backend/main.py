@@ -12826,6 +12826,16 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"水耗快照后台刷新触发失败: {exc}")
 
+    def _run_scheduled_cabinet_export(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            cabinet = getattr(self, "_cabinet_power", None)
+            if cabinet is not None:
+                cabinet.start_scheduled_export_if_due()
+        except Exception as exc:
+            log_warning(f"机柜五楼月度归档启动失败: {exc}")
+
     def _run_scheduled_critical_guard_weather(self) -> None:
         if _mock_external_enabled():
             return
@@ -13228,6 +13238,15 @@ class FastAPIPortalController:
             "interval",
             minutes=30,
             id="water_consumption_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_cabinet_export,
+            "interval",
+            minutes=1,
+            id="cabinet_monthly_export",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

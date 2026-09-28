@@ -1,6 +1,7 @@
 """Feishu business data with local immutable map/export templates."""
 from __future__ import annotations
 import copy
+import calendar
 import datetime as dt
 import gzip
 import hashlib
@@ -28,6 +29,7 @@ EXPORT_ARCHIVE_URL=f"https://vnet.feishu.cn/base/{EXPORT_ARCHIVE_APP_TOKEN}?tabl
 EXPORT_ARCHIVE_FIELDS={"导出标识":1,"批次标识":1,"楼栋":1,"文件名称":1,"数据版本":2,"导出时间":1,"文件SHA256":1,"导出人":1,"上传文件":17,"子分类":3,"年度":3,"月份":3,"链接":1}
 EXPORT_ARCHIVE_CATEGORY="机柜上下电记录"
 EXPORT_BATCH_NAMESPACE="cabinet_export_batches"
+EXPORT_SCHEDULE_NAMESPACE="cabinet_export_schedule"
 _ARCHIVE_THREAD_LOCK=threading.RLock()
 NAMESPACE="cabinet_power"
 DIRECTORY_NAME="机柜基础资料"
@@ -1524,6 +1526,53 @@ class CabinetPowerService:
     def _batch_record(self,batch_id):
         return self.store.get_document(EXPORT_BATCH_NAMESPACE,batch_id)
 
+    @staticmethod
+    def _scheduled_batch_id(now):
+        return "all_"+uuid.uuid5(uuid.NAMESPACE_URL,f"cabinet-power-monthly:{now:%Y-%m}").hex
+
+    def export_schedule(self,now=None):
+        now=now or dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        config=self.store.get_document(EXPORT_SCHEDULE_NAMESPACE,"monthly") or {}
+        result={"enabled":bool(config.get("enabled")),"day":int(config.get("day") or 1),
+                "time":str(config.get("time") or "02:00"),"updated_at":str(config.get("updated_at") or "")}
+        current=self._batch_record(self._scheduled_batch_id(now))
+        result["current_month_batch"] = self._public_batch_record(current) if current else None
+        year,month=now.year,now.month
+        for _ in range(2):
+            day=min(result["day"],calendar.monthrange(year,month)[1])
+            hour,minute=map(int,result["time"].split(":"))
+            due=now.replace(year=year,month=month,day=day,hour=hour,minute=minute,second=0,microsecond=0)
+            if due>now or not current:
+                result["next_run_at"]=due.strftime("%Y-%m-%d %H:%M")
+                break
+            year,month=(year+1,1) if month==12 else (year,month+1)
+        return result
+
+    def save_export_schedule(self,payload,owner):
+        if not isinstance(payload.get("enabled"),bool): raise CabinetError("请选择是否启用每月自动归档")
+        try: day=int(payload.get("day"))
+        except (TypeError,ValueError): raise CabinetError("每月日期必须为 1–31") from None
+        clock=str(payload.get("time") or "")
+        if not 1<=day<=31 or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d",clock):
+            raise CabinetError("请选择有效的每月日期和时间")
+        config={"enabled":payload["enabled"],"day":day,"time":clock,"owner":owner,"updated_at":stamp()}
+        self.store.put_document(EXPORT_SCHEDULE_NAMESPACE,"monthly",config)
+        return self.export_schedule()
+
+    def start_scheduled_export_if_due(self,now=None):
+        now=now or dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        config=self.store.get_document(EXPORT_SCHEDULE_NAMESPACE,"monthly") or {}
+        if not config.get("enabled") or not config.get("owner"): return None
+        day=min(int(config["day"]),calendar.monthrange(now.year,now.month)[1])
+        hour,minute=map(int,str(config["time"]).split(":"))
+        due=now.replace(day=day,hour=hour,minute=minute,second=0,microsecond=0)
+        if now<due: return None
+        batch_id=self._scheduled_batch_id(now)
+        current=self._batch_record(batch_id)
+        if current and current.get("status") in ("succeeded","failed"): return self._public_batch_record(current)
+        return self.start_export_batch(batch_id,str(config["owner"]),TOTALS,admin=True,
+                                       archive_period=now.strftime("%Y-%m"))
+
     def _save_batch_record(self,batch):
         batch["updated_at"]=stamp()
         self.store.put_document(EXPORT_BATCH_NAMESPACE,batch["batch_id"],batch)
@@ -1541,7 +1590,7 @@ class CabinetPowerService:
             result["status"]="interrupted"
         return result
 
-    def start_export_batch(self,batch_id,owner,allowed,admin=False):
+    def start_export_batch(self,batch_id,owner,allowed,admin=False,archive_period=""):
         if set(TOTALS)-set(allowed): raise CabinetError("一键导出需要 A–E 五楼权限",403)
         if not re.fullmatch(r"all_[a-f0-9]{32}",batch_id or ""): raise CabinetError("五楼导出批次标识无效")
         with archive_file_lock(self.root/"archive.lock"):
@@ -1550,6 +1599,9 @@ class CabinetPowerService:
                 batch={"batch_id":batch_id,"owner":owner,"status":"pending","phase":"preparing",
                        "items":{scope:{"scope":scope,"status":"pending"} for scope in TOTALS},
                        "tokens":{},"created_at":stamp(),"cloud_record_id":"","archive_url":""}
+                if archive_period:
+                    batch.update(year=archive_period[:4],month=archive_period[5:],
+                                 upload_started_at=stamp())
                 self._save_batch_record(batch)
             if not admin and batch.get("owner")!=owner: raise CabinetError("无权继续此导出批次",403)
             if batch["status"]=="succeeded": return self._public_batch_record(batch)

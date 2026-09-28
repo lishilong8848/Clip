@@ -24,6 +24,15 @@ def install_cabinet_power_routes(app,controller,runtime):
             if not owner: raise CabinetError("登录身份不完整",401)
             allowed=[s for s in TOTALS if admin or runtime.auth_manager.scope_allowed(session,s)]
             query=dict(request.query_params)
+            if path=="export-schedule":
+                if not admin: raise CabinetError("仅管理员可设置机柜月度归档",403)
+                if request.method=="GET":
+                    data=await asyncio.to_thread(service.export_schedule)
+                elif request.method=="PUT":
+                    payload=await controller._read_json_request(request,max_bytes=4096)
+                    data=await asyncio.to_thread(service.save_export_schedule,payload,owner)
+                else: raise CabinetError("请求方式无效",405)
+                return controller._json_ok(request,session,data)
             if path.startswith("batches"):
                 if path=="batches/retry-handoffs" and request.method=="POST":
                     if not admin: raise CabinetError("仅管理员可重试通告联动",403)
@@ -268,7 +277,8 @@ def install_cabinet_power_routes(app,controller,runtime):
         "rack-power":["PATCH"],
         "operations/{record_id}/evidence/{image_id}":["GET"],"operations/{record_id}/documents/{file_id}":["GET"],"refresh":["POST"],
          "exports":["POST"],"jobs/{job_id}":["GET"],"exports/{export_id}/download":["GET"],
-         "export-batches":["POST"],"export-batches/{batch_id}":["GET"],"export-batches/{batch_id}/resume":["POST"],
+        "export-batches":["POST"],"export-batches/{batch_id}":["GET"],"export-batches/{batch_id}/resume":["POST"],
+        "export-schedule":["GET","PUT"],
         "writes":["GET"],"writes/{operation_id}":["GET"],"writes/{operation_id}/resume":["POST"],
         "writes/{operation_id}/reconcile":["POST"],
         "export-history":["GET"],"exports/{export_id}/upload":["POST"],"exports/{export_id}/cleanup":["POST"],
