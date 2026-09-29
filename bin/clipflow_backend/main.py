@@ -729,6 +729,8 @@ class FastAPIPortalController:
         app = FastAPI(title="ClipFlow LAN Backend")
         from lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
         install_cabinet_power_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.learning_routes import install_learning_routes
+        install_learning_routes(app, self, PortalRuntime)
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
@@ -11966,6 +11968,11 @@ class FastAPIPortalController:
             info = extract_event_info(str(payload.get("text") or "")) or {}
             item_key = str(info.get("unique_key") or "").strip()
             item_event_identity_key = str(payload.get("event_identity_key") or "").strip()
+            if notice_type == "事件通告":
+                try:
+                    item_event_identity_key = PortalRuntime._event_notice_identity_key(payload) or item_event_identity_key
+                except Exception:
+                    pass
             item_title = str(
                 payload.get("match_title")
                 or info.get("title")

@@ -108,6 +108,12 @@
       @switch-scope="enterEventManagement"
     />
 
+    <LearningPage
+      v-else-if="isLearningPage"
+      :scope="routeParams.get('scope') || ''"
+      :user-id="String(auth.user?.open_id || '')"
+    />
+
     <DailyTaskChecklistPage
       v-else-if="isDailyTaskPage"
       :scope="currentScope"
@@ -181,6 +187,7 @@
       @water="enterWaterManagement"
       @critical-guard="enterCriticalGuard()"
       @drill="enterDrillManagement()"
+      @learning="navigate('/learning')"
       @cabinet-power="navigate('/cabinet-power')"
       @daily="enterDailyTasks"
       @request-permission="openAdditionalPermissionRequest"
@@ -214,6 +221,7 @@ const AuthPanels = asyncPage(() => import("./components/AuthPanels.vue"));
 const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue"));
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
 const DailyTaskChecklistPage = asyncPage(() => import("./components/DailyTaskChecklistPage.vue"));
+const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
@@ -300,6 +308,7 @@ const isSignaturePage = computed(() => routePath.value === "/signature");
 const isSignatureManagementPage = computed(() => routePath.value === "/signature-management");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks" || routePath.value === "/daily-tasks/morning-meeting/print");
+const isLearningPage = computed(() => routePath.value === "/learning");
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCabinetPowerPage = computed(() => routePath.value === "/cabinet-power");
@@ -368,6 +377,7 @@ const headerSubtitle = computed(() => {
   if (isSignatureManagementPage.value) return "人员中心 · 统一签名管理";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
+  if (isLearningPage.value) return "画像学练";
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (isCabinetPowerPage.value || isCabinetPowerBatchPage.value) return "机柜上下电";
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";

@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "critical_guard" | "drill" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "critical_guard" | "drill" | "learning" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -131,6 +131,7 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
 ];
 
 export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, ScopeHomeEntryConfig> = {
+  learning: { kicker: "画像学练", title: "画像学练", description: "", actionLabel: "进入画像学练" },
   cabinet_power: { kicker: "机柜台账", title: "选择楼栋", description: "上下电记录与机柜平面图", actionLabel: "进入机柜上下电" },
   capacity: { kicker: "容量管理", title: "选择容量管理模板", description: "", actionLabel: "选择模板" },
   event: {
@@ -232,6 +233,7 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
 };
 
 export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
+  { key: "learning", title: "画像学练", description: "每日练习、错题复习与学习画像", badge: "学练", icon: "daily", tone: "emerald" },
   { key: "daily", title: "每日任务清单", description: "汇总当天通告、事件、检修和维护记录", badge: "今日", icon: "daily", tone: "blue" },
   { key: "power", title: "上/下电通告", description: "机柜上电、下电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },

@@ -1456,6 +1456,9 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "signature_print.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "repair_operations.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_cloud.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_routes.py",
         PROJECT_ROOT / "bin" / "test_submission_reliability.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",
@@ -1527,6 +1530,13 @@ def _run_packaging_preflight_tests() -> None:
         check=True,
     )
     log("通告 ID 边界测试通过。")
+
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    log("画像学练专项测试通过。")
 
     subprocess.run(
         [sys.executable, "-m", "unittest", "bin.test_submission_reliability",

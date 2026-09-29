@@ -1284,7 +1284,11 @@ class MainWindowRecordsMixin:
 
     @staticmethod
     def _normalize_event_building_key(value) -> str:
-        return ",".join(extract_building_codes(value))
+        codes = extract_building_codes(value)
+        values = value if isinstance(value, (list, tuple)) else [value]
+        if not codes and any(str(item or "").strip().upper() in {"园区", "CAMPUS", "PARK"} for item in values):
+            codes = list("ABCDE")
+        return ",".join(codes)
 
     def _event_match_title_from_data(self, data: dict | None) -> str:
         if not isinstance(data, dict):
@@ -1332,6 +1336,8 @@ class MainWindowRecordsMixin:
         if not buildings:
             buildings = self._infer_buildings_from_notice_text(raw_text)
         building_key = self._normalize_event_building_key(buildings)
+        if not building_key and "园区" in str(info.get("title") or data.get("title") or ""):
+            building_key = "A,B,C,D,E"
         source = self._normalize_match_text(
             info.get("source")
             or data.get("event_source")

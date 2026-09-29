@@ -284,6 +284,7 @@ const emit = defineEmits<{
   water: [scope: string];
   "critical-guard": [];
   drill: [];
+  learning: [];
   "cabinet-power": [];
   daily: [scope: string];
   "request-permission": [];
@@ -596,6 +597,7 @@ function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
 }
 
 function selectEntry(key: EntryKey): void {
+  if (key === "learning") { emit("learning"); return; }
   if (!key) return;
   if (key === "event") {
     const scope = defaultEventScope();

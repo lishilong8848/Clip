@@ -380,6 +380,10 @@ class MainWindowRuntimeMixin:
         projection = (
             result.get("projection") if isinstance(result.get("projection"), dict) else {}
         )
+        if projection.get("ignored") and projection.get("reason"):
+            show_message = getattr(self, "show_message", None)
+            if callable(show_message):
+                show_message(f"剪贴板通告未更新：{projection['reason']}")
         if not projection or projection.get("ignored"):
             return {"ok": True, "skipped": True}
         item = projection.get("item") if isinstance(projection.get("item"), dict) else None

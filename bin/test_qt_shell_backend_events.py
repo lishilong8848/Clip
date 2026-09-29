@@ -2483,6 +2483,62 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
+    def test_campus_event_end_matches_campus_instead_of_identical_h_building_notice(self):
+        start = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房园区I3级事件通报\n"
+            "【来源】BMS系统\n"
+            "【时间】2026-09-29 15:38:08\n"
+            "【概述】BMS报园区多设备_电压_V: 过低报警\n"
+            "【影响】IT业务暂无影响\n"
+            "【进展】1、值班工程师已前往现场查看,请知晓!"
+        )
+        updates = [
+            start.replace("状态：新增", "状态：更新") + "\n2、各楼动环告警已全部恢复，初步判断电压暂降",
+            start.replace("状态：新增", "状态：更新") + "\n2、各楼动环告警已全部恢复，初步判断电压暂降\n3、110站检查后台无异常",
+        ]
+        end = start.replace("状态：新增", "状态：结束") + "\n2、各楼动环告警已全部恢复，初步判断电压暂降\n3、110站检查后台无异常\n4、各楼反馈现场设备运行正常"
+        matcher = _RecordsHarness()
+        self.assertEqual(matcher._normalize_event_building_key(["园区"]), "A,B,C,D,E")
+        self.assertFalse(matcher._event_sparse_identity_matches({"text": end}, {"text": start, "building_codes": ["H"]}))
+        self.assertTrue(matcher._event_sparse_identity_matches({"text": end}, {"text": start, "building_codes": list("ABCDE")}))
+        stale_key = PortalRuntime._event_notice_identity_key({"notice_type": "事件通告", "text": start, "building_codes": list("ABCDE")})
+        self.assertTrue(stale_key)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            with patch.object(PortalRuntime, "state_store", store):
+                for name, codes in (("H", ["H"]), ("Campus", list("ABCDE"))):
+                    payload = {
+                        "active_item_id": f"active{name}", "record_id": f"rec{name}123",
+                        "target_record_id": f"rec{name}123", "notice_type": "事件通告",
+                        "work_type": "event", "text": start, "building_codes": codes,
+                        "source": "BMS系统", "event_source": "BMS系统", "level": "I3",
+                        "_is_placeholder_record": False,
+                    }
+                    if name == "H":
+                        payload["event_identity_key"] = stale_key
+                        payload["event_match_fields"] = {"building": "A,B,C,D,E"}
+                        corrected = PortalRuntime._event_identity_payload_patch(payload)
+                        self.assertNotEqual(corrected["event_identity_key"], stale_key)
+                        self.assertEqual(corrected["event_match_fields"]["building"], "H")
+                    store.upsert_qt_active_item(payload, section="event", origin="qt_upload")
+                for text in (*updates, end):
+                    entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                    result = FastAPIPortalController._project_clipboard_entry_to_active(entry)
+                    self.assertFalse(result.get("ignored"), result)
+                    self.assertEqual(result["record_id"], "recCampus123")
+                items = {item["active_item_id"]: item["payload"] for item in store.list_qt_active_items()}
+                self.assertNotIn("状态：结束", items["activeH"]["text"])
+                self.assertIn("状态：结束", items["activeCampus"]["text"])
+
+    def test_ignored_clipboard_projection_explains_why_qt_did_not_update(self):
+        harness = _Harness()
+        messages = []
+        harness.show_message = messages.append
+        result = harness._apply_clipboard_projection_result({"projection": {"ignored": True, "reason": "未找到可更新的活动条目。"}})
+        self.assertTrue(result["skipped"])
+        self.assertEqual(messages, ["剪贴板通告未更新：未找到可更新的活动条目。"])
+
     def test_sparse_event_clipboard_update_refuses_ambiguous_targets(self):
         current_month = dt.datetime.now().strftime("%Y-%m")
         first_text = (

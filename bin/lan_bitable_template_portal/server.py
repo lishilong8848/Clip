@@ -8115,6 +8115,8 @@ class PortalRuntime:
         codes = collect_codes(explicit_values)
         if codes:
             return ",".join(sorted(codes))
+        if any(str(value or "").strip().upper() in {"园区", "CAMPUS", "PARK"} for value in explicit_values):
+            return "A,B,C,D,E"
 
         fallback_values = [
             data.get(key)
@@ -8128,6 +8130,8 @@ class PortalRuntime:
         codes = collect_codes(fallback_values)
         if codes:
             return ",".join(sorted(codes))
+        if any("园区" in str(value or "") for value in fallback_values):
+            return "A,B,C,D,E"
         if text:
             try:
                 for code in cls.service._building_codes_from_value(text):
@@ -8216,10 +8220,11 @@ class PortalRuntime:
         computed = cls._event_match_fields(data)
         stored = data.get("event_match_fields")
         stored = stored if isinstance(stored, dict) else {}
+        explicit_building = any(data.get(key) for key in ("building_codes", "buildings", "building", "机楼", "楼栋"))
         return {
             key: str(
                 (computed.get(key) or stored.get(key) or "")
-                if key == "time"
+                if key == "time" or key == "building" and explicit_building
                 else (stored.get(key) or computed.get(key) or "")
             ).strip()
             for key in ("title", "time", "building", "source", "level")
@@ -9452,19 +9457,24 @@ class PortalRuntime:
             computed_key = cls._event_notice_identity_key(data)
         except Exception:
             computed_key = ""
-        identity_key = existing_key or computed_key
+        existing_fields = (data or {}).get("event_match_fields")
+        existing_fields = existing_fields if isinstance(existing_fields, dict) else {}
+        try:
+            computed_fields = cls._event_match_fields(data)
+        except Exception:
+            computed_fields = {}
+        explicit_building = any((data or {}).get(key) for key in ("building_codes", "buildings", "building", "机楼", "楼栋"))
+        building_changed = bool(explicit_building and computed_fields.get("building") and existing_fields.get("building") != computed_fields["building"])
+        identity_key = computed_key if building_changed else existing_key or computed_key
         if not identity_key:
             return {}
         patch: dict[str, Any] = {"event_identity_key": identity_key}
         try:
-            computed_fields = cls._event_match_fields(data)
-            existing_fields = (data or {}).get("event_match_fields")
-            existing_fields = (
-                existing_fields if isinstance(existing_fields, dict) else {}
-            )
             patch["event_match_fields"] = {
                 key: str(
-                    existing_fields.get(key) or computed_fields.get(key) or ""
+                    computed_fields.get(key) or existing_fields.get(key) or ""
+                    if key == "building" and explicit_building
+                    else existing_fields.get(key) or computed_fields.get(key) or ""
                 ).strip()
                 for key in ("title", "time", "building", "source", "level")
             }
