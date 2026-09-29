@@ -724,6 +724,8 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
         "actual_total": ("演练总用时",),
         "participant_signatures": ("演练参演人签字", "参演人签字"),
         "recorder_signature": ("演练记录人签字", "记录人签字"),
+        "reviewer_signature": ("演练审核人签字", "审核人签字"),
+        "review_time": ("签字时间",),
     }
     mapping = {key: _target_right(sheet, _find_label(sheet, aliases)) for key, aliases in labels.items()}
     headers = {
@@ -810,6 +812,8 @@ def _detect_assessment_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
         "start_time": ("开始时间",),
         "end_time": ("结束时间",),
         "total_score": ("总分",),
+        "evaluator_signature": ("演练评估人", "评估人签字"),
+        "evaluation_time": ("评估时间",),
     }
     mapping = {key: _target_right(sheet, _find_label(sheet, aliases)) for key, aliases in labels.items()}
     score_header = _find_label(sheet, ("分值",))
@@ -836,7 +840,7 @@ def _detect_assessment_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
     total = sum(float(item["score"]) for item in score_rows)
     if not score_rows or abs(total - 100.0) > 0.001:
         raise DrillError(f"评估表分值合计必须为 100，当前为 {total:g}。")
-    missing = [key for key, value in mapping.items() if not value]
+    missing = [key for key in ("drill_name", "drill_date", "participants", "start_time", "end_time", "total_score") if not mapping.get(key)]
     if missing:
         raise DrillError(f"工作表“{sheet.get('name')}”缺少必要标签：{', '.join(missing)}")
     mapping["score_rows"] = score_rows
@@ -928,6 +932,8 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         "actual_total",
         "participant_signatures",
         "recorder_signature",
+        "reviewer_signature",
+        "review_time",
     ):
         value = supplied_mapping.get(key)
         if isinstance(value, str) and value.strip():
@@ -1034,6 +1040,12 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
     missing_assessment = [key for key in required_assessment if not assessment_mapping.get(key)]
     if missing_assessment:
         raise DrillError("演练评估表映射不完整：" + "、".join(missing_assessment))
+    review_ranges = (
+        mapping.get("reviewer_signature"), mapping.get("review_time"),
+        assessment_mapping.get("evaluator_signature"), assessment_mapping.get("evaluation_time"),
+    )
+    if any(review_ranges) and not all(review_ranges):
+        raise DrillError("演练审核人、签字时间、演练评估人和评估时间须全部映射。")
     assessment_total = sum(float(item.get("score") or 0) for item in assessment_mapping["score_rows"])
     if abs(assessment_total - 100.0) > 0.001:
         raise DrillError(f"评估表分值合计必须为 100，当前为 {assessment_total:g}。")
@@ -1150,6 +1162,16 @@ def _cell_target(reference: str) -> str:
     return _cell_ref(row, col)
 
 
+def _parse_evaluation_time(value: Any) -> dt.datetime | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d", text):
+        return None
+    try:
+        return dt.datetime.strptime(text, "%Y-%m-%dT%H:%M")
+    except ValueError:
+        return None
+
+
 def _derived_values(
     definition: dict[str, Any], execution: dict[str, Any], *, allow_incomplete: bool = False
 ) -> dict[str, Any]:
@@ -1157,6 +1179,7 @@ def _derived_values(
     mapping = configuration["mapping"]
     steps = configuration["steps"]
     commander = _person(execution.get("commander"))
+    evaluator = _person(execution.get("evaluator"))
     participants = [_person(item) for item in execution.get("participants") or []]
     timeline: list[dict[str, str]] = []
     drill_date_text = str(execution.get("drill_date") or "")
@@ -1199,10 +1222,29 @@ def _derived_values(
     if mapping.get("actual_total"):
         record_values[_cell_target(mapping["actual_total"])] = total_text
     assessment = mapping["assessment"]
+    review_ranges = (
+        mapping.get("reviewer_signature"), mapping.get("review_time"),
+        assessment.get("evaluator_signature"), assessment.get("evaluation_time"),
+    )
+    if any(review_ranges) and not all(review_ranges):
+        raise DrillError("演练评估签名区域映射不完整。")
+    review_enabled = all(review_ranges)
+    signature_time = _parse_evaluation_time(execution.get("signature_time", execution.get("evaluation_time")))
+    evaluation_time = _parse_evaluation_time(execution.get("evaluation_time"))
+    evaluation_time_text = (
+        evaluation_time.strftime("%Y年%m月%d日 %H时%M分")
+        if evaluation_time else ""
+    )
+    if review_enabled:
+        record_values[_cell_target(mapping["reviewer_signature"])] = ""
+        record_values[_cell_target(mapping["review_time"])] = signature_time.strftime("%Y年%m月%d日 %H时%M分") if signature_time else ""
     assessment_values: dict[str, str | int | float] = {
         _cell_target(assessment["participants"]): "",
         _cell_target(assessment["total_score"]): 100,
     }
+    if review_enabled:
+        assessment_values[_cell_target(assessment["evaluator_signature"])] = ""
+        assessment_values[_cell_target(assessment["evaluation_time"])] = evaluation_time_text
     if drill_date:
         assessment_values[_cell_target(assessment["drill_date"])] = record_values[
             _cell_target(mapping["drill_date"])
@@ -1246,6 +1288,11 @@ def _derived_values(
             "signers": participants,
         },
     ]
+    if review_enabled:
+        signature_cells.extend([
+            {"sheet_type": "record", "range": mapping["reviewer_signature"], "layout": "grid", "signers": [evaluator] if evaluator["record_id"] else []},
+            {"sheet_type": "assessment", "range": assessment["evaluator_signature"], "layout": "grid", "signers": [evaluator] if evaluator["record_id"] else []},
+        ])
     step_signers = execution.get("step_signers") if isinstance(execution.get("step_signers"), dict) else {}
     participant_by_id = {item["record_id"]: item for item in participants}
     for step in steps:
@@ -1289,6 +1336,22 @@ def _validate_execution(definition: dict[str, Any], execution: dict[str, Any]) -
         errors.append("指挥人必须排在参演人员第一位。")
     if len(ids) != len(set(ids)) or len(ids) > DRILL_MAX_PARTICIPANTS:
         errors.append("参演人员不能重复且最多选择 10 人。")
+    mapping = definition.get("configuration", {}).get("mapping") or {}
+    assessment = mapping.get("assessment") or {}
+    review_ranges = (
+        mapping.get("reviewer_signature"), mapping.get("review_time"),
+        assessment.get("evaluator_signature"), assessment.get("evaluation_time"),
+    )
+    if any(review_ranges) and not all(review_ranges):
+        errors.append("演练评估签名区域映射不完整。")
+    elif all(review_ranges):
+        evaluator = _person(execution.get("evaluator"))
+        if not evaluator["record_id"] or not evaluator["name"]:
+            errors.append("请选择演练评估人。")
+        if _parse_evaluation_time(execution.get("signature_time", execution.get("evaluation_time"))) is None:
+            errors.append("请选择有效的演练审核人签名时间。")
+        if _parse_evaluation_time(execution.get("evaluation_time")) is None:
+            errors.append("请选择有效的演练评估人评估时间。")
     selected = set(ids)
     step_signers = execution.get("step_signers") if isinstance(execution.get("step_signers"), dict) else {}
     for step in definition.get("configuration", {}).get("steps") or []:
@@ -2378,12 +2441,27 @@ def _sheet_preview_model(sheet: dict[str, Any], *, sheet_type: str, derived: dic
         for item in derived.get("signature_cells") or []
         if str(item.get("sheet_type") or "record") == sheet_type
     ]
+    signature_bounds = [_range_bounds(str(item["range"])) for item in signature_cells]
+
+    def overlaps_signature(item: dict[str, Any]) -> bool:
+        anchor = _cell_ref(int(item.get("row") or 0) + 1, int(item.get("col") or 0) + 1)
+        try:
+            image_row1, image_col1, image_row2, image_col2 = _range_bounds(str(item.get("range") or anchor))
+        except DrillError:
+            return True
+        return any(
+            image_row1 <= row2 and image_row2 >= row1
+            and image_col1 <= col2 and image_col2 >= col1
+            for row1, col1, row2, col2 in signature_bounds
+        )
+
     cell_styles = _preview_cell_styles(sheet, row_count, col_count)
     images = [
         copy.deepcopy(item)
         for item in sheet.get("preview_images") or []
         if int(item.get("row") or 0) < row_count
         and int(item.get("col") or 0) < col_count
+        and not overlaps_signature(item)
     ]
     _row1, _col1, _row2, _col2, sheet_width, sheet_height = _row_col_pixels(
         sheet,
@@ -2423,43 +2501,54 @@ class DrillManagementService:
 
             data_root = get_data_file_path("drill_management")
         self.data_root = Path(data_root).resolve()
-        self._scenario_cache: dict[str, tuple[str, str]] = {}
+        self._template_mapping_cache: dict[str, dict[str, str]] = {}
 
-    def _with_scenario_mapping(self, definition: dict[str, Any]) -> dict[str, Any]:
+    def _with_template_mappings(self, definition: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(definition)
         configuration = result.get("configuration")
-        if not isinstance(configuration, dict) or not configuration.get("record_sheet"):
+        if not isinstance(configuration, dict) or not configuration.get("record_sheet") or not configuration.get("assessment_sheet"):
             return result
         mapping = configuration.get("mapping")
         if not isinstance(mapping, dict):
             return result
-        if mapping.get("scenario") and "scenario_default_text" in configuration:
+        assessment = mapping.setdefault("assessment", {})
+        if not isinstance(assessment, dict):
+            return result
+        if (mapping.get("scenario") and "scenario_default_text" in configuration
+                and all(mapping.get(key) for key in ("reviewer_signature", "review_time"))
+                and all(assessment.get(key) for key in ("evaluator_signature", "evaluation_time"))):
             return result
         drill_id = str(result.get("drill_id") or "")
-        cached = self._scenario_cache.get(drill_id)
+        cached = self._template_mapping_cache.get(drill_id)
         if cached is None:
-            scenario_range = scenario_text = ""
+            cached = {}
             try:
                 workbook = _parse_workbook(self._source_path(result))
                 record = _find_sheet(workbook, str(configuration.get("record_sheet") or ""))
-                scenario_range = _target_right(
-                    record,
-                    _find_label(
-                        record,
-                        ("模拟场景（包括故障点与故障现象）", "模拟场景", "故障点与故障现象"),
-                    ),
-                )
-                if scenario_range:
-                    scenario_text = str(
-                        (record.get("cells") or {}).get(_cell_target(scenario_range)) or ""
+                review = _find_sheet(workbook, str(configuration.get("assessment_sheet") or ""))
+                labels = {
+                    "scenario": (record, ("模拟场景（包括故障点与故障现象）", "模拟场景", "故障点与故障现象")),
+                    "reviewer_signature": (record, ("演练审核人签字", "审核人签字")),
+                    "review_time": (record, ("签字时间",)),
+                    "evaluator_signature": (review, ("演练评估人", "评估人签字")),
+                    "evaluation_time": (review, ("评估时间",)),
+                }
+                for key, (sheet, aliases) in labels.items():
+                    cached[key] = _target_right(sheet, _find_label(sheet, aliases))
+                if cached["scenario"]:
+                    cached["scenario_default_text"] = str(
+                        (record.get("cells") or {}).get(_cell_target(cached["scenario"])) or ""
                     )
             except Exception:
-                pass
-            cached = (scenario_range, scenario_text)
-            self._scenario_cache[drill_id] = cached
-        if cached[0]:
-            mapping["scenario"] = cached[0]
-        configuration.setdefault("scenario_default_text", cached[1])
+                return result
+            self._template_mapping_cache[drill_id] = cached
+        for key in ("scenario", "reviewer_signature", "review_time"):
+            if not mapping.get(key) and cached.get(key):
+                mapping[key] = cached[key]
+        for key in ("evaluator_signature", "evaluation_time"):
+            if not assessment.get(key) and cached.get(key):
+                assessment[key] = cached[key]
+        configuration.setdefault("scenario_default_text", cached.get("scenario_default_text", ""))
         return result
 
     def _definition_directory(self, definition: dict[str, Any]) -> Path:
@@ -2496,7 +2585,7 @@ class DrillManagementService:
             marker = f"{int(item.get('year') or 0):04d}-{int(item.get('month') or 0):02d}"
             if normalized_month and marker != normalized_month:
                 continue
-            result = copy.deepcopy(item)
+            result = self._with_template_mappings(item)
             result["assigned_scopes"] = drill_assigned_scopes(item)
             result["has_executions"] = str(result.get("drill_id") or "") in execution_ids
             result["configuration_locked"] = result["has_executions"]
@@ -2550,7 +2639,7 @@ class DrillManagementService:
         item = self.state_store.get_document(DRILL_DEFINITION_NAMESPACE, str(drill_id or "").strip())
         if not isinstance(item, dict):
             raise DrillNotFoundError("演练不存在。")
-        result = self._with_scenario_mapping(item)
+        result = self._with_template_mappings(item)
         result["assigned_scopes"] = drill_assigned_scopes(item)
         result["has_executions"] = self._has_execution(str(result.get("drill_id") or ""))
         result["configuration_locked"] = result["has_executions"]
@@ -2698,6 +2787,9 @@ class DrillManagementService:
                     or ""
                 ),
                 "commander": {},
+                "evaluator": {},
+                "signature_time": "",
+                "evaluation_time": "",
                 "participants": [],
                 "step_signers": {},
                 "validation_errors": [],
@@ -2714,6 +2806,9 @@ class DrillManagementService:
                 or ""
             ),
         )
+        execution.setdefault("evaluator", {})
+        execution.setdefault("evaluation_time", "")
+        execution.setdefault("signature_time", execution["evaluation_time"])
         execution["generation_rule_current"] = _generation_is_current(execution)
         execution["definition_version"] = int(definition.get("version") or 0)
         return copy.deepcopy(execution)
@@ -2736,6 +2831,10 @@ class DrillManagementService:
                     "演练文件正在生成或同步，请完成后再修改。"
                 )
             commander = _person((payload or {}).get("commander"))
+            evaluator = _person((payload or {}).get("evaluator"))
+            signature_time = (payload or {}).get("signature_time")
+            if signature_time is None:
+                signature_time = current.get("signature_time") or (payload or {}).get("evaluation_time") or ""
             incoming = [_person(item) for item in ((payload or {}).get("participants") or []) if isinstance(item, dict)]
             participants: list[dict[str, str]] = []
             seen = set()
@@ -2754,6 +2853,9 @@ class DrillManagementService:
                     (payload or {}).get("simulation_scenario") or ""
                 ).strip()[:5000],
                 "commander": commander,
+                "evaluator": evaluator,
+                "signature_time": str(signature_time).strip(),
+                "evaluation_time": str((payload or {}).get("evaluation_time") or "").strip(),
                 "participants": participants,
                 "step_signers": {
                     str(key): [str(value or "") for value in values]
@@ -2826,7 +2928,6 @@ class DrillManagementService:
         scope: str,
         *,
         require_complete: bool = False,
-        prefer_generated: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         definition = self.get_definition(drill_id)
         execution = self.get_execution(drill_id, scope, create=not require_complete)
@@ -2835,11 +2936,8 @@ class DrillManagementService:
             raise DrillConflictError(errors[0])
         configuration = definition["configuration"]
         current = _generation_is_current(execution)
-        workbook_path = self._source_path(definition)
-        if current and prefer_generated:
-            workbook_path, _file_name = self.generated_file(drill_id, scope)
         workbook = _parse_workbook(
-            workbook_path,
+            self._source_path(definition),
             include_assets_for={
                 str(configuration.get("record_sheet") or ""),
                 str(configuration.get("assessment_sheet") or ""),
@@ -2858,9 +2956,7 @@ class DrillManagementService:
         return {**copy.deepcopy(models[normalized]), "execution_version": int(execution.get("execution_version") or 0), "generated_version": int(execution.get("generated_version") or 0)}
 
     def print_model(self, drill_id: str, scope: str, sheet_type: str) -> dict[str, Any]:
-        _definition, execution, _derived, models = self._models(
-            drill_id, scope, require_complete=True
-        )
+        _definition, execution, _derived, models = self._models(drill_id, scope)
         if (
             not _generation_is_current(execution)
         ):
@@ -2889,7 +2985,6 @@ class DrillManagementService:
                 drill_id,
                 normalized_scope,
                 require_complete=True,
-                prefer_generated=False,
             )
             if str(definition.get("status") or "") != "published":
                 raise DrillConflictError("演练模板已归档或尚未发布，不能生成。")

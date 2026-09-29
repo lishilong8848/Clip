@@ -453,6 +453,29 @@
             </section>
 
             <section v-else class="assessment-view">
+              <div v-if="hasReviewMapping" class="field-grid two assessment-fields">
+                <label class="span-two">
+                  <span>演练审核人 / 评估人 <b>*</b></span>
+                  <VnetSelect
+                    input-id="drill-evaluator"
+                    label="演练评估人"
+                    :model-value="personOptionLabel(evaluatorId)"
+                    :options="commanderPersonOptionLabels"
+                    :disabled="busy"
+                    required
+                    @update:model-value="selectEvaluatorByLabel"
+                  />
+                  <small v-if="evaluatorId && selectedEvaluator && !selectedEvaluator.has_signature" class="missing-signature-hint">该人员尚未保存签名</small>
+                </label>
+                <label>
+                  <span>演练审核人签名时间 <b>*</b></span>
+                  <input v-model="execution.signature_time" type="datetime-local" :disabled="busy" @input="markDirty" />
+                </label>
+                <label>
+                  <span>演练评估人评估时间 <b>*</b></span>
+                  <input v-model="execution.evaluation_time" type="datetime-local" :disabled="busy" @input="markDirty" />
+                </label>
+              </div>
               <div v-if="previewLoading" class="inline-state"><Loader2 :size="20" class="spinning" /> 正在读取评估表</div>
               <MessageBanner v-else-if="previewError" tone="failed" :text="previewError" />
               <SheetTable v-else-if="previewModel" :model="previewModel" />
@@ -681,6 +704,8 @@ const recordMappingFields: MappingField[] = [
   { path: "mapping.actual_total", label: "演练总用时" },
   { path: "mapping.participant_signatures", label: "参演人签名区" },
   { path: "mapping.recorder_signature", label: "记录人签名区" },
+  { path: "mapping.reviewer_signature", label: "审核人签名区" },
+  { path: "mapping.review_time", label: "演练审核人签名时间" },
 ];
 const stepMappingFields: MappingField[] = [
   { path: "mapping.steps.start_row", label: "起始行" },
@@ -701,6 +726,8 @@ const assessmentMappingFields: MappingField[] = [
   { path: "mapping.assessment.start_time", label: "开始时间" },
   { path: "mapping.assessment.end_time", label: "结束时间" },
   { path: "mapping.assessment.total_score", label: "总分" },
+  { path: "mapping.assessment.evaluator_signature", label: "评估人签名区" },
+  { path: "mapping.assessment.evaluation_time", label: "演练评估人评估时间" },
 ];
 const blankStepSignerOption = "留空（事后签名）";
 
@@ -753,8 +780,15 @@ const executionSteps = computed<Dict[]>(() => {
 });
 const configurationLocked = computed(() => Boolean(selectedDrill.value?.configuration_locked || selectedDrill.value?.has_executions));
 const commanderId = computed(() => String(execution.value?.commander?.record_id || ""));
+const evaluatorId = computed(() => String(execution.value?.evaluator?.record_id || ""));
+const hasReviewMapping = computed(() => {
+  const mapping = selectedDrill.value?.configuration?.mapping || {};
+  const assessment = mapping.assessment || {};
+  return Boolean(mapping.reviewer_signature && mapping.review_time && assessment.evaluator_signature && assessment.evaluation_time);
+});
 const participantIds = computed<string[]>(() => (Array.isArray(execution.value?.participants) ? execution.value?.participants : []).map((person: Dict) => personId(person)).filter(Boolean));
 const selectedParticipants = computed<Dict[]>(() => participantIds.value.map((id) => personById(id) || execution.value?.participants?.find((person: Dict) => personId(person) === id) || { record_id: id, name: id }));
+const selectedEvaluator = computed<Dict | null>(() => evaluatorId.value ? personById(evaluatorId.value) || execution.value?.evaluator || null : null);
 const currentBuildingPeople = computed(() => people.value.filter((person) => personBelongsToScope(person, activeScope.value)));
 const searchedPeople = computed(() => {
   const query = peopleSearch.value.toLocaleLowerCase("zh-CN");
@@ -774,7 +808,10 @@ const filteredPeople = computed(() => {
     : peopleExpanded.value ? people.value : currentBuildingPeople.value;
   return source;
 });
-const missingSignaturePeople = computed(() => selectedParticipants.value.filter((person) => !person.has_signature));
+const missingSignaturePeople = computed(() => uniquePeople([
+  ...selectedParticipants.value,
+  ...(selectedEvaluator.value ? [selectedEvaluator.value] : []),
+]).filter((person) => !person.has_signature));
 const executionStatusText = computed(() => statusLabel(execution.value?.status || "draft"));
 const generationCurrent = computed(() => execution.value?.generation_rule_current !== false && Number(execution.value?.generated_version || 0) > 0 && Number(execution.value?.generated_version || 0) === Number(execution.value?.execution_version || execution.value?.version || 0));
 const canUseGeneratedFile = computed(() => Boolean(execution.value?.generated && generationCurrent.value && !dirty.value));
@@ -1043,6 +1080,9 @@ function normalizeExecution(value: Dict, drill: Dict | null, scope: string): Dic
   next.first_start_time ||= "09:00";
   next.simulation_scenario = String(next.simulation_scenario ?? drill?.configuration?.scenario_default_text ?? "");
   next.commander = next.commander && typeof next.commander === "object" ? next.commander : {};
+  next.evaluator = next.evaluator && typeof next.evaluator === "object" ? next.evaluator : {};
+  next.evaluation_time = String(next.evaluation_time || "");
+  next.signature_time = String(next.signature_time ?? next.evaluation_time);
   next.participants = Array.isArray(next.participants) ? next.participants : [];
   next.step_signers = next.step_signers && typeof next.step_signers === "object" ? next.step_signers : {};
   next.steps = Array.isArray(next.steps) ? next.steps : deepClone(drill?.configuration?.steps || drill?.steps || []);
@@ -1114,7 +1154,8 @@ function personOptionLabelFromPerson(person: Dict): string {
 }
 
 function personOptionLabel(id: string): string {
-  const person = personById(id) || selectedParticipants.value.find((item) => personId(item) === id);
+  const person = personById(id) || selectedParticipants.value.find((item) => personId(item) === id)
+    || (personId(execution.value?.evaluator) === id ? execution.value?.evaluator : null);
   return person ? personOptionLabelFromPerson(person) : "";
 }
 
@@ -1137,6 +1178,23 @@ function selectCommanderByLabel(label: string): void {
   for (const step of executionSteps.value) {
     const ids = stepSignerIds(step.row).map((id) => id === oldId ? "" : id);
     execution.value.step_signers[String(step.row)] = ids;
+  }
+  markDirty();
+}
+
+function selectEvaluatorByLabel(label: string): void {
+  if (!execution.value) return;
+  const person = personFromOptionLabel(label);
+  if (!person) return;
+  execution.value.evaluator = compactPerson(person);
+  if (!execution.value.signature_time || !execution.value.evaluation_time) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(new Date()).map(({ type, value }) => [type, value]));
+    const currentTime = `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    execution.value.signature_time ||= currentTime;
+    execution.value.evaluation_time ||= currentTime;
   }
   markDirty();
 }
@@ -1232,6 +1290,11 @@ function validateExecution(): string[] {
   if (!execution.value.drill_date) errors.push("请选择演练日期");
   if (!execution.value.first_start_time) errors.push("请选择首步开始时间");
   if (!commanderId.value) errors.push("请选择指挥人");
+  if (hasReviewMapping.value) {
+    if (!evaluatorId.value) errors.push("请选择演练评估人");
+    if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(execution.value.signature_time || ""))) errors.push("请选择有效的演练审核人签名时间");
+    if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(execution.value.evaluation_time || ""))) errors.push("请选择有效的演练评估人评估时间");
+  }
   if (!participantIds.value.length) errors.push("请选择参演人员");
   if (participantIds.value.length > 10) errors.push("参演人员不能超过 10 人");
   for (const step of executionSteps.value) {
@@ -1253,6 +1316,9 @@ function buildExecutionPayload(): Dict {
     first_start_time: execution.value.first_start_time,
     simulation_scenario: String(execution.value.simulation_scenario || ""),
     commander: compactPerson(execution.value.commander || {}),
+    evaluator: evaluatorId.value ? compactPerson(selectedEvaluator.value || execution.value.evaluator) : {},
+    signature_time: String(execution.value.signature_time || ""),
+    evaluation_time: String(execution.value.evaluation_time || ""),
     participants: selectedParticipants.value.map(compactPerson),
     step_signers: deepClone(execution.value.step_signers || {}),
   };
@@ -1819,17 +1885,17 @@ function cellCoordinates(address: string): { row: number; col: number } {
 
 function sheetCellContent(cell: SheetCell): ReturnType<typeof h>[] | string {
   const signature = cell.signature_cell && typeof cell.signature_cell === "object" ? cell.signature_cell as Dict : {};
-  const directUrl = String(signature.image_data_url || signature.image_url || signature.signature_url || cell.image_url || cell.signature_url || cell.src || "");
   const content: ReturnType<typeof h>[] = [];
-  if (directUrl) {
-    content.push(h("img", { class: "sheet-signature-image", src: directUrl, alt: cell.text || "签名", onLoad: markPrintImageLoaded }));
-  } else if (arrayFrom(signature.signers).length) {
-    content.push(h("div", { class: "sheet-signers" }, arrayFrom(signature.signers).map((signer: Dict, index: number) => {
-      const imageUrl = String(signer.image_url || signer.signature_url || "");
-      return imageUrl
-        ? h("img", { key: personId(signer) || index, src: imageUrl, alt: personName(signer), onLoad: markPrintImageLoaded })
-        : h("span", { key: personId(signer) || index }, personName(signer));
-    })));
+  if (arrayFrom(signature.signers).length) {
+    const vertical = signature.layout === "vertical";
+    const slots = Math.max(1, Number(signature.signature_slots || 1));
+    content.push(h("div", {
+      class: ["sheet-signers", { vertical }],
+      style: vertical ? { gridTemplateRows: `repeat(${slots}, minmax(0, 1fr))` } : undefined,
+    }, arrayFrom(signature.signers).map((signer: Dict, index: number) => h("span", {
+      key: personId(signer) || index,
+      style: vertical ? { gridRow: String(Number(signer.slot_index ?? index) + 1) } : undefined,
+    }, personName(signer)))));
   } else if (cell.text) {
     content.push(h("span", { class: "sheet-cell-text" }, cell.text));
   }
@@ -2184,14 +2250,14 @@ details.locked { opacity: .75; }
 .step-table input { width: 76px; }
 .sheet-preview-table td { box-sizing: border-box; padding: 1px 3px; color: #000; font-size: 11pt; line-height: 1.2; white-space: pre-wrap; text-align: center; vertical-align: middle; }
 .sheet-preview-table img { display: block; max-width: 100%; max-height: 76px; margin: auto; object-fit: contain; }
-.sheet-preview-table img.sheet-signature-image { width: 100%; height: 100%; max-height: none; margin: 0; }
 .sheet-preview-table td.sheet-cell-has-image { position: relative; overflow: visible; }
 .sheet-cell-text { position: relative; z-index: 1; }
 .sheet-preview-table img.sheet-template-image { position: absolute; z-index: 2; max-width: none; max-height: none; margin: 0; object-fit: contain; pointer-events: none; }
 .sheet-image-warning { position: sticky; left: 0; margin: 0; padding: 8px 10px; border-top: 1px solid #fde68a; background: #fffbeb; color: #92400e; font-size: 11px; font-weight: 800; }
-.sheet-signers { min-height: 34px; display: flex; align-items: center; justify-content: flex-start; gap: 2px; overflow: hidden; }
-.sheet-signers span { color: #31516f; font-family: "KaiTi", "STKaiti", serif; font-size: 13px; font-weight: 700; white-space: nowrap; }
-.sheet-signers img { min-width: 0; flex: 1 1 0; max-width: 120px; margin: 0; object-fit: contain; }
+.sheet-signers { min-height: 34px; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 2px; }
+.sheet-signers.vertical { display: grid; min-height: 100%; }
+.sheet-signers span { max-width: 112px; overflow: hidden; border: 1px solid #bfdbfe; border-radius: 4px; padding: 2px 6px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.missing-signature-hint { color: #b45309; font-size: 12px; }
 .sheet-table-wrap.compact { max-height: 480px; }
 
 .sticky-actions { position: sticky; bottom: 10px; z-index: 5; display: flex; align-items: center; flex-wrap: wrap; gap: 9px; border: 1px solid #cfe0ff; border-radius: 18px; padding: 10px; background: rgba(255,255,255,.96); box-shadow: 0 14px 34px rgba(0,47,135,.14); backdrop-filter: blur(10px); }

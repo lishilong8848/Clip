@@ -273,6 +273,9 @@ class DrillExecutionRequest(APIModel):
     first_start_time: str = Field(default="", max_length=16)
     simulation_scenario: str = Field(default="", max_length=5000)
     commander: dict[str, Any] = Field(default_factory=dict)
+    evaluator: dict[str, Any] = Field(default_factory=dict)
+    signature_time: str | None = Field(default=None, max_length=16)
+    evaluation_time: str = Field(default="", max_length=16)
     participants: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
     step_signers: dict[str, list[str]] = Field(default_factory=dict)
 

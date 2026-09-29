@@ -21,6 +21,7 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.drill_management import (  # noqa: E402
     DRILL_DEFINITION_NAMESPACE,
     DRILL_EXECUTION_NAMESPACE,
+    DRILL_GENERATION_RULE_VERSION,
     DrillError,
     DrillForbiddenError,
     DrillConflictError,
@@ -28,6 +29,7 @@ from lan_bitable_template_portal.drill_management import (  # noqa: E402
     _horizontal_signature_layout,
     _parse_workbook,
     _row_col_pixels,
+    _sheet_preview_model,
     _verify_generated_workbook,
     _derived_values,
     _validate_execution,
@@ -61,6 +63,7 @@ def _fixture_xlsx(
     with_drawing: bool = True,
     with_table_parts: bool = False,
     shared_drawing: bool = False,
+    with_evaluator: bool = False,
 ) -> bytes:
     record_title = "演练记录表" if recognized else "待配置记录"
     record_rows = [
@@ -89,6 +92,8 @@ def _fixture_xlsx(
         _row(16, [("C16", "预估总用时"), ("D16", "0 时 10 分"), ("F16", "演练总用时")]),
         _row(17, [("B17", "演练参演人（签字）"), ("F17", "演练记录人（签字）")], height=70),
     ]
+    if with_evaluator:
+        record_rows.append(_row(18, [("B18", "演练审核人（签字）"), ("F18", "签字时间"), ("G18", "年 月 日 时 分")], height=70))
     assessment_title = "演练评估表" if recognized else "待配置评估"
     assessment_rows = [
         _row(2, [("D2", assessment_title)]),
@@ -99,6 +104,8 @@ def _fixture_xlsx(
         _row(10, [("H10", "60")]),
         _row(11, [("B11", "总分")]),
     ]
+    if with_evaluator:
+        assessment_rows.append(_row(12, [("B12", "演练评估人"), ("G12", "评估时间"), ("H12", "年 月 日 时 分")], height=70))
     worksheet = lambda rows, merges, drawing="": (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
@@ -112,13 +119,15 @@ def _fixture_xlsx(
     table_parts = '<tableParts count="0"/>' if with_table_parts else ""
     record_xml = worksheet(
         record_rows,
-        ["C2:I4", "C5:E5", "G5:I5", "C6:E6", "G6:I6", "C7:E7", "G7:I7", "G8:I8", "C9:I9", "C10:I10", "D16:E16", "G16:I16", "C17:E17", "G17:I17"],
+        ["C2:I4", "C5:E5", "G5:I5", "C6:E6", "G6:I6", "C7:E7", "G7:I7", "G8:I8", "C9:I9", "C10:I10", "D16:E16", "G16:I16", "C17:E17", "G17:I17"]
+        + (["C18:E18", "G18:I18"] if with_evaluator else []),
         drawing_reference + table_parts,
     )
     record_xml = record_xml.replace('<c r="C2"', '<c r="C2" s="1"', 1)
     assessment_xml = worksheet(
         assessment_rows,
-        ["D2:K4", "B5:C5", "D5:E5", "G5:K5", "B6:C6", "D6:E6", "H6:I6", "J6:K6", "B11:G11", "H11:K11"],
+        ["D2:K4", "B5:C5", "D5:E5", "G5:K5", "B6:C6", "D6:E6", "H6:I6", "J6:K6", "B11:G11", "H11:K11"]
+        + (["B12:C12", "D12:F12", "H12:K12"] if with_evaluator else []),
         drawing_reference if shared_drawing else "",
     )
 
@@ -264,6 +273,88 @@ def _duplicate_workbook_part(source: bytes) -> bytes:
 
 
 class DrillManagementTests(unittest.TestCase):
+    def test_evaluator_is_independent_and_only_generated_file_contains_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            service = DrillManagementService(store, data_root=Path(temporary) / "drills")
+            definition = service.create_definition(
+                name="评估签名演练", year=2026, month=9, file_name="test.xlsx",
+                source=_fixture_xlsx(with_evaluator=True),
+            )
+            mapping = definition["configuration"]["mapping"]
+            self.assertEqual(
+                [mapping["reviewer_signature"], mapping["review_time"],
+                 mapping["assessment"]["evaluator_signature"], mapping["assessment"]["evaluation_time"]],
+                ["C18:E18", "G18:I18", "D12:F12", "H12:K12"],
+            )
+            stored = store.get_document(DRILL_DEFINITION_NAMESPACE, definition["drill_id"])
+            for key in ("reviewer_signature", "review_time"):
+                stored["configuration"]["mapping"].pop(key)
+            for key in ("evaluator_signature", "evaluation_time"):
+                stored["configuration"]["mapping"]["assessment"].pop(key)
+            store.put_document(DRILL_DEFINITION_NAMESPACE, definition["drill_id"], stored)
+            restored = service.get_definition(definition["drill_id"])
+            self.assertEqual(restored["version"], definition["version"])
+            self.assertEqual(restored["configuration"]["mapping"]["reviewer_signature"], "C18:E18")
+            self.assertEqual(service.list_definitions("2026-09")[0]["configuration"]["mapping"]["assessment"]["evaluator_signature"], "D12:F12")
+            definition = service.publish(definition["drill_id"], expected_version=definition["version"])
+            people = [{"record_id": f"p{index}", "name": f"人员{index}"} for index in range(1, 6)]
+            payload = {
+                "drill_date": "2026-09-29", "first_start_time": "09:00",
+                "commander": people[0], "participants": people[:4],
+                "step_signers": {
+                    str(step["row"]): [item["record_id"] for item in people[:step["signature_slots"]]]
+                    for step in definition["configuration"]["steps"]
+                },
+            }
+            draft = service.save_execution(definition["drill_id"], "A", payload, expected_version=0)
+            self.assertEqual(draft["status"], "draft")
+            with self.assertRaisesRegex(DrillConflictError, "评估人"):
+                service.generate(definition["drill_id"], "A")
+            legacy = {**draft, "generated_version": draft["execution_version"],
+                      "generated": {"rule_version": DRILL_GENERATION_RULE_VERSION}}
+            store.put_document(DRILL_EXECUTION_NAMESPACE, legacy["key"], legacy)
+            self.assertTrue(service.print_model(definition["drill_id"], "A", "record")["generated_current"])
+            saved = service.save_execution(
+                definition["drill_id"], "A",
+                {**payload, "evaluator": people[4], "signature_time": "2026-09-29T10:15", "evaluation_time": "2026-09-29T11:32"},
+                expected_version=draft["version"],
+            )
+            self.assertEqual(saved["status"], "ready")
+            reloaded = service.get_execution(definition["drill_id"], "A")
+            self.assertEqual((reloaded["signature_time"], reloaded["evaluation_time"]),
+                             ("2026-09-29T10:15", "2026-09-29T11:32"))
+            self.assertIn("请选择有效的演练审核人签名时间。", _validate_execution(definition, {**saved, "signature_time": ""}))
+            old_execution = {key: value for key, value in saved.items() if key != "signature_time"}
+            self.assertEqual(_derived_values(definition, old_execution)["record_values"]["G18"], "2026年09月29日 11时32分")
+            record_preview = service.preview_model(definition["drill_id"], "A", "record")
+            assessment_preview = service.preview_model(definition["drill_id"], "A", "assessment")
+            self.assertEqual(record_preview["rows"][17][6], "2026年09月29日 10时15分")
+            self.assertEqual(assessment_preview["rows"][11][7], "2026年09月29日 11时32分")
+            self.assertEqual(next(item for item in record_preview["signature_cells"] if item["range"] == "C18:E18")["signers"][0]["name"], "人员5")
+            self.assertEqual(next(item for item in assessment_preview["signature_cells"] if item["range"] == "D12:F12")["signers"][0]["name"], "人员5")
+            self.assertFalse(any("image_data_url" in item for item in record_preview["signature_cells"]))
+            signatures = {person["record_id"]: _signature_png() for person in people}
+            generated = service.generate(definition["drill_id"], "A", signatures=signatures)
+            output = Path(generated["generated"]["path"])
+            book = _parse_workbook(output)
+            record = next(sheet for sheet in book["sheets"] if sheet["name"] == "本月记录")
+            assessment = next(sheet for sheet in book["sheets"] if sheet["name"] == "评估表")
+            self.assertEqual(record["cells"]["G18"], "2026年09月29日 10时15分")
+            self.assertEqual(assessment["cells"]["H12"], "2026年09月29日 11时32分")
+            with zipfile.ZipFile(output) as archive:
+                self.assertGreaterEqual(sum("drill_signature_" in name for name in archive.namelist()), 2)
+            source_sheet = _parse_workbook(Path(definition["source"]["path"]))["sheets"][0]
+            source_sheet["preview_images"] = [
+                {"row": 1, "col": 1, "data_url": "data:image/png;base64,LOGO"},
+                {"row": 17, "col": 1, "range": "B18:D18", "data_url": "data:image/png;base64,SIGNATURE"},
+            ]
+            derived = _derived_values(definition, saved)
+            filtered = _sheet_preview_model(source_sheet, sheet_type="record", derived=derived, generated_current=True)
+            self.assertEqual([item["data_url"] for item in filtered["images"]], ["data:image/png;base64,LOGO"])
+            printed = service.print_model(definition["drill_id"], "A", "record")
+            self.assertFalse(any("image_data_url" in item for item in printed["signature_cells"]))
+
     def test_step_signature_slots_allow_zero_or_partial_selection(self):
         definition = {
             "configuration": {

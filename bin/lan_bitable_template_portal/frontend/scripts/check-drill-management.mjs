@@ -34,6 +34,7 @@ for (const marker of [
 }
 if (page.includes("window.confirm")) throw new Error("演练页面仍使用原生确认框");
 if (page.includes("MopSignaturePadModal") || page.includes("sendMissingSignatureLink")) throw new Error("演练页面仍含分散签名采集入口");
+if (/signature\.image_data_url|signer\.image_url|signer\.signature_url/.test(page)) throw new Error("演练预览仍尝试渲染签名图片");
 if (page.includes('<VnetBackButton :disabled="busy"')) throw new Error("演练后台同步仍会锁住返回按钮");
 if (/type="file"[^>]*\brequired\b/.test(page)) throw new Error("演练拖放文件输入仍被 required 拦截");
 if (!app.includes('routePath.value === "/drill-management/print"')) throw new Error("App 缺少演练打印路由");

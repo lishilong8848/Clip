@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import io
 import os
 import sys
@@ -297,46 +296,35 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                 )
         upload.assert_not_called()
 
-    def test_print_signature_cells_receive_one_composite_image(self):
-        from PIL import Image, ImageDraw
-
-        image = Image.new("RGBA", (24, 12), (0, 0, 0, 0))
-        ImageDraw.Draw(image).line((2, 10, 22, 2), fill=(0, 0, 0, 255), width=2)
-        output = io.BytesIO()
-        image.save(output, format="PNG")
-        previous_service = PortalRuntime.service
-        PortalRuntime.service = Mock()
-        PortalRuntime.service.drill_signature_image_bytes.return_value = (
-            output.getvalue(),
-            "image/png",
-        )
+    def test_preview_and_print_return_names_without_reading_signatures(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        model = {"signature_cells": [{"range": "H14", "signers": [{"record_id": "rec-1", "name": "甲"}]}]}
+        controller._drills = Mock()
+        controller._drills.get_definition.return_value = {"status": "published", "assigned_scopes": ["E"]}
+        controller._drills.preview_model.return_value = model
+        controller._drills.print_model.return_value = model
+        sessions = dict(PortalRuntime.auth_manager._sessions)
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions["drill-preview-user"] = {
+                "session_id": "drill-preview-user", "user": {"name": "E楼用户"},
+                "role": "user", "allowed_scopes": ["E"], "expires_at": 9_999_999_999,
+            }
         try:
-            model = FastAPIPortalController._attach_drill_signature_composites(
-                {
-                    "signature_cells": [
-                        {
-                            "range": "H14",
-                            "layout": "vertical",
-                            "width_px": 100,
-                            "height_px": 120,
-                            "signature_slots": 3,
-                            "signers": [
-                                {"record_id": "rec-1", "name": "甲", "slot_index": 0},
-                                {"record_id": "rec-2", "name": "乙", "slot_index": 2},
-                            ],
-                        }
-                    ]
-                },
-                required=True,
-            )
+            client = TestClient(controller._build_app())
+            with patch.object(PortalRuntime.service, "drill_signature_image_bytes", side_effect=AssertionError("signature read forbidden")) as read:
+                for endpoint in ("preview", "print-model"):
+                    response = client.get(
+                        f"/api/drills/drill-1/{endpoint}?scope=E&sheet=record",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}=drill-preview-user"},
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    payload = response.json()["data"]["model"]
+                    self.assertEqual(payload["signature_cells"][0]["signers"][0]["name"], "甲")
+                    self.assertNotIn("image_data_url", response.text)
+                read.assert_not_called()
         finally:
-            PortalRuntime.service = previous_service
-        data_url = model["signature_cells"][0]["image_data_url"]
-        self.assertTrue(data_url.startswith("data:image/png;base64,"))
-        with Image.open(io.BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as preview:
-            self.assertEqual(preview.getpixel((4, 40))[3], 255)
-            self.assertEqual(preview.getpixel((4, 80))[3], 255)
-            self.assertEqual(preview.getpixel((50, 60))[3], 0)
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = sessions
 
     def test_draft_can_save_incomplete_but_generate_cannot(self):
         controller = object.__new__(FastAPIPortalController)
@@ -422,6 +410,28 @@ class DrillBackendIntegrationTests(unittest.TestCase):
                 controller._validate_drill_people_payload(
                     "E", definition, execution, require_complete=False, require_signatures=False,
                 )
+
+    def test_evaluator_can_be_outside_participants_and_must_have_signature(self):
+        controller = object.__new__(FastAPIPortalController)
+        people = [
+            {"record_id": "actor", "name": "参演人", "has_signature": True},
+            {"record_id": "reviewer", "name": "评估人", "has_signature": True},
+        ]
+        controller._drill_people = lambda scope, refresh=False: people
+        definition = {"configuration": {"steps": [], "mapping": {
+            "reviewer_signature": "C18:E18", "review_time": "G18:I18",
+            "assessment": {"evaluator_signature": "D12:F12", "evaluation_time": "H12:K12"},
+        }}}
+        execution = {
+            "commander": {"record_id": "actor"}, "participants": [{"record_id": "actor"}],
+            "evaluator": {"record_id": "reviewer", "name": "untrusted"}, "step_signers": {},
+        }
+        controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
+        self.assertEqual(execution["participants"], [{"record_id": "actor", "name": "参演人"}])
+        self.assertEqual(execution["evaluator"], {"record_id": "reviewer", "name": "评估人"})
+        people[1]["has_signature"] = False
+        with self.assertRaisesRegex(PortalError, "评估人"):
+            controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
 
     def test_step_signer_slots_keep_empty_middle_position(self):
         controller = object.__new__(FastAPIPortalController)
@@ -527,7 +537,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         self.assertEqual(staff[0]["record_id"], "s1")
         self.assertIn("raw_fields", staff[0])
 
-    def test_temporary_drill_signatures_validate_preview_and_generate_from_correct_source(self):
+    def test_temporary_drill_signatures_validate_and_generate_from_correct_source(self):
         from PIL import Image
         service = object.__new__(MaintenancePortalService)
         controller = object.__new__(FastAPIPortalController)
@@ -547,10 +557,8 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         with patch.object(PortalRuntime, "service", service), patch.object(service, "_load_signature_people", return_value=staff), patch.object(service, "_load_external_signature_people", return_value=external), patch.object(service, "signature_image_bytes", return_value=signature) as staff_image, patch.object(service, "external_signature_image_bytes", return_value=signature) as external_image:
             controller._validate_drill_people_payload("E", definition, execution, require_complete=True, require_signatures=True)
             self.assertEqual(execution["commander"]["name"], "临时指挥人")
-            preview = controller._attach_drill_signature_composites({"signature_cells": [{"range": "H13", "signers": execution["participants"], "width_px": 100, "height_px": 80}]}, required=True)
-            self.assertTrue(preview["signature_cells"][0]["image_data_url"].startswith("data:image/png;base64,"))
-            external_image.assert_called_with(record_id="temp")
-            staff_image.assert_called_with(record_id="staff")
+            external_image.assert_not_called()
+            staff_image.assert_not_called()
             def generate(_drill_id, _scope, *, signature_resolver, **kwargs):
                 self.assertEqual(signature_resolver("external:temp"), signature[0])
                 self.assertEqual(signature_resolver("staff"), signature[0])
@@ -558,11 +566,8 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             controller._run_drill_job("drill", "E", True, 1)
             controller._drills.generate.assert_called_once()
             controller._sync_drill_output.assert_called_once_with("drill", "E")
-            self.assertEqual(external_image.call_count, 2)
-            self.assertEqual(staff_image.call_count, 2)
-            external_image.side_effect = PortalError("临时签名读取失败")
-            with self.assertRaisesRegex(PortalError, "无法读取临时指挥人的签名"):
-                controller._attach_drill_signature_composites({"signature_cells": [{"range": "H13", "signers": [execution["commander"]]}]}, required=True)
+            self.assertEqual(external_image.call_count, 1)
+            self.assertEqual(staff_image.call_count, 1)
 
 
 if __name__ == "__main__":

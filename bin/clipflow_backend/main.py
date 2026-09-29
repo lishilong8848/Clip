@@ -191,10 +191,7 @@ from lan_bitable_template_portal.drill_management import (
     DrillForbiddenError,
     DrillManagementService,
     drill_assigned_scopes,
-    drill_signature_layout,
-    normalize_drill_signature_png,
 )
-from lan_bitable_template_portal.signature_print import print_signature_image
 from upload_event_module.config import config
 from upload_event_module.core.parser import extract_event_info, is_notice_confirmed_ended
 from upload_event_module.services.service_registry import check_token_status
@@ -3906,11 +3903,6 @@ class FastAPIPortalController:
                     scope,
                     str(request.query_params.get("sheet") or "record"),
                 )
-                model = await asyncio.to_thread(
-                    self._attach_drill_signature_composites,
-                    model,
-                    required=False,
-                )
                 return self._drill_json_ok(request, session, {"model": model})
             except Exception as exc:
                 return self._drill_error_response(exc, default_status=403)
@@ -3932,11 +3924,6 @@ class FastAPIPortalController:
                     drill_id,
                     scope,
                     str(request.query_params.get("sheet") or "record"),
-                )
-                model = await asyncio.to_thread(
-                    self._attach_drill_signature_composites,
-                    model,
-                    required=True,
                 )
                 return self._drill_json_ok(request, session, {"model": model})
             except Exception as exc:
@@ -10800,8 +10787,17 @@ class FastAPIPortalController:
         require_signatures: bool,
     ) -> dict[str, dict[str, Any]]:
         commander_id = self._drill_person_record_id(execution.get("commander"))
+        evaluator_id = self._drill_person_record_id(execution.get("evaluator"))
+        mapping = (definition.get("configuration") or {}).get("mapping") or {}
+        assessment = mapping.get("assessment") or {}
+        needs_evaluator = all((
+            mapping.get("reviewer_signature"), mapping.get("review_time"),
+            assessment.get("evaluator_signature"), assessment.get("evaluation_time"),
+        ))
         if require_complete and not commander_id:
             raise PortalError("请选择一名演练指挥人。")
+        if require_complete and needs_evaluator and not evaluator_id:
+            raise PortalError("请选择演练评估人。")
         participant_ids = [
             self._drill_person_record_id(item)
             for item in (execution.get("participants") or [])
@@ -10820,6 +10816,8 @@ class FastAPIPortalController:
             if str(item.get("record_id") or "").strip()
         }
         required_ids = set(participant_ids)
+        if evaluator_id:
+            required_ids.add(evaluator_id)
         def add_signature_aliases():
             for person in people:
                 for alias in person.get("record_aliases") or []:
@@ -10904,6 +10902,10 @@ class FastAPIPortalController:
             if commander_id
             else {}
         )
+        execution["evaluator"] = (
+            {"record_id": evaluator_id, "name": str(people_by_id[evaluator_id].get("name") or "")}
+            if evaluator_id else {}
+        )
         execution["participants"] = [
             {
                 "record_id": record_id,
@@ -10913,77 +10915,6 @@ class FastAPIPortalController:
         ]
         execution["step_signers"] = normalized_step_signers
         return people_by_id
-
-    @staticmethod
-    def _attach_drill_signature_composites(
-        model: dict[str, Any],
-        *,
-        required: bool,
-    ) -> dict[str, Any]:
-        from PIL import Image, ImageDraw
-
-        result = dict(model or {})
-        cells = [
-            dict(item)
-            for item in (result.get("signature_cells") or [])
-            if isinstance(item, dict)
-        ]
-        for cell in cells:
-            signers = [
-                item for item in (cell.get("signers") or []) if isinstance(item, dict)
-            ]
-            layout = str(cell.get("layout") or "grid").strip().lower()
-            slots = max(len(signers), int(cell.get("signature_slots") or 0)) if layout == "vertical" else 0
-            if not signers and slots <= 1:
-                continue
-            width = max(48, min(1600, int(cell.get("width_px") or 320)))
-            height = max(32, min(1000, int(cell.get("height_px") or 96)))
-            canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
-            prepared = []
-            for index, signer in enumerate(signers):
-                record_id = str(signer.get("record_id") or "").strip()
-                try:
-                    signature_bytes = PortalRuntime.service.drill_signature_image_bytes(
-                        record_id=record_id
-                    )[0]
-                    signature_bytes = normalize_drill_signature_png(signature_bytes)
-                    with Image.open(io.BytesIO(signature_bytes)) as source:
-                        image = source.convert("RGBA")
-                        image.load()
-                        prepared.append((image, int(signer.get("slot_index", index))))
-                except Exception as exc:
-                    if required:
-                        name = str(signer.get("name") or record_id or "未知人员")
-                        raise PortalError(f"无法读取{name}的签名：{exc}") from exc
-            positions = drill_signature_layout(
-                [(image.width, image.height) for image, _slot_index in prepared],
-                width,
-                height,
-                layout,
-                slot_count=slots,
-                slot_indices=[slot_index for _image, slot_index in prepared],
-            )
-            for (image, _slot_index), (left, top, image_width, image_height) in zip(
-                prepared, positions
-            ):
-                resized = print_signature_image(
-                    image,
-                    (max(1, round(image_width)), max(1, round(image_height))),
-                )
-                canvas.alpha_composite(resized, (round(left), round(top)))
-            if slots > 1:
-                draw = ImageDraw.Draw(canvas)
-                for index in range(1, slots):
-                    y = round(height * index / slots)
-                    draw.line((3, y, width - 3, y), fill=(0, 0, 0, 255), width=1)
-            output = io.BytesIO()
-            canvas.save(output, format="PNG", optimize=True)
-            cell["image_data_url"] = (
-                "data:image/png;base64,"
-                + base64.b64encode(output.getvalue()).decode("ascii")
-            )
-        result["signature_cells"] = cells
-        return result
 
     def _queue_drill_job(
         self,
