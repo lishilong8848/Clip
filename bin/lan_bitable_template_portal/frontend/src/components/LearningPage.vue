@@ -5,7 +5,7 @@
       <div class="actions">
         <VnetSelect input-id="learning-select-1" v-if="isAdmin && ready" :model-value="scopeLabel" :options="scopes.map(s => s.label)" label="学练楼栋" :disabled="busy || loading" @update:model-value="changeScope" />
         <strong v-else-if="scopeLabel">{{ scopeLabel }}</strong>
-        <span v-if="ready" class="sync-label" :class="{ danger: boot.sync?.status === 'error' }"><Loader2 v-if="syncActive" :size="15" class="spin" />{{ syncLabel }}<template v-if="boot.sync?.pending"> · {{ boot.sync.pending }} 项待同步</template></span>
+        <span v-if="ready && isAdmin" class="sync-label" :class="{ danger: boot.sync?.status === 'error' }"><Loader2 v-if="syncActive" :size="15" class="spin" />{{ syncLabel }}<template v-if="boot.sync?.pending"> · {{ boot.sync.pending }} 项待同步</template></span>
         <button class="icon-button" title="刷新当前页面" aria-label="刷新当前页面" :disabled="busy || loading" @click="refreshView"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       </div>
     </header>
@@ -16,8 +16,8 @@
     <div v-if="error && !modalKind" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ error }}</span><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><X :size="16" /></button></div>
     <div v-if="notice" class="alert success" role="status"><CheckCircle2 :size="18" /><span>{{ notice }}</span></div>
     <div v-if="storageWarning" class="alert warning" role="status"><AlertCircle :size="18" />{{ storageWarning }}</div>
-    <div v-if="boot.sync?.error" class="alert warning"><AlertCircle :size="18" /><span>{{ boot.sync.error }}</span><button v-if="isAdmin" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="15" />重试同步</button></div>
-    <div v-if="ready && !boot.settings?.enabled" class="alert warning"><AlertCircle :size="18" /><span>自动发布未启用。{{ isAdmin ? '仍可手动发布今日题单，且不发送通知。' : '请等待管理员发布题单。' }}</span><button v-if="isAdmin" @click="switchTab('settings')"><Settings :size="15" />发布设置</button></div>
+    <div v-if="boot.sync?.error && isAdmin" class="alert warning"><AlertCircle :size="18" /><span>{{ boot.sync.error }}</span><button v-if="isAdmin" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="15" />重试同步</button></div>
+    <div v-if="ready && !boot.settings?.enabled && isAdmin" class="alert warning"><AlertCircle :size="18" /><span>自动发布未启用。{{ isAdmin ? '仍可手动发布今日题单，且不发送通知。' : '请等待管理员发布题单。' }}</span><button v-if="isAdmin" @click="switchTab('settings')"><Settings :size="15" />发布设置</button></div>
     <div v-if="!ready" class="empty"><Loader2 v-if="loading" :size="24" class="spin" /><span>{{ loading ? '正在加载学练数据…' : '学练数据加载失败' }}</span><button v-if="!loading" @click="bootstrap()"><RefreshCw :size="16" />重试</button></div>
 
     <template v-else>
@@ -30,8 +30,8 @@
             <span v-if="paper" class="muted">已完成 {{ answered }} / {{ validCount }} 题</span>
             <span v-if="paper?.status" class="badge">{{ paper.status === 'completed' ? '已完成' : paper.status === 'published' ? '已发布' : paper.status === 'pending' ? '待完成' : paper.status }}</span>
           </div>
-          <div v-if="isAdmin && tab === 'today'" class="actions"><button :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库</button><button class="primary" :title="boot.silent_manual_publish ? '生成今日题单，不发送飞书消息' : '请重启主程序后使用静默发布'" :disabled="busy || boot.sync?.status === 'publishing' || !boot.silent_manual_publish" @click="runJob('publish')"><Send :size="16" />手动发布题单</button><button v-if="paper" class="danger" :disabled="busy || loading" @click="deletePaper(paper.id)"><Trash2 :size="16" />删除本楼题单</button></div>
         </div>
+        <div v-if="isAdmin && tab === 'today'" class="today-admin-bar"><button :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库</button><button class="primary" :title="boot.silent_manual_publish ? '生成今日题单，不发送飞书消息' : '请重启主程序后使用静默发布'" :disabled="busy || boot.sync?.status === 'publishing' || !boot.silent_manual_publish" @click="runJob('publish')"><Send :size="16" />手动发布题单</button><button v-if="paper" class="danger" :disabled="busy || loading" @click="deletePaper(paper.id)"><Trash2 :size="16" />删除本楼题单</button></div>
         <div v-if="isAdmin && paper" class="muted read-only"><Eye :size="16" />管理员作答计入{{ paper.scope }}楼进度</div>
         <div v-if="shortageText(paper?.shortage)" class="alert warning"><AlertCircle :size="18" />{{ shortageText(paper?.shortage) }}</div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取题单…</div>
@@ -55,7 +55,6 @@
             <div class="answer-actions actions"><button v-if="!locked" class="primary" :disabled="busy || loading" @click="submitAnswer"><Save :size="16" />{{ practice ? '提交本次复习' : '确认作答' }}</button><span v-if="current.attempt && !practice" :class="['result', current.attempt.correct === false ? 'danger' : 'success-text']">{{ resultText(current) }}<small>{{ timeLabel(current.attempt.submitted_at) }}</small></span><button v-if="current.attempt && canAnswer && !current.invalid && !practice" :disabled="busy" @click="startPractice"><RotateCcw :size="16" />{{ current.type === 'interview' ? '重新练习与自评' : '再次练习' }}</button><span v-if="current.hinted || current.attempt?.assisted" class="badge warning-badge">已查看提示或答案</span></div>
             <div class="answer-tools actions"><button v-if="canAnswer" :disabled="busy" @click="reveal('answer')"><Eye :size="16" />查看答案与解析</button><button v-if="canAnswer && current.has_hint !== false" :disabled="busy" @click="reveal('hint')"><Lightbulb :size="16" />思路提示</button><button v-if="canAnswer" :disabled="busy" @click="openIssue()"><MessageSquare :size="16" />题目有疑问</button></div>
             <p v-if="current.attempt?.missed?.length || current.attempt?.wrong?.length" class="answer-feedback"><span v-if="current.attempt.missed?.length">漏选：{{ answerLabels(current.attempt.missed) }}</span><span v-if="current.attempt.wrong?.length">错选：{{ answerLabels(current.attempt.wrong) }}</span></p>
-            <details v-if="current.practice?.length" class="practice-history"><summary>复习记录（{{ current.practice.length }} 次）</summary><div v-for="(attempt, n) in [...current.practice].reverse()" :key="n" class="comment-entry"><span>{{ timeLabel(attempt.submitted_at) }}</span><strong :class="attempt.correct === false ? 'danger' : 'success-text'"> {{ current.type === 'interview' ? (ratingLabels[attempt.self_rating] || '已提交') : (attempt.correct ? '回答正确' : '回答错误') }}</strong><p class="prewrap">{{ attempt.answer_text || '选择：' + answerLabels(attempt.option_ids) }}</p></div></details>
             <section v-if="current.answer" class="answer-reference" aria-label="参考答案">
               <h3>参考答案</h3><p v-if="current.answer.correct_option_ids?.length"><strong>{{ answerLabels(current.answer.correct_option_ids) }}</strong></p><p v-if="current.answer.answer_text" class="prewrap">{{ current.answer.answer_text }}</p>
               <template v-if="current.answer.analysis"><h3>解析</h3><p class="prewrap">{{ current.answer.analysis }}</p></template><template v-if="current.answer.hint"><h3>提示</h3><p class="prewrap">{{ current.answer.hint }}</p></template>
@@ -107,10 +106,10 @@
       </template>
 
       <form v-else-if="tab === 'settings'" class="settings-form" @submit.prevent="saveSettings">
-        <h2>每日发布</h2><label class="checkbox-label"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy" />每日自动发布</label><p class="muted">首次发布将创建云端学练数据表及题库扩展字段。</p>
-        <div class="settings-grid"><label>发布时间<input v-model="settingsForm.publish_time" type="time" required :disabled="busy" /></label><label>学习入口<span v-if="portalUrl" class="portal-readonly"><input :value="portalUrl" readonly aria-label="学习入口" /><a :href="portalUrl" target="_blank" rel="noopener" aria-label="打开学习入口" title="打开学习入口"><ExternalLink :size="16" /></a></span><span v-else class="muted">程序访问地址暂不可用</span></label></div>
-        <h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label><label class="time-field">提醒时间<input v-model="settingsForm.reminder_time" type="time" :disabled="!settingsForm.reminder_enabled || busy" required /></label>
-        <div class="settings-summary"><span>每日选择题 <strong>8</strong></span><span>值班面试 <strong>1</strong></span><span>专业面试 <strong>1</strong></span><span>楼栋 <strong>A / B / C / D / E / H</strong></span></div>
+        <h2>每日发布</h2><label class="checkbox-label"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy" />每日自动发布</label>
+        <label v-if="settingsForm.enabled" class="time-field">发布时间<input v-model="settingsForm.publish_time" type="time" required :disabled="busy" /></label>
+        <h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label>
+        <label v-if="settingsForm.reminder_enabled" class="time-field">提醒时间<input v-model="settingsForm.reminder_time" type="time" required :disabled="busy" /></label>
         <footer class="actions"><button class="primary" :disabled="busy || loading"><Save :size="16" />保存设置</button><button type="button" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库</button></footer>
       </form>
     </template>
@@ -130,14 +129,11 @@
               <label><span class="label-text">题干 <span class="required">*</span></span><textarea v-model="editor.stem" rows="4" maxlength="12000" required /></label>
               <section v-if="editor.type !== 'interview'" class="option-editor"><div class="section-heading"><h3>选项与正确答案</h3><button type="button" :disabled="busy || editor.options.length >= 26" @click="editor.options.push({ id: uid(), text: '' })"><Plus :size="16" />添加选项</button></div><div v-for="(option, n) in editor.options" :key="option.id" class="option-edit-row"><input :type="editor.type === 'single' ? 'radio' : 'checkbox'" name="correct-answer" :checked="editor.correct_option_ids.includes(option.id)" :aria-label="`选项 ${String.fromCharCode(65 + Number(n))} 为正确答案`" @change="chooseCorrect(option.id)" /><strong>{{ String.fromCharCode(65 + Number(n)) }}</strong><textarea v-model="option.text" rows="2" :aria-label="`选项 ${String.fromCharCode(65 + Number(n))} 内容`" /><button type="button" class="icon-button" :disabled="Number(n) === 0" aria-label="上移选项" title="上移选项" @click="moveOption(Number(n), -1)"><ArrowUp :size="15" /></button><button type="button" class="icon-button" :disabled="Number(n) === editor.options.length - 1" aria-label="下移选项" title="下移选项" @click="moveOption(Number(n), 1)"><ArrowDown :size="15" /></button><button type="button" class="icon-button danger" aria-label="删除选项" title="删除选项" @click="removeOption(option.id)"><Trash2 :size="15" /></button></div></section>
               <label v-if="editor.type === 'interview'">参考答案<textarea v-model="editor.answer_text" rows="4" maxlength="12000" /></label>
-              <details class="question-extra"><summary>更多设置（选填）</summary><div class="editor-form">
-                <label v-if="editor.type !== 'interview' && editor.answer_text">原参考答案<textarea :value="editor.answer_text" rows="2" readonly /></label>
+              <details class="question-extra"><summary>解析与提示</summary><div class="editor-form">
                 <label>解析<textarea v-model="editor.analysis" rows="3" maxlength="12000" /></label><label>提示<textarea v-model="editor.hint" rows="2" maxlength="5000" /></label>
-                <div class="form-grid"><label>年度<input v-model="editor.year" type="text" maxlength="5" pattern="\s*|(19\d{2}|20\d{2}|2100)年?" title="请留空，或填写 1900 至 2100 的四位年份（可带“年”后缀，如 2026 或 2026年）" placeholder="如 2026 或 2026年" /></label><label>知识点<input v-model="editor.topic" maxlength="100" /></label><label>专业<input v-model="editor.specialty" maxlength="50" /></label><label>难度<VnetSelect input-id="learning-select-11" v-model="editor.difficulty" :options="['简单', '中等', '困难']" :allow-custom="true" label="难度" /></label><label>修订依据<input v-model="editor.reason" maxlength="1000" /></label></div>
               </div></details>
               <div v-if="editor.status === 'published' && learningQuestionProblems(editor).length" class="alert warning"><AlertCircle :size="17" /><span>发布前待修正：{{ learningQuestionProblems(editor).join('；') }}</span></div>
               <div v-if="editor.problems?.length" class="alert warning"><AlertCircle :size="17" />{{ editor.problems.join('；') }}</div>
-              <details v-if="editor.audit?.length || editor.versions?.length"><summary>版本与修订记录</summary><div v-for="(entry, n) in editor.audit || editor.versions" :key="n" class="comment-entry"><strong>{{ (typeof entry.actor === 'string' ? entry.actor : entry.actor?.name) || entry.user || entry.version || '管理员' }}</strong><small>{{ timeLabel(entry.at || entry.created_at) }}</small><p>{{ entry.reason || entry.action }}</p><details v-if="entry.before || entry.after"><summary>查看修改前后</summary><div class="audit-columns"><div><h3>修改前</h3><pre>{{ auditText(entry.before) }}</pre></div><div><h3>修改后</h3><pre>{{ auditText(entry.after) }}</pre></div></div></details></div></details>
             </form>
 
             <div v-else-if="modalKind === 'issue'" class="issue-form">
@@ -254,6 +250,7 @@ svg { flex-shrink: 0; }
 .tabs button { flex: 0 0 auto; border: 0; border-bottom: 3px solid transparent; border-radius: 0; padding: 12px 16px; min-height: 46px; color: #52647b; background: transparent; }
 .tabs button.active { border-bottom-color: #1e63ff; color: #1456c7; background: #f0f5ff; }
 .toolbar { gap: 12px; margin: 16px 0; }
+.today-admin-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: -4px 0 12px; padding: 8px 10px; background: #f3f7fc; border: 1px solid #d8e5f7; border-radius: 6px; }.today-admin-bar button { min-height: 32px; padding: 5px 10px; font-size: 12px; }
 .filters { gap: 8px; }
 .muted, small, .sync-label { color: #65758a; font-size: 12px; }
 .sync-label, .read-only { display: inline-flex; align-items: center; gap: 6px; }
@@ -304,7 +301,7 @@ textarea { resize: vertical; }
 .answer-reference { background: #f6faf8; border-left: 3px solid #7cc7a6; padding: 16px 18px; margin-bottom: 20px; }
 .answer-reference h3 { color: #226748; margin: 8px 0; }.answer-reference p { line-height: 1.8; }
 .prewrap { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }.draft-status { margin: 10px 0; }
-.answer-feedback { display: flex; gap: 20px; margin: 10px 0; color: #b62946; }.practice-history { margin: 12px 0; }.audit-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }.audit-columns pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12px; line-height: 1.6; background: #f7f9fc; padding: 12px; }
+.answer-feedback { display: flex; gap: 20px; margin: 10px 0; color: #b62946; }
 .result { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }.result small { font-weight: 400; }
 .notes { border-top: 1px solid #e5ecf5; padding-top: 14px; }.note-editor { display: grid; gap: 10px; padding: 8px 0 14px; }.question-footer { padding-top: 22px; margin-top: 22px; border-top: 1px solid #e5ecf5; font-size: 12px; color: #667b95; }
 .starred { color: #aa730b; background: #fff9e9; }
@@ -328,7 +325,7 @@ td { line-height: 1.65; }td small { display: block; margin-top: 4px; }.stem-cell
 .subtabs { display: flex; gap: 6px; }.subtabs button { border: 0; background: transparent; border-radius: 0; }.subtabs button.active { color: #1554df; box-shadow: inset 0 -2px #1e63ff; }
 .inventory { margin-top: 24px; }.inventory dl { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }.inventory dd { margin: 0 30px 0 0; font-size: 18px; font-weight: 600; }
 .inventory dd { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; font-weight: 400; }.inventory dd strong { font-size: 18px; font-weight: 600; }
-.settings-form { background: #fff; padding: 24px 28px; display: grid; gap: 18px; border-top: 1px solid #d8e5f7; }.settings-form h2:not(:first-child) { border-top: 1px solid #e5ecf5; padding-top: 22px; }.settings-grid { display: grid; grid-template-columns: 170px minmax(250px, 650px); gap: 24px; }.time-field { width: 170px; }.portal-readonly { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; min-width: 0; }.portal-readonly input { flex: 1 1 0%; min-width: 0; width: 0; }.portal-readonly a { flex: 0 0 36px; width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center; color: #2563eb; }.page-jump { display: inline-flex; align-items: center; gap: 5px; }.page-jump input { width: 64px; }.settings-summary { display: flex; flex-wrap: wrap; gap: 26px; color: #65758a; padding: 20px 0; border-block: 1px solid #e5ecf5; }.settings-summary strong { color: #243e5d; margin-left: 8px; }
+.settings-form { background: #fff; padding: 24px 28px; display: grid; gap: 18px; border-top: 1px solid #d8e5f7; }.settings-form h2:not(:first-child) { border-top: 1px solid #e5ecf5; padding-top: 22px; }.time-field { width: 170px; }.page-jump { display: inline-flex; align-items: center; gap: 5px; }.page-jump input { width: 64px; }
 .learning-overlay { position: fixed; inset: 0; z-index: 800; display: grid; place-items: center; background: rgba(15, 35, 65, .4); padding: 24px; }
 .learning-modal { display: flex; flex-direction: column; width: min(1040px, 100%); max-height: calc(100dvh - 48px); background: #fff; border: 1px solid #d8e5f7; border-radius: 8px; box-shadow: 0 22px 80px #12356235; font: 14px 'Microsoft YaHei', system-ui, sans-serif; color: #20344e; outline: none; }
 .learning-modal > header { padding: 18px 22px; border-bottom: 1px solid #d8e5f7; flex: 0 0 auto; }.learning-modal > header h2 { min-width: 0; overflow-wrap: anywhere; }
@@ -346,13 +343,13 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
 .spin { animation: learning-spin 1s linear infinite; }@keyframes learning-spin { to { transform: rotate(360deg); } }
 :deep(.vnet-select) { min-width: 145px; max-width: 100%; }:deep(.vnet-select-trigger), :deep(.vnet-select-input) { border-radius: 6px; min-height: 36px; }
 @media (max-width: 1050px) { .learning-page { padding: 18px 20px 30px; }.practice-layout { grid-template-columns: 175px minmax(0, 1fr); }.question-body { padding: 22px; }.question-rail { padding: 22px 12px; }.profile-overview { grid-template-columns: minmax(0, 1fr); }.form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 700px) { .learning-page { padding: 16px 12px; }.heading { gap: 7px; flex-wrap: wrap; }h1 { font-size: 20px; }.page-head > .actions { width: 100%; }.tabs { gap: 0; }.tabs button { padding: 10px; }.practice-layout { grid-template-columns: minmax(0, 1fr); }.question-rail { position: static; border-bottom: 1px solid #e5ecf5; padding: 14px; }.question-numbers { grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 5px; margin: 12px 0; }.question-rail progress { display: none; }.question-body { border-left: 0; padding: 18px 14px; }.stem { font-size: 16px; }.options label { padding: 12px; gap: 8px; }.answer-tools { gap: 7px; }.answer-tools button { font-size: 12px; padding: 7px 9px; }.profile-overview { padding: 16px; gap: 14px; }.profile-kpis > div { padding: 10px; }.profile-kpis strong { font-size: 16px; }.settings-form { padding: 18px 14px; }.settings-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }.settings-summary { gap: 15px; }.learning-overlay { padding: 10px; }.learning-modal { max-height: calc(100dvh - 20px); }.learning-modal > header, .learning-modal > footer { padding: 12px; }.modal-scroll { padding: 14px; }.form-grid { grid-template-columns: minmax(0, 1fr); }.option-edit-row { grid-template-columns: 16px 16px minmax(0, 1fr) repeat(3, 30px); gap: 4px; }.option-edit-row .icon-button { width: 30px; flex-basis: 30px; }.search-field { max-width: 100%; }.search-field input { width: 180px; }.inline-field input { width: 145px; }.toolbar { align-items: flex-start; }.pending-file { flex-wrap: wrap; }.alert { align-items: flex-start; }.table-wrap { max-width: 100%; }.pagination { flex-wrap: wrap; } }
+@media (max-width: 700px) { .learning-page { padding: 16px 12px; }.heading { gap: 7px; flex-wrap: wrap; }h1 { font-size: 20px; }.page-head > .actions { width: 100%; }.tabs { gap: 0; }.tabs button { padding: 10px; }.practice-layout { grid-template-columns: minmax(0, 1fr); }.question-rail { position: static; border-bottom: 1px solid #e5ecf5; padding: 14px; }.question-numbers { grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 5px; margin: 12px 0; }.question-rail progress { display: none; }.question-body { border-left: 0; padding: 18px 14px; }.stem { font-size: 16px; }.options label { padding: 12px; gap: 8px; }.answer-tools { gap: 7px; }.answer-tools button { font-size: 12px; padding: 7px 9px; }.profile-overview { padding: 16px; gap: 14px; }.profile-kpis > div { padding: 10px; }.profile-kpis strong { font-size: 16px; }.settings-form { padding: 18px 14px; }.learning-overlay { padding: 10px; }.learning-modal { max-height: calc(100dvh - 20px); }.learning-modal > header, .learning-modal > footer { padding: 12px; }.modal-scroll { padding: 14px; }.form-grid { grid-template-columns: minmax(0, 1fr); }.option-edit-row { grid-template-columns: 16px 16px minmax(0, 1fr) repeat(3, 30px); gap: 4px; }.option-edit-row .icon-button { width: 30px; flex-basis: 30px; }.search-field { max-width: 100%; }.search-field input { width: 180px; }.inline-field input { width: 145px; }.toolbar { align-items: flex-start; }.pending-file { flex-wrap: wrap; }.alert { align-items: flex-start; }.table-wrap { max-width: 100%; }.pagination { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 </style>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, ExternalLink, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Star, Trash2, Upload, X, ChartNoAxesCombined } from "lucide-vue-next";
+import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Star, Trash2, Upload, X, ChartNoAxesCombined } from "lucide-vue-next";
 import { ApiError, downloadFile, requestJson } from "../api/client";
 import { requestLearning, type LearningApiOptions } from "../api/learning";
 import { registerNavigationGuard } from "../navigation";
@@ -407,10 +404,6 @@ const pageCount = computed(() => Math.max(1, Math.ceil(total.value / 20)));
 const jumpPage = ref<number>(1);
 const settingsForm = reactive<Dict>({ enabled: false, publish_time: "08:00", reminder_enabled: false, reminder_time: "17:00", portal_url: "" });
 let settingsSnapshot = "";
-const portalUrl = computed(() => {
-  const base = String(settingsForm.portal_url || "").trim();
-  return base ? `${base.replace(/\/+$/, "")}/learning` : "";
-});
 const syncActive = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status) || Number(boot.value.sync?.pending || 0) > 0);
 const jobRunning = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status));
 const syncLabel = computed(() => ({ idle: "未初始化", syncing: "同步中", publishing: "发布中", ready: "已同步", error: "同步失败" }[String(boot.value.sync?.status)] || "等待同步"));
@@ -433,6 +426,12 @@ let releaseGuard: (() => void) | undefined;
 
 function uid(): string { return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`; }
 function copy<T>(value: T): T { return JSON.parse(JSON.stringify(value)); }
+const QUESTION_META_KEYS = ["year", "topic", "specialty", "difficulty", "reason"];
+function withoutQuestionMetadata(q: Dict): Dict {
+  const clean = copy(q);
+  for (const key of QUESTION_META_KEYS) delete clean[key];
+  return clean;
+}
 function keyFor(labels: Dict, label: string): string { return Object.keys(labels).find(k => labels[k] === label) || ""; }
 function percent(value: unknown): string { return value === undefined || value === null ? "数据不足" : `${Number(value).toFixed(1)}%`; }
 function chartPercent(value: unknown): number { const n = Number(value); return value == null || !Number.isFinite(n) ? 0 : Math.min(100, Math.max(0, n)); }
@@ -643,11 +642,6 @@ async function refreshView(): Promise<void> {
   void refreshSync();
 }
 function setPeriod(value: string): void { filters.period = value; filters.from = ""; filters.to = ""; pages.profile = 1; }
-function auditText(value: Dict | undefined): string {
-  if (!value) return "无记录";
-  const labels: Dict = { stem: "题干", type: "题型", options: "选项", correct_option_ids: "正确选项标识", answer_text: "参考答案", analysis: "解析", hint: "提示", topic: "知识点", specialty: "专业", difficulty: "难度", status: "状态", version: "版本" };
-  return Object.entries(labels).filter(([key]) => value[key] != null).map(([key, label]) => `${label}：${key === "options" ? value[key].map((o: Dict) => `${o.id}: ${o.text}`).join("\n") : Array.isArray(value[key]) ? value[key].join("、") : value[key]}`).join("\n\n");
-}
 async function refreshSync(): Promise<void> {
   if (!ready.value || disposed) return;
   try {
@@ -745,7 +739,7 @@ async function scrollModalError(): Promise<void> {
 }
 async function editQuestion(id = ""): Promise<void> {
   await perform(async () => {
-    editor.value = id ? await requestLearning(learningOptions,`/questions/${encodeURIComponent(id)}`) : { new_id: "q_" + uid(), bank: "written", type: "single", stem: "", year: String(new Date().getFullYear()), options: [{ id: uid(), text: "" }, { id: uid(), text: "" }], correct_option_ids: [], answer_text: "", analysis: "", hint: "", topic: "", specialty: "", difficulty: "中等", status: "draft", attachments: [] };
+    editor.value = withoutQuestionMetadata(id ? await requestLearning(learningOptions,`/questions/${encodeURIComponent(id)}`) : { new_id: "q_" + uid(), bank: "written", type: "single", stem: "", options: [{ id: uid(), text: "" }, { id: uid(), text: "" }], correct_option_ids: [], answer_text: "", analysis: "", hint: "", status: "draft", attachments: [] });
     editorSnapshot.value = JSON.stringify(editor.value); uploadFiles.value = []; attachmentKind.value = "question"; modalKind.value = "question";
     conflicted.value = false;
   });
@@ -791,8 +785,8 @@ async function saveQuestion(): Promise<void> {
   if (!String(editor.value.stem || "").trim() || (editor.value.status === "published" && problems.length)) { error.value = problems.join("；"); void scrollModalError(); return; }
   await perform(async () => {
     const id = editor.value.id;
-    const payload = copy(editor.value); delete payload.audit;
-    editor.value = await requestLearning(learningOptions,id ? `/questions/${encodeURIComponent(id)}` : "/questions", id ? "PUT" : "POST", payload);
+    const payload = withoutQuestionMetadata(editor.value); delete payload.audit;
+    editor.value = withoutQuestionMetadata(await requestLearning(learningOptions,id ? `/questions/${encodeURIComponent(id)}` : "/questions", id ? "PUT" : "POST", payload));
     editorSnapshot.value = JSON.stringify(editor.value);
     conflicted.value = false;
     if (uploadFiles.value.length) await uploadAttachments("question");
@@ -808,7 +802,7 @@ async function setQuestionStatus(items: Dict[], status: string): Promise<void> {
   });
 }
 async function copyQuestion(q: Dict): Promise<void> {
-  await perform(async () => { editor.value = await requestLearning(learningOptions,`/questions/${encodeURIComponent(q.id)}/copy`, "POST", { version: q.version }); editorSnapshot.value = JSON.stringify(editor.value); modalKind.value = "question"; uploadFiles.value = []; await loadView(); }, "已复制为草稿。");
+  await perform(async () => { editor.value = withoutQuestionMetadata(await requestLearning(learningOptions,`/questions/${encodeURIComponent(q.id)}/copy`, "POST", { version: q.version })); editorSnapshot.value = JSON.stringify(editor.value); modalKind.value = "question"; uploadFiles.value = []; await loadView(); }, "已复制为草稿。");
 }
 function openIssue(q: Dict = current.value || {}, existing?: Dict): void {
   issue.value = existing ? copy(existing) : { scope: paper.value?.scope || scope.value, paper_id: paper.value?.id, question_id: questionId(q), question_version: q.version, category: "答案", description: "", suggestion: "", snapshot: copy(q), attachments: [] };

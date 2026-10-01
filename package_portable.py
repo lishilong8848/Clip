@@ -188,6 +188,7 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "urllib3": "urllib3",
 
     "httpx": "httpx",
+    "websocket": "websocket-client",
 
     "cryptography": "cryptography",
 
@@ -206,6 +207,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "uvicorn": "uvicorn",
 
     "pydantic": "pydantic",
+    "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
+    "openai": "openai==3.22.1",
 
     "starlette": "starlette",
 
@@ -250,6 +253,7 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "urllib3",
 
     "httpx",
+    "websocket",
 
     "cryptography",
 
@@ -264,6 +268,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "apscheduler",
 
     "pydantic",
+    "pydantic_ai",
+    "openai",
 
     "starlette",
 
@@ -303,6 +309,11 @@ SMOKE_IMPORT_MODULES = [
     "upload_event_module.ui.main_window_runtime",
     "lan_bitable_template_portal.portal_service",
     "lan_bitable_template_portal.server",
+    "lan_bitable_template_portal.plan_convergence",
+    "lan_bitable_template_portal.lighthouse_routes",
+    "lan_bitable_template_portal.lighthouse_model",
+    "lan_bitable_template_portal.lighthouse_queries",
+    "lan_bitable_template_portal.lighthouse_stream",
     "clipflow_backend.main",
     "clipflow_backend.process_controller",
     "lan_bitable_template_portal.cabinet_power_batches",
@@ -313,7 +324,10 @@ SMOKE_IMPORT_MODULES = [
 ]
 
 PACKAGING_PREFLIGHT_MODULES = [
+    "pydantic_ai",
+    "openai",
     "httpx",
+    "websocket",
     "anyio",
     "apscheduler",
     "pydantic",
@@ -991,11 +1005,14 @@ def _missing_runtime_modules(venv_python: Path) -> list[str]:
     modules = list(RUNTIME_MODULE_TO_PACKAGE.keys())
     script_lines = [
         "import importlib",
+        "import importlib.metadata",
+        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1')}",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
         "    try:",
         "        importlib.import_module(name)",
+        "        if name in pinned and importlib.metadata.version(pinned[name][0]) != pinned[name][1]: missing.append(name)",
         "    except Exception:",
         "        missing.append(name)",
         "print('\\n'.join(missing))",
@@ -1021,6 +1038,8 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
     runtime_site_packages = _project_runtime_site_packages()
     script_lines = [
         "import importlib",
+        "import importlib.metadata",
+        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1')}",
         "import sys",
         "for path in " + repr(runtime_site_packages) + ":",
         "    if path not in sys.path:",
@@ -1030,6 +1049,7 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
         "for name in mods:",
         "    try:",
         "        importlib.import_module(name)",
+        "        if name in pinned and importlib.metadata.version(pinned[name][0]) != pinned[name][1]: missing.append(name)",
         "    except Exception:",
         "        missing.append(name)",
         "print('\\n'.join(missing))",
@@ -1459,6 +1479,22 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_cloud.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_routes.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_ai.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_sources.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_routes.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_pending.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_scope.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_model.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_queries.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_stream.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_routes.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_compare.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_auth.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_browser_login.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_maintenance.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_rules.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_points.py",
         PROJECT_ROOT / "bin" / "test_submission_reliability.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",
@@ -1532,11 +1568,18 @@ def _run_packaging_preflight_tests() -> None:
     log("通告 ID 边界测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud"],
+        [sys.executable, "-m", "unittest", "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_lighthouse_assistant", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope", "bin.test_lighthouse_stream", "bin.test_lighthouse_queries", "bin.test_lighthouse_api", "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows", "bin.test_lighthouse_business_matrix", "bin.test_lighthouse_reference_workflows", "bin.test_lighthouse_frontend_contracts"],
         cwd=PROJECT_ROOT,
         check=True,
     )
-    log("画像学练专项测试通过。")
+    log("画像学练与灯塔助手专项测试通过。")
+
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_points_adapter"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    log("计划收敛审查专项测试通过。")
 
     subprocess.run(
         [sys.executable, "-m", "unittest", "bin.test_submission_reliability",

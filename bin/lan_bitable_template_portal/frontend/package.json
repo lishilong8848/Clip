@@ -10,12 +10,17 @@
     "check:reliability": "node scripts/check-request-reliability.mjs",
     "check:repair-submission": "node scripts/check-repair-submission.mjs",
     "check:cabinet-reliability": "node scripts/check-cabinet-reliability.mjs",
+    "check:plan-convergence": "node --experimental-strip-types scripts/check-plan-convergence.ts",
     "smoke": "python ../../tools/frontend_runtime_smoke.py",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/vue": "3.0.299",
     "@tanstack/vue-virtual": "^3.13.12",
+    "ai": "6.0.299",
+    "dompurify": "3.4.16",
     "lucide-vue-next": "^0.468.0",
+    "marked": "18.0.14",
     "vue": "^3.5.16"
   },
   "devDependencies": {

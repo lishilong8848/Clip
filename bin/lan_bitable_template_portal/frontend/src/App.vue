@@ -1,6 +1,6 @@
 <template>
   <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }" @dragstart.capture="preventSignatureImageDrag">
-    <div v-if="!isDrillPrintPage && !isMorningMeetingPrintPage" class="security-watermark" aria-hidden="true">
+    <div v-if="!isDrillPrintPage && !isMorningMeetingPrintPage && !isLifeGuidePage" class="security-watermark" aria-hidden="true">
       <span v-for="index in 30" :key="index">{{ watermarkText }}</span>
     </div>
     <AppTopbar
@@ -24,6 +24,7 @@
       @refresh-event="refreshEvent"
       @open-admin="showAdminTools = true"
       @open-signatures="navigateHard('/signature-management')"
+      @open-life-guide="navigate('/life-guide')"
       @logout="logout"
     />
 
@@ -114,6 +115,10 @@
       :user-id="String(auth.user?.open_id || '')"
     />
 
+    <PlanConvergencePage v-else-if="isPlanConvergencePage" />
+
+    <LifeGuidePage v-else-if="isLifeGuidePage" />
+
     <DailyTaskChecklistPage
       v-else-if="isDailyTaskPage"
       :scope="currentScope"
@@ -188,10 +193,18 @@
       @critical-guard="enterCriticalGuard()"
       @drill="enterDrillManagement()"
       @learning="navigate('/learning')"
+      @plan-convergence="navigate('/plan-convergence')"
       @cabinet-power="navigate('/cabinet-power')"
       @daily="enterDailyTasks"
       @request-permission="openAdditionalPermissionRequest"
       @dashboard-visible="scopeHomeDashboardVisible = $event"
+    />
+
+    <LighthouseAssistant
+      v-if="auth.loggedIn && auth.user?.role !== 'guest'"
+      :key="String(auth.user?.open_id || '')"
+      :user-name="String(auth.user?.name || '')"
+      :user-id="String(auth.user?.open_id || '')"
     />
 
   </main>
@@ -222,6 +235,9 @@ const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
 const DailyTaskChecklistPage = asyncPage(() => import("./components/DailyTaskChecklistPage.vue"));
 const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
+const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergencePage.vue"));
+const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
+const LighthouseAssistant = defineAsyncComponent(() => import("./components/LighthouseAssistant.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
@@ -309,6 +325,8 @@ const isSignatureManagementPage = computed(() => routePath.value === "/signature
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks" || routePath.value === "/daily-tasks/morning-meeting/print");
 const isLearningPage = computed(() => routePath.value === "/learning");
+const isPlanConvergencePage = computed(() => routePath.value === "/plan-convergence");
+const isLifeGuidePage = computed(() => routePath.value === "/life-guide");
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCabinetPowerPage = computed(() => routePath.value === "/cabinet-power");
@@ -378,6 +396,8 @@ const headerSubtitle = computed(() => {
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
   if (isLearningPage.value) return "画像学练";
+  if (isPlanConvergencePage.value) return "计划收敛审查";
+  if (isLifeGuidePage.value) return "参考人生指南";
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (isCabinetPowerPage.value || isCabinetPowerBatchPage.value) return "机柜上下电";
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";

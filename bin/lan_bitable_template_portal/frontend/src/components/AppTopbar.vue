@@ -10,6 +10,7 @@
       </div>
     </div>
     <div class="topbar-actions">
+      <button v-if="auth.loggedIn && homeMode" type="button" class="btn ghost life-guide-entry" title="参考人生指南" @click="emit('open-life-guide')"><BookOpen :size="16" aria-hidden="true" /><span>参考人生指南</span></button>
       <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
         <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
         {{ auth.user?.name || "已登录" }}
@@ -55,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { Fingerprint, LogOut, Settings, UserRound } from "lucide-vue-next";
+import { BookOpen, Fingerprint, LogOut, Settings, UserRound } from "lucide-vue-next";
 import RefreshDataMenu from "./RefreshDataMenu.vue";
 import type { LooseDict, ScopeOption } from "../types";
 
@@ -85,6 +86,7 @@ const emit = defineEmits<{
   "refresh-event": [];
   "open-admin": [];
   "open-signatures": [];
+  "open-life-guide": [];
   logout: [];
 }>();
 
@@ -451,6 +453,9 @@ header.app-topbar .settings-entry {
     display: none;
   }
 }
+
+header.app-topbar .life-guide-entry {white-space:nowrap;padding-inline:11px}
+@media (max-width:520px){header.app-topbar .life-guide-entry{padding-inline:7px;font-size:11px;gap:4px}}
 
 @media (max-width: 520px) {
   header.app-topbar {

@@ -731,6 +731,10 @@ class FastAPIPortalController:
         install_cabinet_power_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.learning_routes import install_learning_routes
         install_learning_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
+        install_plan_convergence_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes
+        install_lighthouse_routes(app, self, PortalRuntime)
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
@@ -809,6 +813,12 @@ class FastAPIPortalController:
         @app.get("/admin/history-memory")
         @app.get("/admin/history-memory/")
         async def admin_history_memory_page(request: Request):
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
+
+        @app.get("/life-guide")
+        async def life_guide_page(request: Request):
+            if self._current_session(request) is None:
+                return Response(status_code=302, headers={"Location": "/api/auth/login?next=%2Flife-guide"})
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/workbench-lite")

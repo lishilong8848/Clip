@@ -1,0 +1,78 @@
+- main [ref=f1e3]:
+  - generic [aria-hidden]:
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+  - generic [ref=f1e4]:
+    - button "返回" [ref=f1e6] [cursor=pointer]
+    - generic [ref=f1e9]:
+      - img "世纪互联官方标识" [ref=f1e10]
+      - generic [ref=f1e11]:
+        - heading "南通基地-运维灯塔工作台" [level=1] [ref=f1e12]
+        - paragraph [ref=f1e13]: 计划收敛审查
+    - generic [ref=f1e14]:
+      - generic "飞书身份：test" [ref=f1e15]: 隔离测试管理员
+      - button "打开管理员诊断和权限管理" [ref=f1e16] [cursor=pointer]
+      - button "退出" [ref=f1e18] [cursor=pointer]
+  - generic [ref=f1e20]:
+    - generic [ref=f1e21]:
+      - heading "计划收敛审查" [level=2] [ref=f1e27]
+      - button "刷新屏蔽记录" [disabled] [ref=f1e29]
+    - navigation "计划收敛功能" [ref=f1e35]:
+      - button "核对台" [ref=f1e36] [cursor=pointer]
+      - button "规则配置" [ref=f1e41] [cursor=pointer]
+      - button "检修核对" [ref=f1e46] [cursor=pointer]
+    - generic [ref=f1e49]: 正在加载…
+    - generic [ref=f1e52]:
+      - complementary [ref=f1e53]:
+        - generic [ref=f1e54]:
+          - heading "屏蔽记录 0" [level=3] [ref=f1e55]
+          - generic [ref=f1e56]: 屏蔽中 0
+        - generic [ref=f1e57]:
+          - searchbox "搜索屏蔽记录" [ref=f1e58]
+          - combobox [ref=f1e60] [cursor=pointer]:
+            - generic [ref=f1e61]: 全部状态
+        - generic [ref=f1e64]:
+          - text: 暂无屏蔽记录
+          - button "拉取记录" [ref=f1e65] [cursor=pointer]
+        - generic [ref=f1e71]:
+          - button "上一页屏蔽记录" [disabled] [ref=f1e72]
+          - generic [ref=f1e75]: 1 / 1
+          - button "下一页屏蔽记录" [disabled] [ref=f1e76]
+      - main [ref=f1e79]:
+        - generic [ref=f1e80]:
+          - generic [ref=f1e81]:
+            - text: 屏蔽 ID
+            - textbox "屏蔽 ID" [ref=f1e82]:
+              - /placeholder: 输入屏蔽 ID
+          - button "查询详情" [disabled] [ref=f1e83]:
+            - search
+            - text: 查询详情
+        - generic [ref=f1e84]: 选择一条屏蔽记录

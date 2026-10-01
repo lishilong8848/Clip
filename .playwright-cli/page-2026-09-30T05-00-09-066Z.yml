@@ -1,0 +1,9 @@
+- alertdialog [ref=e1]:
+  - generic [ref=e2]:
+    - text: 南通基地 · 运维灯塔工作台
+    - heading "页面连接已中断" [level=1] [ref=e3]
+    - paragraph [ref=e4]: 无法连接当前程序。请检查当前程序是否运行、电脑网络及页面访问地址。
+    - paragraph [ref=e5]: 业务页面已暂停显示。恢复连接后请刷新页面；此前正在提交的通告，请先核对处理结果，不要重复发送。
+    - button "刷新页面" [active] [ref=e6] [cursor=pointer]
+    - button "重新检测连接" [ref=e7] [cursor=pointer]
+    - status [ref=e8]: 连接尚未恢复。

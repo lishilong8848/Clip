@@ -287,6 +287,7 @@ const emit = defineEmits<{
   learning: [];
   "cabinet-power": [];
   daily: [scope: string];
+  "plan-convergence": [];
   "request-permission": [];
   "dashboard-visible": [visible: boolean];
 }>();
@@ -614,6 +615,10 @@ function selectEntry(key: EntryKey): void {
   }
   if (key === "cabinet_power") {
     emit("cabinet-power");
+    return;
+  }
+  if (key === "plan_convergence") {
+    emit("plan-convergence");
     return;
   }
   activeMode.value = key;

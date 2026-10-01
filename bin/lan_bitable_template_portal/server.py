@@ -4191,6 +4191,8 @@ class PortalRuntime:
             "/signature/",
             "/signature-management",
             "/signature-management/",
+            "/life-guide",
+            "/life-guide/",
             "/engineer/mop",
             "/engineer/mop/",
         }:

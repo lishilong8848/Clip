@@ -1,0 +1,112 @@
+- main [ref=f1e3]:
+  - generic [aria-hidden]:
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+    - generic: 内部资料 · 隔离测试管理员 · 2026/09/30
+  - generic [ref=f1e4]:
+    - button "返回" [ref=f1e6] [cursor=pointer]
+    - generic [ref=f1e9]:
+      - img "世纪互联官方标识" [ref=f1e10]
+      - generic [ref=f1e11]:
+        - heading "南通基地-运维灯塔工作台" [level=1] [ref=f1e12]
+        - paragraph [ref=f1e13]: 计划收敛审查
+    - generic [ref=f1e14]:
+      - generic "飞书身份：test" [ref=f1e15]: 隔离测试管理员
+      - button "打开管理员诊断和权限管理" [ref=f1e16] [cursor=pointer]
+      - button "退出" [ref=f1e18] [cursor=pointer]
+  - generic [ref=f1e20]:
+    - generic [ref=f1e21]:
+      - heading "计划收敛审查" [level=2] [ref=f1e27]
+      - generic [ref=f1e28]:
+        - generic [ref=f1e89]: 屏蔽列表 2026/09/30 13:01
+        - button "平台设置" [ref=f1e90] [cursor=pointer]
+    - navigation "计划收敛功能" [ref=f1e35]:
+      - button "核对台" [ref=f1e36] [cursor=pointer]
+      - button "规则配置" [active] [ref=f1e41] [cursor=pointer]
+      - button "检修核对" [ref=f1e46] [cursor=pointer]
+    - generic [ref=f1e284]:
+      - generic [ref=f1e285]: 管理员
+      - generic [ref=f1e287]:
+        - complementary [ref=f1e288]:
+          - generic [ref=f1e289]:
+            - heading "规则集" [level=3] [ref=f1e290]
+            - button "刷新规则集" [ref=f1e291] [cursor=pointer]
+          - generic [ref=f1e297]:
+            - textbox "新规则集名称（如：南区公共部分）" [ref=f1e298]
+            - button [disabled] [ref=f1e299]
+          - list [ref=f1e301]:
+            - listitem [ref=f1e302]:
+              - button "制冷单元轮巡 4 项 无备注" [ref=f1e303] [cursor=pointer]:
+                - generic [ref=f1e304]: 制冷单元轮巡
+                - generic [ref=f1e305]:
+                  - generic [ref=f1e306]: 4 项
+                  - generic [ref=f1e307]: 无备注
+              - button "删除该规则集" [ref=f1e308] [cursor=pointer]
+            - listitem [ref=f1e312]:
+              - button "空调轮巡 2 项 无备注" [ref=f1e313] [cursor=pointer]:
+                - generic [ref=f1e314]: 空调轮巡
+                - generic [ref=f1e315]:
+                  - generic [ref=f1e316]: 2 项
+                  - generic [ref=f1e317]: 无备注
+              - button "删除该规则集" [ref=f1e318] [cursor=pointer]
+            - listitem [ref=f1e322]:
+              - button "蓄电池屏蔽 4 项 无备注" [ref=f1e323] [cursor=pointer]:
+                - generic [ref=f1e324]: 蓄电池屏蔽
+                - generic [ref=f1e325]:
+                  - generic [ref=f1e326]: 4 项
+                  - generic [ref=f1e327]: 无备注
+              - button "删除该规则集" [ref=f1e328] [cursor=pointer]
+            - listitem [ref=f1e332]:
+              - button "测试 6 项 无备注" [ref=f1e333] [cursor=pointer]:
+                - generic [ref=f1e334]: 测试
+                - generic [ref=f1e335]:
+                  - generic [ref=f1e336]: 6 项
+                  - generic [ref=f1e337]: 无备注
+              - button "删除该规则集" [ref=f1e338] [cursor=pointer]
+            - listitem [ref=f1e342]:
+              - button "A楼制冷单元轮巡 4 项 无备注" [ref=f1e343] [cursor=pointer]:
+                - generic [ref=f1e344]: A楼制冷单元轮巡
+                - generic [ref=f1e345]:
+                  - generic [ref=f1e346]: 4 项
+                  - generic [ref=f1e347]: 无备注
+              - button "删除该规则集" [ref=f1e348] [cursor=pointer]
+        - main [ref=f1e352]:
+          - generic [ref=f1e353]:
+            - heading "选择屏蔽范围" [level=3] [ref=f1e354]
+            - button "添加屏蔽范围" [disabled] [ref=f1e356]
+          - paragraph [ref=f1e358]: 请先选择或新建一个规则集。
+        - complementary [ref=f1e359]:
+          - generic [ref=f1e360]:
+            - heading "屏蔽条目（0）" [level=3] [ref=f1e361]
+            - generic [ref=f1e362]:
+              - button "清空" [disabled] [ref=f1e363]
+              - button "合并(0)" [disabled] [ref=f1e367]
+          - paragraph [ref=f1e372]: 「公共」条目须全部被包含；此外至少需匹配一个「普通」条目（若无普通条目，则仅需全部公共条目即可）。本工具仅配置规则集，不修改智航数据。
+          - paragraph [ref=f1e373]: 暂无屏蔽条目。

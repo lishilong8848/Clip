@@ -14,7 +14,7 @@ const source = await readFile(path.join(root, "src/components/LearningPage.vue")
 const { descriptor } = parse(source);
 const compiled = ts.transpileModule(descriptor.script.content, { compilerOptions: { module: ts.ModuleKind.ES2022 } }).outputText;
 const { parseLearningImport, learningQuestionProblems } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
-const question = (n = 1) => ({ id: `q${n}`, question_id: `q${n}`, bank: "written", stem: n === 1 ? "检修前发现供电切换异常，应如何确认现场条件？\n" + "核对设备运行状态、操作票和影响范围，确认安全条件后进行下一步。".repeat(12) : `测试题目 ${n}`, type: "single", type_label: "单选", year: "2026", options: [{ id: `q${n}-a`, text: "核对运行方式与隔离点，并进行双人复核。" }, { id: `q${n}-b`, text: "直接切换设备。" }, { id: `q${n}-c`, text: "仅以远程指示作为依据。" }], correct_option_ids: [`q${n}-a`], answer_text: "核对运行方式与隔离点，并进行双人复核。", analysis: "先核对现场条件，再执行经批准的操作。", hint: "注意隔离点与现场复核。", topic: "供电安全", specialty: "电气", difficulty: "中等", version: "v1", status: "published", attachments: [], problems: [] });
+const question = (n = 1) => ({ id: `q${n}`, question_id: `q${n}`, bank: "written", stem: n === 1 ? "检修前发现供电切换异常，应如何确认现场条件？\n" + "核对设备运行状态、操作票和影响范围，确认安全条件后进行下一步。".repeat(12) : `测试题目 ${n}`, type: "single", type_label: "单选", year: "2026", options: [{ id: `q${n}-a`, text: "核对运行方式与隔离点，并进行双人复核。" }, { id: `q${n}-b`, text: "直接切换设备。" }, { id: `q${n}-c`, text: "仅以远程指示作为依据。" }], correct_option_ids: [`q${n}-a`], answer_text: "核对运行方式与隔离点，并进行双人复核。", analysis: "先核对现场条件，再执行经批准的操作。", hint: "注意隔离点与现场复核。", topic: "供电安全", specialty: "电气", difficulty: "中等", reason: "原修订依据", version: "v1", status: "published", attachments: [], problems: [] });
 const sample = question();
 assert.deepEqual(learningQuestionProblems(sample), []);
 for (const year of ["", "1900", "2026", "2025年", "2100年"]) assert.deepEqual(learningQuestionProblems({ ...sample, year }), []);
@@ -130,6 +130,7 @@ async function fixture(route) {
   }
   if (p === "/api/learning/questions" && method === "POST") {
     assert(body.new_id.startsWith("q_"));
+    for (const k of ["year", "topic", "specialty", "difficulty", "reason"]) assert(!(k in body), `POST must not carry ${k}`);
     const item = { ...structuredClone(body), id: body.new_id, version: "v1", problems: [] };
     bank.push(item);
     return ok(item);
@@ -137,7 +138,18 @@ async function fixture(route) {
   if (/\/questions\/q\d+$/.test(p)) {
     const item = bank.find(q => q.id === p.split("/").at(-1));
     if (method === "GET") return ok({ ...item, audit: [{ at: "2026-09-28", actor: "管理员", reason: "答案更正", before: { stem: "原题干" }, after: { stem: item.stem } }] });
-    if (method === "PUT") { assert.equal(body.version, item.version); assert(!("audit" in body)); Object.assign(item, body, { version: item.version + "-saved" }); return ok(item); }
+    if (method === "PUT") {
+      assert.equal(body.version, item.version);
+      assert(!("audit" in body));
+      for (const k of ["year", "topic", "specialty", "difficulty", "reason"]) assert(!(k in body), `PUT must not carry ${k}`);
+      Object.assign(item, body, { version: item.version + "-saved" });
+      assert.equal(item.year, "2026");
+      assert.equal(item.topic, "供电安全");
+      assert.equal(item.specialty, "电气");
+      assert.equal(item.difficulty, "中等");
+      assert.equal(item.reason, "原修订依据");
+      return ok(item);
+    }
   }
   if (p.endsWith("/status")) { const item = bank.find(q => q.id === p.split("/").at(-2)); assert.equal(body.version, item.version); item.status = body.status; item.version += "-status"; return ok(item); }
   if (p === "/api/learning/settings") {
@@ -166,6 +178,18 @@ try {
   page.setDefaultTimeout(15000);
   page.on("pageerror", error => pageErrors.push(error.message));
   const select = async (id, value) => { await page.locator(`#${id}`).click(); await page.getByRole("option", { name: value, exact: true }).click(); };
+  // Open the 发布设置 tab and wait deterministically until the async /api/learning/settings
+  // read has been applied to the rendered form (the checkbox state reflects the applied
+  // settingsForm.enabled). Assertions about the settings form shape must not run before this.
+  const openSettingsTab = async expectedEnabled => {
+    const settingsGet = page.waitForResponse(r => new URL(r.url()).pathname === "/api/learning/settings" && r.request().method() === "GET");
+    await page.getByRole("button", { name: "发布设置", exact: true }).first().click();
+    await settingsGet;
+    await page.waitForFunction(enabled => {
+      const box = [...document.querySelectorAll('.settings-form input[type="checkbox"]')].find(el => (el.closest("label")?.textContent || "").includes("每日自动发布"));
+      return !!box && box.checked === enabled;
+    }, expectedEnabled);
+  };
   await page.goto(`${base}/learning?scope=H`);
   await page.getByRole("heading", { name: "画像学练", exact: true }).waitFor();
   await page.locator(".stem").waitFor();
@@ -201,7 +225,7 @@ try {
   await page.getByRole("button", { name: "提交本次复习", exact: true }).waitFor();
   assert(await page.locator(".options input").nth(1).isChecked(), "practice draft must also recover");
   await page.getByRole("button", { name: "提交本次复习", exact: true }).click();
-  await page.getByText("复习记录（1 次）", { exact: true }).waitFor();
+  await page.getByText("作答已确认。", { exact: true }).waitFor();
   assert.deepEqual(paper.questions[0].attempt, originalAttempt, "practice cannot overwrite first answer");
   await page.getByRole("button", { name: /^第 2 题/ }).click();
   await page.locator(".options input").first().check();
@@ -290,8 +314,13 @@ try {
   await page.getByRole("button", { name: "编辑题目", exact: true }).first().click();
   await page.getByRole("heading", { name: "编辑题目", exact: true }).waitFor();
   assert.equal(await page.getByLabel("解析", { exact: true }).isVisible(), false);
-  assert.equal(await page.getByLabel("年度", { exact: true }).isVisible(), false);
+  assert.equal(await page.getByLabel("年度", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("知识点", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("专业", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("难度", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("修订依据", { exact: true }).count(), 0);
   assert.equal(await page.getByLabel("参考答案", { exact: true }).count(), 0);
+  assert((await page.locator(".question-extra summary").innerText()).includes("解析与提示"));
   await page.getByRole("button", { name: "下移选项", exact: true }).first().click();
   assert.equal(await page.locator('.option-edit-row input:checked').getAttribute("aria-label"), "选项 B 为正确答案");
   await page.getByRole("textbox", { name: "题干 *", exact: true }).fill("管理员修订后的题干");
@@ -308,6 +337,14 @@ try {
   assert.equal(bank[0].options[1].id, "q1-a");
   assert.deepEqual(bank[0].correct_option_ids, ["q1-a"]);
   assert.equal(bank[0].analysis, "先核对现场条件，再执行经批准的操作。");
+  const savedPut = calls.filter(c => c.p === "/api/learning/questions/q1" && c.method === "PUT").at(-1).body;
+  assert.equal(savedPut.stem, "管理员修订后的题干");
+  for (const k of ["year", "topic", "specialty", "difficulty", "reason"]) assert.equal(k in savedPut, false, `PUT must exclude ${k}`);
+  assert.equal(savedPut.analysis, "先核对现场条件，再执行经批准的操作。");
+  assert.equal(savedPut.correct_option_ids[0], "q1-a");
+  assert.equal(bank[0].answer_text, "核对运行方式与隔离点，并进行双人复核。");
+  assert.equal(bank[0].attachments.length, 0);
+  assert(bank[0].version, "version must be preserved");
   await page.getByRole("textbox", { name: "题干 *", exact: true }).fill("旧窗口未保存的题干");
   await page.locator('.learning-modal input[type="file"]').setInputFiles({ name: "证据.txt", mimeType: "text/plain", buffer: Buffer.from("new evidence") });
   staleAttachment = true;
@@ -322,7 +359,11 @@ try {
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "新增题目", exact: true }).click();
   await page.getByRole("heading", { name: "新增题目", exact: true }).waitFor();
-  assert.equal(await page.getByLabel("知识点", { exact: true }).isVisible(), false);
+  assert.equal(await page.getByLabel("知识点", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("年度", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("专业", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("难度", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("修订依据", { exact: true }).count(), 0);
   assert.equal(await page.locator('.attachment-editor').getAttribute("open"), null);
   await select("learning-select-9", "不定项");
   assert.equal(await page.locator('.option-edit-row input[type="checkbox"]').count(), 2);
@@ -337,8 +378,10 @@ try {
   await page.getByText("题目已保存。", { exact: true }).waitFor();
   const created = calls.filter(c => c.p === "/api/learning/questions" && c.method === "POST").at(-1).body;
   assert.equal(created.analysis, "");
-  assert.equal(created.specialty, "");
+  for (const k of ["year", "topic", "specialty", "difficulty", "reason"]) assert.equal(k in created, false, `POST must exclude ${k}`);
   assert.equal(created.correct_option_ids[0], created.options[0].id);
+  assert.equal(created.answer_text, "");
+  assert.equal(created.attachments.length, 0);
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "新增题目", exact: true }).click();
   await select("learning-select-8", "值班面试");
@@ -371,33 +414,41 @@ try {
   await page.getByText("导入完成。", { exact: true }).waitFor();
   assert(calls.some(c => c.p.endsWith("/import") && c.body.preview === true));
   settings.enabled = false;
-  await page.getByRole("button", { name: "发布设置", exact: true }).click();
-  assert.equal(await page.getByRole("textbox", { name: "学习入口", exact: true }).inputValue(), settings.portal_url + "/learning");
-  assert.equal(await page.getByRole("textbox", { name: "学习入口", exact: true }).getAttribute("readonly"), "");
+  await openSettingsTab(false);
+  // 只读学习入口已移除；开关关闭时对应时间输入隐藏；云表/固定题量表摘除
+  assert.equal(await page.getByRole("textbox", { name: "学习入口", exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("发布时间", { exact: true }).count(), 0);
+  assert.equal(await page.getByLabel("提醒时间", { exact: true }).count(), 0);
+  assert.equal(await page.getByText("首次发布将创建云端学练数据表").count(), 0);
+  assert.equal(await page.getByText("每日选择题").count(), 0);
   assert.equal(await page.getByRole("textbox", { name: "门户地址", exact: true }).count(), 0);
   await page.getByLabel("每日自动发布", { exact: true }).check();
+  await page.getByLabel("发布时间", { exact: true }).fill("08:30");
   await page.getByLabel("提醒未完成的楼栋", { exact: true }).check();
+  assert(await page.getByLabel("发布时间", { exact: true }).isVisible());
   await page.getByLabel("提醒时间", { exact: true }).fill("17:30");
   await page.screenshot({ path: path.join(output, "learning-admin-settings.png"), fullPage: true });
-  for (const width of [1440, 390]) {
-    await page.setViewportSize({ width, height: 1000 });
-    const inputBox = await page.getByRole("textbox", { name: "学习入口", exact: true }).boundingBox();
-    const linkBox = await page.getByRole("link", { name: "打开学习入口", exact: true }).boundingBox();
-    assert(Math.abs(inputBox.y + inputBox.height / 2 - linkBox.y - linkBox.height / 2) < 2, "portal link must remain beside the address");
-    assert(await page.locator(".learning-page").evaluate(e => e.scrollWidth <= e.clientWidth + 1));
-  }
+  await page.setViewportSize({ width: 390, height: 1000 });
+  assert(await page.locator(".learning-page").evaluate(e => e.scrollWidth <= e.clientWidth + 1));
   await page.screenshot({ path: path.join(output, "learning-settings-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   // The bootstrap originally said enabled, so reload the page to test first enable explicitly.
   await page.getByText("设置已保存。", { exact: true }).waitFor();
+  assert.equal(settings.publish_time, "08:30");
   assert.equal(settings.reminder_time, "17:30");
   assert.deepEqual(Object.keys(calls.filter(c => c.p.endsWith("/settings") && c.method === "PUT").at(-1).body).sort(), ["enabled", "publish_time", "reminder_enabled", "reminder_time"]);
   settings.enabled = false;
   await page.reload();
   await page.getByRole("button", { name: "手动发布题单", exact: true }).waitFor();
   assert(await page.getByRole("button", { name: "手动发布题单", exact: true }).isEnabled(), "manual publish must work with automatic publishing off");
-  await page.getByRole("button", { name: "发布设置", exact: true }).first().click();
+  await openSettingsTab(false);
+  // 自动发布关闭时发布时间隐藏，但仍可保存并保留既有时间
+  assert.equal(await page.getByLabel("发布时间", { exact: true }).count(), 0);
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await page.getByText("设置已保存。", { exact: true }).waitFor();
+  assert.equal(settings.enabled, false);
+  assert.equal(settings.publish_time, "08:30");
   await page.getByLabel("每日自动发布", { exact: true }).check();
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await page.getByRole("dialog", { name: "启用每日自动发布", exact: true }).waitFor();
@@ -475,9 +526,15 @@ try {
   await page.getByText("今日暂无可学习题目", { exact: true }).waitFor();
   assert(paperDeleted);
   admin = false;
+  settings.enabled = false;
   await page.reload();
   await page.getByText("今日暂无可学习题目", { exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "删除本楼题单", exact: true }).count(), 0);
+  // 普通答题账号不显示同步状态标签与自动发布未启用的全局提示，今日空状态仍明确
+  assert.equal(await page.locator(".sync-label").count(), 0);
+  assert.equal(await page.getByText("自动发布未启用").count(), 0);
+  assert.equal(await page.getByText("同步题库", { exact: true }).count(), 0);
+  assert.equal(await page.getByText("手动发布题单", { exact: true }).count(), 0);
   await page.getByRole("button", { name: "学习历史", exact: true }).click();
   await page.getByText("暂无符合条件的记录", { exact: true }).waitFor();
   await page.getByRole("button", { name: "返回", exact: true }).click();

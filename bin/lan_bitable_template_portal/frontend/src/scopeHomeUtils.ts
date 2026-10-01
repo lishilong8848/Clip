@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "critical_guard" | "drill" | "learning" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "critical_guard" | "drill" | "learning" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -230,6 +230,12 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     description: "按楼栋打开已配置的交接班审核页面。",
     actionLabel: "打开审核页",
   },
+  plan_convergence: {
+    kicker: "其他工具",
+    title: "计划收敛审查",
+    description: "",
+    actionLabel: "进入计划收敛审查",
+  },
 };
 
 export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
@@ -239,6 +245,7 @@ export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
   { key: "handover", title: "交接班审核页", description: "按楼栋跳转审核链接", badge: "链接", icon: "link", tone: "slate" },
+  { key: "plan_convergence", title: "计划收敛审查", description: "计划收敛与执行情况审查", badge: "审查", icon: "link", tone: "slate" },
 ];
 
 export const SCOPE_HOME_CAPACITY_ENTRIES: ScopeHomeToolEntry[] = [

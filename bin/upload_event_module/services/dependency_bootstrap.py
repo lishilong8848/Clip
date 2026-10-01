@@ -1,4 +1,5 @@
 import importlib.util
+import importlib.metadata
 import subprocess
 import sys
 import urllib.request
@@ -14,12 +15,15 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "requests": "requests",
     "urllib3": "urllib3",
     "httpx": "httpx",
+    "websocket": "websocket-client",
     "cryptography": "cryptography",
     "PIL": "Pillow",
     "openpyxl": "openpyxl",
     "pypdf": "pypdf",
     "anyio": "anyio",
     "pydantic": "pydantic",
+    "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
+    "openai": "openai==3.22.1",
     "starlette": "starlette",
     "multipart": "python-multipart",
     "apscheduler": "APScheduler",
@@ -88,7 +92,13 @@ def _run_cmd(args: list[str], timeout_seconds: int = 30) -> tuple[bool, str]:
 
 def _has_module(module_name: str) -> bool:
     try:
-        return importlib.util.find_spec(module_name) is not None
+        if importlib.util.find_spec(module_name) is None:
+            return False
+        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1")}
+        if module_name in pinned:
+            distribution, version = pinned[module_name]
+            return importlib.metadata.version(distribution) == version
+        return True
     except Exception:
         return False
 
