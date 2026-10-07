@@ -34,14 +34,27 @@ if (process.platform === 'win32' && (process.env.LIGHTHOUSE_SDK_ROOT || process.
     const { a: systemExe } = await import(pathToFileURL(resolve(codeRoot, 'windows-install-roots-BdGcwph2.js')).href);
     const spawn = childProcess.spawnSync, exec = childProcess.execFileSync;
     const pidUrl = pathToFileURL(pidModule).href + ':', portUrl = pathToFileURL(portModule).href + ':';
-    const creationTime = `import sys, win32api, win32process
-from datetime import timezone
-h = win32api.OpenProcess(0x1000, False, int(sys.argv[1]))
+    const creationTime = `import ctypes, sys
+from ctypes import wintypes as w
+from datetime import datetime, timedelta, timezone
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+k.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+k.OpenProcess.restype = w.HANDLE
+k.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+k.GetProcessTimes.argtypes = [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4
+k.CloseHandle.argtypes = [w.HANDLE]
+h = k.OpenProcess(0x1000, False, int(sys.argv[1]))
+if not h: raise ctypes.WinError(ctypes.get_last_error())
 try:
-    if win32process.GetExitCodeProcess(h) != 259: raise OSError('process exited')
-    print(win32process.GetProcessTimes(h)['CreationTime'].astimezone(timezone.utc).isoformat(timespec='milliseconds'))
+    code = w.DWORD()
+    if not k.GetExitCodeProcess(h, ctypes.byref(code)) or code.value != 259: raise OSError('process exited')
+    times = [w.FILETIME() for _ in range(4)]
+    if not k.GetProcessTimes(h, *[ctypes.byref(value) for value in times]): raise ctypes.WinError(ctypes.get_last_error())
+    ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+    created = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)
+    print(created.isoformat(timespec='milliseconds'))
 finally:
-    h.Close()
+    k.CloseHandle(h)
 `;
     const probe = (file, args, options) => {
       if (typeof file !== 'string' || basename(file).toLowerCase() !== 'powershell.exe' ||
@@ -62,7 +75,7 @@ finally:
     };
     const read = (query, options) => {
       const result = query.pid
-        ? spawn(python, ['-I', '-B', '-c', creationTime, query.pid], { ...options, timeout: Math.min(options.timeout || 1000, 1000), shell: false })
+        ? spawn(python, ['-I', '-S', '-B', '-c', creationTime, query.pid], { ...options, timeout: Math.min(options.timeout || 1000, 1000), shell: false })
         : spawn(systemExe('netstat.exe'), ['-ano'], options);
       if (result.error || result.status !== 0) return null;
       if (query.pid && (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}\+00:00\s*$/.test(result.stdout) ||

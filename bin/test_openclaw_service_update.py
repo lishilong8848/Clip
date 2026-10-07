@@ -171,6 +171,42 @@ class AssistantUpdateTests(unittest.TestCase):
                 self.assertEqual(finished, [('finish', failure == 'none', True)], events)
                 self.assertEqual(events[-1], ('emit', failure == 'none'), events)
 
+    def test_dependency_failure_releases_ui_before_external_alert(self):
+        from bin.test_transport_safety import isolated_class
+        events = []
+        def alert(**kwargs):
+            self.assertEqual(events, ['finish', 'failed'])
+            events.append('alert')
+            raise OSError('isolated alert unavailable')
+        namespace = {'__package__': 'upload_event_module.ui', 'Path': Path, 'sys': sys,
+            'config': SimpleNamespace(auto_install_dependencies=True),
+            'DEFAULT_MODULE_TO_PACKAGE': {}, 'DEFAULT_WINDOWS_MODULE_TO_PACKAGE': {},
+            'patch_deletions': lambda *_: [], 'log_warning': lambda *_: None,
+            'send_system_alert': alert, 'ensure_runtime_dependencies': lambda *args, **kwargs: (False, 'pip failed')}
+        installer = isolated_class(Path(__file__).parent / 'upload_event_module/ui/main_window_patch.py',
+            'PatchUpdateMixin', {'_apply_patch_worker'}, namespace)
+        item = installer()
+        item._last_patch_meta, item._last_patch_source = {}, 'remote'
+        item._get_app_root_dir = lambda: self.project
+        item._collect_patch_files = lambda _: []
+        item._parse_deleted_files = lambda _: []
+        item._emit_remote_update_phase = lambda _: None
+        def emit(success, message):
+            self.assertFalse(success)
+            self.assertIn('pip failed', message)
+            events.append('failed')
+        item.patch_update_finished = SimpleNamespace(emit=emit)
+        def finish(applied, **kwargs):
+            self.assertFalse(applied)
+            self.assertFalse(kwargs['dependencies_ready'])
+            events.append('finish')
+            return ''
+        guard = SimpleNamespace(pause=lambda *args, **kwargs: None, finish=finish)
+        with patch('openclaw_service.update.AssistantUpdateGuard', return_value=guard), \
+                patch('upload_event_module.services.dependency_bootstrap._verify_modules', return_value=['fixture']):
+            item._apply_patch_worker(self.payload)
+        self.assertEqual(events, ['finish', 'failed', 'alert'])
+
 
 if __name__ == '__main__':
     unittest.main()

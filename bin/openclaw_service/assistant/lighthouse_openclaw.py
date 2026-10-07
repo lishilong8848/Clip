@@ -6,7 +6,6 @@ import hmac
 import json
 import logging
 import secrets
-import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -172,15 +171,8 @@ class OpenClawToolAgent:
             except ServiceError as exc:
                 raise AssistantError(str(exc), exc.status) from None
         plugin = self.engine.manager.root / account_key(self.actor['id']) / 'plugin'
-        plugin.mkdir(parents=True, exist_ok=True)
-        for file in (Path(__file__).parent / 'openclaw/plugin').iterdir():
-            if file.is_file():
-                shutil.copyfile(file, plugin / file.name)
-        (plugin / 'tools.json').write_text(json.dumps(definitions, ensure_ascii=False), encoding='utf-8')
-        manifest = json.loads((plugin / 'openclaw.plugin.json').read_text(encoding='utf-8'))
-        manifest.update(activation={'onStartup': True}, contracts={'tools': list(self.tools)},
-                        toolMetadata={name: {'optional': False} for name in self.tools})
-        (plugin / 'openclaw.plugin.json').write_text(json.dumps(manifest), encoding='utf-8')
+        from openclaw_service.protocol import prepare_tool_plugin
+        await asyncio.to_thread(prepare_tool_plugin, Path(__file__).parent / 'openclaw/plugin', plugin, definitions)
         if not self.engine.gateway_ready(self.actor):
             await self.emit('status', {'label': '正在连接助手'})
         loop = asyncio.get_running_loop()

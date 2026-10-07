@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import httpx
-from openclaw_service.protocol import PROJECT, InstanceLock, ServiceError, atomic_json, control_key, descriptor, identity, migrate_accounts, process_stamp, protect_state_directory
+from openclaw_service.protocol import PROJECT, InstanceLock, ServiceError, atomic_json, control_key, descriptor, identity, migrate_accounts, process_stamp, protect_state_directory, prepare_tool_plugin
 from openclaw_service.server import Host, build_app
 from lan_bitable_template_portal.lighthouse_runtime import account_key
 
@@ -49,6 +49,43 @@ class FakeManager:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_plugin_only_writes_changed_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / 'source', Path(directory) / 'target'
+            source.mkdir()
+            (source / 'openclaw.plugin.json').write_text('{"id":"lighthouse-tools"}', encoding='utf-8')
+            (source / 'index.mjs').write_text('export default {}', encoding='utf-8')
+            tools = [{'name': 'lighthouse_query', 'parameters': {'type': 'object'}}]
+            prepare_tool_plugin(source, target, tools)
+            with patch.object(Path, 'write_bytes', side_effect=AssertionError('unchanged files must not be rewritten')):
+                prepare_tool_plugin(source, target, copy.deepcopy(tools))
+            before = (target / 'index.mjs').stat().st_mtime_ns
+            prepare_tool_plugin(source, target, [*tools, {'name': 'lighthouse_new', 'parameters': {}}])
+            self.assertEqual((target / 'index.mjs').stat().st_mtime_ns, before)
+            manifest = json.loads((target / 'openclaw.plugin.json').read_text(encoding='utf-8'))
+            self.assertEqual(manifest['contracts']['tools'], ['lighthouse_query', 'lighthouse_new'])
+
+    def test_state_acl_skips_unchanged_files_but_repairs_widened_access(self):
+        import win32security
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'state'
+            root.mkdir()
+            child = root / 'existing.txt'
+            child.write_bytes(b'private')
+            protect_state_directory(root)
+            with patch('win32security.SetNamedSecurityInfo', wraps=win32security.SetNamedSecurityInfo) as write:
+                protect_state_directory(root)
+                write.assert_not_called()
+            acl = win32security.ACL()
+            acl.AddAccessAllowedAce(win32security.ACL_REVISION, 0x1F01FF,
+                win32security.CreateWellKnownSid(win32security.WinWorldSid, None))
+            win32security.SetNamedSecurityInfo(str(child), win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                None, None, acl, None)
+            with patch('win32security.SetNamedSecurityInfo', wraps=win32security.SetNamedSecurityInfo) as write:
+                protect_state_directory(root)
+                self.assertEqual([call.args[0] for call in write.call_args_list], [str(child)])
+
     def test_state_acl_protects_existing_and_new_owned_files(self):
         import win32security
         with tempfile.TemporaryDirectory() as directory:

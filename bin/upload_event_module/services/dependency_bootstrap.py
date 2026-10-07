@@ -1,12 +1,46 @@
 import importlib.util
 import importlib.metadata
+import logging
+import os
+import re
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
-from ..logger import log_error, log_info, log_warning
+from ..logger import setup_logging
+
+setup_logging()
+_LOG = logging.getLogger("DependencyInstall")
+_LOG.setLevel(logging.INFO)
+
+
+def _safe_log(value: Any) -> str:
+    def redact_url(match):
+        try:
+            parsed = urlsplit(match.group())
+            return urlunsplit((parsed.scheme, parsed.netloc.rsplit('@', 1)[-1], parsed.path, '', ''))
+        except ValueError:
+            return '[URL]'
+    text = re.sub(r'https?://[^\s<>"\']+', redact_url, str(value))
+    return text[:2000]
+
+
+def log_info(message):
+    _LOG.info('%s', _safe_log(message))
+
+
+def log_warning(message):
+    _LOG.warning('%s', _safe_log(message))
+
+
+def log_error(message):
+    _LOG.error('%s', _safe_log(message))
 
 
 DEFAULT_MODULE_TO_PACKAGE = {
@@ -64,32 +98,88 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
-def _run_cmd(args: list[str], timeout_seconds: int = 30) -> tuple[bool, str]:
+def _run_cmd(args: list[str], timeout_seconds: int = 30, *, status_callback=None) -> tuple[bool, str]:
     startupinfo = None
     creationflags = 0
     if sys.platform == "win32":
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0  # SW_HIDE
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+    started = time.monotonic()
+    tail = deque(maxlen=40)
+    label = '安装依赖' if 'install' in args else '准备 pip'
+    log_info(f"{label}: 开始，超时限制 {max(5, timeout_seconds)} 秒")
+    proc = None
+    reader = None
+    timed_out = False
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             args,
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
-            errors="ignore",
-            timeout=max(5, timeout_seconds),
-            check=False,
+            errors="replace",
+            env={**os.environ, 'PYTHONUNBUFFERED': '1', 'PIP_PROGRESS_BAR': 'off', 'NO_COLOR': '1'},
             startupinfo=startupinfo,
             creationflags=creationflags,
         )
+        def read_output():
+            try:
+                with proc.stdout:
+                    for line in proc.stdout:
+                        line = _safe_log(line.strip())
+                        if line:
+                            tail.append(line)
+                            log_info('pip: ' + line)
+            except (OSError, ValueError):
+                pass
+        reader = threading.Thread(target=read_output, name='DependencyOutput', daemon=True)
+        reader.start()
+        deadline = started + max(5, timeout_seconds)
+        while proc.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                proc.kill()
+                proc.wait(timeout=5)
+                break
+            try:
+                proc.wait(timeout=min(10, remaining))
+            except subprocess.TimeoutExpired:
+                elapsed = int(time.monotonic() - started)
+                message = f'{label}中，已等待 {elapsed} 秒'
+                log_info(message)
+                if status_callback:
+                    try:
+                        status_callback('远程更新: ' + message)
+                    except Exception as exc:
+                        log_warning(f'依赖安装进度通知失败: {type(exc).__name__}')
     except Exception as exc:
-        return False, str(exc)
+        message = _safe_log(f'{label}异常: {type(exc).__name__}: {exc}')
+        log_error(message)
+        return False, message
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                log_warning(f'依赖安装进程退出未完成: {type(exc).__name__}')
+        if reader is not None:
+            reader.join(timeout=2)
+    elapsed = round(time.monotonic() - started, 1)
+    detail = '\n'.join(tail)
+    if timed_out:
+        message = f'{label}超时（{elapsed} 秒），将核验已安装的依赖'
+        log_warning(message)
+        return False, message + ('\n' + detail if detail else '')
+    log_info(f'{label}: 退出码 {proc.returncode}，耗时 {elapsed} 秒')
     if proc.returncode == 0:
-        return True, proc.stdout.strip()
-    err = (proc.stderr or proc.stdout or "").strip()
-    return False, err
+        return True, detail
+    return False, f'{label}退出码 {proc.returncode}' + ('\n' + detail if detail else '')
 
 
 def _has_module(module_name: str) -> bool:
@@ -208,6 +298,7 @@ def _resolve_missing_packages(
 
 
 def _verify_modules(module_to_package: dict[str, str]) -> list[str]:
+    importlib.invalidate_caches()
     return [module for module in module_to_package if not _has_module(module)]
 
 
@@ -221,6 +312,7 @@ def ensure_runtime_dependencies(
     allow_get_pip: bool = True,
     status_callback: Callable[[str], None] | None = None,
 ) -> tuple[bool, str]:
+    log_info(f'依赖检查开始，解释器: {python_exe or sys.executable}')
     module_to_package = _normalize_module_to_package(
         (manifest or {}).get("module_to_package")
     )
@@ -233,6 +325,7 @@ def ensure_runtime_dependencies(
         status_callback("远程更新: 依赖检查中")
 
     if not missing_modules:
+        log_info('依赖检查通过，无需安装')
         return True, "依赖已就绪"
 
     py = Path(python_exe or sys.executable)
@@ -251,6 +344,7 @@ def ensure_runtime_dependencies(
     if status_callback:
         status_callback("远程更新: 正在安装依赖")
     log_info(f"依赖安装: 缺失模块 {', '.join(missing_modules)}")
+    last_error = ''
     for mirror in mirror_list:
         for attempt in range(1, retry_value + 1):
             cmd = [
@@ -269,17 +363,21 @@ def ensure_runtime_dependencies(
                 mirror,
             ] + packages_to_install
             log_info(f"依赖安装: mirror={mirror} attempt={attempt}")
-            ok, err = _run_cmd(cmd, timeout_value + 60)
+            ok, err = _run_cmd(cmd, timeout_value + 60, status_callback=status_callback)
             if not ok:
+                last_error = err
                 log_warning(f"依赖安装失败({mirror}): {err}")
-                continue
             still_missing = _verify_modules(module_to_package)
             if not still_missing:
-                return True, f"依赖安装成功({mirror})"
+                message = '依赖安装后核验通过' if ok else '安装命令未正常结束，但依赖已全部就绪，核验通过'
+                log_info(message)
+                return True, message
             log_warning("依赖安装后仍缺模块: " + ", ".join(still_missing))
 
     final_missing = _verify_modules(module_to_package)
     if final_missing:
-        return False, "仍缺模块: " + ", ".join(final_missing)
-    log_error("依赖安装失败: 未知错误")
-    return False, "未知错误"
+        detail = "仍缺模块: " + ", ".join(final_missing) + ('；最后安装结果: ' + last_error[-1500:] if last_error else '')
+        log_error(detail)
+        return False, detail
+    log_info('依赖最终核验通过，可以继续更新')
+    return True, '依赖最终核验通过'

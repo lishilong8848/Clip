@@ -402,7 +402,7 @@ PACKAGING_PREFLIGHT_MODULES = [
 
 def log(msg: str) -> None:
 
-    print(f"[Package] {msg}")
+    print(f"[Package] {msg}", flush=True)
 
 
 
@@ -1082,26 +1082,11 @@ def _missing_runtime_modules(venv_python: Path) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _project_runtime_site_packages() -> list[str]:
-    candidates: list[Path] = []
-    venv_root = BIN_DIR / ".venv"
-    if os.name == "nt":
-        candidates.append(venv_root / "Lib" / "site-packages")
-    else:
-        candidates.extend((venv_root / "lib").glob("python*/site-packages"))
-    return [str(path) for path in candidates if path.is_dir()]
-
-
 def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str]:
-    runtime_site_packages = _project_runtime_site_packages()
     script_lines = [
         "import importlib",
         "import importlib.metadata",
         "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0')}",
-        "import sys",
-        "for path in " + repr(runtime_site_packages) + ":",
-        "    if path not in sys.path:",
-        "        sys.path.insert(0, path)",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
@@ -1118,8 +1103,9 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _ensure_packaging_preflight_dependencies() -> None:
-    missing = _missing_selected_modules(Path(sys.executable), PACKAGING_PREFLIGHT_MODULES)
+def _ensure_packaging_preflight_dependencies(python_exe: Path | None = None) -> None:
+    python_exe = python_exe or _find_dist_venv_python(PROJECT_ROOT) or Path(sys.executable)
+    missing = _missing_selected_modules(python_exe, PACKAGING_PREFLIGHT_MODULES)
     if not missing:
         return
 
@@ -1135,9 +1121,9 @@ def _ensure_packaging_preflight_dependencies() -> None:
 
     log("发布就绪检查缺少依赖，先补齐: " + ", ".join(packages))
     if WHEELS_DIR.exists():
-        _pip_install_packages(Path(sys.executable), packages, use_local_wheels=True)
+        _pip_install_packages(python_exe, packages, use_local_wheels=True)
 
-    missing_after_wheels = _missing_selected_modules(Path(sys.executable), PACKAGING_PREFLIGHT_MODULES)
+    missing_after_wheels = _missing_selected_modules(python_exe, PACKAGING_PREFLIGHT_MODULES)
     if not missing_after_wheels:
         log("发布就绪检查依赖已从本地 wheels 补齐。")
         return
@@ -1150,9 +1136,9 @@ def _ensure_packaging_preflight_dependencies() -> None:
         )
     )
     if packages_after_wheels:
-        _pip_install_packages(Path(sys.executable), packages_after_wheels, use_local_wheels=False)
+        _pip_install_packages(python_exe, packages_after_wheels, use_local_wheels=False)
 
-    final_missing = _missing_selected_modules(Path(sys.executable), PACKAGING_PREFLIGHT_MODULES)
+    final_missing = _missing_selected_modules(python_exe, PACKAGING_PREFLIGHT_MODULES)
     if final_missing:
         missing_text = ", ".join(RUNTIME_MODULE_TO_PACKAGE.get(m, m) for m in final_missing)
         raise RuntimeError(f"发布就绪检查依赖缺失: {missing_text}")
@@ -1346,9 +1332,9 @@ def _registered_skill_resources(registry_path: str, modified: int, size: int) ->
     return frozenset(result)
 
 
-def _is_development_only_path(path: Path, root: Path) -> bool:
+def _is_development_only_path(path: Path, root: Path, *, relative_path: Path | None = None) -> bool:
     try:
-        rel = path.resolve().relative_to(root.resolve())
+        rel = relative_path if relative_path is not None else path.resolve().relative_to(root.resolve())
     except Exception:
         return False
     if rel in FORCE_PATCH_INCLUDE_FILES:
@@ -1458,11 +1444,11 @@ def _has_relative_prefix(parts: tuple[str, ...], prefix: tuple[str, ...]) -> boo
     return lowered[: len(lowered_prefix)] == lowered_prefix
 
 
-def _is_runtime_data_path(path: Path, root: Path | None = None) -> bool:
+def _is_runtime_data_path(path: Path, root: Path | None = None, *, relative_path: Path | None = None) -> bool:
 
     try:
 
-        parts = path.resolve().relative_to((root or PROJECT_ROOT).resolve()).parts
+        parts = (relative_path if relative_path is not None else path.resolve().relative_to((root or PROJECT_ROOT).resolve())).parts
 
     except Exception:
 
@@ -1557,6 +1543,8 @@ def _assert_project_iterator_excludes_runtime_data() -> None:
 def _run_packaging_preflight_tests() -> None:
 
     log("开始执行打包前自动测试。")
+    test_python = str(_find_dist_venv_python(PROJECT_ROOT) or sys.executable)
+    log(f"测试解释器: {test_python}")
 
     _assert_project_iterator_excludes_runtime_data()
     _cleanup_vue_dist_assets()
@@ -1633,14 +1621,11 @@ def _run_packaging_preflight_tests() -> None:
 
     if py_targets:
         with tempfile.TemporaryDirectory(prefix="clipflow_pycompile_") as pycache_dir:
-            compile_env = os.environ.copy()
-            compile_env["PYTHONPYCACHEPREFIX"] = pycache_dir
-
+            compile_script = "import pathlib,py_compile,sys\nfor index,source in enumerate(sys.argv[2:]): py_compile.compile(source,cfile=str(pathlib.Path(sys.argv[1])/f'{index}.pyc'),doraise=True)"
             subprocess.run(
-                [sys.executable, "-m", "py_compile", *[os.fspath(path) for path in py_targets]],
+                [test_python, "-c", compile_script, pycache_dir, *[os.fspath(path) for path in py_targets]],
                 cwd=PROJECT_ROOT,
                 check=True,
-                env=compile_env,
             )
 
         log(f"Python 语法检查通过: {len(py_targets)} 个文件。")
@@ -1649,9 +1634,9 @@ def _run_packaging_preflight_tests() -> None:
 
     readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
     if readiness_script.exists():
-        _ensure_packaging_preflight_dependencies()
+        _ensure_packaging_preflight_dependencies(Path(test_python))
         subprocess.run(
-            [sys.executable, os.fspath(readiness_script)],
+            [test_python, os.fspath(readiness_script)],
             cwd=PROJECT_ROOT,
             check=True,
         )
@@ -1662,7 +1647,7 @@ def _run_packaging_preflight_tests() -> None:
     notice_flow_smoke = PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py"
     if notice_flow_smoke.exists():
         subprocess.run(
-            [sys.executable, os.fspath(notice_flow_smoke)],
+            [test_python, os.fspath(notice_flow_smoke)],
             cwd=PROJECT_ROOT,
             check=True,
         )
@@ -1671,14 +1656,14 @@ def _run_packaging_preflight_tests() -> None:
         raise RuntimeError("缺少通告链路静态烟测脚本，已中止打包。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_notice_identity_boundaries"],
+        [test_python, "-m", "unittest", "bin.test_notice_identity_boundaries"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("通告 ID 边界测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest",
+        [test_python, "-m", "unittest",
          "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
@@ -1708,7 +1693,7 @@ def _run_packaging_preflight_tests() -> None:
     )
     log("画像学练与灯塔助手专项测试通过。")
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_openclaw_service", "bin.test_openclaw_service_client",
+        [test_python, "-m", "unittest", "bin.test_openclaw_service", "bin.test_openclaw_service_client",
          "bin.test_openclaw_service_launcher", "bin.test_openclaw_service_store", "bin.test_openclaw_service_update",
          "bin.test_openclaw_backend_proxy", "bin.test_openclaw_packaging_imports",
          "bin.test_openclaw_gateway_log",
@@ -1719,14 +1704,14 @@ def _run_packaging_preflight_tests() -> None:
     log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_points_adapter"],
+        [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_points_adapter"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("计划收敛审查专项测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_submission_reliability",
+        [test_python, "-m", "unittest", "bin.test_submission_reliability",
          "bin.test_event_remote_atomicity", "bin.test_notice_upload_reliability", "bin.test_notice_undo",
          "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
         cwd=PROJECT_ROOT,
@@ -1735,14 +1720,14 @@ def _run_packaging_preflight_tests() -> None:
     log("通告与维修可靠性、恢复及进程退出测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_critical_guard"],
+        [test_python, "-m", "unittest", "bin.test_critical_guard"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("重保管理专项测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_transport_safety"],
+        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials"],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -1795,19 +1780,20 @@ def _is_under_bin_build_or_dist(path: Path) -> bool:
 
 
 def _is_excluded(
-    path: Path, *, root: Path = PROJECT_ROOT, exclude_venv: bool = False
+    path: Path, *, root: Path = PROJECT_ROOT, exclude_venv: bool = False, relative_path: Path | None = None
 ) -> bool:
 
     try:
-        parts = set(path.resolve().relative_to(root.resolve()).parts)
+        relative_path = relative_path if relative_path is not None else path.resolve().relative_to(root.resolve())
+        parts = set(relative_path.parts)
     except Exception:
         parts = set(path.parts)
 
-    if _is_development_only_path(path, root):
+    if _is_development_only_path(path, root, relative_path=relative_path):
 
         return True
 
-    if _is_runtime_data_path(path, root):
+    if _is_runtime_data_path(path, root, relative_path=relative_path):
 
         return True
 
@@ -1847,8 +1833,6 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
         kept_dirnames: list[str] = []
         for dirname in dirnames:
             child = base / dirname
-            if _is_development_only_path(child, root):
-                continue
             if rel_base == Path(".") and dirname in EXCLUDE_TOP_LEVEL:
                 continue
             if dirname in EXCLUDE_DIR_NAMES:
@@ -1857,7 +1841,10 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
                 continue
             if dirname == "build_output":
                 continue
-            if _is_runtime_data_path(child, root):
+            relative = child.resolve().relative_to(root)
+            if _is_development_only_path(child, root, relative_path=relative):
+                continue
+            if _is_runtime_data_path(child, root, relative_path=relative):
                 continue
             if _is_under_bin_build_or_dist(child):
                 continue
@@ -1870,7 +1857,7 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
                 continue
             if path.suffix.lower() == ".zip" and base == root:
                 continue
-            if _is_excluded(path, root=root, exclude_venv=exclude_venv):
+            if _is_excluded(path, root=root, exclude_venv=exclude_venv, relative_path=path.resolve().relative_to(root)):
                 continue
             files.append(path)
 
@@ -3478,9 +3465,11 @@ def main() -> None:
 
         log("已从基线元数据识别运行时依赖哈希。")
 
-    code_changed = _has_code_changes(baseline_dir, exclude_venv=True)
+    force_ui_update = bool(DEFAULT_FORCE_UI_UPDATE or args.force_ui_update)
+    # Forced restarts do not need a second scan before build_patch compares files.
+    code_changed = False if force_ui_update else _has_code_changes(baseline_dir, exclude_venv=True)
 
-    if not code_changed:
+    if not force_ui_update and not code_changed:
 
         log("相对基线未检测到 .py 代码变化。")
 
@@ -3517,8 +3506,6 @@ def main() -> None:
     else:
 
         log("补丁将排除 .venv 运行时目录。")
-
-    force_ui_update = bool(DEFAULT_FORCE_UI_UPDATE or args.force_ui_update)
 
     # Python code is loaded by the running Qt/backend processes, so every code
     # patch must restart even when the visible UI assets did not change.

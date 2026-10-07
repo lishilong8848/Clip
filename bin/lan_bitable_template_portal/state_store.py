@@ -221,6 +221,7 @@ class LanPortalStateStore:
         self._initialized = False
         self._initialized_db_identity: tuple[int, int] | None = None
         self._wal_initialized = False
+        self._verified_backup: tuple | None = None
         self._write_queue: queue.Queue[dict[str, Any] | None] | None = None
         self._write_thread: threading.Thread | None = None
         self._write_worker_lock = threading.Lock()
@@ -12812,13 +12813,24 @@ class LanPortalStateStore:
         target_dir.mkdir(parents=True, exist_ok=True)
         day_key = time.strftime("%Y%m%d")
         backup_path = target_dir / f"{self.db_path.stem}_{day_key}.sqlite3"
+
+        def backup_identity() -> tuple:
+            info = backup_path.stat()
+            return (str(backup_path.resolve()), info.st_dev, info.st_ino, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns)
+
         if backup_path.exists() and backup_path.stat().st_size > 0:
             try:
-                with closing(
-                    sqlite3.connect(str(backup_path), timeout=10.0)
-                ) as existing:
-                    existing_rows = existing.execute("PRAGMA quick_check").fetchall()
-                if [str(row[0] or "") for row in existing_rows] == ["ok"]:
+                identity = backup_identity()
+                verified = self._verified_backup == identity and not any(
+                    Path(f"{backup_path}{suffix}").exists() for suffix in ("-wal", "-journal"))
+                if not verified:
+                    with closing(sqlite3.connect(str(backup_path), timeout=10.0)) as existing:
+                        existing_rows = existing.execute("PRAGMA quick_check").fetchall()
+                    verified = [str(row[0] or "") for row in existing_rows] == ["ok"]
+                    if verified and backup_identity() == identity:
+                        self._verified_backup = identity
+                if verified:
                     return {
                         "created": False,
                         "reason": "already_exists",
@@ -12854,6 +12866,8 @@ class LanPortalStateStore:
                     f"SQLite 备份完整性检查失败: {results}"
                 )
             os.replace(temporary_path, backup_path)
+            # Reuse validation only while this exact, already checked file is unchanged.
+            self._verified_backup = backup_identity()
         finally:
             try:
                 if temporary_path.exists():
@@ -13100,15 +13114,26 @@ class LanPortalStateStore:
         lease_seconds = max(5, int(lease_seconds or 30))
         now = time.time()
         stale_before = now - lease_seconds
+        due_sql = (
+            "SELECT 1 FROM event_outbox WHERE channel = ? AND "
+            "(status = 'pending' OR (status = 'leased' AND updated_at < ?)) LIMIT 1"
+        )
         with self._lock:
+            if self._initialized:
+                # Empty SSE polls need neither writable PRAGMAs nor a last-writer WAL checkpoint.
+                try:
+                    with closing(sqlite3.connect(self.db_path.absolute().as_uri() + "?mode=ro",
+                            uri=True, timeout=self.busy_timeout_ms / 1000.0)) as reader:
+                        due = reader.execute(due_sql, (channel, stale_before)).fetchone()
+                    if due is None:
+                        return []
+                except sqlite3.OperationalError:
+                    # A replaced database may need the existing schema initialization path.
+                    pass
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 # Idle SSE polls must not acquire a write lock for an empty outbox.
-                due = conn.execute(
-                    "SELECT 1 FROM event_outbox WHERE channel = ? AND "
-                    "(status = 'pending' OR (status = 'leased' AND updated_at < ?)) LIMIT 1",
-                    (channel, stale_before),
-                ).fetchone()
+                due = conn.execute(due_sql, (channel, stale_before)).fetchone()
                 if due is None:
                     return []
                 conn.execute(

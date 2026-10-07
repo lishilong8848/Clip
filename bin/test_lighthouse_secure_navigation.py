@@ -255,31 +255,31 @@ class SecureNavigationTests(unittest.IsolatedAsyncioTestCase):
         """生成维护单 / 选择评估人 / 发送签名使用确认 / 在维护单或演练中
         使用我的签名 are NON-security intents:
         they must reach model_factory (never short-circuit into a protected link)."""
+        class BusinessModelReached(Exception):
+            pass
+
         for question in ("生成A楼维护单", "请选择评估人", "给A楼发送签名使用确认",
                          "在维护单中使用我的签名", "在演练中使用我的签名"):
             with self.subTest(question=question):
                 rounds = []
 
-                async def stream(messages, info):
-                    rounds.append(len(messages))
-                    yield "业务表单已准备，请核对。"
-
                 @asynccontextmanager
                 async def factory(*_):
-                    yield FunctionModel(stream_function=stream)
+                    rounds.append(question)
+                    raise BusinessModelReached(question)
+                    yield  # pragma: no cover
 
                 engine = LighthouseModel(self.portal, model_factory=factory)
                 async def emit(*_):
                     pass
-                result = await engine.answer(
-                    self.actor,
-                    {"question": question, "operation_id": "business_%04d" % (self.auth_calls + 1),
-                     "file_ids": [], "_profile": {"id": "default", "name": "fixture", "model": "fixture-model"}},
-                    [], self.request, emit, self.authorize, {},
-                )
+                with self.assertRaises(BusinessModelReached):
+                    await engine.answer(
+                        self.actor,
+                        {"question": question, "operation_id": "business_%04d" % (self.auth_calls + 1),
+                         "file_ids": [], "_profile": {"id": "default", "name": "fixture", "model": "fixture-model"}},
+                        [], self.request, emit, self.authorize, {},
+                    )
                 self.assertTrue(rounds, "business intent must reach model_factory (not secure_page)")
-                for link in SECURE_LINKS:
-                    self.assertNotIn(link, result["answer"], question)
 
     async def test_upload_signed_reaches_model_not_secure_page_via_sentinel(self):
         """'上传并回填已签维护单' must reach model_factory -- no large fixture is

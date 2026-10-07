@@ -66,6 +66,23 @@ def atomic_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+def prepare_tool_plugin(source, destination, definitions):
+    """Keep identical plugin files untouched so native watchers stay idle."""
+    source, destination = Path(source), Path(destination)
+    files = {path.name: path.read_bytes() for path in source.iterdir() if path.is_file()}
+    names = [item['name'] for item in definitions]
+    manifest = json.loads(files['openclaw.plugin.json'])
+    manifest.update(activation={'onStartup': True}, contracts={'tools': names},
+                    toolMetadata={name: {'optional': False} for name in names})
+    for name, value in (('openclaw.plugin.json', manifest), ('tools.json', definitions)):
+        files[name] = json.dumps(value, ensure_ascii=False, sort_keys=True).encode('utf-8')
+    destination.mkdir(parents=True, exist_ok=True)
+    for name, content in files.items():
+        path = destination / name
+        if not path.is_file() or path.read_bytes() != content:
+            path.write_bytes(content)
+
+
 def control_key(state=STATE):
     import win32crypt
     path = Path(state) / 'service-key.dpapi'
@@ -99,12 +116,13 @@ def protect_state_directory(state):
             raise ServiceError('助手数据目录含外部链接，未修改目录权限。', code='unsafe_state_directory')
     reject_link(root)
     root.mkdir(parents=True, exist_ok=True)
+    resolved_root = root.resolve()
     paths = [root]
     for directory, names, files in os.walk(root, followlinks=False):
         for name in (*names, *files):
             path = Path(directory) / name
             reject_link(path)
-            if not path.resolve().is_relative_to(root.resolve()):
+            if not path.resolve().is_relative_to(resolved_root):
                 raise ServiceError('助手数据目录路径无效，未修改目录权限。', code='unsafe_state_directory')
             paths.append(path)
     if os.name != 'nt':
@@ -118,12 +136,26 @@ def protect_state_directory(state):
     finally:
         token.Close()
     acl = win32security.ACL()
-    for sid in (owner, win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None),
-                win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid, None)):
+    owners = (owner, win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None),
+              win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid, None))
+    expected_sids = {win32security.ConvertSidToStringSid(sid) for sid in owners}
+    for sid in owners:
         acl.AddAccessAllowedAceEx(win32security.ACL_REVISION,
             win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE, 0x1F01FF, sid)
     for path in paths:
         reject_link(path)
+        try:
+            saved = win32security.GetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION)
+            previous = saved.GetSecurityDescriptorDacl()
+            flags = win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE if path.is_dir() else 0
+            entries = [previous.GetAce(index) for index in range(previous.GetAceCount())] if previous else []
+            if saved.GetSecurityDescriptorControl()[0] & win32security.SE_DACL_PROTECTED and len(entries) == 3 \
+                    and all(ace[0] == (win32security.ACCESS_ALLOWED_ACE_TYPE, flags) and ace[1] == 0x1F01FF for ace in entries) \
+                    and {win32security.ConvertSidToStringSid(ace[2]) for ace in entries} == expected_sids:
+                continue
+        except Exception:
+            pass  # Apply the original restrictive ACL if reading/comparing it failed.
         try:
             win32security.SetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
                 win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,

@@ -176,6 +176,8 @@ class OpenClawRuntime:
         self.startup_timeout = startup_timeout
         self.prepared = None
         self.prepare_lock = asyncio.Lock()
+        self.prepare_retry_at = 0.0
+        self.prepare_error = None
         self.config_check_lock = asyncio.Lock()
         self.gateway = None
         self.startup = None
@@ -191,6 +193,8 @@ class OpenClawRuntime:
             if self.closing:
                 raise AssistantStartupError("助手服务正在关闭。", 503)
             if self.prepared is None:
+                if self.prepare_error is not None and time.monotonic() < self.prepare_retry_at:
+                    raise AssistantStartupError(str(self.prepare_error), 503)
                 startup_log('runtime_check', node=PIN['node_version'], openclaw=PIN['openclaw_version'])
                 try:
                     try:
@@ -204,8 +208,11 @@ class OpenClawRuntime:
                         await asyncio.to_thread(install_runtime, root, progress=progress)
                         self.prepared = await asyncio.to_thread(runtime_files, root)
                 except Exception as exc:
+                    self.prepare_error = str(exc) if isinstance(exc, AssistantError) else '助手运行环境准备失败，请稍后重试。'
+                    self.prepare_retry_at = time.monotonic() + 60
                     startup_log('startup_failed', error=type(exc).__name__)
                     raise
+                self.prepare_error, self.prepare_retry_at = None, 0.0
                 startup_log('runtime_ready', node=PIN['node_version'], openclaw=PIN['openclaw_version'])
             return self.prepared
 

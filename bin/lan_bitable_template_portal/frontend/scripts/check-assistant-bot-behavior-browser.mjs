@@ -91,6 +91,17 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__bot-check`);
   await page.locator('.assistant-launcher svg').waitFor();await page.waitForTimeout(350);
   const original=await iconBox();assert(same(original,base));
+  await page.evaluate(() => {
+    window.fixtureHasFocus = document.hasFocus.bind(document);
+    document.hasFocus = () => false;
+    window.dispatchEvent(new Event('blur'));
+  });
+  await page.waitForFunction(() => document.querySelector('.assistant-launcher .lighthouse-bot')?.dataset.animationActive === 'false');
+  const pausedScene = await page.locator('.assistant-launcher svg').innerHTML();
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator('.assistant-launcher svg').innerHTML(), pausedScene, 'unfocused window must stop SVG repainting');
+  await page.evaluate(() => { document.hasFocus = window.fixtureHasFocus; window.dispatchEvent(new Event('focus')); });
+  await page.waitForFunction(() => document.querySelector('.assistant-launcher .lighthouse-bot')?.dataset.animationActive === 'true');
   await page.waitForTimeout(1000);
   assert(await page.locator('.assistant-launcher svg mask g').evaluate(group=>{
     const eyes=[...group.querySelectorAll('path')];return eyes.length===2&&eyes.reduce((n,eye)=>n+new DOMMatrix(eye.getAttribute('transform')).e,0)<0;

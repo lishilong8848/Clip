@@ -12973,11 +12973,12 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"每日汇总主管目录预热失败，将使用兜底名单: {exc}")
 
-    def _run_scheduled_polling_relay(self) -> None:
+    def _run_scheduled_polling_relay(self) -> bool:
         if _mock_external_enabled():
-            return
+            return False
         relay_error = None
-        if PortalRuntime.polling_work_order_public_relay_should_run():
+        relay_enabled = PortalRuntime.polling_work_order_public_relay_should_run()
+        if relay_enabled:
             try:
                 relay = PortalRuntime.polling_work_order_relay()
                 relay.run_once()
@@ -12985,7 +12986,8 @@ class FastAPIPortalController:
                 # Public outages must not starve pending LAN/fallback role links.
                 relay_error = exc
         manager = PortalRuntime.polling_work_orders()
-        for group in manager.open_groups():
+        groups = manager.open_groups()
+        for group in groups:
             projected = manager.group_with_links(
                 group, PortalRuntime._polling_work_order_public_base_url()
             )
@@ -12998,6 +13000,7 @@ class FastAPIPortalController:
                     log_warning(f"工单角色链接待重试：group_id={projected.get('target_record_id')}, error={exc}")
         if relay_error is not None:
             raise relay_error  # preserve the worker's existing offline backoff
+        return bool(relay_enabled or groups)
 
     def _start_polling_relay_worker(self) -> None:
         if self._polling_relay_thread and self._polling_relay_thread.is_alive():
@@ -13010,8 +13013,8 @@ class FastAPIPortalController:
             delay = 2.0
             while not stop_event.is_set():
                 try:
-                    self._run_scheduled_polling_relay()
-                    delay = 2.0
+                    active = self._run_scheduled_polling_relay()
+                    delay = 2.0 if active else 10.0
                 except Exception as exc:
                     log_warning(f"轮巡公网工单同步失败，将自动重试: {exc}")
                     delay = min(30.0, delay * 2.0)

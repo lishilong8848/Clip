@@ -15,6 +15,7 @@ from ..config import SPECIALTY_FIRE, config
 from ..logger import log_error, log_info, log_warning
 from .feishu_token_manager import (
     TOKEN_REFRESH_MARGIN_SECONDS,
+    FeishuCredentialError,
     FeishuTokenError,
     token_manager,
 )
@@ -514,6 +515,9 @@ def refresh_feishu_token():
         log_info("正在尝试刷新飞书 Token...")
         try:
             return token_manager.refresh_tenant_token()
+        except FeishuCredentialError:
+            # The token manager logs a rejected credential once per retry window.
+            return None
         except FeishuTokenError as exc:
             log_error(f"Token 刷新失败: {exc}")
             return None

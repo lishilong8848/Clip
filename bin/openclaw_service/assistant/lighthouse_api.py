@@ -2647,7 +2647,7 @@ class PortalAPICatalog:
                 hay = f"{api_id} {desc.get('name', '')} {desc.get('group', '')} {desc.get('keywords', '')}".lower()
                 if not all(term in hay for term in keyword.split()):
                     continue
-            items.append(deepcopy(desc))
+            items.append(desc)
         total = len(items)
         try:
             raw_page_size = int(page_size)
@@ -2670,7 +2670,7 @@ class PortalAPICatalog:
                 groups.append({"name": label, "page": _PAGE_BY_GROUP.get(label, "/")})
                 seen.add(label)
         return {
-            "items": items[start:start + page_size],
+            "items": deepcopy(items[start:start + page_size]),
             "total": total,
             "page": page,
             "page_size": page_size,

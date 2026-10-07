@@ -34,24 +34,16 @@ REQUIRED_IMPORTS_FOR_CHECK = {
 }
 
 
-def _candidate_site_packages() -> list[Path]:
-    candidates: list[Path] = []
-    venv_root = BIN_DIR / ".venv"
-    if os.name == "nt":
-        candidates.append(venv_root / "Lib" / "site-packages")
-    else:
-        candidates.extend((venv_root / "lib").glob("python*/site-packages"))
-    return [path for path in candidates if path.is_dir()]
+def _use_project_python() -> None:
+    if __name__ != "__main__" or getattr(sys, "frozen", False):
+        return
+    candidate = BIN_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if candidate.is_file() and os.path.normcase(str(candidate)) != os.path.normcase(sys.executable):
+        # Use one environment; mixing site-packages also mixes optional plugin dependencies.
+        raise SystemExit(subprocess.call([str(candidate), str(Path(__file__).resolve()), *sys.argv[1:]]))
 
 
-def _add_project_runtime_site_packages() -> None:
-    for path in _candidate_site_packages():
-        text = str(path)
-        if text not in sys.path:
-            sys.path.insert(0, text)
-
-
-_add_project_runtime_site_packages()
+_use_project_python()
 
 _missing_for_check = [
     package
@@ -207,14 +199,12 @@ def check_requests_usage() -> tuple[bool, list[str]]:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        # Inspect code, not comments/test strings. Catching SDK exception types
-        # is allowed; importing requests/Session (including aliases) is not.
+        # Imports identify the network library, unlike local lists named requests.
+        # Catching SDK exception types is allowed; importing requests/Session is not.
         for node in ast.walk(ast.parse(text.lstrip("\ufeff"))):
             forbidden = isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "requests" for alias in node.names)
             if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "requests":
                 forbidden = not (node.module == "requests.exceptions" and all(alias.name in {"Timeout", "ReadTimeout", "ConnectionError"} for alias in node.names))
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "requests":
-                forbidden = True
             if forbidden:
                 offenders.append(normalized)
                 break

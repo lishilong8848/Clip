@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 
 from .lighthouse_ai import AssistantError
+from .lighthouse_startup_log import emit as startup_log
 
 BASE = 'H7DLbpdQiaIw4ssg5sCcSoGMn5M'
 TABLE = 'tblUECEItaUpOWvd'
@@ -92,14 +93,18 @@ class FeishuRuntimeMirror:
     """This adapter cannot address any other app/table, or delete records."""
     def __init__(self, *, client=None, headers=None):
         if client is None:
-            from upload_event_module.config import config
-            from upload_event_module.services.service_registry import ensure_feishu_token
+            from upload_event_module.services.feishu_token_manager import FeishuTokenError, token_manager
             from upload_event_module.services.http_client import FeishuHttpClient
-            token = ensure_feishu_token() or config.user_token
+            try:
+                token = token_manager.get_tenant_token()
+            except FeishuTokenError as exc:
+                startup_log('runtime_auth_failed')
+                raise AssistantError('助手依赖镜像认证失败：' + str(exc), 503) from None
             if not token:
                 raise AssistantError('飞书依赖镜像认证不可用。', 503)
             client, headers = FeishuHttpClient(timeout=60, retries=1), {'Authorization': 'Bearer ' + token}
         self.client, self.headers = client, headers
+        self._download_client = None
 
     def request(self, method, suffix='', **kwargs):
         value = self.client.request_json(method, API + suffix, headers=self.headers, **kwargs)
@@ -180,38 +185,45 @@ class FeishuRuntimeMirror:
         url = 'https://open.feishu.cn/open-apis/drive/v1/medias/' + quote(part['file_token'], safe='') + '/download'
         # Stream directly; do not buffer an arbitrary remote body into memory.
         import httpx
-        with httpx.Client(timeout=60, follow_redirects=False) as client:
-            for attempt in range(4):
-                # Never forward the API bearer to an attachment CDN.
-                headers = self.headers if urlsplit(url).netloc == 'open.feishu.cn' else {}
-                with client.stream('GET', url, headers=headers) as response:
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        redirected = urljoin(url, response.headers.get('location', ''))
-                        parsed = urlsplit(redirected)
-                        host = parsed.hostname or ''
-                        if not response.headers.get('location') or parsed.scheme != 'https' or parsed.username or parsed.password \
-                                or parsed.port not in (None, 443) or not any(host == domain or host.endswith('.' + domain)
-                                    for domain in ('feishu.cn', 'feishucdn.com', 'feishu-attachment.com')):
-                            raise AssistantError('依赖下载跳转不安全，未安装。', 502)
-                        url = redirected
-                        continue
-                    if response.status_code != 200:
-                        raise AssistantError('依赖分片下载未完成（HTTP ' + str(response.status_code) + '）。', 502)
-                    size = 0
-                    with Path(target).open('wb') as output:
-                        for chunk in response.iter_bytes(1024 * 1024):
-                            size += len(chunk)
-                            if size > part['size']:
-                                raise AssistantError('依赖分片大小异常，未安装。', 502)
-                            output.write(chunk)
-                    break
-            else:
-                raise AssistantError('依赖下载跳转次数过多。', 502)
+        from upload_event_module.services.http_client import verified_tls_context
+        if self._download_client is None:
+            self._download_client = httpx.Client(timeout=60, follow_redirects=False, verify=verified_tls_context())
+        for attempt in range(4):
+            # Never forward the API bearer to an attachment CDN.
+            headers = self.headers if urlsplit(url).netloc == 'open.feishu.cn' else {}
+            with self._download_client.stream('GET', url, headers=headers) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    redirected = urljoin(url, response.headers.get('location', ''))
+                    parsed = urlsplit(redirected)
+                    host = parsed.hostname or ''
+                    if not response.headers.get('location') or parsed.scheme != 'https' or parsed.username or parsed.password \
+                            or parsed.port not in (None, 443) or not any(host == domain or host.endswith('.' + domain)
+                                for domain in ('feishu.cn', 'feishucdn.com', 'feishu-attachment.com')):
+                        raise AssistantError('依赖下载跳转不安全，未安装。', 502)
+                    url = redirected
+                    continue
+                if response.status_code != 200:
+                    raise AssistantError('依赖分片下载未完成（HTTP ' + str(response.status_code) + '）。', 502)
+                size = 0
+                with Path(target).open('wb') as output:
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        size += len(chunk)
+                        if size > part['size']:
+                            raise AssistantError('依赖分片大小异常，未安装。', 502)
+                        output.write(chunk)
+                break
+        else:
+            raise AssistantError('依赖下载跳转次数过多。', 502)
         if size != part['size'] or checksum(target) != part['sha256']:
             raise AssistantError('依赖分片校验失败，未安装。', 502)
 
     def close(self):
-        self.client.close()
+        try:
+            self.client.close()
+        finally:
+            if self._download_client is not None:
+                self._download_client.close()
+                self._download_client = None
 
 
 def extract_verified(archive, destination, expected_hash):
@@ -262,6 +274,7 @@ def install_runtime(destination, *, mirror_factory=FeishuRuntimeMirror, progress
                 for part, path in zip(spec['parts'], parts):
                     progress('正在下载助手运行环境 ' + str(part['index']) + '/' + str(len(parts)))
                     if not path.is_file() or path.stat().st_size != part['size'] or checksum(path) != part['sha256']:
+                        startup_log('runtime_download', part=part['index'], parts=len(parts))
                         temporary = path.with_suffix(path.suffix + '.tmp')
                         try:
                             mirror.download_part(part, temporary)
@@ -282,6 +295,7 @@ def install_runtime(destination, *, mirror_factory=FeishuRuntimeMirror, progress
         backup = None
         try:
             progress('正在校验并安装助手运行环境')
+            startup_log('runtime_extract')
             extract_verified(archive, staging, spec['sha256'])
             runtime_files(staging)
             if destination.exists():

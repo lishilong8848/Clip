@@ -24,6 +24,11 @@ class FeishuTokenError(RuntimeError):
     pass
 
 
+class FeishuCredentialError(FeishuTokenError):
+    def __init__(self):
+        super().__init__("飞书应用密钥无效（10014 - app secret invalid）。请在当前程序的设置中更新 App Secret；重新扫码不能修复此配置错误。")
+
+
 class FeishuTokenManager:
     """Central token manager for Feishu tenant/app/user auth flows."""
 
@@ -32,6 +37,8 @@ class FeishuTokenManager:
         self._tenant_lock = threading.RLock()
         self._app_lock = threading.RLock()
         self._app_token_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._credential_lock = threading.RLock()
+        self._rejected_credentials = None
 
     def tenant_token_refresh_needed(
         self, *, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS
@@ -72,6 +79,8 @@ class FeishuTokenManager:
             http_error = ""
             try:
                 token, expire = self._request_tenant_token_http(app_id, app_secret)
+            except FeishuCredentialError:
+                raise
             except Exception as exc:
                 token, expire = "", 0
                 http_error = str(exc)
@@ -91,6 +100,8 @@ class FeishuTokenManager:
         try:
             try:
                 token, _expire = self._request_tenant_token_http(app_id, app_secret)
+            except FeishuCredentialError:
+                raise
             except Exception:
                 token, _expire = self._request_tenant_token_sdk(app_id, app_secret)
             if not token:
@@ -181,6 +192,22 @@ class FeishuTokenManager:
 
     def _request_json(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         try:
+            if len(args) > 1 and args[1] in {TENANT_TOKEN_URL, APP_TOKEN_URL}:
+                body = kwargs.get("json_payload") or {}
+                credentials = (body.get("app_id"), body.get("app_secret"))
+                # All auth callers share the rejection window; changed credentials retry immediately.
+                with self._credential_lock:
+                    rejected = self._rejected_credentials
+                    if rejected and rejected[0] == credentials and time.monotonic() < rejected[1]:
+                        raise FeishuCredentialError()
+                    payload = self._http_client.request_json(*args, **kwargs)
+                    if int(payload.get("code") or 0) == 10014:
+                        self._rejected_credentials = (credentials, time.monotonic() + 60)
+                        error = FeishuCredentialError()
+                        log_error(str(error))
+                        raise error
+                    self._rejected_credentials = None
+                    return payload
             return self._http_client.request_json(*args, **kwargs)
         except FeishuHTTPError as exc:
             raise FeishuTokenError(str(exc)) from exc
@@ -235,7 +262,7 @@ class FeishuTokenManager:
         expire_seconds = int(expire_in or 7200)
         expire_time = int(time.time()) + expire_seconds - 300
         config.save(user_token=new_token, token_expire_time=expire_time)
-        log_info(f"Token 刷新成功: {new_token[:10]}... (过期时间: {expire_time})")
+        log_info(f"Token 刷新成功 (过期时间: {expire_time})")
         return new_token
 
 

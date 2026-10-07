@@ -9,12 +9,11 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import time
 import uuid
 from fastapi import Request
 
-from .protocol import MAX_CONCURRENT_ACCOUNTS, PROTOCOL, PROJECT, STATE, ServiceError, code_digest, process_stamp
+from .protocol import MAX_CONCURRENT_ACCOUNTS, PROTOCOL, PROJECT, STATE, ServiceError, code_digest, process_stamp, prepare_tool_plugin
 
 
 def text(value, name, limit=200):
@@ -218,18 +217,8 @@ class Host:
             if existing and existing.get('busy'):
                 raise ServiceError('当前账号已有正在处理的会话，请稍后继续。', 409, 'account_busy')
             plugin = self.manager.root / key / 'plugin' if hasattr(self.manager, 'root') else self.state / 'accounts' / key / 'plugin'
-            def prepare_plugin():
-                plugin.mkdir(parents=True, exist_ok=True)
-                for file in (self.project / 'bin/openclaw_service/assistant/openclaw/plugin').iterdir():
-                    if file.is_file():
-                        shutil.copyfile(file, plugin / file.name)
-                (plugin / 'tools.json').write_text(json.dumps(definitions, ensure_ascii=False, sort_keys=True), encoding='utf-8')
-                manifest_path = plugin / 'openclaw.plugin.json'
-                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                manifest.update(activation={'onStartup': True}, contracts={'tools': names},
-                    toolMetadata={name: {'optional': False} for name in names})
-                manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding='utf-8')
-            await asyncio.to_thread(prepare_plugin)
+            await asyncio.to_thread(prepare_tool_plugin,
+                self.project / 'bin/openclaw_service/assistant/openclaw/plugin', plugin, definitions)
             model = type('UserModel', (), {'unprotect': staticmethod(unprotect_key)})()
             item = await self.manager.acquire(actor, model, profile, plugin=plugin, tool_names=names,
                 bridge_token=self.bridge_key(key), bridge_url=f'http://127.0.0.1:{self.port}/bridge',

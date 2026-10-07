@@ -14,6 +14,9 @@ STAGES = {
     'service_failed': '灯塔助手仍在后台准备，其他业务可继续使用',
     'runtime_check': '正在校验运行环境',
     'runtime_install': '本地运行环境缺失，正在准备安装',
+    'runtime_auth_failed': '助手依赖下载认证失败，请检查当前程序的飞书应用凭证',
+    'runtime_download': '正在下载助手运行环境分片',
+    'runtime_extract': '正在校验并解压助手运行环境',
     'runtime_ready': '运行环境已就绪',
     'skills_ready': '技能目录已加载',
     'awaiting_login': '等待登录账号，登录后自动准备独立 Agent',
@@ -29,7 +32,7 @@ TEXT_FIELDS = {
     'account': r'[0-9a-f]{8,32}', 'error': r'[A-Za-z][A-Za-z0-9_]{0,60}',
     'last_stage': r'[A-Za-z][A-Za-z0-9_]{0,60}',
 }
-NUMBERS = {'pid', 'port', 'elapsed_ms', 'protocol', 'skills', 'backend_pid', 'exit_code'}
+NUMBERS = {'pid', 'port', 'elapsed_ms', 'protocol', 'skills', 'backend_pid', 'exit_code', 'part', 'parts'}
 
 
 def render(line, *, backend_pid=None):
@@ -49,7 +52,7 @@ def render(line, *, backend_pid=None):
         if key in NUMBERS and (isinstance(value, bool) or not isinstance(value, (int, float)) or
                                abs(value) > 1_000_000_000 or not math.isfinite(value)):
             return None
-    details = ' '.join(f'{key}={data[key]}' for key in (*TEXT_FIELDS, 'skills', 'pid', 'port', 'protocol', 'elapsed_ms', 'exit_code') if key in data)
+    details = ' '.join(f'{key}={data[key]}' for key in (*TEXT_FIELDS, 'skills', 'pid', 'port', 'protocol', 'elapsed_ms', 'exit_code', 'part', 'parts') if key in data)
     return '[ClipFlow][OpenClaw] ' + STAGES[data['stage']] + (' | ' + details if details else '')
 
 

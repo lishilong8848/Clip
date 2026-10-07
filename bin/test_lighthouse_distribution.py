@@ -239,7 +239,7 @@ class _FakeHttpxClient:
         return _FakeRespCtx(next(self.responses))
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def all_fields():
@@ -752,6 +752,26 @@ class NodeHashValidationTests(unittest.TestCase):
 # 9. HTTP statuses and redirects in download_part.
 # ---------------------------------------------------------------------------
 class DownloadRedirectTests(unittest.TestCase):
+    def test_parts_share_one_client_and_verified_tls_context(self):
+        from upload_event_module.services import http_client
+        with tempfile.TemporaryDirectory() as tmp:
+            responses = []
+            for _ in range(2):
+                response = MagicMock(status_code=200, headers={})
+                response.iter_bytes.return_value = iter([b'000'])
+                responses.append(response)
+            mirror, client = self._mirror_with_http(responses)
+            context = object()
+            with patch('httpx.Client', return_value=client) as create, \
+                    patch.object(http_client, 'verified_tls_context', return_value=context) as tls:
+                for index in range(2):
+                    mirror.download_part(self._part(), Path(tmp) / str(index))
+                create.assert_called_once_with(timeout=60, follow_redirects=False, verify=context)
+                tls.assert_called_once()
+                self.assertFalse(client.closed)
+                mirror.close()
+                self.assertTrue(client.closed)
+
     def _part(self):
         return {"record_id": "rec1", "file_token": "tok1", "size": 3,
                 "sha256": hashlib.sha256(b"000").hexdigest()}

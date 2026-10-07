@@ -16,7 +16,10 @@ const host = ref<HTMLElement | null>(null), ready = ref(false), resumed = ref(fa
 let bot: BloubBot | undefined, disposed = false;
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
 const pageVisible = ref(!document.hidden), reducedMotion = ref(reduced.matches);
-const active = computed(() => props.visible && pageVisible.value);
+// A same-origin workbench iframe is still part of the active browser window.
+const focusWindow = (() => { try { return window.top?.document ? window.top : window; } catch { return window; } })();
+const windowFocused = ref(focusWindow.document.hasFocus());
+const active = computed(() => props.visible && pageVisible.value && windowFocused.value);
 const IDLE_CYCLE: StateId[] = ['idle', 'wink', 'wide', 'play', 'orbit', 'swirl', 'burst', 'comet', 'egg', 'hexagon'];
 const QUIET_CYCLE: StateId[] = ['idle', 'wink', 'wide'];
 let lastUrl = window.location.href;
@@ -41,6 +44,8 @@ function update(value: BotAppearance): void {
   activate();
 }
 function visibility(): void { pageVisible.value = !document.hidden; reducedMotion.value = reduced.matches; }
+function focus(): void { if (!disposed) windowFocused.value = focusWindow.document.hasFocus(); }
+function blur(): void { window.setTimeout(focus, 0); }
 async function reposition(animate = true): Promise<void> {
   await nextTick();
   if (disposed || !bot || !host.value || !props.interactive) return;
@@ -91,6 +96,9 @@ onMounted(() => {
   document.addEventListener('visibilitychange', visibility);
   reduced.addEventListener('change', visibility);
   window.addEventListener('resize', onResize);
+  window.addEventListener('focus', focus);
+  window.addEventListener('blur', blur);
+  if (focusWindow !== window) { focusWindow.addEventListener('focus', focus); focusWindow.addEventListener('blur', blur); }
   if (props.interactive) {
     window.addEventListener('popstate', onNavigation);
     window.addEventListener('clipflow:workbench-pointer', onFramePointer);
@@ -103,6 +111,9 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', visibility);
   reduced.removeEventListener('change', visibility);
   window.removeEventListener('resize', onResize);
+  window.removeEventListener('focus', focus);
+  window.removeEventListener('blur', blur);
+  if (focusWindow !== window) { focusWindow.removeEventListener('focus', focus); focusWindow.removeEventListener('blur', blur); }
   window.removeEventListener('popstate', onNavigation);
   window.removeEventListener('clipflow:workbench-pointer', onFramePointer);
   window.removeEventListener('pagehide', saveMotion);

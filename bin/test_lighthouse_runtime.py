@@ -99,7 +99,7 @@ cp.execFileSync = function(file, args, options) {
 cp.spawnSync = function(file, args, options) {
   if (file === process.env.LIGHTHOUSE_PYTHON) {
     helpers++;
-    assert.deepEqual(args.slice(0, 3), ['-I', '-B', '-c']);
+    assert.deepEqual(args.slice(0, 4), ['-I', '-S', '-B', '-c']);
     assert.match(args.at(-1), /^[1-9]\\d*$/);
     assert.equal(options.shell, false);
     assert.ok(options.timeout > 0 && options.timeout <= 1000);
@@ -595,6 +595,18 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(distribution, 'install_runtime', Mock()) as install:
             await self.acquire()
             install.assert_called_once()
+
+    async def test_runtime_install_failure_is_shared_and_retries_after_cooldown(self):
+        from lan_bitable_template_portal import lighthouse_distribution as distribution
+        with patch.object(lrt, 'runtime_files', side_effect=AssistantError('missing', 503)), \
+                patch.object(distribution, 'install_runtime', side_effect=AssistantError('fixture auth failure', 503)) as install:
+            failures = await asyncio.gather(*(self.runtime.prepare() for _ in range(8)), return_exceptions=True)
+            self.assertTrue(all(isinstance(error, AssistantError) for error in failures))
+            install.assert_called_once()
+            self.runtime.prepare_retry_at = 0
+            with self.assertRaises(AssistantError):
+                await self.runtime.prepare()
+            self.assertEqual(install.call_count, 2)
 
     async def test_shutdown_idempotent_terminates_shared_process_once(self):
         await self.acquire('first')

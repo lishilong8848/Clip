@@ -164,6 +164,56 @@ class PerformanceGuardTests(unittest.TestCase):
             finally:
                 writer.close()
 
+    def test_unchanged_backup_is_not_rescanned_but_restart_and_changes_are_checked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / 'state.sqlite3')
+            store.put_document('fixture', 'record', {'value': 'preserved'})
+            created = store.backup_database()
+            backup = Path(created['backup_path'])
+            real_connect = sqlite3.connect
+            with patch('lan_bitable_template_portal.state_store.sqlite3.connect', wraps=real_connect) as connect:
+                self.assertEqual(store.backup_database()['reason'], 'already_exists')
+                connect.assert_not_called()
+                restarted = LanPortalStateStore(store.db_path)
+                self.assertEqual(restarted.backup_database()['reason'], 'already_exists')
+                self.assertEqual(connect.call_count, 1)
+                info = backup.stat()
+                import os
+                os.utime(backup, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+                self.assertEqual(restarted.backup_database()['reason'], 'already_exists')
+                self.assertEqual(connect.call_count, 2)
+                with closing(real_connect(backup)) as editing:
+                    editing.execute('PRAGMA journal_mode = WAL')
+                    restarted.backup_database()
+                    checked = connect.call_count
+                    editing.execute('CREATE TABLE backup_edit_fixture (value INTEGER)')
+                    editing.commit()
+                    restarted.backup_database()
+                    self.assertEqual(connect.call_count, checked + 1)
+                backup.write_bytes(b'corrupt backup')
+                self.assertTrue(restarted.backup_database()['created'])
+                self.assertGreater(connect.call_count, 2)
+            with closing(real_connect(backup)) as saved:
+                self.assertEqual(saved.execute('PRAGMA quick_check').fetchone()[0], 'ok')
+            self.assertEqual(store.get_document('fixture', 'record'), {'value': 'preserved'})
+
+    def test_assistant_catalog_copies_only_requested_page_without_sharing_mutable_schema(self):
+        import copy
+        from openclaw_service.assistant.lighthouse_api import PortalAPICatalog
+        catalog = object.__new__(PortalAPICatalog)
+        catalog._order = [f'GET /api/fixture/{index}' for index in range(500)]
+        catalog._descriptors = {key: {'id': key, 'group': '业务接口', 'name': 'fixture',
+            'schema': {'body': {'properties': {'name': {'type': 'string'}}}}} for key in catalog._order}
+        with patch('openclaw_service.assistant.lighthouse_api.deepcopy', wraps=copy.deepcopy) as copied:
+            result = catalog.discover(keyword='fixture', page=2, page_size=8)
+            copied.assert_called_once()
+            self.assertEqual(len(copied.call_args.args[0]), 8)
+        self.assertEqual(result['total'], 500)
+        self.assertEqual([item['id'] for item in result['items']], catalog._order[8:16])
+        result['items'][0]['schema']['body']['properties']['name']['type'] = 'changed'
+        self.assertEqual(catalog.get(catalog._order[8])['schema']['body']['properties']['name']['type'], 'string')
+        self.assertEqual(catalog.discover(keyword='missing')['items'], [])
+
     def test_queue_stats_reads_details_once(self):
         from clipflow_backend.main import PortalRuntime, _queue_stats
         details = {'message': {'queued_due': 2, 'queued_future': 1}, 'qt_action': {'queued_due': 4}}
@@ -317,6 +367,39 @@ class PerformanceGuardTests(unittest.TestCase):
             self.assertFalse(any(sql.lstrip().upper().startswith('UPDATE ') for sql in statements))
             with patch('lan_bitable_template_portal.state_store.time.time', return_value=time.time() + 31):
                 self.assertEqual(store.count_outbox_events('qt_action', stale_lease_seconds=30), {'pending': 1})
+
+    def test_empty_outbox_avoids_writable_connections_and_observes_other_writers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'state.sqlite3'
+            reader, writer = LanPortalStateStore(path), LanPortalStateStore(path)
+            reader.put_settings({'fixture': True})
+            with patch.object(reader, '_connect', wraps=reader._connect) as writable:
+                for _ in range(3):
+                    self.assertEqual(reader.lease_outbox_events('qt_action'), [])
+                writable.assert_not_called()
+                identity = writer.enqueue_outbox_event('qt_action', {'kind': 'fixture'})
+                self.assertEqual([row['id'] for row in reader.lease_outbox_events('qt_action')], [identity])
+                self.assertEqual(writable.call_count, 1)
+
+    def test_relay_worker_polls_idle_less_often_without_slowing_active_work(self):
+        from bin.test_transport_safety import isolated_class
+        waits, stop = [], threading.Event()
+        def wait(delay):
+            waits.append(delay)
+            if len(waits) == 3:
+                stop.set()
+        stop.wait = wait
+        worker = Mock(is_alive=Mock(return_value=False))
+        namespace = {'threading': SimpleNamespace(Event=lambda: stop, Thread=Mock(return_value=worker)),
+                     'lower_current_thread_priority': lambda: None, 'log_warning': lambda _: None}
+        cls = isolated_class(ROOT / 'bin/clipflow_backend/main.py', 'FastAPIPortalController',
+                             {'_start_polling_relay_worker'}, namespace)
+        controller = cls()
+        controller._polling_relay_thread = None
+        controller._run_scheduled_polling_relay = Mock(side_effect=[False, True, RuntimeError('offline')])
+        controller._start_polling_relay_worker()
+        namespace['threading'].Thread.call_args.kwargs['target']()
+        self.assertEqual(waits, [10.0, 2.0, 4.0])
 
     def test_http_client_allows_parallel_requests_and_honors_retry_after(self):
         lock = threading.Lock()

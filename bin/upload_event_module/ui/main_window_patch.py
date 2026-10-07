@@ -1073,23 +1073,22 @@ class PatchUpdateMixin:
                     allow_get_pip=bool(
                         getattr(config, "dependency_bootstrap_allow_get_pip", True)
                     ),
-                    status_callback=(
-                        self._emit_remote_update_phase
-                        if self._last_patch_source.startswith("remote")
-                        else None
-                    ),
+                    status_callback=self._emit_remote_update_phase,
                 )
                 if not dep_ok:
                     dependencies_ready = False
                     if self._last_patch_source.startswith("remote"):
                         self._emit_remote_update_phase("远程更新: 依赖安装失败")
-                    send_system_alert(
-                        event_code="dep.patch.install_failed",
-                        title="补丁依赖安装失败",
-                        detail=str(dep_detail),
-                        dedup_key=f"{self._last_patch_source}:patch_dep_failed",
-                    )
                     report(False, f"依赖安装失败: {dep_detail}")
+                    try:
+                        send_system_alert(
+                            event_code="dep.patch.install_failed",
+                            title="补丁依赖安装失败",
+                            detail=str(dep_detail),
+                            dedup_key=f"{self._last_patch_source}:patch_dep_failed",
+                        )
+                    except Exception as exc:
+                        log_warning(f"更新失败告警未发送: {type(exc).__name__}")
                     return
                 if self._last_patch_source.startswith("remote"):
                     self._emit_remote_update_phase("远程更新: 依赖就绪，应用补丁中")
