@@ -337,6 +337,7 @@ def main():
 
     def _start_portal_worker():
         started_at = time.perf_counter()
+        print('[ClipFlow] OpenClaw 将随门户在后台启动，无需另开助手程序。', flush=True)
         controller = None
         error = ""
         try:

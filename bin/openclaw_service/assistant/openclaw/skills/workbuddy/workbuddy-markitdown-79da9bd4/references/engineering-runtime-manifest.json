@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "industrial-corpus",
+  "version": "0.3.4",
+  "platform": "win-x64",
+  "resolverUrl": "https://xiaozhi.qlogicagent.com/api/v15/runtime/industrial-corpus/resolve?platform=win-x64",
+  "allowedDownloadHosts": [
+    "qlogicagent.oss-cn-beijing.aliyuncs.com"
+  ],
+  "checksum": "87be1794790f833bc7e02c0e36fa4407eb5927eac362eacc8ff19c23aef5af74",
+  "sizeBytes": 14907242,
+  "format": "zip",
+  "entrypoint": "industrial-corpus.exe"
+}

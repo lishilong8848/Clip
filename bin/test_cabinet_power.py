@@ -2622,7 +2622,8 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(to_fields(edited)["操作类型"],"下正式电")
 
     def test_de_repeated_saves_expand_history_headers_dates_and_styles(self):
-        from .lan_bitable_template_portal.cabinet_power_excel import col_name, coord
+        from .lan_bitable_template_portal.cabinet_power_excel import col_name, coord, COLORS, STATES
+        from .lan_bitable_template_portal.cabinet_power_data import normalized_actions
         from openpyxl.styles.numbers import BUILTIN_FORMATS
         for scope in 'DE':
             snapshot=self.service._snapshot(scope)
@@ -2662,7 +2663,13 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     key=('action','expected','actual')[offset]
                     sample=f"{col_name(fmt['groups'][-1][key])}2"
                     style=int(cells[f'{col_name(col+offset)}{row}'].get('s'))
-                    self.assertEqual(after.styles[style],before.styles[int(before.cells(sheet)[sample].get('s'))])
+                    expected_style=copy.deepcopy(before.styles[int(before.cells(sheet)[sample].get('s'))])
+                    if not offset:
+                        actions=normalized_actions(after.value(cells[f'{col_name(col)}{row}']))
+                        if actions:
+                            state=STATES[actions[-1]]
+                            expected_style['fill']='#FFFF00' if state=='test' else COLORS[state]
+                    self.assertEqual(after.styles[style],expected_style)
                     if offset: self.assertEqual(num_formats[int(xfs[style].get('numFmtId'))],'yyyy-mm-dd hh:mm')
                     width=next(node.get('width') for node in after.sheet(sheet).find(T('cols')) if int(node.get('min'))<=col+offset<=int(node.get('max')))
                     source_col=fmt['groups'][-1][key]
@@ -2670,6 +2677,46 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
                     self.assertEqual(width,expected_width)
             definitions=sorted(after.sheet(sheet).find(T('cols')),key=lambda node:int(node.get('min')))
             self.assertTrue(all(int(left.get('max'))<int(right.get('min')) for left,right in zip(definitions,definitions[1:])))
+            self.assertEqual(after.archive.read('xl/vbaProject.bin'),before.archive.read('xl/vbaProject.bin'))
+
+    def test_all_buildings_export_operation_cell_fills_without_changing_other_styles(self):
+        from .lan_bitable_template_portal.cabinet_power_excel import col_name, COLORS
+        cases={'上测试电':'test','上正式电':'formal','下正式电':'off','下测试电':'off',
+               '未上电':'off','测试电转正式电':'formal','正式电转测试电':'test',
+               '1、正式电转测试电\n2、测试电转正式电':'formal','转测试电':'test','转正式电':'formal'}
+        for scope in 'ABCDE':
+            config=copy.deepcopy(self.configs[scope]); content=(TEMPLATES/(scope+'.xlsm')).read_bytes(); before=Workbook(content)
+            config['power_baseline']=map_state_baseline(content,config,[from_feishu(r) for r in self.source_records if r['fields']['楼栋']==scope+'楼'])[0]
+            rack=config['inventory'][0]; operations=[]
+            for fmt in config['template_data']['formats']:
+                for index,action in enumerate(cases):
+                    row=fmt['header']+index+1
+                    operations.append({'record_id':f'fill-{scope}-{fmt["sheet"]}-{index}','scope':scope,
+                        'room':rack['room'],'rack':rack['rack'],'system_name':system_name(scope,rack['room']),
+                        'rack_type':rack['rack_type'],'power':4000,'result':'成功','source':fmt['sheet'],'source_row':row,
+                        'category':'down' if '下电' in fmt['sheet'] and '上下电' not in fmt['sheet'] else 'up',
+                        'groups':[{'action':action,'expected':'','actual':''}], 'events':[],
+                        'meta':{'scope':scope,'schema':3}})
+            after=Workbook(export_workbook(content,config,operations))
+            for fmt in config['template_data']['formats']:
+                cells=after.cells(fmt['sheet']); original=before.cells(fmt['sheet'])
+                for group in fmt['groups']:
+                    header=f'{col_name(group["action"])}{fmt["header"]}'
+                    self.assertEqual(after.styles[int(cells[header].get('s','0'))],before.styles[int(original[header].get('s','0'))])
+                for index,(action,state) in enumerate(cases.items()):
+                    row=fmt['header']+index+1
+                    # A/B/C down-only rows place their final operation in the last group.
+                    group=fmt['groups'][-1] if '下电' in fmt['sheet'] and '上下电' not in fmt['sheet'] else fmt['groups'][0]
+                    ref=f'{col_name(group["action"])}{row}'; cell=cells[ref]
+                    self.assertEqual(after.value(cell),action,(scope,fmt['sheet'],ref))
+                    expected=copy.deepcopy(before.styles[int(original[ref].get('s','0'))])
+                    expected['fill']='#FFFF00' if state=='test' else COLORS[state]
+                    if '\n' in action: expected['wrap_text']=True
+                    self.assertEqual(after.styles[int(cell.get('s','0'))],expected,(scope,fmt['sheet'],action))
+                    for col in (fmt['type'],fmt['power'],fmt['result']):
+                        if col:
+                            ref=f'{col_name(col)}{row}'
+                            self.assertEqual(after.styles[int(cells[ref].get('s','0'))].get('fill'),before.styles[int(original[ref].get('s','0'))].get('fill'))
             self.assertEqual(after.archive.read('xl/vbaProject.bin'),before.archive.read('xl/vbaProject.bin'))
 
     def test_abc_history_compression_preserves_empty_times_and_grows_rows(self):

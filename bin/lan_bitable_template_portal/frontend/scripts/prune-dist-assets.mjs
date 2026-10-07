@@ -21,7 +21,9 @@ function addAsset(name) {
   }
 }
 
-for (const match of indexHtml.matchAll(references)) {
+let entryHtml = indexHtml;
+try { entryHtml += await readFile(new URL('./assistant.html', distDir), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+for (const match of entryHtml.matchAll(references)) {
   addAsset(match[1]);
 }
 

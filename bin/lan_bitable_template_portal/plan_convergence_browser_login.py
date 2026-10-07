@@ -8,10 +8,11 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import requests
+import httpx
 
 from upload_event_module.services.process_lifetime import lower_current_thread_priority
 from upload_event_module.utils import get_data_file_path
@@ -135,7 +136,7 @@ class BrowserLogin:
                 return
             if not stop.is_set():
                 self._update(job_id, 'failed', '未取得有效智航认证，登录窗口已关闭或等待超时，请重新登录')
-        except requests.RequestException:
+        except httpx.HTTPError:
             self._update(job_id, 'failed', '智航认证连接失败，请检查主机内网或 VPN 连接后重新登录')
         except ValueError as exc:
             self._update(job_id, 'failed', str(exc))
@@ -198,6 +199,7 @@ class BrowserLogin:
             if connection is None:
                 raise ValueError('智航登录窗口启动超时，请检查浏览器是否限制自动认证')
             sequence = 0
+            pending_events = deque()
 
             def send(method, params=None, session=None):
                 nonlocal sequence
@@ -219,6 +221,12 @@ class BrowserLogin:
                         if reply.get('error'):
                             raise ValueError('智航登录窗口初始化失败，请重新登录')
                         return reply.get('result') or {}
+                    if reply.get('method'):
+                        # Navigation can emit authenticated requests before its
+                        # command reply. Preserve them for the capture loop.
+                        if len(pending_events) >= 4096:
+                            raise ValueError('智航登录窗口请求过多，请关闭窗口后重新登录')
+                        pending_events.append(reply)
                 raise ValueError('智航登录等待已结束')
 
             pages = command('Target.getTargets')['targetInfos']
@@ -231,10 +239,13 @@ class BrowserLogin:
             # Edge may hand off to its browser child; the CDP connection owns the window lifetime.
             while not stop.is_set() and time.monotonic() < deadline:
                 try:
-                    raw = connection.recv()
-                    if not raw:
-                        return
-                    message = json.loads(raw)
+                    if pending_events:
+                        message = pending_events.popleft()
+                    else:
+                        raw = connection.recv()
+                        if not raw:
+                            return
+                        message = json.loads(raw)
                 except websocket.WebSocketTimeoutException:
                     continue
                 params = message.get('params') or {}

@@ -15,45 +15,59 @@ await new Promise(resolve=>reservation.close(resolve));
 const base=`http://127.0.0.1:${port}`;
 const output=path.join(root,'output/playwright/navigation');
 await fs.mkdir(output,{recursive:true});
-const server=spawn('python',[path.join(root,'bin/tools/cabinet_ui_fixture.py'),String(port)],{cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe']});
+const localPython=path.join(root,'bin/.venv',process.platform==='win32'?'Scripts/python.exe':'bin/python');
+const python=process.env.PYTHON || await fs.access(localPython).then(()=>localPython,()=> 'python');
+const server=spawn(python,[path.join(root,'bin/tools/cabinet_ui_fixture.py'),String(port)],{cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe']});
 let log=''; server.stdout.on('data',x=>log+=x); server.stderr.on('data',x=>log+=x);
 let browser,page;
 try {
   for(let i=0;i<60;i++){try{if((await fetch(base+'/api/health')).ok)break}catch{}if(i===59)throw Error(log);await new Promise(r=>setTimeout(r,250))}
   browser=await chromium.launch({headless:true});
   page=await browser.newPage({viewport:{width:1440,height:900}});
+  await page.route('**/workbench-lite?**',async route=>{
+    if(new URL(route.request().url()).searchParams.has('_assistant_frame'))return route.fallback();
+    return route.fulfill({contentType:'text/html',body:await fs.readFile(path.join(root,'bin/lan_bitable_template_portal/frontend/dist/index.html'),'utf8')});
+  });
   const errors=[];
-  page.on('pageerror',error=>errors.push(error.message));
+  page.on('pageerror',error=>{errors.push(error.message);console.error('[NavigationPageError]',page.url(),error.stack);});
   page.on('console',message=>{if(['warning','error'].includes(message.type())&&message.text().includes('Teleport'))errors.push(message.text());});
+  async function surface(){
+    if(new URL(page.url()).pathname!=='/workbench-lite')return page;
+    const element=page.locator('iframe[title="通告管理"]');
+    await element.waitFor();
+    return (await element.elementHandle()).contentFrame();
+  }
   async function assertBack(label){
-    const back=page.locator('#page-back-slot .vnet-back-button');
+    const view=await surface();
+    const back=view.locator('#page-back-slot .vnet-back-button');
     await back.waitFor({state:'visible'});
-    assert.equal(await page.locator('.vnet-back-button:visible').count(),1,label);
+    assert.equal(await view.locator('.vnet-back-button:visible').count(),1,label);
     const rect=await back.boundingBox();
-    const header=await page.locator('#page-navigation').boundingBox();
-    const borderLeft=await page.locator('#page-navigation').evaluate(node=>node.clientLeft);
+    const header=await view.locator('#page-navigation').boundingBox();
+    const borderLeft=await view.locator('#page-navigation').evaluate(node=>node.clientLeft);
     assert.equal(Math.round(rect.x-header.x-borderLeft),24,label);
     assert(Math.abs(rect.y-header.y-header.height+14)<=2,`${label}: header boundary`);
     assert.equal(Math.round(rect.height),page.viewportSize().width<=920?44:40,label);
     assert(Number.parseFloat(await back.evaluate(node=>getComputedStyle(node).borderRadius))>=20,`${label}: rounded back button`);
-    for(const child of await page.locator('#page-navigation > :not(#page-back-slot):not(.page-header-fade)').all()){
+    for(const child of await view.locator('#page-navigation > :not(#page-back-slot):not(.page-header-fade)').all()){
       const bounds=await child.boundingBox();
       if(bounds)assert(bounds.y+bounds.height<=rect.y||bounds.x>=rect.x+rect.width,`${label}: header content overlap`);
     }
-    if(await page.evaluate(()=>window.scrollY===0)){
-      const next=await page.locator('#page-navigation').evaluate(node=>node.nextElementSibling?.getBoundingClientRect().top);
+    if(await view.evaluate(()=>window.scrollY===0)){
+      const next=await view.locator('#page-navigation').evaluate(node=>node.nextElementSibling?.getBoundingClientRect().top);
       if(next!==undefined)assert(next>=rect.y+rect.height,`${label}: page content overlap`);
     }
-    await page.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
+    await view.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
     const scrolled=await back.boundingBox();
-    const scrolledHeader=await page.locator('#page-navigation').boundingBox();
+    const scrolledHeader=await view.locator('#page-navigation').boundingBox();
     assert(Math.abs(scrolled.y-scrolledHeader.y-scrolledHeader.height+14)<=2,`${label}: scroll boundary`);
     assert.equal(Math.round(scrolled.x-scrolledHeader.x-borderLeft),24,`${label}: scroll`);
-    await page.evaluate(()=>window.scrollTo(0,0));
+    await view.evaluate(()=>window.scrollTo(0,0));
     return back;
   }
   async function assertOriginalHeader(label){
-    const [current,original]=await page.evaluate(()=>{
+    const view=await surface();
+    const [current,original]=await view.evaluate(()=>{
       const header=document.querySelector('#page-navigation');
       const slot=document.querySelector('#page-back-slot');
       const fade=header.querySelector('.page-header-fade');
@@ -70,7 +84,7 @@ try {
       return [current,original];
     });
     assert.deepEqual(current,original,`${label}: original header layout`);
-    const fade=page.locator('#page-navigation > .page-header-fade');
+    const fade=view.locator('#page-navigation > .page-header-fade');
     assert.equal(await fade.count(),1,`${label}: gradient edge`);
     assert(await fade.evaluate(node=>{
       const style=getComputedStyle(node);
@@ -98,16 +112,17 @@ try {
   }
   await page.goto(base+'/cabinet-power');
   await page.evaluate(()=>location.assign('/workbench-lite?scope=D&work_type=maintenance'));
+  await page.waitForURL(base+'/workbench-lite?scope=D&work_type=maintenance');
   await assertBack('workbench');
   await assertOriginalHeader('workbench');
   await page.screenshot({path:path.join(output,'workbench.png')});
-  await page.locator('#lite-back-link').click();
+  await (await surface()).locator('#lite-back-link').click();
   await page.waitForURL(base+'/?entry=maintenance');
   await page.goto(base+'/');
   await page.getByRole('button',{name:'进入维护管理',exact:true}).click();
   await page.getByRole('heading',{name:'选择楼栋进入维护管理',exact:true}).waitFor();
   await page.getByRole('button',{name:'进入维护管理：D楼',exact:true}).click();
-  await page.locator('#lite-back-link').click();
+  await (await surface()).locator('#lite-back-link').click();
   await page.waitForURL(base+'/?entry=maintenance');
   await page.getByRole('heading',{name:'选择楼栋进入维护管理',exact:true}).waitFor();
   await page.locator('.vnet-back-button').click();
@@ -124,7 +139,7 @@ try {
   await page.waitForURL(base+'/?entry=capacity');
   await page.goto(base+'/workbench-lite?scope=D&work_type=maintenance');
   await page.goto(base+'/workbench-lite?scope=D&work_type=change');
-  await page.locator('#lite-back-link').click();
+  await (await surface()).locator('#lite-back-link').click();
   await page.waitForURL(base+'/?entry=change');
   const entryPages={
     maintenance:'选择楼栋进入维护管理', maintenance_mop:'选择楼栋进入 MOP 填写',

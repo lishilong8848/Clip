@@ -1,0 +1,3605 @@
+[
+  {
+    "name": "workbuddy-agent-browser-core-695bde8d",
+    "kind": "workflow_guide",
+    "display_name": "网页自动化",
+    "description": "基于 agent-browser CLI 的 AI 友好型网页自动化",
+    "source": "agent-browser-core",
+    "path": "workbuddy/workbuddy-agent-browser-core-695bde8d/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-agent-browser-core-695bde8d/references/agent-browser-command-map.md",
+      "workbuddy/workbuddy-agent-browser-core-695bde8d/references/agent-browser-overview.md",
+      "workbuddy/workbuddy-agent-browser-core-695bde8d/references/agent-browser-safety.md",
+      "workbuddy/workbuddy-agent-browser-core-695bde8d/references/agent-browser-troubleshooting.md",
+      "workbuddy/workbuddy-agent-browser-core-695bde8d/references/agent-browser-workflows.md"
+    ],
+    "content_hash": "ed6aeb24c37effe7437f26931e21d0271d7593ebf4f0ba71045e28a2598e751b",
+    "original_source_hash": "8dc30466d24ce61995d11ad18f999b17531e7dd73a3af0e44671dbc3a6530fc7",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "缺少 agent-browser；未执行网页控制或转换"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-agent-browser-skillhub-96b01697",
+    "kind": "workflow_guide",
+    "display_name": "Agent Browser",
+    "description": "使用 agent-browser CLI 的网页自动化工作指南；具体操作需已提供且已授权的浏览器工具。",
+    "source": "agent-browser__skillhub",
+    "path": "workbuddy/workbuddy-agent-browser-skillhub-96b01697/SKILL.md",
+    "references": [],
+    "content_hash": "6611ea37194c65c257b55e076f23ce700cc9853df46b11e8647b9b4bac359f9d",
+    "original_source_hash": "0c2a1c60522c304c1ed63429101e4e19e9ef98e121b0ef92a5e2595acfaaf902",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "缺少 agent-browser；未执行网页控制或转换"
+    ],
+    "metadata_repaired": true,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-apple-design-95a74b05",
+    "kind": "workflow_guide",
+    "display_name": "Apple流体界面设计指南",
+    "description": "提炼苹果流体交互设计思想，面向设计师与前端，可输出交互方案、弹簧参数、拖拽手势实现、毛玻璃样式、无障碍适配代码。",
+    "source": "apple-design",
+    "path": "workbuddy/workbuddy-apple-design-95a74b05/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-apple-design-95a74b05/references/spring‑param‑ref.md",
+      "workbuddy/workbuddy-apple-design-95a74b05/references/wwdc‑design‑rules.md",
+      "workbuddy/workbuddy-apple-design-95a74b05/templates/apple‑ui‑review‑template.md"
+    ],
+    "content_hash": "7fb1459da31dd3d7b5e10b82c431d7857dda8ea068a3788a5f276867be27fce4",
+    "original_source_hash": "ce1e62775fe8bd6ea154f3bc358e97567db2c6bbd1e58712676c062e20527ced",
+    "execution_status": "guide_only",
+    "source_test_status": "failed",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "glass 分支输出双花括号，CSS 无效；access 分支尚不能代表整体通过"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/code‑snippet‑gen.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/code‑snippet‑gen.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-banner-design-db669de3",
+    "kind": "workflow_guide",
+    "display_name": "banner-design",
+    "description": "Design banners for social media, ads, website heroes, creative assets, and print. Multiple art direction options with optional generated or supplied visuals. Actions: design, create, generate banner. Platforms: Facebook, Twitter/X, LinkedIn, YouTube, Instagram, Google Display, website hero, print. Styles: minimalist, gradient, bold typography, photo-based, illustrated, geometric, retro, glassmorphism, 3D, neon, duotone, editorial, collage.",
+    "source": "banner-design",
+    "path": "workbuddy/workbuddy-banner-design-db669de3/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-banner-design-db669de3/references/banner-sizes-and-styles.md"
+    ],
+    "content_hash": "41368ab50420d381e9dac34fe430339a2b218fc27089da1b24edc3f12180db7e",
+    "original_source_hash": "ccb89ddc848f60bfe630cb19dfe3e062df94a029467a9b15259f2761019ac5c4",
+    "execution_status": "guide_only",
+    "source_test_status": "guidance_test_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "已调用真实配置模型阅读指南，返回具体建议及能力限制；未执行代码或业务操作"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": []
+  },
+  {
+    "name": "workbuddy-brand-04a9fba2",
+    "kind": "workflow_guide",
+    "display_name": "brand",
+    "description": "Brand voice, visual identity, messaging frameworks, asset management, brand consistency. Activate for branded content, tone of voice, marketing assets, brand compliance, style guides.",
+    "source": "brand",
+    "path": "workbuddy/workbuddy-brand-04a9fba2/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-brand-04a9fba2/references/approval-checklist.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/asset-organization.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/brand-guideline-template.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/color-palette-management.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/consistency-checklist.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/logo-usage-rules.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/messaging-framework.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/typography-specifications.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/update.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/visual-identity.md",
+      "workbuddy/workbuddy-brand-04a9fba2/references/voice-framework.md",
+      "workbuddy/workbuddy-brand-04a9fba2/templates/brand-guidelines-starter.md"
+    ],
+    "content_hash": "f3c121c425455739f34882d710df4ed000e998d405efc563899d013dab51f6ae",
+    "original_source_hash": "1c24139633e2ebf11da4f97eaeb1c0564f8658a40b3ad779387a5b8c6cb76dbc",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "合成品牌指南读取并生成 JSON；未执行品牌覆盖或云端图片生成"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/extract-colors.cjs",
+      "scripts/inject-brand-context.cjs",
+      "scripts/sync-brand-to-tokens.cjs",
+      "scripts/tests/test_sync_brand_to_tokens.py",
+      "scripts/validate-asset.cjs"
+    ],
+    "excluded_files": [
+      {
+        "path": "scripts/extract-colors.cjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/inject-brand-context.cjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/sync-brand-to-tokens.cjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_sync_brand_to_tokens.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validate-asset.cjs",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-browser-skill-6a5de61f",
+    "kind": "workflow_guide",
+    "display_name": "BrowserSkill",
+    "description": "BrowserSkill 是腾讯开源的一个智能浏览器自动化工具，让 WorkBuddy 能够像人一样操作网页——自动填表、点击、翻页、截图，完成任何需要浏览器的复杂任务。",
+    "source": "browser-skill",
+    "path": "workbuddy/workbuddy-browser-skill-6a5de61f/SKILL.md",
+    "references": [],
+    "content_hash": "6f8eabe96f58184acf1d3ad65e00a695ed13e9126866069b21de546973859f1a",
+    "original_source_hash": "42c17c7022a8285aad155d7e2ffacd8c2fc20c2f47ce7b348b22ab6ab6120194",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "缺少 bsk；未执行网页控制或转换"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-browser-use-035549a4",
+    "kind": "workflow_guide",
+    "display_name": "浏览器自动化",
+    "description": "浏览器自动化（导航、点击、截图、数据提取、多会话、云浏览器）",
+    "source": "browser-use",
+    "path": "workbuddy/workbuddy-browser-use-035549a4/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-browser-use-035549a4/_icon.svg",
+      "workbuddy/workbuddy-browser-use-035549a4/references/cdp-python.md",
+      "workbuddy/workbuddy-browser-use-035549a4/references/multi-session.md"
+    ],
+    "content_hash": "2f52f67810dc98eadc19b4f30d316388293be1f26322619dfc011f0aa383fced",
+    "original_source_hash": "0e84ece0fb39839837cbc0993229f58a34b650229f42099595f6e66c772dcebe",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "缺少 browser-use；未执行网页控制或转换"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "workbuddy.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-design-a77de8a6",
+    "kind": "workflow_guide",
+    "display_name": "design",
+    "description": "Comprehensive design skill: brand identity, design tokens, UI styling, logo generation (55 styles, Gemini, Atlas Cloud, or MuAPI AI), corporate identity program (50 deliverables, CIP mockups), HTML presentations (Chart.js), banner design (22 styles, social/ads/web/print), icon design (15 styles, SVG, Gemini 3.1 Pro), social photos (HTML→screenshot, multi-platform). Actions: design logo, create CIP, generate mockups, build slides, design banner, generate icon, create social photos, social media images, brand identity, design system. Platforms: Facebook, Twitter, LinkedIn, YouTube, Instagram, Pinterest, TikTok, Threads, Google Ads.",
+    "source": "design",
+    "path": "workbuddy/workbuddy-design-a77de8a6/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-design-a77de8a6/references/banner-sizes-and-styles.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/cip-deliverable-guide.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/cip-design.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/cip-prompt-engineering.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/cip-style-guide.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/design-routing.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/icon-design.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/logo-color-psychology.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/logo-design.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/logo-prompt-engineering.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/logo-style-guide.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/slides-copywriting-formulas.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/slides-create.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/slides-html-template.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/slides-layout-patterns.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/slides-strategies.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/slides.md",
+      "workbuddy/workbuddy-design-a77de8a6/references/social-photos-design.md"
+    ],
+    "content_hash": "8a2a58da52f570af671258ad7489da685077b6afe7c016c68edba5460e0c4ddc",
+    "original_source_hash": "c84f3ecfd6a0fd1c46abf6805a0bbc26ea0b94a104f457e243ccf0943ece123c",
+    "execution_status": "guide_only",
+    "source_test_status": "guidance_test_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "已调用真实配置模型阅读指南，返回具体建议及能力限制；未执行代码或业务操作"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/cip/core.py",
+      "scripts/cip/generate.py",
+      "scripts/cip/render-html.py",
+      "scripts/cip/search.py",
+      "scripts/icon/generate.py",
+      "scripts/logo/core.py",
+      "scripts/logo/generate.py",
+      "scripts/logo/search.py",
+      "scripts/logo/tests/test_generate.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "data/cip/deliverables.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/cip/industries.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/cip/mockup-contexts.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/cip/styles.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/icon/styles.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/logo/colors.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/logo/industries.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/logo/styles.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "scripts/cip/core.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cip/generate.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cip/render-html.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cip/search.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/icon/generate.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/logo/core.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/logo/generate.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/logo/search.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/logo/tests/test_generate.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-design-system-d555b87c",
+    "kind": "workflow_guide",
+    "display_name": "design-system",
+    "description": "Token architecture, component specifications, and slide generation. Three-layer tokens (primitive→semantic→component), CSS variables, spacing/typography scales, component specs, strategic slide creation. Use for design tokens, systematic design, brand-compliant presentations.",
+    "source": "design-system",
+    "path": "workbuddy/workbuddy-design-system-d555b87c/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-design-system-d555b87c/references/component-specs.md",
+      "workbuddy/workbuddy-design-system-d555b87c/references/component-tokens.md",
+      "workbuddy/workbuddy-design-system-d555b87c/references/primitive-tokens.md",
+      "workbuddy/workbuddy-design-system-d555b87c/references/semantic-tokens.md",
+      "workbuddy/workbuddy-design-system-d555b87c/references/states-and-variants.md",
+      "workbuddy/workbuddy-design-system-d555b87c/references/tailwind-integration.md",
+      "workbuddy/workbuddy-design-system-d555b87c/references/token-architecture.md",
+      "workbuddy/workbuddy-design-system-d555b87c/templates/design-tokens-starter.json"
+    ],
+    "content_hash": "ab14d9a5b0eccdeb62f375259db5ff4e3c0bddd19b1784e44bc449fac2807def",
+    "original_source_hash": "8aa5ff93320559a6e5289d37b6b06b3307737dbfb4a6f3fc44135c705613c511",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "三级 token 的引用解析、CSS 变量输出通过；未验证全部幻灯片流程"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/embed-tokens.cjs",
+      "scripts/fetch-background.py",
+      "scripts/generate-slide.py",
+      "scripts/generate-tokens.cjs",
+      "scripts/html-token-validator.py",
+      "scripts/search-slides.py",
+      "scripts/slide-token-validator.py",
+      "scripts/slide_search_core.py",
+      "scripts/tests/test_validate_tokens.py",
+      "scripts/validate-tokens.cjs"
+    ],
+    "excluded_files": [
+      {
+        "path": "data/slide-backgrounds.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-charts.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-color-logic.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-copy.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-layout-logic.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-layouts.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-strategies.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/slide-typography.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "scripts/embed-tokens.cjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/fetch-background.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/generate-slide.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/generate-tokens.cjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/html-token-validator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/search-slides.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/slide-token-validator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/slide_search_core.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_validate_tokens.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validate-tokens.cjs",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-frontend-design-7429eb2e",
+    "kind": "workflow_guide",
+    "display_name": "前端设计",
+    "description": "生成极具视觉冲击力的生产级前端界面：独特排版、统一色彩主题、编排动效与非对称布局，直接产出可运行代码，告别千篇一律的 AI 味设计。",
+    "source": "frontend-design",
+    "path": "workbuddy/workbuddy-frontend-design-7429eb2e/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-frontend-design-7429eb2e/README.md",
+      "workbuddy/workbuddy-frontend-design-7429eb2e/references/playbook.md",
+      "workbuddy/workbuddy-frontend-design-7429eb2e/references/zh-CN.md"
+    ],
+    "content_hash": "e12205fc7310932266da930c4d4da42743dd6c8cb12fbce93980f646affddc24",
+    "original_source_hash": "7fa480199ad30541999a9c9106d963de7064a2506deb269cc37c0cd49694b10e",
+    "execution_status": "guide_only",
+    "source_test_status": "guidance_test_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "已调用真实配置模型阅读指南，返回具体建议及能力限制；未执行代码或业务操作"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-github-c0b0109d",
+    "kind": "workflow_guide",
+    "display_name": "github",
+    "description": "管理 GitHub Issues、PR 和 CI",
+    "source": "github",
+    "path": "workbuddy/workbuddy-github-c0b0109d/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-github-c0b0109d/_icon.svg"
+    ],
+    "content_hash": "fce3ae34e951bd72160964ec508357994a7c5180e55e2afc88701109bda74598",
+    "original_source_hash": "f8b6f3b380d6d22eb4cefde352b6a8b8d0dd18925c3647ea42c71e5403cdf0fe",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "真实 gh API 只读查询公开仓库通过；未测试 Issues/PR 写操作"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-markitdown-79da9bd4",
+    "kind": "workflow_guide",
+    "display_name": "MarkItDown",
+    "description": "批量摄取文档、网页、邮件、图片、音视频、压缩包及授权工程文件，生成带来源证据的 Markdown 材料包。",
+    "source": "markitdown",
+    "path": "workbuddy/workbuddy-markitdown-79da9bd4/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-markitdown-79da9bd4/references/advanced-usage.md",
+      "workbuddy/workbuddy-markitdown-79da9bd4/references/cad-runtime-policy.json",
+      "workbuddy/workbuddy-markitdown-79da9bd4/references/engineering-files.md",
+      "workbuddy/workbuddy-markitdown-79da9bd4/references/engineering-runtime-manifest.json",
+      "workbuddy/workbuddy-markitdown-79da9bd4/references/examples-and-faq.md",
+      "workbuddy/workbuddy-markitdown-79da9bd4/references/troubleshooting.md"
+    ],
+    "content_hash": "4785cfc501e5fa2271f7b73dd24e71001303c2620f44a6b94ed58205a463ea37",
+    "original_source_hash": "0900c9fd73622206380b8dbeef7a15914ff2e95a8fa7f3d1c8655299c1fdee6a",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "CSV 内置转换器输出 Markdown 表格通过；未启动自动更新/安装器，OCR/音视频/CAD 未测试"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/_markitdown_batch.py",
+      "scripts/_markitdown_cad_runtime.py",
+      "scripts/_markitdown_constants.py",
+      "scripts/_markitdown_engineering.py",
+      "scripts/_markitdown_media.py",
+      "scripts/_markitdown_runtime.py",
+      "scripts/_markitdown_sources.py",
+      "scripts/convert.py",
+      "scripts/convert_batch.py",
+      "scripts/extract-cad-roundtrip.py",
+      "scripts/install-runtime.ps1"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/_markitdown_batch.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_markitdown_cad_runtime.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_markitdown_constants.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_markitdown_engineering.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_markitdown_media.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_markitdown_runtime.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_markitdown_sources.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/convert.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/convert_batch.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/extract-cad-roundtrip.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/install-runtime.ps1",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-markitdown-skill-769ceead",
+    "kind": "workflow_guide",
+    "display_name": "markitdown-skill",
+    "description": "文档转 Markdown(PDF/Word/PPT/图片OCR/音频转写/网页)",
+    "source": "markitdown-skill",
+    "path": "workbuddy/workbuddy-markitdown-skill-769ceead/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-markitdown-skill-769ceead/references/USAGE-GUIDE.md",
+      "workbuddy/workbuddy-markitdown-skill-769ceead/references/reference.md"
+    ],
+    "content_hash": "635900b0ba51c570585d9bd716d924bd510dfe14e9ca04500e74d9e90b3e1b99",
+    "original_source_hash": "47aee272f21a1457a44bfb07fb6a715d4b6f41d16f642fa53eb655ef22468631",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "缺少 markitdown；未执行网页控制或转换"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/batch_convert.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/batch_convert.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-minimax-docx-0ce163fe",
+    "kind": "workflow_guide",
+    "display_name": "minimax-docx",
+    "description": "Word 文档生成与编辑",
+    "source": "minimax-docx",
+    "path": "workbuddy/workbuddy-minimax-docx-0ce163fe/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/LICENSE",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/_icon.svg",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/styles/academic_styles.xml",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/styles/corporate_styles.xml",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/styles/default_styles.xml",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/xsd/aesthetic-rules.xsd",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/xsd/business-rules.xsd",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/xsd/common-types.xsd",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/assets/xsd/wml-subset.xsd",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/cjk_typography.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/cjk_university_template_guide.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/comments_guide.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/design_good_bad_examples.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/design_principles.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/openxml_element_order.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/openxml_encyclopedia_part1.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/openxml_encyclopedia_part2.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/openxml_encyclopedia_part3.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/openxml_namespaces.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/openxml_units.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/scenario_a_create.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/scenario_b_edit_content.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/scenario_c_apply_template.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/track_changes_guide.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/troubleshooting.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/typography_guide.md",
+      "workbuddy/workbuddy-minimax-docx-0ce163fe/references/xsd_validation_guide.md"
+    ],
+    "content_hash": "07ca366091d0a08ef169957d1ce2feea2f38f4adef43fff15d99abf03945231b",
+    "original_source_hash": "4fbc2717a8c522dc01ad8d27b07cd4e274f65d77db5d1f6f0fbccce2f8ea35cb",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "未安装 .NET SDK，docx CLI 无法运行"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/doc_to_docx.sh",
+      "scripts/docx_preview.sh",
+      "scripts/dotnet/MiniMaxAIDocx.Cli/MiniMaxAIDocx.Cli.csproj",
+      "scripts/dotnet/MiniMaxAIDocx.Cli/Program.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/AnalyzeCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/ApplyTemplateCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/CreateCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/DiffCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/EditContentCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/FixOrderCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/MergeRunsCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Commands/ValidateCommand.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/MiniMaxAIDocx.Core.csproj",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/CommentSynchronizer.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/ElementOrder.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/NamespaceConstants.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/RunMerger.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/StyleAnalyzer.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/TrackChangesHelper.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/UnitConverter.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch1.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch2.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch3.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch4.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/CharacterFormattingSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/DocumentCreationSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/FieldAndTocSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/FootnoteAndCommentSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/HeaderFooterSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/ImageSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/ListAndNumberingSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/ParagraphFormattingSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/StyleSystemSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/TableSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Samples/TrackChangesSamples.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Typography/CjkHelper.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Typography/FontDefaults.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Typography/PageSizes.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Validation/BusinessRuleValidator.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Validation/GateCheckValidator.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Validation/ValidationResult.cs",
+      "scripts/dotnet/MiniMaxAIDocx.Core/Validation/XsdValidator.cs",
+      "scripts/env_check.sh",
+      "scripts/setup.ps1",
+      "scripts/setup.sh"
+    ],
+    "excluded_files": [
+      {
+        "path": ".gitignore",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/doc_to_docx.sh",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/docx_preview.sh",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Cli/MiniMaxAIDocx.Cli.csproj",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Cli/Program.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/AnalyzeCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/ApplyTemplateCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/CreateCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/DiffCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/EditContentCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/FixOrderCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/MergeRunsCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Commands/ValidateCommand.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/MiniMaxAIDocx.Core.csproj",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/CommentSynchronizer.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/ElementOrder.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/NamespaceConstants.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/RunMerger.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/StyleAnalyzer.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/TrackChangesHelper.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/OpenXml/UnitConverter.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch1.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch2.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch3.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/AestheticRecipeSamples_Batch4.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/CharacterFormattingSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/DocumentCreationSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/FieldAndTocSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/FootnoteAndCommentSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/HeaderFooterSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/ImageSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/ListAndNumberingSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/ParagraphFormattingSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/StyleSystemSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/TableSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Samples/TrackChangesSamples.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Typography/CjkHelper.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Typography/FontDefaults.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Typography/PageSizes.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Validation/BusinessRuleValidator.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Validation/GateCheckValidator.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Validation/ValidationResult.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.Core/Validation/XsdValidator.cs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/dotnet/MiniMaxAIDocx.slnx",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/env_check.sh",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/setup.ps1",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/setup.sh",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-minimax-xlsx-475d4727",
+    "kind": "workflow_guide",
+    "display_name": "minimax-xlsx",
+    "description": "Excel 文件创建与分析",
+    "source": "minimax-xlsx",
+    "path": "workbuddy/workbuddy-minimax-xlsx-475d4727/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/_icon.svg",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/create.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/edit.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/fix.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/format.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/ooxml-cheatsheet.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/read-analyze.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/references/validate.md",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/templates/minimal_xlsx/[Content_Types].xml",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/templates/minimal_xlsx/xl/_rels/workbook.xml.rels",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/templates/minimal_xlsx/xl/sharedStrings.xml",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/templates/minimal_xlsx/xl/styles.xml",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/templates/minimal_xlsx/xl/workbook.xml",
+      "workbuddy/workbuddy-minimax-xlsx-475d4727/templates/minimal_xlsx/xl/worksheets/sheet1.xml"
+    ],
+    "content_hash": "57021bcafc61f8ef09d3c6b46295ef05832773c382e512ac56c81ed2be1e3e70",
+    "original_source_hash": "bd61bea365398b38440f4b805ca859973c349fe75aa0cd55c044fb1238e095c7",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "XLSX 解包、重包及单元格/公式回读通过；公式计算仍需 Office/LibreOffice"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/formula_check.py",
+      "scripts/libreoffice_recalc.py",
+      "scripts/shared_strings_builder.py",
+      "scripts/style_audit.py",
+      "scripts/xlsx_add_column.py",
+      "scripts/xlsx_insert_row.py",
+      "scripts/xlsx_pack.py",
+      "scripts/xlsx_reader.py",
+      "scripts/xlsx_shift_rows.py",
+      "scripts/xlsx_unpack.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/formula_check.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/libreoffice_recalc.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/shared_strings_builder.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/style_audit.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/xlsx_add_column.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/xlsx_insert_row.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/xlsx_pack.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/xlsx_reader.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/xlsx_shift_rows.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/xlsx_unpack.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "templates/minimal_xlsx/_rels/.rels",
+        "reason": "dotfile metadata"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-pdf-c35b21d6",
+    "kind": "workflow_guide",
+    "display_name": "PDF 文档处理",
+    "description": "PDF 文档处理工具，支持文本与表格提取、PDF 创建、合并拆分、表单填写及批量分析。",
+    "source": "pdf",
+    "path": "workbuddy/workbuddy-pdf-c35b21d6/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-pdf-c35b21d6/forms.md",
+      "workbuddy/workbuddy-pdf-c35b21d6/reference.md"
+    ],
+    "content_hash": "469f1d6103c33264144ce3e1f16d51a6da1b23c5a65ba950a529d8a278d03800",
+    "original_source_hash": "30856d3c04e473faf639aa64f4055ac1c4c6d0b701130917092be70923b02cbd",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "PDF 表单检测脚本通过；扫描 OCR、复杂标注未测试"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/check_bounding_boxes.py",
+      "scripts/check_bounding_boxes_test.py",
+      "scripts/check_fillable_fields.py",
+      "scripts/convert_pdf_to_images.py",
+      "scripts/create_validation_image.py",
+      "scripts/extract_form_field_info.py",
+      "scripts/fill_fillable_fields.py",
+      "scripts/fill_pdf_form_with_annotations.py"
+    ],
+    "excluded_files": [
+      {
+        "path": ".DS_Store",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/check_bounding_boxes.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/check_bounding_boxes_test.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/check_fillable_fields.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/convert_pdf_to_images.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/create_validation_image.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/extract_form_field_info.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/fill_fillable_fields.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/fill_pdf_form_with_annotations.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-pptx-1512e97a",
+    "kind": "workflow_guide",
+    "display_name": "PPT 演示文稿",
+    "description": "创建、读取、编辑 .pptx/.potx 演示文稿：幻灯片、版式、备注与模板。",
+    "source": "pptx",
+    "path": "workbuddy/workbuddy-pptx-1512e97a/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-pptx-1512e97a/LICENSE.txt",
+      "workbuddy/workbuddy-pptx-1512e97a/README.md",
+      "workbuddy/workbuddy-pptx-1512e97a/references/zh-CN.md",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-chart.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-chartDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-diagram.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-lockedCanvas.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-main.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-picture.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-spreadsheetDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/dml-wordprocessingDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/mc.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/opc-contentTypes.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/opc-coreProperties.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/opc-digSig.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/opc-relationships.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/pml.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-additionalCharacteristics.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-bibliography.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-commonSimpleTypes.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-customXmlDataProperties.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-customXmlSchemaProperties.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-documentPropertiesCustom.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-documentPropertiesExtended.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-documentPropertiesVariantTypes.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-math.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/shared-relationshipReference.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/sml.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/vml-main.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/vml-officeDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/vml-presentationDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/vml-spreadsheetDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/vml-wordprocessingDrawing.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-2010.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-2012.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-2018.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-cex-2018.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-cid-2016.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-sdtdatahash-2020.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml-symex-2015.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/wml.xsd",
+      "workbuddy/workbuddy-pptx-1512e97a/schemas/xml.xsd"
+    ],
+    "content_hash": "7979d8f9d8c8c14496549dd91d1c1d49260dc578899656072297a2b623ca314e",
+    "original_source_hash": "3b9a3e6dccaed33b44bc12bf2616807a1485ba335110e4c559e2ef3c19b79555",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "missing_dependency:defusedxml"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/__init__.py",
+      "scripts/add_slide.py",
+      "scripts/clean.py",
+      "scripts/helpers.py",
+      "scripts/pptx_chart.py",
+      "scripts/pptx_slide.py",
+      "scripts/pptx_theme.py",
+      "scripts/soffice.py",
+      "scripts/thumbnail.py",
+      "scripts/validate.py",
+      "scripts/validators.py",
+      "scripts/validators_base.py",
+      "scripts/validators_docx.py",
+      "scripts/validators_pptx.py",
+      "scripts/validators_redlining.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/__init__.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/add_slide.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/clean.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/helpers.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pptx_chart.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pptx_slide.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pptx_theme.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/soffice.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/thumbnail.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validate.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_base.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_docx.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_pptx.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_redlining.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-self-improving-agent-0c7ddbdd",
+    "kind": "workflow_guide",
+    "display_name": "自我改进（self-improving-agent）",
+    "description": "捕获学习、错误和纠正，让 Agent 自动积累经验并持续改进。（类别：七、垂直场景与商业 API 类；风险等级：中（持久化记忆可能被污染））当用户需要自我改进相关能力、或提到 self-improving-agent、session-logs 时使用；与自我改进无关的请求不要触发。",
+    "source": "self-improving-agent",
+    "path": "workbuddy/workbuddy-self-improving-agent-0c7ddbdd/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-self-improving-agent-0c7ddbdd/references/setup.md"
+    ],
+    "content_hash": "758ae0154edad73a507c5a70747693c14936e702d9efba510cfec251381387c5",
+    "original_source_hash": "00577b3e7f1e644df3dfa563d9d8a347d57e6f4e486d69d48e4949ed0c7016d9",
+    "execution_status": "guide_only",
+    "source_test_status": "guidance_only",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "仅方法说明，原包明确要求后续实现日志/记忆适配；不能测试不存在的执行实现"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-slides-fd2c8f1d",
+    "kind": "workflow_guide",
+    "display_name": "slides",
+    "description": "Create strategic HTML presentations with Chart.js, design tokens, responsive layouts, copywriting formulas, and contextual slide strategies.",
+    "source": "slides",
+    "path": "workbuddy/workbuddy-slides-fd2c8f1d/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-slides-fd2c8f1d/references/copywriting-formulas.md",
+      "workbuddy/workbuddy-slides-fd2c8f1d/references/create.md",
+      "workbuddy/workbuddy-slides-fd2c8f1d/references/html-template.md",
+      "workbuddy/workbuddy-slides-fd2c8f1d/references/layout-patterns.md",
+      "workbuddy/workbuddy-slides-fd2c8f1d/references/slide-strategies.md"
+    ],
+    "content_hash": "0acc5c7e9b7d58b79ae80014af314b8d564938e451c34f3da857d193aa21a887",
+    "original_source_hash": "86c07f19ec09f79441d3837e909cfcd51034b83bdcc88094c15e652be1e765cb",
+    "execution_status": "guide_only",
+    "source_test_status": "guidance_test_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "已调用真实配置模型阅读指南，返回具体建议及能力限制；未执行代码或业务操作"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": []
+  },
+  {
+    "name": "workbuddy-smart-charts-skillhub-be3b9d93",
+    "kind": "workflow_guide",
+    "display_name": "智能图表",
+    "description": "将数据文件（CSV/TSV/TXT/XLSX/XLS/JSON）转化为独立交互式 ECharts HTML 图表——32 类图表、3 套主题，全离线无需 CDN。出图前可先取数据画像（--profile：每列 dtype/基数/缺失/样本/统计、实体粒度、候选洞察信号、疑似非数据行），让 agent 在用户没说想看什么时自己读懂数据并决定出什么图——哪列是 ID、哪列是维度、出什么图，全部由 agent 从画像的客观事实自行判断，技能不代笔；每张图内置事实卡（plot_stats + data_preview），其数值是解读时唯一可引用的数字。本技能负责出图与算事实，不产出书面报告或叙事文档。触发：用户提供或指向表格数据文件并要求出图；提到「画图/出图/可视化/生成图表/generate a chart/make a graph」；想把表格渲染成交互式 HTML 图表。不触发：要的是书面报告、叙事分析或幻灯片；没有数据文件；需要后端的仪表盘；图片/音频/视频等非表格内容。",
+    "source": "smart-charts__skillhub",
+    "path": "workbuddy/workbuddy-smart-charts-skillhub-be3b9d93/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-smart-charts-skillhub-be3b9d93/references/REFERENCE.md",
+      "workbuddy/workbuddy-smart-charts-skillhub-be3b9d93/requirements.txt"
+    ],
+    "content_hash": "3d3816ee2a05f003d64c02e6b50fe73e2be35d5c276631c9efc9ed828f21d51e",
+    "original_source_hash": "abce26ef34842962f28e152b9f58be08a8538e97a2992ce4fa930fdbabc6a4d3",
+    "execution_status": "guide_only",
+    "source_test_status": "partial",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "独立环境 CSV 柱图、事实值及浏览器非空画布通过；依赖预检通过=False，项目环境仍需隔离安装，未执行模型 transform"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "assets/echarts-liquidfill.min.js",
+      "assets/echarts-wordcloud.min.js",
+      "assets/echarts.min.js",
+      "scripts/__init__.py",
+      "scripts/_bootstrap.py",
+      "scripts/chart_generator.py",
+      "scripts/cli.py",
+      "scripts/data_parser.py",
+      "scripts/data_transformer.py",
+      "scripts/exceptions.py",
+      "scripts/plot_stats.py",
+      "scripts/profile.py",
+      "scripts/regression_check.py",
+      "scripts/renderers.py",
+      "scripts/stats_kernels.py",
+      "scripts/template.py",
+      "scripts/texts.py",
+      "scripts/themes.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "assets/china.json",
+        "reason": "file exceeds 524288 bytes"
+      },
+      {
+        "path": "assets/echarts-liquidfill.min.js",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "assets/echarts-wordcloud.min.js",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "assets/echarts.min.js",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "assets/world.json",
+        "reason": "file exceeds 524288 bytes"
+      },
+      {
+        "path": "scripts/__init__.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/_bootstrap.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/chart_generator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cli.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/data_parser.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/data_transformer.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/exceptions.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/plot_stats.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/profile.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/regression_check.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/renderers.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/stats_kernels.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/template.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/texts.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/themes.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-superpowers-b225390a",
+    "kind": "workflow_guide",
+    "display_name": "Superpowers 工程方法论",
+    "description": "Agent 软件工程方法论框架：开始写码前先头脑风暴出规格，写可执行实施计划，强制红绿 TDD，子代理驱动开发，系统化调试与代码评审，收尾合并。当用户要做功能开发、重构、修复 bug、写实施计划、做代码评审，或提到「用 superpowers / 先想清楚再写 / 红绿测试 / 子代理开发」时触发。",
+    "source": "superpowers",
+    "path": "workbuddy/workbuddy-superpowers-b225390a/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-superpowers-b225390a/README.md",
+      "workbuddy/workbuddy-superpowers-b225390a/references/01-workflow.md",
+      "workbuddy/workbuddy-superpowers-b225390a/references/02-writing-plans.md",
+      "workbuddy/workbuddy-superpowers-b225390a/references/03-tdd.md",
+      "workbuddy/workbuddy-superpowers-b225390a/references/04-systematic-debugging.md",
+      "workbuddy/workbuddy-superpowers-b225390a/references/05-code-review.md"
+    ],
+    "content_hash": "f48f978eff9304edbe0a3a353437271d2bd0f4452fde3d2dadd95e07324791b6",
+    "original_source_hash": "b984a5cb91f3392854eabf2ce573a896fdba6c0f8ce70cdb6d2bbe9de8c631e5",
+    "execution_status": "guide_only",
+    "source_test_status": "guidance_test_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "已调用真实配置模型阅读指南，返回具体建议及能力限制；未执行代码或业务操作"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-tencent-news-835f18e9",
+    "kind": "workflow_guide",
+    "display_name": "腾讯新闻",
+    "description": "腾讯新闻综合信息服务，集成新闻、事实查证、天气、天气预警、体育赛程和高考志愿填报能力。",
+    "source": "tencent-news",
+    "path": "workbuddy/workbuddy-tencent-news-835f18e9/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/env-setup-guide.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/factcheck.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/gaokao-volunteer.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/installation-guide.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/sport.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/update-guide.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/weather-alert.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/weather.md",
+      "workbuddy/workbuddy-tencent-news-835f18e9/references/workbuddy-review.md"
+    ],
+    "content_hash": "9b3eedc271f70e1415f19813f2c5b071d07ea202cde0873636700b275019333a",
+    "original_source_hash": "fe07f69982615d2abc7588d44df653c76adb2ee532b0706c3d44bf3566e88d3e",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "环境诊断已执行，未找到腾讯新闻 CLI；新闻/天气查询不可用"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/cli-runtime.ps1",
+      "scripts/cli-runtime.sh",
+      "scripts/cli-state.ps1",
+      "scripts/cli-state.sh",
+      "scripts/run-cli.ps1",
+      "scripts/run-cli.sh"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "references/gaokao-html-interaction-reference.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cli-runtime.ps1",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cli-runtime.sh",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cli-state.ps1",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cli-state.sh",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/run-cli.ps1",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/run-cli.sh",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-tencent-weather-93231631",
+    "kind": "workflow_guide",
+    "display_name": "腾讯天气查询",
+    "description": "中国各地实时天气、天气预报和天气预警信息查询。",
+    "source": "tencent-weather",
+    "path": "workbuddy/workbuddy-tencent-weather-93231631/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-tencent-weather-93231631/references/env-setup-guide.md",
+      "workbuddy/workbuddy-tencent-weather-93231631/references/installation-guide.md",
+      "workbuddy/workbuddy-tencent-weather-93231631/references/update-guide.md"
+    ],
+    "content_hash": "d14894c088f278117ce96729ed1b10257309d7fd1d7fa5c25a7b5b1525d1bdef",
+    "original_source_hash": "2503bb0285cc4e51081fb696c7de20b4ad995c547d817dc13c6fe2df675a3326",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "环境诊断已执行，未找到腾讯新闻 CLI；新闻/天气查询不可用"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/cli-state.ps1",
+      "scripts/cli-state.sh",
+      "scripts/run-cli.ps1",
+      "scripts/run-cli.sh"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/cli-state.ps1",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cli-state.sh",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/run-cli.ps1",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/run-cli.sh",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-tencentmap-map-assistant-be40b197",
+    "kind": "workflow_guide",
+    "display_name": "腾讯地图助手",
+    "description": "一句自然语言调用腾讯地图全套能力。提供 AI 旅游攻略、地点搜索（含评分/人均/营业时间）、路线规划（驾车/步行/公交/骑行）、地址解析与逆解析、行政区划、IP 定位、距离计算、天气查询、坐标转换，并可将行程渲染成网页地图或生成腾讯地图小程序指南。",
+    "source": "tencentmap-map-assistant",
+    "path": "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/README.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/agent-notes.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/api_reference.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/error-codes.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/README.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/demos/地图操作示例.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/demos/点标记&文本标记.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/DOM覆盖物.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/事件.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/信息窗体.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/地图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/基础类.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/室内图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/控件.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/文本标记.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/概述.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/点标记.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/点聚合.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/环境检测.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/矢量图形.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/自定义图层.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：几何计算库.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：地图工具.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：地图视角附加库.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：天气图层.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：服务类库.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：模型库.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/jsapigl/docs/附加库：矢量数据图层.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/事件.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/区域图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/参考手册.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/围墙面.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/基础类.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/弧线图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/散点图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/水晶体.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/热力图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/管道图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/网格热力图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/蜂窝热力图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/轨迹图.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/references/jsapi-guide/visualization/docs/辐射圈.md",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/requirements.txt",
+      "workbuddy/workbuddy-tencentmap-map-assistant-be40b197/tempkey-guide.md"
+    ],
+    "content_hash": "7c397308255c5447573ce96fc24ea44de3e58e9e3acbc31d208f43340500dfff",
+    "original_source_hash": "854e1e46b06e8773fc46b81b713bf00917ebc81ae24ddce9f55f791f62529b0e",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "未提供独立腾讯地图 API Key，未请求临时 Key、短信认证或修改已有配置"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/create_key.py",
+      "scripts/send_code.py",
+      "scripts/supplement_key.py",
+      "scripts/test_all.py",
+      "scripts/tmap_client.py",
+      "setup.py",
+      "test_semantic.py"
+    ],
+    "excluded_files": [
+      {
+        "path": ".DS_Store",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "__pycache__",
+        "reason": "local/cache/lock directory"
+      },
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "references/.DS_Store",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "references/jsapi-guide/.DS_Store",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/.DS_Store",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/个性化地图_切换地图个性化样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/个性化地图_墨渊(夜间模式效果).html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/个性化地图_玉露(绿色系活泼风格).html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/信息窗口_信息窗口偏移设置.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/信息窗口_包含图文信息的信息窗口.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/信息窗口_拖拽信息窗口.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/信息窗口_点击标记弹出信息窗口.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/信息窗口_简单信息窗口.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/信息窗口_自定义信息窗体.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_判断多边形是否在另一个多边形内.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_判断点与多边形的关系.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_判断点是否在多边形边上.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_计算区域面积.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_计算多边形形心.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_计算多边形的交集区域.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_计算线上距离P点最近的点.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_计算线与多边形是否相交.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_计算路径距离.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/几何计算库_路径顺逆时针判断与转换.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图叠加图层_WMS标准图层.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图叠加图层_自定义贴地图层.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图叠加图层_静态图贴地图层.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_2D_3D模式切换.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_切换底图类型.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_创建地图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_区域高亮.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_卫星地图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_同时加载两个地图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_地图加载完成事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_地图导出图片.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_地图平滑变化至指定状态.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_地图平移.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_地图设置缩放焦点.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_天空盒.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_实时路况.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_异步加载地图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_点击地图拾取POI.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_点击地图拾取坐标.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_粒子路况.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置_获取地图中心.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置_获取地图显示范围.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置_获取地图视角.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置地图中心点偏移.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置地图显示比例.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置地图边界范围.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置控件位置及样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_设置鼠标样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_调整图层顺序.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_配置矢量底图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/地图操作示例_销毁地图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/城市漫游_地面漫游.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/城市漫游_空中漫游.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/城市漫游_绕点环绕.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_多边形拔起_3D棱柱.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_多边形点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_多边形选中高亮显示.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_多边形飞地.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_带飞地的区域实现高亮.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_环形(带洞)多边形.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_简单圆形.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_简单多边形.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_自定义多边形样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/多边形&3D棱柱_自定义边线样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/应用工具_开关编辑器键盘事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/应用工具_测量工具.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/应用工具_绘制几何图形.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/应用工具_编辑几何图形.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/应用工具_编辑器的禁用和启用.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/应用工具_设置编辑点为GL模式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线-动态箭头.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线-大圆航线.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线-彩虹线.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线-虚线样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线应用_路线规划.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线样式自定义.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_折线点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_简单折线.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_管道线.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/折线_线条泛光效果.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_IP定位.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_下属行政区查询.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_公交路线规划.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_关键字搜索.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_关键字输入提示.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_地址至坐标转换.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_坐标至地址转换.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_行政区划边界.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/服务类库_驾车路线规划.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/模型库_3DTiles模型.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/模型库_3Dmarker.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/模型库_GLTF模型加载.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/模型库_GLTF模型沿线移动.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/模型库_使用Three.js加载模型.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/模型库_在地图上使用Three.js.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_Marker文本背景色.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_Marker随地图放大缩小.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_marker拖动.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_marker轨迹回放-全局模式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_marker轨迹回放-跟随模式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_为多个marker添加事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_图文标记.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_文本标记开启碰撞避让.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_文本标记样式自定义.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_文本标记点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_文本标记背景.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_普通Marker.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_普通文本标记.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_标记跨图层碰撞.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_添加与移除marker.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_点击地图添加marker.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_点标记应用：周边检索.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_自定义marker样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点标记&文本标记_自适应显示多个标记.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点聚合_基本点聚合功能.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点聚合_点聚合跨图层碰撞.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/点聚合_自定义聚合样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/环境检测_浏览器环境检测.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/矢量数据图层_polygonGeoJSON.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/矢量数据图层_编辑GeojsonLayer数据.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义栅格图层_叠加自定义网格.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义栅格图层_自定义栅格图层-销毁.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义栅格图层_自定义栅格图层.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义覆盖物_DOMOverlay.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义覆盖物_DOMOverlay跨图层碰撞.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义覆盖物_DomOverlay阻止事件冒泡.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义覆盖物_SVG图层.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义覆盖物_marker动画.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义覆盖物_添加动态gif图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/jsapigl/demos/自定义遮罩图层_自定义遮罩图层.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/.DS_Store",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/2D经典热力.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/2D网格热力.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/2D蜂窝热力.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/3D经典热力.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/3D网格热力.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/3D蜂窝热力.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/全国行政区划.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/分类散点图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/动态围墙面.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/动态设置弧线图参数.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/动态设置热力参数.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/动态轨迹图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/动态辐射圈.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/区域图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/区域图使用geojson数据.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/区域图使用编辑器.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/区域图数据转换为geojson.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/区域图鼠标事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/区域图鼠标双击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/单色散点图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/图标散点图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/弧线中点位置标记.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/弧线图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/弧线图点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/弧线图鼠标事件选定样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/弧线流向图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/弧线流向组合图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/散点动画.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/散点图朝向设置.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/散点图点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/散点图鼠标事件选定样式设置.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/水晶体.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/热力图自动切换散点.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/热力时序动画.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/网格热力动画.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/网格热力图点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/网格热力图鼠标事件选定样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/航线图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/蜂窝热力动画.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/蜂窝热力图点击事件.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/蜂窝热力图鼠标事件选定样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/贴地弧线流向图.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/轨迹回放动画.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "references/jsapi-guide/visualization/demos/轨迹图鼠标事件选定样式.html",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/__pycache__",
+        "reason": "local/cache/lock directory"
+      },
+      {
+        "path": "scripts/create_key.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/save_config.py",
+        "reason": "local config file"
+      },
+      {
+        "path": "scripts/send_code.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/supplement_key.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/test_all.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tmap_client.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "setup.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "test_semantic.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "workbuddy.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-travel-planner-wb-c568daf2",
+    "kind": "workflow_guide",
+    "display_name": "旅游规划",
+    "description": "旅游规划与行程设计。当用户提到旅游规划、旅行攻略、行程安排、出游计划、度假计划、做攻略、亲子游规划、自由行规划、自驾游规划、周末出游，或给出目的地/时间/预算/同行人希望生成完整旅行方案时触发。基于全网公开搜索获取实时信息（景点开放与门票、预约政策、交通时刻、限流政策），提供实时天气查询（规划期气候研判 + 出发前天气复核），输出目的地调研、逐日行程、路线图、预算明细、实用清单五件套。不适用于：机票酒店实际预订操作、签证代办、保险购买，以及无行程编排需求的单纯景点问答。",
+    "source": "travel-planner-wb",
+    "path": "workbuddy/workbuddy-travel-planner-wb-c568daf2/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-travel-planner-wb-c568daf2/references/output-structure.md",
+      "workbuddy/workbuddy-travel-planner-wb-c568daf2/references/search-question-library.md"
+    ],
+    "content_hash": "c8d2902bdce67fb06a9d001336a9d3560f2af92100ddec72141acaff34c28aec",
+    "original_source_hash": "590ba358d8197f1367d5a0322106fbbada610f848af62d08e7499ff75fd59fe6",
+    "execution_status": "guide_only",
+    "source_test_status": "partial",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "预算表生成及合计回读通过；未完成实时行程/地图/门票核验"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/budget_table.py",
+      "scripts/map_overlay.py",
+      "scripts/route_map.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/budget_table.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/map_overlay.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/route_map.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-ui-styling-830f9ee0",
+    "kind": "workflow_guide",
+    "display_name": "ui-styling",
+    "description": "Create beautiful, accessible user interfaces with shadcn/ui components (built on Radix UI + Tailwind), Tailwind CSS utility-first styling, and canvas-based visual designs. Use when building user interfaces, implementing design systems, creating responsive layouts, adding accessible components (dialogs, dropdowns, forms, tables), customizing themes and colors, implementing dark mode, generating visual designs and posters, or establishing consistent styling patterns across applications.",
+    "source": "ui-styling",
+    "path": "workbuddy/workbuddy-ui-styling-830f9ee0/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-ui-styling-830f9ee0/LICENSE.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/ArsenalSC-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/BigShoulders-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Boldonse-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/BricolageGrotesque-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/CrimsonPro-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/DMMono-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/EricaOne-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/GeistMono-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Gloock-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/IBMPlexMono-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/InstrumentSans-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Italiana-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/JetBrainsMono-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Jura-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/LibreBaskerville-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Lora-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/NationalPark-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/NothingYouCouldDo-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Outfit-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/PixelifySans-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/PoiretOne-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/RedHatMono-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Silkscreen-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/SmoochSans-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/Tektur-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/WorkSans-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/canvas-fonts/YoungSerif-OFL.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/canvas-design-system.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/shadcn-accessibility.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/shadcn-components.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/shadcn-theming.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/tailwind-customization.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/tailwind-responsive.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/references/tailwind-utilities.md",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/scripts/requirements.txt",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/scripts/tests/coverage-ui.json",
+      "workbuddy/workbuddy-ui-styling-830f9ee0/scripts/tests/requirements.txt"
+    ],
+    "content_hash": "ba2754297601e89fc306184fbc2f40752e5c07a497563dcc936e1eff2addfc2c",
+    "original_source_hash": "625e302c60ee8f2e22d56cbe638c4a739e2657f566dae42689503ad517c30f1e",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "Vue 配置路径、颜色注入通过；未安装 React/shadcn 或改动现有前端"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/shadcn_add.py",
+      "scripts/tailwind_config_gen.py",
+      "scripts/tests/test_shadcn_add.py",
+      "scripts/tests/test_tailwind_config_gen.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "canvas-fonts/ArsenalSC-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/BigShoulders-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/BigShoulders-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Boldonse-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/BricolageGrotesque-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/BricolageGrotesque-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/CrimsonPro-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/CrimsonPro-Italic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/CrimsonPro-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/DMMono-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/EricaOne-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/GeistMono-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/GeistMono-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Gloock-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/IBMPlexMono-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/IBMPlexMono-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/IBMPlexSerif-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/IBMPlexSerif-BoldItalic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/IBMPlexSerif-Italic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/IBMPlexSerif-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/InstrumentSans-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/InstrumentSans-BoldItalic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/InstrumentSans-Italic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/InstrumentSans-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/InstrumentSerif-Italic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/InstrumentSerif-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Italiana-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/JetBrainsMono-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/JetBrainsMono-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Jura-Light.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Jura-Medium.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/LibreBaskerville-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Lora-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Lora-BoldItalic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Lora-Italic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Lora-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/NationalPark-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/NationalPark-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/NothingYouCouldDo-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Outfit-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Outfit-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/PixelifySans-Medium.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/PoiretOne-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/RedHatMono-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/RedHatMono-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Silkscreen-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/SmoochSans-Medium.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Tektur-Medium.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/Tektur-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/WorkSans-Bold.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/WorkSans-BoldItalic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/WorkSans-Italic.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/WorkSans-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "canvas-fonts/YoungSerif-Regular.ttf",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/.coverage",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/shadcn_add.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tailwind_config_gen.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_shadcn_add.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_tailwind_config_gen.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-ui-ux-pro-max-2931516d",
+    "kind": "workflow_guide",
+    "display_name": "ui-ux-pro-max",
+    "description": "UI/UX design intelligence for web, mobile, and desktop. This skill should be used when designing, building, reviewing, or fixing interfaces, including pages, components, design systems, accessibility, interaction, responsive layout, typography, color, charts, and stack-specific UI implementation. Searchable local data: 79 searchable styles (50 active), 192 product palettes and reasoning profiles, 74 font pairings, 119 UX guidelines, 105 icons, 17 GSAP presets, 25 chart types, and 22 stacks.",
+    "source": "ui-ux-pro-max",
+    "path": "workbuddy/workbuddy-ui-ux-pro-max-2931516d/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/data/catalog-summary.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/data/data-provenance.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/data/google-font-licenses.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/references/pro-rules.md",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/references/quick-reference.md",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/google-api.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/google-catalog.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/google-metadata.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/google-overrides.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/phosphor-core.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/phosphor-package.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/phosphor-react-exports.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/catalogs/phosphor-react-package.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/relevance-baseline.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/relevance-cases.json",
+      "workbuddy/workbuddy-ui-ux-pro-max-2931516d/scripts/tests/fixtures/relevance-thresholds.json"
+    ],
+    "content_hash": "3f4abd0173e06b3791be1d8af97f8c29271cdf4627273a348bb3672daece0973",
+    "original_source_hash": "20a538d271d9028c9eb3b90350c672bdabb9806a4235c84deee98dc298e2db36",
+    "execution_status": "guide_only",
+    "source_test_status": "subset_pass",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "内置 CSV 搜索返回 UX 加载反馈建议；未验证所有领域与框架"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/core.py",
+      "scripts/design_system.py",
+      "scripts/reasoning_contract.py",
+      "scripts/search.py",
+      "scripts/tests/test_catalog_refresh.py",
+      "scripts/tests/test_catalog_summary_line_endings.py",
+      "scripts/tests/test_core.py",
+      "scripts/tests/test_core_data_quality.py",
+      "scripts/tests/test_data_contracts.py",
+      "scripts/tests/test_design_system_mode.py",
+      "scripts/tests/test_design_system_stack.py",
+      "scripts/tests/test_native_desktop_stack_freshness.py",
+      "scripts/tests/test_relevance_evaluator.py",
+      "scripts/tests/test_skill_script_paths.py",
+      "scripts/tests/test_style_taxonomy.py",
+      "scripts/tests/test_text_layout_resilience.py",
+      "scripts/tests/test_web_stack_freshness.py",
+      "scripts/validate_data.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "data/app-interface.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/charts.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/colors.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/google-fonts.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/icons.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/landing.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/motion.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/phosphor-icons-upstream.json",
+        "reason": "file exceeds 524288 bytes"
+      },
+      {
+        "path": "data/products.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/react-performance.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/angular.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/astro.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/avalonia.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/flutter.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/html-tailwind.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/javafx.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/jetpack-compose.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/laravel.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/nextjs.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/nuxt-ui.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/nuxtjs.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/react-native.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/react.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/shadcn.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/svelte.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/swiftui.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/threejs.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/uno.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/uwp.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/vue.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/winui.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/stacks/wpf.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/styles.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/typography.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/ui-reasoning.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "data/ux-guidelines.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "scripts/core.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/design_system.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/reasoning_contract.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/search.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/fixtures/catalogs/google-existing.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "scripts/tests/fixtures/catalogs/icons-curated.csv",
+        "reason": "unsupported resource type (.csv)"
+      },
+      {
+        "path": "scripts/tests/test_catalog_refresh.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_catalog_summary_line_endings.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_core.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_core_data_quality.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_data_contracts.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_design_system_mode.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_design_system_stack.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_native_desktop_stack_freshness.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_relevance_evaluator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_skill_script_paths.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_style_taxonomy.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_text_layout_resilience.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/tests/test_web_stack_freshness.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validate_data.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-weather-open-meteo-6b2c75b3",
+    "kind": "workflow_guide",
+    "display_name": "天气查询",
+    "description": "基于 Open-Meteo 公共 API 查询全球任意地点的当前天气与未来 7 天预报，无需 API Key；支持城市名或经纬度查询，Open-Meteo 请求失败时自动降级到 wttr.in。",
+    "source": "weather-open-meteo",
+    "path": "workbuddy/workbuddy-weather-open-meteo-6b2c75b3/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-weather-open-meteo-6b2c75b3/_icon.svg"
+    ],
+    "content_hash": "433d7b44aeb3070a330e313f955348c06bd23e1227dcc5774bbf3c7beae0b0fb",
+    "original_source_hash": "629ec167b926b0116ef1d23a668e887f4652a2dfbd7a230c03294515148ed4b2",
+    "execution_status": "guide_only",
+    "source_test_status": "partial",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "南通坐标的昨日历史预报与今日预报 API 实测通过；非气象站实测，企业部署仍需遵守商用授权，缺少 jq"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [],
+    "excluded_files": [
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-web-access-b25ac0df",
+    "kind": "workflow_guide",
+    "display_name": "Web Access（浏览器自动化）",
+    "description": "CDP 直连本地 Chrome，智能调度联网工具，支持登录态、并行批量操作",
+    "source": "web-access",
+    "path": "workbuddy/workbuddy-web-access-b25ac0df/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-web-access-b25ac0df/_icon.svg",
+      "workbuddy/workbuddy-web-access-b25ac0df/references/cdp-api.md",
+      "workbuddy/workbuddy-web-access-b25ac0df/references/migration-2.5.3.md"
+    ],
+    "content_hash": "c15464ea93493688ef7d8011a8808ac97dae27caa07ecedd5f1d8d00eae52ac0",
+    "original_source_hash": "01f996086c4e57fc461ecb836fa420ee6179b80c1b684108aa0314c68b4e1900",
+    "execution_status": "guide_only",
+    "source_test_status": "blocked",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "JS 语法通过；该检查会启动 CDP/修改配置，未控制用户浏览器，独立浏览器适配未完成"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/browser-discovery.mjs",
+      "scripts/cdp-proxy.mjs",
+      "scripts/check-deps.mjs",
+      "scripts/find-url.mjs",
+      "scripts/match-site.mjs"
+    ],
+    "excluded_files": [
+      {
+        "path": ".claude-plugin",
+        "reason": "local/cache/lock directory"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/browser-discovery.mjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/cdp-proxy.mjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/check-deps.mjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/find-url.mjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/match-site.mjs",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "templates/config.env.template",
+        "reason": "environment config file"
+      },
+      {
+        "path": "workbuddy.json",
+        "reason": "local metadata/config file"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-wps-office-suite-skillhub-f76539f0",
+    "kind": "workflow_guide",
+    "display_name": "WPS Office 全家桶",
+    "description": "Word、Excel、PPT 办公文档工作指南；外部 Office 引擎和脚本需独立的受控执行适配。",
+    "source": "wps-office-suite__skillhub",
+    "path": "workbuddy/workbuddy-wps-office-suite-skillhub-f76539f0/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-wps-office-suite-skillhub-f76539f0/ARCHITECTURE.md",
+      "workbuddy/workbuddy-wps-office-suite-skillhub-f76539f0/README.md",
+      "workbuddy/workbuddy-wps-office-suite-skillhub-f76539f0/references/gongwen_rules.yaml",
+      "workbuddy/workbuddy-wps-office-suite-skillhub-f76539f0/requirements.txt",
+      "workbuddy/workbuddy-wps-office-suite-skillhub-f76539f0/templates/templates_index.json"
+    ],
+    "content_hash": "c7bd8485afe330fe85872d9f8de982d0acd138a5b3c0b7b50041efe5b3c59aeb",
+    "original_source_hash": "93f4c01ae31a50436a5d6ce52ac4c44270e599d8be3b74e27b33b52b7e6716ab",
+    "execution_status": "guide_only",
+    "source_test_status": "partial",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "独立测试环境 Python 引擎 Word/Excel/PPT 创建回读通过；项目环境缺库，COM/云桥未测试"
+    ],
+    "metadata_repaired": true,
+    "missing_executable_dependencies": [
+      "scripts/chart_recommender.py",
+      "scripts/clarify.py",
+      "scripts/com_health.py",
+      "scripts/conditional_format_io.py",
+      "scripts/doc_search.py",
+      "scripts/document_manager.py",
+      "scripts/document_translator.py",
+      "scripts/email_reply.py",
+      "scripts/excel_analyzer.py",
+      "scripts/format_converter.py",
+      "scripts/formula_explainer.py",
+      "scripts/gongwen.py",
+      "scripts/kingdoc_bridge.py",
+      "scripts/llm_bridge.py",
+      "scripts/long_document.py",
+      "scripts/md_converter.py",
+      "scripts/meeting_minutes.py",
+      "scripts/nl2sql_engine.py",
+      "scripts/pipeline_bridge.py",
+      "scripts/ppt_generator.py",
+      "scripts/redact.py",
+      "scripts/report_generator.py",
+      "scripts/schedule_register.py",
+      "scripts/template_manager.py",
+      "scripts/usage_stats.py",
+      "scripts/validation_io.py",
+      "scripts/watch.py",
+      "scripts/watermark.py",
+      "scripts/wps_ai.py",
+      "scripts/wps_common.py",
+      "scripts/wps_docx_to_ppt.py",
+      "scripts/wps_engine.py",
+      "scripts/wps_error.py",
+      "scripts/wps_excel.py",
+      "scripts/wps_feedback.py",
+      "scripts/wps_invoice_ocr.py",
+      "scripts/wps_ms.py",
+      "scripts/wps_nl_analysis.py",
+      "scripts/wps_performance.py",
+      "scripts/wps_ppt.py",
+      "scripts/wps_pure.py",
+      "scripts/wps_pure_enhancements.py",
+      "scripts/wps_test.py",
+      "scripts/wps_toc.py",
+      "scripts/wps_update.py",
+      "scripts/wps_word.py",
+      "scripts/wps_worker.py",
+      "templates/generate_templates.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/chart_recommender.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/clarify.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/com_health.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/conditional_format_io.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/doc_search.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/document_manager.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/document_translator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/email_reply.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/excel_analyzer.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/format_converter.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/formula_explainer.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/gongwen.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/kingdoc_bridge.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/llm_bridge.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/long_document.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/md_converter.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/meeting_minutes.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/nl2sql_engine.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pipeline_bridge.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/ppt_generator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/redact.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/report_generator.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/schedule_register.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/template_manager.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/usage_stats.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validation_io.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/watch.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/watermark.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_ai.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_common.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_docx_to_ppt.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_engine.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_error.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_excel.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_feedback.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_invoice_ocr.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_ms.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_nl_analysis.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_performance.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_ppt.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_pure.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_pure_enhancements.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_test.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_toc.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_update.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_word.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/wps_worker.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "templates/generate_templates.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  },
+  {
+    "name": "workbuddy-xlsx-1c980b22",
+    "kind": "workflow_guide",
+    "display_name": "Excel 表格处理",
+    "description": "创建、编辑、分析 Excel 表格：公式、图表、透视表与格式设置。",
+    "source": "xlsx",
+    "path": "workbuddy/workbuddy-xlsx-1c980b22/SKILL.md",
+    "references": [
+      "workbuddy/workbuddy-xlsx-1c980b22/LICENSE.txt",
+      "workbuddy/workbuddy-xlsx-1c980b22/README.md",
+      "workbuddy/workbuddy-xlsx-1c980b22/references/zh-CN.md",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-chart.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-chartDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-diagram.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-lockedCanvas.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-main.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-picture.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-spreadsheetDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/dml-wordprocessingDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/mc.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/opc-contentTypes.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/opc-coreProperties.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/opc-digSig.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/opc-relationships.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/pml.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-additionalCharacteristics.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-bibliography.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-commonSimpleTypes.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-customXmlDataProperties.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-customXmlSchemaProperties.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-documentPropertiesCustom.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-documentPropertiesExtended.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-documentPropertiesVariantTypes.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-math.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/shared-relationshipReference.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/sml.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/vml-main.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/vml-officeDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/vml-presentationDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/vml-spreadsheetDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/vml-wordprocessingDrawing.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-2010.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-2012.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-2018.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-cex-2018.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-cid-2016.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-sdtdatahash-2020.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml-symex-2015.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/wml.xsd",
+      "workbuddy/workbuddy-xlsx-1c980b22/schemas/xml.xsd"
+    ],
+    "content_hash": "a576f2e11f122214487d47937a32533ecf919917ca231ae668f08bfe0da69806",
+    "original_source_hash": "7bc4a98bb4fa015a832f7626093ea1cb38aab6294c3482f47487594918e8c999",
+    "execution_status": "guide_only",
+    "source_test_status": "partial",
+    "warnings": [
+      "仅安装说明和参考资料；不新增脚本执行、浏览器控制或云端写入权限。",
+      "openpyxl 修改/回读通过；缺少 LibreOffice，不能完成技能要求的强制公式重算"
+    ],
+    "metadata_repaired": false,
+    "missing_executable_dependencies": [
+      "scripts/helpers.py",
+      "scripts/pptx_chart.py",
+      "scripts/pptx_slide.py",
+      "scripts/pptx_theme.py",
+      "scripts/recalc.py",
+      "scripts/soffice.py",
+      "scripts/validate.py",
+      "scripts/validators.py",
+      "scripts/validators_base.py",
+      "scripts/validators_docx.py",
+      "scripts/validators_pptx.py",
+      "scripts/validators_redlining.py"
+    ],
+    "excluded_files": [
+      {
+        "path": "_icon.png",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "_skillhub_meta.json",
+        "reason": "local metadata/config file"
+      },
+      {
+        "path": "scripts/helpers.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pptx_chart.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pptx_slide.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/pptx_theme.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/recalc.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/soffice.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validate.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_base.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_docx.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_pptx.py",
+        "reason": "executable/binary resource"
+      },
+      {
+        "path": "scripts/validators_redlining.py",
+        "reason": "executable/binary resource"
+      }
+    ]
+  }
+]

@@ -7,6 +7,8 @@ import threading
 import time
 import uuid
 from typing import Any, Callable
+from types import SimpleNamespace
+from urllib.parse import quote
 from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
 from ..config import SPECIALTY_FIRE, config
@@ -61,6 +63,7 @@ OPTIONAL_TARGET_FIELD_NAMES = {
 }
 _field_cache_lock = threading.RLock()
 _field_cache: dict[str, list[str]] = {}
+_bitable_write_locks: dict[tuple[str, str], threading.Lock] = {}
 _lark_sdk_lock = threading.RLock()
 lark: Any = None
 AppTableRecord: Any = None
@@ -133,6 +136,8 @@ def _ensure_lark_sdk_loaded() -> None:
         UploadAllMediaRequest = LoadedUploadAllMediaRequest
         UploadAllMediaRequestBody = LoadedUploadAllMediaRequestBody
         GetNodeSpaceRequest = LoadedGetNodeSpaceRequest
+        from .http_client import reuse_lark_http_client
+        reuse_lark_http_client()
         lark = loaded_lark
 
 
@@ -151,9 +156,47 @@ def _build_client(*, timeout: float = 30.0) -> Any:
         lark.Client.builder()
         .enable_set_token(True)
         .log_level(lark.LogLevel.ERROR)
-        .timeout(timeout)
+        .timeout((min(5.0, timeout), timeout))
         .build()
     )
+
+
+def _feishu_request(method, path, token, *, body=None, params=None, files=None):
+    # Reuse verified TLS and sockets without importing every SDK service.
+    from .http_client import _sdk_request
+
+    headers = {"Authorization": f"Bearer {token}"}
+    data = body
+    if files is None and body is not None:
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    response = _sdk_request(method, "https://open.feishu.cn/open-apis/" + path,
+        headers=headers, params=params, data=data, files=files, timeout=(5.0, 30.0))
+    try:
+        payload = response.json()
+        if not isinstance(payload, dict) or type(payload.get("code")) is not int:
+            raise ValueError("missing response code")
+        if response.status_code >= 400 and payload["code"] == 0:
+            raise ValueError("unsuccessful HTTP status")
+        values = dict(payload.get("data") or {})
+        if isinstance(values.get("record"), dict):
+            values["record"] = SimpleNamespace(**values["record"])
+        for key in ("records", "items"):
+            if isinstance(values.get(key), list):
+                values[key] = [SimpleNamespace(**item) for item in values[key]]
+        if method == "POST" and path.endswith("/records") and payload["code"] == 0:
+            if not getattr(values.get("record"), "record_id", ""):
+                raise ValueError("missing created record ID")
+    except (ValueError, TypeError) as exc:
+        raise RequestsConnectionError("飞书响应不完整，写入结果尚未确认。") from exc
+    return SimpleNamespace(code=payload["code"], msg=payload.get("msg", ""),
+        data=SimpleNamespace(**values), raw=SimpleNamespace(content=response.content),
+        success=lambda: payload["code"] == 0)
+
+
+def _record_path(table_id, record_id="", endpoint=""):
+    path = f"bitable/v1/apps/{quote(config.app_token, safe='')}/tables/{quote(table_id, safe='')}/records"
+    return path + ("/" + quote(record_id, safe="") if record_id else "") + ("/" + endpoint if endpoint else "")
 
 
 def _with_token_retry(request_fn: Callable[[str], object]):
@@ -209,11 +252,20 @@ class BitableWriteUncertainError(RuntimeError):
 
 
 def _execute_bitable_write(request_fn: Callable[[str], object], notice_type: str):
+    started = time.monotonic()
+    _, table_id, _ = _resolve_handler(notice_type)
+    with _field_cache_lock:
+        lock = _bitable_write_locks.setdefault((config.app_token, table_id or notice_type), threading.Lock())
     try:
         # Retry only explicit server rejections, for every notice type. A
         # transport timeout after POST is uncertain, not permission to POST again.
-        return _with_rejected_bitable_write_retry(request_fn)
+        # Feishu rejects concurrent writes to the same table; reads and other
+        # tables still run concurrently in the existing upload pool.
+        with lock:
+            started = time.monotonic()
+            return _with_rejected_bitable_write_retry(request_fn)
     except (RequestsTimeout, RequestsConnectionError) as exc:
+        log_warning(f"多维写入响应未确认: notice_type={notice_type}, exception={type(exc).__name__}, elapsed_ms={(time.monotonic() - started) * 1000:.0f}")
         raise BitableWriteUncertainError("飞书写入请求超时或连接中断，远端结果暂不能确认。请刷新核验该条通告，不要重复新增；重试会先核验上次结果。") from exc
 
 
@@ -264,25 +316,16 @@ def _get_bitable_fields(notice_type: str) -> list:
         if err or not table_id:
             return []
 
-        client = _build_client()
         field_names = []
         page_token = ""
         seen_page_tokens: set[str] = set()
 
         while True:
-            builder = (
-                ListAppTableFieldRequest.builder()
-                .app_token(config.app_token)
-                .table_id(table_id)
-                .page_size(200)
-            )
-            if page_token:
-                builder = builder.page_token(page_token)
-            request = builder.build()
-
             def do_list(token: str):
-                option = lark.RequestOption.builder().user_access_token(token).build()
-                return client.bitable.v1.app_table_field.list(request, option)
+                params = {"page_size": 200}
+                if page_token:
+                    params["page_token"] = page_token
+                return _feishu_request("GET", _record_path(table_id).removesuffix("records") + "fields", token, params=params)
 
             response = _with_token_retry(do_list)
             if not response.success():
@@ -516,12 +559,8 @@ def resolve_bitable_app_token(
         return app_token, False
 
     try:
-        client = _build_client()
-        request = (
-            GetNodeSpaceRequest.builder().token(app_token).obj_type("wiki").build()
-        )
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        response = client.wiki.v2.space.get_node(request, option)
+        response = _feishu_request("GET", "wiki/v2/spaces/get_node", token,
+            params={"token": app_token, "obj_type": "wiki"})
         if not response.success():
             # 视为 base token，不做替换
             return app_token, False
@@ -576,22 +615,10 @@ def upload_media_to_feishu(image_bytes, file_name="screenshot.jpg", file_size=No
 
         def attempt_upload(token: str):
             with open(temp_file_path, "rb") as file:
-                client = _build_client()
-                request = (
-                    UploadAllMediaRequest.builder()
-                    .request_body(
-                        UploadAllMediaRequestBody.builder()
-                        .file_name(file_name)
-                        .parent_type("bitable_image")
-                        .parent_node(config.app_token)
-                        .size(str(file_size))
-                        .file(file)
-                        .build()
-                    )
-                    .build()
-                )
-                option = lark.RequestOption.builder().user_access_token(token).build()
-                return client.drive.v1.media.upload_all(request, option)
+                return _feishu_request("POST", "drive/v1/medias/upload_all", token,
+                    body={"file_name": file_name, "parent_type": "bitable_image",
+                          "parent_node": config.app_token, "size": str(file_size)},
+                    files={"file": (file_name, file, "application/octet-stream")})
 
         response = _with_token_retry(attempt_upload)
 
@@ -719,15 +746,6 @@ def create_bitable_record(
     创建多维表格记录
     :return: (success, record_id or error_msg)
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
-
-    handler, table_id, err = _resolve_handler(notice_type)
-    if err:
-        return False, err
-
     payload = NoticePayload(
         text=data_source_text,
         level=level,
@@ -741,41 +759,10 @@ def create_bitable_record(
         recover=recover,
         maintenance_cycle=maintenance_cycle,
     )
-    fields = _filter_missing_optional_fields(
-        notice_type, handler.build_create_fields(payload)
-    )
-    setattr(payload, "_clipflow_written_fields", dict(fields or {}))
-    if _info_logging_enabled():
-        log_info(f"Creating record({notice_type}) with fields: {fields}")
-
-    client = _build_client()
-    request = (
-        CreateAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .request_body(AppTableRecord.builder().fields(fields).build())
-        .build()
-    )
-
-    def do_create(token: str):
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.create(request, option)
-
-    response = _execute_bitable_write(do_create, notice_type)
-
-    if not response.success():
-        error_msg = f"创建记录失败: {_parse_field_error(response, notice_type, fields)}"
-        log_error(f"飞书创建记录: {error_msg}")
-        return False, error_msg
-
-    record_id = response.data.record.record_id
-    log_info(f"飞书创建记录: 成功, record_id={record_id}")
-    _log_record_action("上传", notice_type, record_id, fields, data_source_text)
-    _send_robot_message(handler, payload)
-    return True, record_id
+    return create_bitable_record_by_payload(notice_type, payload)
 
 
-def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
+def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload, *, target_record_id: str = ""):
     """
     通过 NoticePayload 创建多维表记录
     """
@@ -792,27 +779,24 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
         notice_type, handler.build_create_fields(payload)
     )
     setattr(payload, "_clipflow_written_fields", dict(fields or {}))
+    if target_record_id:
+        ok, result = update_bitable_record_fields(target_record_id, notice_type, fields)
+        if ok:
+            _send_robot_message(handler, payload)
+        return ok, result
     if _info_logging_enabled():
         log_info(f"Creating record({notice_type}) with fields: {fields}")
 
-    client = _build_client()
-    request_builder = (
-        CreateAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .request_body(AppTableRecord.builder().fields(fields).build())
-    )
     client_token = _notice_create_client_token(payload, notice_type, table_id)
-    if client_token:
-        request_builder.client_token(client_token)
-    request = request_builder.build()
-
+    checkpoint = getattr(payload, "_clipflow_create_checkpoint", None)
+    if callable(checkpoint):
+        checkpoint(dict(fields), client_token)
     def do_create(token: str):
         guard = getattr(payload, "_clipflow_write_guard", None)
         if callable(guard):
             guard()
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.create(request, option)
+        return _feishu_request("POST", _record_path(table_id), token,
+            body={"fields": fields}, params={"client_token": client_token} if client_token else None)
 
     response = _execute_bitable_write(do_create, notice_type)
 
@@ -853,24 +837,20 @@ def create_bitable_record_fields(
     if _info_logging_enabled():
         log_info(f"Creating record fields({notice_type}) with fields: {fields}")
 
-    client = _build_client()
-    request_builder = (
-        CreateAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .request_body(AppTableRecord.builder().fields(fields).build())
-    )
-    if str(client_token or "").strip():
-        request_builder.client_token(
-            _stable_uuid4_client_token(
+    client_token = str(client_token or "").strip()
+    if client_token:
+        try:
+            original = uuid.UUID(client_token)
+        except ValueError:
+            original = None
+        if original is None or original.version != 4 or str(original) != client_token:
+            client_token = _stable_uuid4_client_token(
                 f"clipflow-undo:{config.app_token}:{table_id}:{notice_type}:{client_token}"
             )
-        )
-    request = request_builder.build()
 
     def do_create(token: str):
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.create(request, option)
+        return _feishu_request("POST", _record_path(table_id), token,
+            body={"fields": fields}, params={"client_token": client_token} if client_token else None)
 
     response = _execute_bitable_write(do_create, notice_type)
 
@@ -964,28 +944,8 @@ def query_record_by_id(record_id, notice_type):
         return False, err
 
     def do_batch_query(token: str):
-        client = _build_client(timeout=30.0)
-        from lark_oapi.api.bitable.v1 import (
-            BatchGetAppTableRecordRequest,
-            BatchGetAppTableRecordRequestBody,
-        )
-
-        batch_request = (
-            BatchGetAppTableRecordRequest.builder()
-            .app_token(config.app_token)
-            .table_id(table_id)
-            .request_body(
-                BatchGetAppTableRecordRequestBody.builder()
-                .record_ids([record_id])
-                .automatic_fields(True)
-                .build()
-            )
-            .build()
-        )
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.batch_get(
-            batch_request, option
-        )
+        return _feishu_request("POST", _record_path(table_id, endpoint="batch_get"), token,
+            body={"record_ids": [record_id], "automatic_fields": True})
 
     started_at = time.perf_counter()
     try:
@@ -1058,18 +1018,8 @@ def delete_bitable_record(record_id: str, notice_type: str):
     if err:
         return False, err
 
-    client = _build_client()
-    request = (
-        DeleteAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .record_id(record_id)
-        .build()
-    )
-
     def do_delete(token: str):
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.delete(request, option)
+        return _feishu_request("DELETE", _record_path(table_id, record_id), token)
 
     response = _with_bitable_data_ready_retry(do_delete)
 
@@ -1107,15 +1057,6 @@ def update_bitable_record(
     更新多维表格记录
     :return: (success, result or error_msg)
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
-
-    handler, table_id, err = _resolve_handler(notice_type)
-    if err:
-        return False, err
-
     payload = NoticePayload(
         text=data_source_text,
         level=level,
@@ -1131,48 +1072,15 @@ def update_bitable_record(
         recover=recover,
         maintenance_cycle=maintenance_cycle,
     )
-    fields = _filter_missing_optional_fields(
-        notice_type, handler.build_update_fields(payload)
-    )
-    setattr(payload, "_clipflow_written_fields", dict(fields or {}))
-    if _info_logging_enabled():
-        log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
-
-    client = _build_client()
-    request = (
-        UpdateAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .record_id(record_id)
-        .request_body(AppTableRecord.builder().fields(fields).build())
-        .build()
-    )
-
-    def do_update(token: str):
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.update(request, option)
-
     started_at = time.perf_counter()
     try:
-        response = _execute_bitable_write(do_update, notice_type)
+        return update_bitable_record_by_payload(record_id, notice_type, payload)
     finally:
         elapsed = time.perf_counter() - started_at
         if elapsed >= 2.0:
             log_warning(
                 f"NoticeTiming update: type={notice_type}, record_id={record_id}, elapsed_s={elapsed:.2f}"
             )
-
-    if not response.success():
-        error_msg = f"更新记录失败: {_parse_field_error(response, notice_type, fields)}"
-        log_error(f"飞书更新记录: {error_msg}")
-        return False, error_msg
-
-    log_info(f"飞书更新记录: 成功, record_id={record_id}")
-    action = "结束" if _extract_status_from_fields(fields) == "结束" else "更新"
-    _log_record_action(action, notice_type, record_id, fields, data_source_text)
-    _send_robot_message(handler, payload)
-    return True, record_id
-
 
 def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: NoticePayload):
     """
@@ -1194,22 +1102,11 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     if _info_logging_enabled():
         log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
-    client = _build_client()
-    request = (
-        UpdateAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .record_id(record_id)
-        .request_body(AppTableRecord.builder().fields(fields).build())
-        .build()
-    )
-
     def do_update(token: str):
         guard = getattr(payload, "_clipflow_write_guard", None)
         if callable(guard):
             guard()
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.update(request, option)
+        return _feishu_request("PUT", _record_path(table_id, record_id), token, body={"fields": fields})
 
     response = _execute_bitable_write(do_update, notice_type)
 
@@ -1312,19 +1209,8 @@ def update_bitable_record_fields(record_id: str, notice_type: str, fields: dict)
     if _info_logging_enabled():
         log_info(f"Updating record fields({notice_type}) {record_id} with fields: {fields}")
 
-    client = _build_client()
-    request = (
-        UpdateAppTableRecordRequest.builder()
-        .app_token(config.app_token)
-        .table_id(table_id)
-        .record_id(record_id)
-        .request_body(AppTableRecord.builder().fields(fields).build())
-        .build()
-    )
-
     def do_update(token: str):
-        option = lark.RequestOption.builder().user_access_token(token).build()
-        return client.bitable.v1.app_table_record.update(request, option)
+        return _feishu_request("PUT", _record_path(table_id, record_id), token, body={"fields": fields})
 
     response = _execute_bitable_write(do_update, notice_type)
 

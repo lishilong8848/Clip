@@ -79,7 +79,7 @@
           <span>最近跟进</span>
           <span>操作</span>
         </div>
-        <div v-if="loading && !records.length" class="empty-state">正在读取检修状态...</div>
+        <div v-if="loading && !records.length" class="empty-state"><LoadingIndicator>正在读取检修状态...</LoadingIndicator></div>
         <div v-else-if="!records.length" class="empty-state">{{ statusEmptyText }}</div>
         <article v-for="record in records" v-else :key="record.record_id" class="status-row">
           <div class="project-cell">

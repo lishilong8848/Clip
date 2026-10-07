@@ -19,7 +19,7 @@ const VW = 1440;
 const VH = 1000;
 const CAP_X = 160;
 const CAP_Y = 140;
-const MARGIN = 24;
+const RIGHT_MARGIN = 12, BOTTOM_MARGIN = 96;
 const ROUTES = [
   '/learning',
   '/cabinet-power?scope=E',
@@ -33,11 +33,11 @@ async function assertDefaultLauncherBottomRight(pageLike) {
   const lb = await pageLike.locator('.lighthouse').boundingBox();
   assert(lb, 'launcher bounding box required');
   assert(
-    Math.abs((lb.x + lb.width) - (VW - MARGIN)) <= 8 &&
-    Math.abs((lb.y + lb.height) - (VH - MARGIN)) <= 8,
+    Math.abs((lb.x + lb.width) - (VW - RIGHT_MARGIN)) <= 8 &&
+    Math.abs((lb.y + lb.height) - (VH - BOTTOM_MARGIN)) <= 8,
     `default launcher must sit at bottom-right (${JSON.stringify(lb)})`,
   );
-  assert(lb.width < 300 && lb.height < 100,
+  assert(lb.width <= 40 && lb.height < 100,
     `default launcher must use its own small size (${JSON.stringify(lb)})`);
 }
 
@@ -211,8 +211,8 @@ try {
     const lbOther = await otherPage.locator('.lighthouse').boundingBox();
     assert(lbOther, 'user2 launcher box required');
     assert(
-      Math.abs((lbOther.x + lbOther.width) - (VW - MARGIN)) <= 8 &&
-      Math.abs((lbOther.y + lbOther.height) - (VH - MARGIN)) <= 8,
+      Math.abs((lbOther.x + lbOther.width) - (VW - RIGHT_MARGIN)) <= 8 &&
+      Math.abs((lbOther.y + lbOther.height) - (VH - BOTTOM_MARGIN)) <= 8,
       `different identity must get default bottom-right launcher, not reused cap position (${JSON.stringify(lbOther)})`,
     );
     await otherPage.getByRole('button', { name: '打开灯塔助手', exact: true }).click();

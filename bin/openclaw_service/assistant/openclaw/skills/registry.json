@@ -1,0 +1,23 @@
+[
+  {"name": "alert-tagging", "description": "通告告警推荐标签、分类依据、注意事项与示例；通告成功后由独立后台任务自动调用，不影响原发送流程。", "references": ["alert-tagging/references/rules.md"]},
+  {"name": "lighthouse-business", "description": "灯塔业务查询口径、权限和办理确认规则。"},
+  {"name": "public-research", "description": "公开搜索和天气查询，保留来源和时间，不外传内部数据。"},
+  {"name": "assistant-general", "description": "日常问答、写作、翻译、代码解释和本会话附件阅读。"},
+  {"name": "assistant-calculation", "description": "安全的本地算式、百分比、北京时间与日期差计算。"},
+  {"name": "lighthouse-extension", "description": "灯塔助手后续新增已审核插件、技能和受控工具的接入方法。"},
+  {"name": "lighthouse-notices", "description": "维保、变更、检修、上下电、轮巡、调整通告的查询、解析、计划关联及原生发送流程。"},
+  {"name": "lighthouse-events", "description": "事件通告查询、发生时间统计、闭环和转检修；发送仍由Qt办理。"},
+  {"name": "lighthouse-repairs", "description": "维修单、跟进记录、设备台账、关联事件和检修通告的查询及保存流程。"},
+  {"name": "lighthouse-cabinet-power", "description": "机柜平面图、操作历史、批次、证明、回退及五楼月度导出归档的调用规则。"},
+  {"name": "lighthouse-drills", "description": "演练记录、评估、人员姓名占位、签名授权及正式文件生成流程。"},
+  {"name": "lighthouse-mops", "description": "维护单MOP的来源关联、表格填写、人员选择、生成文件及上传流程。"},
+  {"name": "lighthouse-sops", "description": "SOP配置、循环、延时提醒及工单进度查询；不在助手执行工单步骤。"},
+  {"name": "lighthouse-critical-guard", "description": "重保任务、楼栋清单、填写和签名流程及未填报数量口径。"},
+  {"name": "lighthouse-water", "description": "水耗管理的日期范围、楼栋容量、日月数据及填写导出流程。"},
+  {"name": "lighthouse-daily-work", "description": "每日任务清单、交接和晨会信息的读取、填写及状态口径。"},
+  {"name": "lighthouse-plan-convergence", "description": "计划收敛核对台、规则集配置和未结束检修核对的调用流程。"},
+  {"name": "lighthouse-learning-query", "description": "画像学练题单、未答题进度、题库和资料的权限内只读查询。"},
+  {"name": "lighthouse-people-signatures", "description": "人员姓名和工号查询、业务签名选择与授权；安全设置和本人签名采集仅提供原页面。"},
+  {"name": "lighthouse-history", "description": "通告历史和知识记录的检索、去重、统计及证据来源区分。"},
+  {"name": "lighthouse-overview", "description": "当前各功能未完成工作、楼栋概览和后台任务状态的完整查询与分类口径。"}
+]

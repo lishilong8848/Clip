@@ -123,6 +123,7 @@ class BackendProcessPortalController:
         self._stop_event = threading.Event()
         self._event_thread: threading.Thread | None = None
         self._snapshot_thread: threading.Thread | None = None
+        self._startup_log_thread: threading.Thread | None = None
         self.notice_callback = None
         self.ongoing_callback = None
         self.ongoing_delete_callback = None
@@ -712,6 +713,10 @@ class BackendProcessPortalController:
                 launch_args[launch_args.index("--host") + 1] = self.host
                 launch_args[launch_args.index("--port") + 1] = str(self.bound_port)
                 log_handle = self._open_backend_log_file()
+                try:
+                    log_offset = self._backend_log_path().stat().st_size if self._process_log_file else 0
+                except OSError:
+                    log_offset = 0
                 self._process = subprocess.Popen(
                     launch_args,
                     cwd=cwd,
@@ -729,6 +734,7 @@ class BackendProcessPortalController:
                     )
                 self._owns_process = True
                 self._stop_event.clear()
+                self._start_startup_log_relay(log_offset)
                 if self._wait_for_health(timeout_s=float(self._startup_timeout_s)):
                     self._ensure_bridge_threads()
                     log_info(f"局域网后端子进程已启动: {self.get_url()}")
@@ -751,6 +757,10 @@ class BackendProcessPortalController:
                             pass
                 self._process = None
                 self._owns_process = False
+                self._stop_event.set()
+                if self._startup_log_thread:
+                    self._startup_log_thread.join(timeout=1)
+                    self._startup_log_thread = None
                 self._close_backend_log_file()
         self.host = original_host
         self.stop()
@@ -766,7 +776,7 @@ class BackendProcessPortalController:
                 self._request_json("POST", "/api/backend/shutdown", payload={}, timeout=1.5)
             except Exception:
                 pass
-        for attr in ("_event_thread", "_snapshot_thread", "_active_delta_thread"):
+        for attr in ("_event_thread", "_snapshot_thread", "_active_delta_thread", "_startup_log_thread"):
             thread = getattr(self, attr, None)
             if thread and thread.is_alive():
                 try:
@@ -788,6 +798,23 @@ class BackendProcessPortalController:
         self._process = None
         self._owns_process = False
         self._close_backend_log_file()
+
+    def _start_startup_log_relay(self, offset: int) -> None:
+        if self._startup_log_thread and self._startup_log_thread.is_alive():
+            return
+        if not self._process_log_file or not self._process:
+            return
+        from lan_bitable_template_portal.lighthouse_startup_log import relay_file
+        self._startup_log_thread = threading.Thread(
+            target=relay_file,
+            args=(self._backend_log_path(), offset, self._stop_event, self._process.pid),
+            name="ClipFlowOpenClawStartupLog", daemon=True,
+        )
+        try:
+            self._startup_log_thread.start()
+        except (OSError, RuntimeError):
+            self._startup_log_thread = None
+            log_warning('OpenClaw 控制台日志转发未启动，详情仍保留在后端日志文件。')
 
     def _ensure_bridge_threads(self) -> None:
         if self._event_thread is None or not self._event_thread.is_alive():

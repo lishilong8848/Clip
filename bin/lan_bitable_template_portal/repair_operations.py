@@ -347,6 +347,9 @@ class RepairOperationsMixin:
                 self._upsert_repair_snapshot_fields(source_key=source, record_id=record_id,
                     fields=fields, **({"parent_record_id": summary_id} if followup else {}))
             if followup:
+                if not checkpoint.get("delete"):
+                    from .repair_ledger import remember_selection
+                    remember_selection(self, summary_id, record_id, request.get("ledger_device_ids"))
                 self._schedule_repair_sync_task("followup_summary_sync", summary_record_id=summary_id,
                     scope=operation["scope"], run_immediately=True)
                 from .portal_service import REPAIR_FOLLOWUP_EVENT_EMERGENCY_FIELD_NAME as emergency

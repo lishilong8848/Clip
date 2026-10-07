@@ -5,7 +5,8 @@
     :role="tone === 'failed' || tone === 'warning' ? 'alert' : 'status'"
     :aria-live="tone === 'failed' || tone === 'warning' ? 'assertive' : 'polite'"
   >
-    <span class="message-dot" aria-hidden="true"></span>
+    <LoadingIndicator v-if="tone !== 'failed' && tone !== 'success' && isLoadingText(text)" />
+    <span v-else class="message-dot" aria-hidden="true"></span>
     <div>
       <strong v-if="title">{{ title }}</strong>
       <p v-if="text" :title="text">{{ text }}</p>
@@ -17,6 +18,7 @@
 </template>
 
 <script setup lang="ts">
+import { isLoadingText } from '../loadingText';
 withDefaults(defineProps<{
   tone?: "info" | "success" | "warning" | "failed";
   title?: string;
@@ -55,6 +57,7 @@ withDefaults(defineProps<{
   width: 4px;
   background: #1e63ff;
 }
+.message-banner:has(.loading-indicator) { grid-template-columns: 18px minmax(0, 1fr); }
 
 .message-dot {
   position: relative;

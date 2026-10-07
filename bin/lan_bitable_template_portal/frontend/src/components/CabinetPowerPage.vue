@@ -5,13 +5,13 @@
       <div class="heading-title"><h1>{{ scope ? scope + '楼机柜上下电' : '机柜上下电' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>
       <div class="actions">
         <button :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
-        <button v-if="isAdmin" :disabled="serverStorageLoading" @click="loadServerStorage"><HardDrive :size="16" />{{ serverStorageLoading ? '读取缓存中' : '本地缓存' }}</button>
+        <button v-if="isAdmin" :disabled="serverStorageLoading" @click="loadServerStorage"><HardDrive :size="16" /><LoadingIndicator v-if="serverStorageLoading">读取缓存中</LoadingIndicator><template v-else>本地缓存</template></button>
         <button @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
         <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
-        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || ['running','checking','interrupted','failed'].includes(allExportStatus)" @click="startAllExports"><CloudUpload :size="16" />{{ allExportBusy ? '各楼正在导出' : '一键导出/上传所有楼栋' }}</button>
+        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || ['running','checking','interrupted','failed'].includes(allExportStatus)" @click="startAllExports"><CloudUpload :size="16" /><LoadingIndicator v-if="allExportBusy">各楼正在导出</LoadingIndicator><template v-else>一键导出/上传所有楼栋</template></button>
         <template v-if="scope">
           <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />{{ pendingExportRequest ? '继续上次导出' : '导出' }}</button>
-      <button :disabled="exportHistoryLoading" @click="showExports()"><History :size="16" />{{ exportHistoryLoading ? '读取历史中' : '导出历史' }}</button>
+      <button :disabled="exportHistoryLoading" @click="showExports()"><History :size="16" /><LoadingIndicator v-if="exportHistoryLoading">读取历史中</LoadingIndicator><template v-else>导出历史</template></button>
         </template>
         <button v-if="isAdmin" title="月度自动归档设置" class="schedule-button" @click="openExportSchedule"><Settings2 :size="16" />设置</button>
       </div>
@@ -48,7 +48,7 @@
         <small v-if="item.error">{{ item.error }}</small>
       </div></div>
     </section>
-    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status">正在读取导出历史…</p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档记录</a></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table><footer v-if="exportTotal > 20" class="pagination"><span>共 {{ exportTotal }} 个文件</span><button :disabled="exportPage <= 1 || exportHistoryLoading" @click="showExports(exportPage - 1)"><ChevronLeft :size="16" /></button><button v-for="page in paginationPages(exportPage,exportPageCount)" :key="page" class="page-number" :disabled="exportHistoryLoading" :aria-label="'导出历史第 ' + page + ' 页'" @click="showExports(page)">{{ page }}</button><button :disabled="exportPage >= exportPageCount || exportHistoryLoading" @click="showExports(exportPage + 1)"><ChevronRight :size="16" /></button></footer></section>
+    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status"><LoadingIndicator>正在读取导出历史…</LoadingIndicator></p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档记录</a></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table><footer v-if="exportTotal > 20" class="pagination"><span>共 {{ exportTotal }} 个文件</span><button :disabled="exportPage <= 1 || exportHistoryLoading" @click="showExports(exportPage - 1)"><ChevronLeft :size="16" /></button><button v-for="page in paginationPages(exportPage,exportPageCount)" :key="page" class="page-number" :disabled="exportHistoryLoading" :aria-label="'导出历史第 ' + page + ' 页'" @click="showExports(page)">{{ page }}</button><button :disabled="exportPage >= exportPageCount || exportHistoryLoading" @click="showExports(exportPage + 1)"><ChevronRight :size="16" /></button></footer></section>
 
     <section v-if="!scope" class="buildings">
       <button v-for="building in buildings" :key="building.scope" class="building" :disabled="building.bootstrap_status !== 'succeeded'" @click="navigate('/cabinet-power?scope=' + building.scope)">
@@ -85,7 +85,7 @@
         <aside class="room-sidebar"><label class="search"><Search :size="16" /><input v-model="mapSearch" placeholder="包间或机架" aria-label="搜索平面图" /></label><button v-for="room in filteredRooms" :key="room.id" :class="{ active: currentRoom === room.id }" @click="selectRoom(room.id)"><b>{{ room.id }} 包间</b><small>{{ room.total }} 柜</small></button></aside>
         <div class="map-main">
           <div class="map-toolbar"><div class="legend"><span v-for="(label, state) in stateLabels" :key="state"><i :style="{ background: stateColors[state] }" />{{ label }}</span></div><div class="actions"><button aria-label="缩小" title="缩小" @click="zoom = Math.max(.25, zoom - .15)"><ZoomOut :size="16" /></button><button @click="fitMap">适应窗口</button><button aria-label="放大" title="放大" @click="zoom = Math.min(3, zoom + .15)"><ZoomIn :size="16" /></button></div></div>
-          <p v-if="layoutLoading">正在读取平面图…</p>
+          <p v-if="layoutLoading" role="status"><LoadingIndicator>正在读取平面图…</LoadingIndicator></p>
           <div v-else-if="layout.layout" ref="viewport" class="map-viewport">
             <div :style="{ width: layout.layout.width * zoom + 'px', height: layout.layout.height * zoom + 'px', position: 'relative' }">
               <div class="map-canvas" :style="{ width: layout.layout.width + 'px', height: layout.layout.height + 'px', transform: 'scale(' + zoom + ')' }">
@@ -105,7 +105,7 @@
           <input v-model="query.from" type="date" aria-label="开始日期" /><input v-model="query.to" type="date" aria-label="结束日期" />
           <label class="checkbox"><input v-model="onlyIssues" type="checkbox" @change="loadRecords(1)" />待核实</label><button @click="loadRecords(1)">查询</button><button class="link" @click="resetFilters">重置</button>
         </div>
-        <p v-if="recordsLoading" role="status">正在读取记录…</p>
+        <p v-if="recordsLoading" role="status"><LoadingIndicator>正在读取记录…</LoadingIndicator></p>
         <div class="table-wrap source-table-wrap mobile-card-table"><table class="source-table" :style="{ width: sourceTableWidth + 'px' }">
           <colgroup><col v-for="column in activeFormat?.columns || []" :key="column.column" :style="{ width: column.width + 'px' }" /><col style="width:150px" /></colgroup>
           <thead><tr><th v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4 }" :style="frozenStyle(column)">{{ column.label }}<small v-if="column.group !== undefined">{{ groupLabel(column.group, activeFormat) }}</small></th><th class="row-actions">操作</th></tr></thead>
@@ -119,6 +119,7 @@
       <details v-if="overview.issues.length && tab === 'overview'" class="issues"><summary>{{ overview.issues.length }} 项资料待核实</summary><div class="issue-scroll"><button v-for="(issue, i) in overview.issues" :key="i" class="issue-row" @click="editIssue(issue.record_id)"><span>{{ issue.room }} / {{ issue.rack }} · {{ issue.message }}</span><small>{{ issue.source }} {{ issue.source_row ? '第 ' + issue.source_row + ' 行' : '' }}</small><Pencil :size="14" /></button></div></details>
     </template>
 
+    <UiTransition name="ui-overlay" appear>
     <div v-if="historyOpen" class="scrim" :inert="discardDialogOpen || restoreDialogOpen || editorOpen" @click.self="historyOpen = false">
       <section class="drawer modal" role="dialog" aria-modal="true" aria-label="机柜完整历史" tabindex="-1">
         <header><div><h2>{{ historyRoom }} / {{ historyRack }}</h2><p v-if="selectedRack">当前状态：{{ stateLabels[selectedRack.state] }} · {{ selectedRack.rack_type }}</p></div><button @click="historyOpen = false" aria-label="关闭历史"><X :size="20" /></button></header>
@@ -126,7 +127,7 @@
           <div v-if="selectedRack" class="rack-power"><span>机柜功率 <strong>{{ selectedRack.power == null || selectedRack.power === '' ? '未填写' : selectedRack.power + ' W' }}</strong></span><button class="icon-button" title="修改机柜功率" aria-label="修改机柜功率" :disabled="saving" @click="openPowerEditor"><Pencil :size="16" /></button></div>
           <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}{{ selectedRack.latest_success.baseline_correction ? '（平面图基线校正）' : '' }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual || '未填写' }}</dd></div></dl>
           <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
-          <p v-if="historyLoading">正在读取完整历史…</p>
+          <p v-if="historyLoading" role="status"><LoadingIndicator>正在读取完整历史…</LoadingIndicator></p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
             <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
@@ -138,6 +139,8 @@
         </div>
       </section>
     </div>
+    </UiTransition>
+    <UiTransition name="ui-overlay" appear>
     <div v-if="editorOpen" class="scrim editor-layer" :inert="discardDialogOpen || restoreDialogOpen || deleteRecordConfirmOpen">
       <section class="editor modal" :class="{ 'power-editor': form.power_only }" role="dialog" aria-modal="true" :aria-label="form.power_only ? '修改机柜功率' : '编辑机柜记录'" tabindex="-1">
         <header><h2>{{ form.power_only ? '修改机柜功率' : editingId ? '编辑机柜记录' : '新增机柜记录' }}</h2><button :disabled="saving" @click="closeEditor" aria-label="关闭编辑"><X :size="20" /></button></header>
@@ -172,6 +175,7 @@
         </form>
       </section>
     </div>
+    </UiTransition>
     <ConfirmDialog
       :open="discardDialogOpen"
       tone="warning"
@@ -187,12 +191,13 @@
     <ConfirmDialog :open="Boolean(cleanupTarget)" tone="danger" title="清理导出文件？" message="清理后无法再次从本机下载此文件；机柜台账和已上传的云端归档不受影响。" confirm-label="清理文件" cancel-label="保留文件" @resolve="resolveExportCleanup" />
     <ConfirmDialog :open="restoreDialogOpen" title="恢复未保存的机柜记录？" message="检测到上次未完成的填写。" confirm-label="恢复编辑" cancel-label="丢弃草稿" @resolve="restoreDraft" />
     <ConfirmDialog :open="cacheCleanupOpen" tone="warning" title="清理本地图片缓存？" message="仅清理已成功上传飞书的本地原图和缩略图；机柜记录、云端附件及再次查看时的自动回填不受影响。" confirm-label="清理缓存" cancel-label="取消" @resolve="resolveCacheCleanup" />
+    <UiTransition name="ui-overlay" appear>
     <div v-if="exportScheduleOpen" class="scrim" @click.self="exportScheduleOpen = false">
       <section class="modal export-schedule-modal" role="dialog" aria-modal="true" aria-label="机柜月度自动归档设置" tabindex="-1">
         <header><h2>月度自动归档</h2><button aria-label="关闭设置" @click="exportScheduleOpen = false"><X :size="18" /></button></header>
         <form @submit.prevent="saveExportSchedule">
           <div class="export-schedule-body">
-            <p v-if="exportScheduleLoading">正在读取设置…</p>
+        <p v-if="exportScheduleLoading" role="status"><LoadingIndicator>正在读取设置…</LoadingIndicator></p>
             <template v-else>
               <label class="checkbox"><input v-model="exportSchedule.enabled" type="checkbox" />每月自动导出 A–E 楼并上传多维</label>
               <div class="export-schedule-fields">
@@ -209,7 +214,10 @@
         </form>
       </section>
     </div>
+    </UiTransition>
+    <UiTransition name="ui-overlay" appear>
     <div v-if="previewEvidence" class="evidence-preview" role="dialog" aria-modal="true" aria-label="上下电确认截图原图" @click.self="previewEvidence = ''"><button aria-label="关闭原图" @click="previewEvidence = ''"><X :size="20" /></button><img :src="previewEvidence" alt="上下电确认截图原图" /></div>
+    </UiTransition>
   </main>
 </template>
 
@@ -217,8 +225,10 @@
 import { randomHexId, resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Settings2, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
-import { requestJson, type Dict } from '../api/client';
+import { invalidateReadCache, requestJson, type Dict } from '../api/client';
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { navigate, registerNavigationGuard } from '../navigation';
+import { isAssistantEvent } from '../modalState';
 import ConfirmDialog from './ConfirmDialog.vue';
 import VnetBackButton from './VnetBackButton.vue';
 const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string }>();
@@ -339,6 +349,7 @@ async function load(): Promise<void> {
   finally { loading.value = false; racksLoading.value = false; }
 }
 async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1',status:'todo',...(props.scope?{scope:props.scope}:{})})).pending_count || 0); batchStatusError.value=''; } catch { batchPendingCount.value=-1; batchStatusError.value='上下电待办数量读取失败，当前数量未知'; } }
+usePageReadRefresh(url => ['/api/cabinet-power/buildings','/api/cabinet-power/overview','/api/cabinet-power/racks'].includes(url.pathname) && (url.searchParams.get('scope') || '') === props.scope, load, () => !loading.value && !disposed && !saving.value && !editorOpen.value);
 const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false), startingKind = ref(''), pendingExportRequest = ref('');
 const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false), exportHistoryLoading = ref(false), exportPage = ref(1), exportTotal = ref(0), cleanupTarget = ref<Dict | null>(null);
 const exportPageCount = computed(() => Math.max(1,Math.ceil(exportTotal.value/20)));
@@ -442,7 +453,7 @@ async function resumeAllExports(): Promise<void> {
     await pollAllExports();
   } catch (exc) { fail(exc); allExportStatus.value = 'checking'; allExportBusy.value = false; }
 }
-async function refresh(): Promise<void> { if (!initialDataLoaded || bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
+async function refresh(): Promise<void> { invalidateReadCache(); if (!initialDataLoaded || bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
 const query = reactive({ q: '', room: '', direction: '', from: '', to: '', sheet: '' }), onlyIssues = ref(false), records = ref<Dict>({}), recordsLoading = ref(false);
 const activeFormat = computed(() => overview.value.sheet_formats?.find((f: Dict) => f.sheet === query.sheet));
 const moveOverview = ref<Dict>({}), moveLoading = ref(false);
@@ -676,6 +687,7 @@ async function resolveExportCleanup(confirmed: boolean): Promise<void> {
   finally { item._cleaning = false; }
 }
 function keyboard(e: KeyboardEvent): void {
+  if (isAssistantEvent(e)) return;
   if (previewEvidence.value) { if (e.key === 'Escape') { e.preventDefault(); previewEvidence.value = ''; } else if (e.key === 'Tab') { e.preventDefault(); document.querySelector<HTMLElement>('.evidence-preview>button')?.focus(); } return; }
   if (!editorOpen.value && !historyOpen.value && !discardDialogOpen.value && !restoreDialogOpen.value && !exportScheduleOpen.value) return;
   if (e.key === 'Escape') { e.preventDefault(); if (exportScheduleOpen.value) exportScheduleOpen.value = false; else if (discardDialogOpen.value) resolveDiscardConfirmation(false); else if (restoreDialogOpen.value) restoreDraft(false); else if (editorOpen.value) closeEditor(); else historyOpen.value = false; return; }
@@ -716,6 +728,8 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 </script>
 
 <style scoped>
+.cabinet-page { width: 100%; box-sizing: border-box; }
+@media(min-width:1000px){.cabinet-page .buildings{grid-template-columns:repeat(5,minmax(0,1fr))}.cabinet-page .building{padding:18px 14px}.cabinet-page .building-stats{flex-wrap:wrap}.building-stats>span{min-width:0}.building p{overflow-wrap:anywhere}}
 .table-wrap:has(>table[aria-label="机柜状态明细"]){max-height:60vh}.table-wrap table[aria-label="机柜状态明细"] th{position:sticky;top:0;z-index:1}.carrier-summary>div{flex-wrap:wrap}
 .bootstrap-notice{align-items:flex-start}.bootstrap-copy{display:grid;flex:1;gap:8px;min-width:320px}.bootstrap-copy progress{width:100%;height:8px;accent-color:#1764dd}.bootstrap-buildings{display:flex;flex-wrap:wrap;gap:6px}.bootstrap-buildings span{border:1px solid #d4dfed;border-radius:6px;padding:3px 7px;background:#fff;color:#60768c;font-size:11px}.bootstrap-buildings .status-succeeded{border-color:#bee8d6;color:#167953}.bootstrap-buildings .status-running{border-color:#9fc5f5;color:#175dbb}.bootstrap-buildings .status-failed{border-color:#f8c9cd;color:#ae283e}
 .metric-link{border:0;background:transparent;border-radius:0;display:flex;flex-direction:column;align-items:flex-start;width:100%;padding:0}.carrier-summary>div{display:flex;align-items:center;gap:20px;padding:16px 0;border-bottom:1px solid #dce6f1}.rack-map-link{margin-left:20px;color:#60768c}.building-loading{display:grid;place-items:center;gap:8px;flex:1;color:#60768c;text-align:center}.building-loading strong{font-size:16px}.building-loading small{max-width:100%;overflow-wrap:anywhere}.building:disabled{opacity:1;background:#f4f7fb}.building:disabled .building-title{color:#6c8198}

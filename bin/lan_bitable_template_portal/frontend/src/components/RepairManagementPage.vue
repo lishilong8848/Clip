@@ -71,7 +71,7 @@
         <div class="panel-head">
           <div>
             <strong>维修项目列表</strong>
-            <span aria-live="polite">{{ loading && records.length ? "更新中" : `${total} 条` }}</span>
+            <span aria-live="polite"><LoadingIndicator v-if="loading && records.length">更新中</LoadingIndicator><template v-else>{{ total }} 条</template></span>
           </div>
           <div class="record-search">
             <input v-model.trim="searchText" type="search" placeholder="搜索维修项目" />
@@ -118,7 +118,7 @@
           <span></span>
         </div>
         <div ref="recordListRef" class="record-list" :aria-busy="loading">
-          <div v-if="loading && !records.length" class="empty-state">正在读取维修项目...</div>
+          <div v-if="loading && !records.length" class="empty-state"><LoadingIndicator>正在读取维修项目...</LoadingIndicator></div>
           <div v-else-if="!records.length" class="empty-state">{{ recordEmptyText }}</div>
           <div
             v-else
@@ -193,6 +193,7 @@
     </div>
 
     <Teleport to="body">
+      <UiTransition name="ui-drawer" appear>
       <div
         v-if="projectDrawerOpen"
         class="repair-project-overlay"
@@ -285,9 +286,7 @@
               </div>
               <div class="project-conflict-actions">
                 <button type="button" @click="copyCurrentProjectDraft">复制当前填写</button>
-                <button type="button" class="primary" :disabled="recordDetailLoading" @click="reloadLatestProject">
-                  {{ recordDetailLoading ? "读取中" : "读取最新内容" }}
-                </button>
+                <button type="button" class="primary" :disabled="recordDetailLoading" @click="reloadLatestProject"><LoadingIndicator v-if="recordDetailLoading">读取中</LoadingIndicator><template v-else>读取最新内容</template></button>
                 <button type="button" @click="projectConflict = null">稍后处理</button>
               </div>
             </section>
@@ -395,7 +394,7 @@
             还缺 {{ missingRequiredEditableFields.length }} 项：{{ missingRequiredEditableFields.join("、") }}
           </div>
 
-          <div v-if="!fields.length && loading" class="empty-state">正在读取字段...</div>
+          <div v-if="!fields.length && loading" class="empty-state"><LoadingIndicator>正在读取字段...</LoadingIndicator></div>
           <div v-else-if="!projectFormFields.length" class="empty-state">暂无可填写字段</div>
           <div v-else class="project-form-sections">
             <section v-for="group in projectFieldGroups" :key="group.key" class="project-field-section">
@@ -507,6 +506,7 @@
           </div>
         </section>
       </div>
+      </UiTransition>
     </Teleport>
 
     <RepairTaskCenter
@@ -601,9 +601,10 @@ import {
   X,
 } from "lucide-vue-next";
 import { ApiError, refreshRemoteSourceAndWait, requestJson } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { useRepairSubmission } from "../composables/useRepairSubmission";
 import RepairSubmissionStatus from "./RepairSubmissionStatus.vue";
-import { navigate, navigateBack, navigateHard } from "../navigation";
+import { navigate, navigateBack } from "../navigation";
 import { invalidateRepairStatus } from "../repairStatusState";
 import {
   REPAIR_REQUIRED_FIELD_GROUPS,
@@ -1642,7 +1643,7 @@ function focusProjectDrawer(): void {
 }
 
 function handleProjectDrawerKeydown(event: KeyboardEvent): void {
-  if (!projectModal?.isTop() || event.defaultPrevented) return;
+  if (!projectModal?.isTop(event, projectDrawerRef.value) || event.defaultPrevented) return;
   if (event.key === "Escape") {
     event.preventDefault();
     requestCloseProjectDrawer();
@@ -3133,7 +3134,7 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     if (!announce && cached && cached.expiresAt > Date.now()) {
       payload = cached.payload;
     } else {
-      payload = await requestJson(requestUrl, { signal: abortController.signal });
+      payload = await requestJson(requestUrl, { signal: abortController.signal, fresh: announce });
       recordResponseCache.set(cacheKey, {
         expiresAt: Date.now() + RECORD_RESPONSE_CACHE_TTL_MS,
         payload,
@@ -3224,6 +3225,7 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     if (requestVersion === recordsRequestVersion) loading.value = false;
   }
 }
+usePageReadRefresh(url => url.pathname === '/api/repair-management/records' && url.searchParams.get('scope') === (props.scope || 'ALL'), async () => { clearRecordResponseCache(); await loadRecords(false, true); }, () => !loading.value && !hasUnsavedChanges.value);
 
 function writablePayload(): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -3509,7 +3511,7 @@ function openRepairNoticeWorkbench(): void {
     url.searchParams.set("repair_management_record_id", editingRecordId.value);
     url.searchParams.set("record_id", editingRecordId.value);
   }
-  navigateHard(url);
+  navigate(url);
 }
 
 watch(integrityRepairStatus, (status, previousStatus) => {

@@ -1,7 +1,7 @@
 <template>
   <main v-if="printMode" class="morning-print-page">
     <div v-if="morningPrintLoading" class="morning-print-state" role="status">
-      正在准备晨会表格…
+      <LoadingIndicator>正在准备晨会表格…</LoadingIndicator>
     </div>
     <div v-else-if="morningPrintError" class="morning-print-state error" role="alert">
       {{ morningPrintError }}
@@ -51,7 +51,7 @@
           type="button"
           class="btn secondary"
           :disabled="loading"
-          @click="loadTasks"
+          @click="loadTasks(true)"
         >
           <RefreshCw :size="17" :class="{ spinning: loading }" aria-hidden="true" />
           {{ loading ? "读取中" : "刷新" }}
@@ -101,7 +101,7 @@
     <div v-if="errorText" class="message error" role="alert">
       <CircleAlert :size="18" aria-hidden="true" />
       <span>{{ errorText }}</span>
-      <button type="button" @click="loadTasks">重试</button>
+      <button type="button" @click="loadTasks(true)">重试</button>
     </div>
     <div v-else-if="warnings.length" class="message warning" role="status">
       <CircleAlert :size="18" aria-hidden="true" />
@@ -217,6 +217,7 @@
       </div>
     </main>
 
+    <UiTransition name="ui-overlay" appear>
     <div v-if="sendDialogOpen" class="send-dialog-backdrop" @click.self="closeSendDialog">
       <section class="send-dialog" role="dialog" aria-modal="true" aria-labelledby="daily-send-title">
         <header>
@@ -252,7 +253,9 @@
         </footer>
       </section>
     </div>
+    </UiTransition>
 
+    <UiTransition name="ui-overlay" appear>
     <div v-if="morningDialogOpen" class="send-dialog-backdrop" @click.self="closeMorningMeeting">
       <section class="morning-dialog" role="dialog" aria-modal="true" aria-labelledby="morning-dialog-title">
         <header>
@@ -272,7 +275,7 @@
             <label><span>湿球温度（℃）</span><input v-model="morningModel.wet_bulb_temperature" :disabled="morningBusy" type="number" min="-50" max="80" step="0.1" @input="morningEnvironmentEdited.add('wet_bulb_temperature')" /></label>
           </div>
           <div v-if="morningEnvironmentLoading" class="morning-inline-state" role="status">
-            正在后台读取天气及干湿球温度，可先查看通告或手动填写。
+            <LoadingIndicator>正在后台读取天气及干湿球温度，可先查看通告或手动填写。</LoadingIndicator>
           </div>
           <div v-if="morningWarnings.length" class="dialog-message warning" role="status">
             {{ morningWarnings.join('；') }}
@@ -300,6 +303,7 @@
         </footer>
       </section>
     </div>
+    </UiTransition>
   </section>
 </template>
 
@@ -326,6 +330,7 @@ import {
   Wrench,
 } from "lucide-vue-next";
 import { requestJson } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
 import RepairPeoplePicker from "./RepairPeoplePicker.vue";
@@ -711,7 +716,7 @@ async function sendTodayReport(): Promise<void> {
   }
 }
 
-async function loadTasks(): Promise<void> {
+async function loadTasks(fresh = false): Promise<void> {
   const generation = ++requestGeneration;
   requestController?.abort();
   requestController = new AbortController();
@@ -725,7 +730,7 @@ async function loadTasks(): Promise<void> {
     });
     const data = await requestJson(
       `/api/daily-tasks?${query.toString()}`,
-      { cache: "no-store", signal: requestController.signal },
+      { cache: "no-store", signal: requestController.signal, fresh },
     );
     if (generation !== requestGeneration) return;
     payload.value = data;
@@ -742,6 +747,7 @@ async function loadTasks(): Promise<void> {
     if (generation === requestGeneration) loading.value = false;
   }
 }
+usePageReadRefresh(url => url.pathname === '/api/daily-tasks' && url.searchParams.get('scope') === scopeCode.value && url.searchParams.get('date') === selectedDate.value, loadTasks, () => !loading.value && !props.printMode);
 
 watch(
   () => props.scope,

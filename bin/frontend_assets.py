@@ -19,8 +19,12 @@ def referenced_assets(root: Path, overlay: Path | None = None, *, strict: bool =
     index = source(FRONTEND_INDEX)
     if not index.is_file():
         return set()
-    pending = [index.read_text(encoding="utf-8")]
     found: set[Path] = set()
+    pending = [index.read_text(encoding="utf-8")]
+    widget = FRONTEND_DIST / "assistant.html"
+    if source(widget).is_file():
+        found.add(widget)
+        pending.append(source(widget).read_text(encoding="utf-8"))
     while pending:
         for name in _REFERENCES.findall(pending.pop()):
             relative = FRONTEND_DIST / "assets" / name

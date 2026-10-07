@@ -4,9 +4,9 @@ export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop"
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
-  primaryValue: number;
+  primaryValue: number | string;
   secondaryLabel: string;
-  secondaryValue: number;
+  secondaryValue: number | string;
 };
 export type ScopeHomeModuleCard = {
   key: string;

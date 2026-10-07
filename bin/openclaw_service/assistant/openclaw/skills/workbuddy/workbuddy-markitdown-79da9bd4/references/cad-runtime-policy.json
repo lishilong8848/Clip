@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "cad-cli",
+  "platform": "win-x64",
+  "resolverUrl": "https://xiaozhi.qlogicagent.com/api/v15/runtime/cad-cli/resolve?platform=win-x64",
+  "allowedDownloadHosts": [
+    "qlogicagent.oss-cn-beijing.aliyuncs.com"
+  ],
+  "format": "zip",
+  "entrypoint": "cad-cli.exe",
+  "versionPolicy": "latest-compatible",
+  "capabilityCommand": [
+    "capabilities",
+    "--json"
+  ],
+  "requiredCommands": [
+    "inspect"
+  ],
+  "protocol": "cad-cli-inspect-command-v1",
+  "updateTtlSeconds": 86400,
+  "maximumArchiveBytes": 536870912
+}

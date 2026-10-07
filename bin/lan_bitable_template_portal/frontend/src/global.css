@@ -173,7 +173,55 @@ body {
   background: #fef2f2;
 }
 
+.page-content { display: grid; min-width: 0; }
+.page-content > * { grid-area: 1 / 1; min-width: 0; width: 100%; box-sizing: border-box; }
+@view-transition { navigation: auto; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 180ms; }
+
+details::details-content {
+  opacity: 0;
+  transition: opacity 160ms ease, content-visibility 160ms allow-discrete;
+}
+details[open]::details-content { opacity: 1; }
+
+:is(.ui-page-enter-active, .ui-page-leave-active,
+    .ui-overlay-enter-active, .ui-overlay-leave-active,
+    .ui-drawer-enter-active, .ui-drawer-leave-active,
+    .ui-popover-enter-active, .ui-popover-leave-active) {
+  transition: opacity 180ms ease, transform 180ms ease !important;
+}
+:is(.ui-overlay-enter-active, .ui-overlay-leave-active,
+    .ui-drawer-enter-active, .ui-drawer-leave-active) > :is(section, aside, form, .modal) {
+  transition: transform 180ms ease !important;
+}
+:is(.ui-page-enter-from, .ui-page-leave-to,
+    .ui-overlay-enter-from, .ui-overlay-leave-to,
+    .ui-drawer-enter-from, .ui-drawer-leave-to,
+    .ui-popover-enter-from, .ui-popover-leave-to) { opacity: 0 !important; }
+:is(.ui-overlay-enter-from, .ui-overlay-leave-to) > :is(section, aside, form, .modal) { transform: translateY(8px); }
+:is(.ui-drawer-enter-from, .ui-drawer-leave-to) > :is(section, aside) { transform: translateX(20px); }
+:is(.ui-popover-enter-from, .ui-popover-leave-to) { transform: translateY(4px); }
+:is(.ui-page-leave-active, .ui-overlay-leave-active, .ui-drawer-leave-active, .ui-popover-leave-active) { pointer-events: none; }
+
+/* Native dialogs retain their focus trap and top-layer lifetime when closing. */
+dialog {
+  opacity: 0;
+  translate: 0 8px;
+  transition: opacity 180ms ease, translate 180ms ease, display 180ms allow-discrete, overlay 180ms allow-discrete;
+}
+dialog[open] { opacity: 1; translate: 0 0; }
+dialog::backdrop {
+  opacity: 0;
+  transition: opacity 180ms ease, display 180ms allow-discrete, overlay 180ms allow-discrete;
+}
+dialog[open]::backdrop { opacity: 1; }
+@starting-style {
+  dialog[open] { opacity: 0; translate: 0 8px; }
+  dialog[open]::backdrop { opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.01ms !important; }
   .app-shell *,
   .app-shell *::before,
   .app-shell *::after {
@@ -182,6 +230,23 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+
+  /* Activity indicators must remain visible even when decorative motion is off. */
+  :is(.app-shell, [role="dialog"], .lighthouse) :is(.spin, .spinning, .spinner, .loading-spinner) {
+    animation: loading-activity 1.2s linear infinite !important;
+  }
+  [class*="ui-"][class*="-active"], [class*="ui-"][class*="-active"] > *, dialog, dialog::backdrop {
+    transition-duration: 0.01ms !important;
+  }
+  details::details-content { transition-duration: 0.01ms !important; }
+  :is(.ui-overlay-enter-from, .ui-overlay-leave-to, .ui-drawer-enter-from, .ui-drawer-leave-to) > *,
+  :is(.ui-popover-enter-from, .ui-popover-leave-to) { transform: none; }
+}
+
+@keyframes loading-activity { to { transform: rotate(360deg); } }
+@media print {
+  .page-content { display: block; }
+  dialog, dialog::backdrop, details::details-content { transition: none !important; }
 }
 
 @media (max-width: 820px) {

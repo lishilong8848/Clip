@@ -1,10 +1,10 @@
 <template>
   <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }" @dragstart.capture="preventSignatureImageDrag">
-    <div v-if="!isDrillPrintPage && !isMorningMeetingPrintPage && !isLifeGuidePage" class="security-watermark" aria-hidden="true">
+    <div v-if="!isWorkbenchLitePage && !isDrillPrintPage && !isMorningMeetingPrintPage && !isLifeGuidePage" class="security-watermark" aria-hidden="true">
       <span v-for="index in 30" :key="index">{{ watermarkText }}</span>
     </div>
     <AppTopbar
-      v-if="!signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
+      v-if="!isWorkbenchLitePage && !signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
       :brand-logo-src="brandLogoSrc"
       :header-subtitle="headerSubtitle"
       :auth="auth"
@@ -23,13 +23,13 @@
       @update:refresh-menu-open="refreshMenuOpen = $event"
       @refresh-event="refreshEvent"
       @open-admin="showAdminTools = true"
-      @open-signatures="navigateHard('/signature-management')"
+      @open-signatures="navigate('/signature-management')"
       @open-life-guide="navigate('/life-guide')"
       @logout="logout"
     />
 
     <AppStatusNotices
-      v-if="!isDrillPrintPage && !isMorningMeetingPrintPage && (!signatureLinkMode || pageStatusText)"
+      v-if="!isWorkbenchLitePage && !isDrillPrintPage && !isMorningMeetingPrintPage && (!signatureLinkMode || pageStatusText)"
       :connection-notice="signatureLinkMode ? null : connectionNotice"
       :page-status-text="pageStatusText"
     />
@@ -42,10 +42,16 @@
     </div>
 
     <AdminTools
-      :open="showAdminTools"
+      v-if="adminToolsLoaded && isAdmin"
+      :open="showAdminTools && isAdmin"
+      :initial-tab="adminInitialTab"
       :scope-options="requestableScopes"
-      @close="showAdminTools = false"
+      @close="closeAdminTools"
     />
+
+    <div class="page-content">
+    <WorkbenchLitePage v-if="workbenchVisited && auth.loggedIn" v-show="isWorkbenchLitePage" :key="currentOverviewKey" :search="lastWorkbenchSearch" :active="isWorkbenchLitePage" />
+    <UiTransition v-if="!isWorkbenchLitePage" name="ui-page" :css="!isDrillPrintPage && !isMorningMeetingPrintPage">
 
     <HistoryMemoryPage
       v-if="isHistoryMemoryPage"
@@ -182,6 +188,7 @@
       :initial-mode="routeParams.get('entry') || ''"
       :scope-options="visibleScopeOptions"
       :overview="scopeOverview"
+      :overview-loading="overviewLoading"
       :handover-links="handoverLinks"
       :can-request-more-scopes="additionalRequestableScopes.length > 0"
       @enter="enterScope"
@@ -200,6 +207,9 @@
       @dashboard-visible="scopeHomeDashboardVisible = $event"
     />
 
+    </UiTransition>
+    </div>
+
     <LighthouseAssistant
       v-if="auth.loggedIn && auth.user?.role !== 'guest'"
       :key="String(auth.user?.open_id || '')"
@@ -211,12 +221,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
 import AsyncPageState from "./components/AsyncPageState.vue";
-import { AUTH_EXPIRED_EVENT, requestJson } from "./api/client";
+import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity } from "./api/client";
 import { navigate, navigateHard } from "./navigation";
+import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
+import { usePageReadRefresh } from './api/usePageReadRefresh';
 import type { LooseDict, ScopeOption } from "./types";
 
 function asyncPage(loader: () => Promise<unknown>) {
@@ -249,6 +261,7 @@ const CriticalGuardPage = asyncPage(() => import("./components/CriticalGuardPage
 const DrillManagementPage = asyncPage(() => import("./components/DrillManagementPage.vue"));
 const CabinetPowerPage = asyncPage(() => import("./components/CabinetPowerPage.vue"));
 const CabinetPowerBatchPage = asyncPage(() => import("./components/CabinetPowerBatchPage.vue"));
+const WorkbenchLitePage = asyncPage(() => import("./components/WorkbenchLitePage.vue"));
 
 type Dict = LooseDict;
 
@@ -274,6 +287,9 @@ const currentScope = ref(normalizeScopeValue(routeParams.value.get("scope") || "
 const authChecking = ref(true);
 const loading = ref(false);
 const showAdminTools = ref(false);
+const adminToolsLoaded = ref(false);
+watch(showAdminTools, visible => { if (visible) adminToolsLoaded.value = true; });
+const adminInitialTab = ref<"status" | "permissions" | "handover">();
 const showPermissionRequestPanel = ref(false);
 const refreshMenuOpen = ref(false);
 const eventRefreshing = ref(false);
@@ -283,6 +299,8 @@ const workbenchOpeningText = ref("正在进入维护管理");
 const scopeHomeDashboardVisible = ref(true);
 const syncText = ref("准备中");
 const scopeOverview = ref<Record<string, Dict>>({});
+const overviewLoading = ref(false);
+let currentOverviewKey = '', overviewRequest = 0, handoverRequest = 0;
 const handoverLinks = ref<Record<string, string>>({});
 const refreshCooldown = reactive<Record<string, boolean>>({
   event: false,
@@ -313,6 +331,12 @@ let appDisposed = false;
 const refreshCooldownTimers = new Map<string, number>();
 
 const isHistoryMemoryPage = computed(() => routePath.value === "/admin/history-memory");
+const isWorkbenchLitePage = computed(() => routePath.value === "/workbench-lite");
+const workbenchVisited = ref(isWorkbenchLitePage.value);
+const lastWorkbenchSearch = ref(windowLocationSearch.value);
+watch([isWorkbenchLitePage, windowLocationSearch], ([active, search]) => {
+  if (active) { workbenchVisited.value = true; lastWorkbenchSearch.value = search; }
+});
 const isEngineerMopPage = computed(() => routePath.value === "/engineer/mop");
 const isRepairManagementPage = computed(() => routePath.value === "/repair-management");
 const isRepairStatusPage = computed(() => routePath.value === "/repair-status");
@@ -349,6 +373,23 @@ const criticalGuardScope = computed(() => {
 const drillScope = computed(() => normalizeScopeValue(routeParams.value.get("scope") || "", ""));
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("request_id") || routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+watch([isAdmin, () => routeParams.value.get("admin")], ([admin, tab]) => {
+  if (admin && (tab === "status" || tab === "permissions" || tab === "handover")) {
+    adminInitialTab.value = tab;
+    showAdminTools.value = true;
+  }
+}, { immediate: true });
+
+function closeAdminTools(): void {
+  showAdminTools.value = false;
+  adminInitialTab.value = undefined;
+  const url = new URL(window.location.href);
+  if (url.searchParams.has("admin")) {
+    url.searchParams.delete("admin");
+    window.history.replaceState(window.history.state, "", url);
+    updateLocationRefs();
+  }
+}
 const watermarkDate = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const watermarkText = computed(() => `内部资料 · ${String(auth.user?.name || "VNET").trim()} · ${watermarkDate}`);
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
@@ -516,6 +557,8 @@ function handleAuthVisibilityChange(): void {
 }
 
 function markAuthExpired(message = "登录已过期，请重新扫码登录。"): void {
+  clearOverview(); currentOverviewKey = ''; overviewRequest++;
+  scopeOverview.value = {}; handoverLinks.value = {};
   auth.loggedIn = false;
   auth.user = {};
   auth.scopeOptions = [];
@@ -554,6 +597,14 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     auth.user = data.user || {};
     auth.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
     auth.loginUrl = data.login_url || "/api/auth/login";
+    const nextOverviewKey = nextLoggedIn ? overviewKey(auth.user, auth.scopeOptions) : '';
+    setReadCacheIdentity(nextOverviewKey);
+    if (currentOverviewKey !== nextOverviewKey) {
+      workbenchVisited.value = isWorkbenchLitePage.value;
+      currentOverviewKey = nextOverviewKey; overviewRequest++;
+      scopeOverview.value = nextOverviewKey ? readOverview(nextOverviewKey) || {} : {};
+      handoverLinks.value = {};
+    }
     if (nextLoggedIn) {
       scheduleAuthKeepalive();
     } else {
@@ -571,22 +622,33 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
 }
 
 async function loadOverview(): Promise<void> {
+  const key = currentOverviewKey, serial = ++overviewRequest;
+  overviewLoading.value = true;
   try {
     const data = await portalRequest("/api/scope-overview");
-    scopeOverview.value = data.scopes || data.items || {};
+    if (appDisposed || key !== currentOverviewKey || serial !== overviewRequest) return;
+    const scopes = data.scopes || data.items;
+    if (scopes && typeof scopes === 'object' && !Array.isArray(scopes) && data.source_snapshot_ready !== false) {
+      scopeOverview.value = scopes; if (key) saveOverview(key, scopes);
+    }
   } catch {
-    scopeOverview.value = {};
+    // Keep the last authorized snapshot while refreshing, not a false zero.
+  } finally {
+    if (serial === overviewRequest) overviewLoading.value = false;
   }
 }
 
 async function loadHandoverLinks(): Promise<void> {
+  const key = currentOverviewKey, serial = ++handoverRequest;
   try {
     const data = await portalRequest("/api/handover-links");
+    if (appDisposed || key !== currentOverviewKey || serial !== handoverRequest) return;
     handoverLinks.value = data.links || {};
   } catch {
-    handoverLinks.value = {};
+    // Keep the last authorized links while a background read is unavailable.
   }
 }
+usePageReadRefresh(url => ['/api/scope-overview', '/api/handover-links'].includes(url.pathname), async () => { await Promise.all([loadOverview(), loadHandoverLinks()]); }, () => !appDisposed && auth.loggedIn && routePath.value === '/' && !routeParams.value.get('mode') && !overviewLoading.value);
 
 async function loadCurrentPermissionRequest(): Promise<void> {
   try {
@@ -628,8 +690,9 @@ function updateLocationRefs(): void {
   routePath.value = normalizedPath();
   routeParams.value = new URLSearchParams(window.location.search);
   currentScope.value = normalizeScopeValue(routeParams.value.get("scope") || currentScope.value || "");
+  workbenchOpening.value = false;
   if (!wasHome && routePath.value === "/" && !routeParams.value.get("mode") && auth.loggedIn) {
-    void loadOverview();
+    void Promise.all([loadOverview(), loadHandoverLinks()]);
   }
 }
 
@@ -688,7 +751,7 @@ function enterScope(scope: string, workType = "maintenance"): void {
   };
   workbenchOpeningText.value = `正在进入${labelMap[normalizedWorkType] || "通告管理"}`;
   workbenchOpening.value = true;
-  navigateHard(url);
+  navigate(url);
 }
 
 function enterEventManagement(scope: string, detail = false): void {
@@ -767,6 +830,7 @@ function refreshEvent(): void {
 }
 
 async function logout(): Promise<void> {
+  clearOverview();
   clearAuthKeepalive();
   await portalRequest("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => null);
   navigateHard("/");
@@ -829,10 +893,14 @@ function closePermissionRequestPanel(): void {
 async function confirmPermissionRequest(): Promise<void> {
   await submitPermissionRequest();
 }
+function refreshHomeAfterWrite(): void {
+  if (auth.loggedIn && routePath.value === '/' && !routeParams.value.get('mode')) void Promise.all([loadOverview(), loadHandoverLinks()]);
+}
 
 onMounted(async () => {
   appDisposed = false;
   window.addEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
+  window.addEventListener('clipflow-business-changed', refreshHomeAfterWrite);
   window.addEventListener("popstate", updateLocationRefs);
   window.addEventListener("focus", checkAuthAfterPageReturn);
   document.addEventListener("visibilitychange", handleAuthVisibilityChange);
@@ -847,7 +915,9 @@ onMounted(async () => {
     await loadCurrentPermissionRequest();
   }
   if (auth.loggedIn && auth.scopeOptions.length) {
-    await Promise.all([loadOverview(), loadHandoverLinks()]);
+    if (routePath.value === "/" && !routeParams.value.get("mode")) {
+      void Promise.all([loadOverview(), loadHandoverLinks()]);
+    }
     if (isEventPage.value && !currentScope.value) {
       enterEventManagement(visibleScopeOptions.value[0]?.value || "ALL");
       return;
@@ -859,6 +929,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   appDisposed = true;
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
+  window.removeEventListener('clipflow-business-changed', refreshHomeAfterWrite);
   window.removeEventListener("popstate", updateLocationRefs);
   window.removeEventListener("focus", checkAuthAfterPageReturn);
   document.removeEventListener("visibilitychange", handleAuthVisibilityChange);

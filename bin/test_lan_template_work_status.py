@@ -3043,6 +3043,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service
 
+    def test_finished_change_records_do_not_read_confirmation_documents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LanPortalStateStore(Path(directory) / 'state.sqlite3')
+            service = _TestMaintenancePortalService()
+            records = [{'record_id': 'closed-' + str(n), 'display_fields': {'变更状态': '结束'}} for n in range(100)]
+            with patch.object(PortalRuntime, 'state_store', store), patch.object(PortalRuntime, 'service', service), \
+                    patch.object(service, '_target_records_for_notice_type', return_value=records), \
+                    patch.object(store, 'get_document', side_effect=AssertionError('Finished change was reread')):
+                PortalRuntime._seed_change_confirmation_tasks()
+
     def test_change_confirmation_seed_revives_stopped_task_only_after_point_read(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
@@ -12197,6 +12207,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 patch.object(PortalRuntime, "_process_maintenance_action_job", side_effect=execute),
             ):
                 worker = threading.Thread(target=PortalRuntime._action_worker_loop)
+                PortalRuntime.action_queue_event.set()
                 worker.start()
                 try:
                     self.assertTrue(first_started.wait(5))
@@ -34313,9 +34324,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(captured["app_token"], REPAIR_SOURCE_APP_TOKEN)
         self.assertEqual(captured["table_id"], REPAIR_SOURCE_TABLE_ID)
-        self.assertEqual(captured["fields"], {"故障维修原因": "测试原因"})
+        self.assertEqual(captured["fields"], {"故障维修原因": "测试原因", "台账关联状态": "待确认", "台账关联说明": "", "关联台账记录ID": ""})
         self.assertEqual(result["record_id"], "rec_repair_created")
-        self.assertEqual(result["field_count"], 1)
+        self.assertEqual(result["field_count"], 4)
         self.assertEqual(service._repair_records[0]["record_id"], "rec_repair_created")
         publish_source.assert_called_once_with(["repair"])
 
@@ -34821,7 +34832,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("当前事件表", event["resolution_warning"])
 
     def test_event_notice_repair_project_helper_is_idempotent(self):
-        service = _TestMaintenancePortalService()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        service = self._new_temp_service(Path(temporary.name))
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
             lambda: ([], {}, [])
         )
@@ -34841,7 +34854,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             result = service.ensure_repair_management_record_for_event_notice(
                 event_record_id="rec_event_end",
                 notice_data={"scope": "E"},
-                remote_fields={"告警描述": "E楼压缩机高压报警"},
+                remote_fields={"告警描述": "E楼压缩机高压报警", "是否转检修": True},
                 scope="E",
                 source_month="2026-07",
             )
@@ -34872,7 +34885,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             replay = service.ensure_repair_management_record_for_event_notice(
                 event_record_id="rec_event_end",
                 notice_data={},
-                remote_fields={},
+                remote_fields={"是否转检修": True},
                 scope="E",
                 source_month="2026-07",
             )
@@ -34880,7 +34893,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(replay["record_id"], "rec_project_created")
         duplicate_create.assert_not_called()
 
-    def test_repair_project_cache_projection_prefers_completed_duplicate_with_followup(self):
+    def test_repair_project_cache_projection_keeps_independent_remote_projects(self):
         service = _TestMaintenancePortalService()
         shared_fields = {
             "维修名称": "南通C楼—2026-07-17 10:37—制冷单元压差异常",
@@ -34920,7 +34933,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(
             [item["record_id"] for item in records],
-            ["rec_project_completed"],
+            ["rec_project_completed", "rec_project_in_progress"],
         )
 
     def test_repair_project_cache_projection_keeps_different_fault_times(self):
@@ -35016,7 +35029,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ["rec_remote_project"],
         )
 
-    def test_repair_project_snapshot_keeps_remote_rows_and_projects_duplicates(self):
+    def test_repair_project_snapshot_keeps_all_independent_remote_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_snapshots_enabled = True
@@ -35061,7 +35074,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 REPAIR_SNAPSHOT_SOURCE_PROJECTS
             )
 
-            self.assertEqual(len(projected), 1)
+            self.assertEqual(len(projected), 2)
             self.assertEqual(
                 {item["record_id"] for item in stored["records"]},
                 {"rec_project_complete", "rec_project_duplicate"},
@@ -35209,7 +35222,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(status["progress_percent"], 100)
             self.assertGreater(status["completed_at"], 0)
 
-    def test_repair_project_live_patch_never_reintroduces_suppressed_duplicate(self):
+    def test_repair_project_live_patch_keeps_each_independent_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_snapshots_enabled = True
@@ -35257,14 +35270,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "rec_project_completed"
             )
 
-            self.assertEqual(suppressed_patch, {})
+            self.assertEqual(suppressed_patch["record_id"], "rec_project_in_progress")
             self.assertEqual(
                 canonical_patch["record_id"],
                 "rec_project_completed",
             )
 
-    def test_event_notice_repair_project_reuses_semantically_identical_remote_record(self):
-        service = _TestMaintenancePortalService()
+    def test_event_notice_repair_project_does_not_reuse_other_event_by_fault_text(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        service = self._new_temp_service(Path(temporary.name))
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
             lambda: (
                 [],
@@ -35300,21 +35315,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with patch.object(
             service,
             "create_repair_management_record",
+            return_value={"record_id": "rec_current_event_project"},
         ) as create_record:
             result = service.ensure_repair_management_record_for_event_notice(
                 event_record_id="rec_event_current",
                 notice_data={},
-                remote_fields={},
+                remote_fields={"是否转检修": True},
                 scope="C",
             )
 
-        self.assertFalse(result["created"])
-        self.assertTrue(result["duplicate_prevented"])
-        self.assertEqual(result["record_id"], "rec_project_existing")
-        create_record.assert_not_called()
+        self.assertTrue(result["created"])
+        self.assertEqual(result["record_id"], "rec_current_event_project")
+        create_record.assert_called_once()
+        self.assertEqual(create_record.call_args.kwargs["source_event_id"], "rec_event_current")
 
-    def test_event_notice_repair_project_serializes_same_business_identity(self):
-        service = _TestMaintenancePortalService()
+    def test_event_notice_repair_project_keeps_distinct_event_ids_independent(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        service = self._new_temp_service(Path(temporary.name))
         projects: list[dict[str, Any]] = []
         projects_guard = threading.Lock()
         start_barrier = threading.Barrier(2)
@@ -35336,18 +35354,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         def create_project(*_args, **_kwargs):
             time.sleep(0.05)
             created = {
-                "record_id": "rec_project_serialized",
+                "record_id": "rec_project_for_" + _kwargs["source_event_id"],
                 "display_fields": {
                     "故障维修原因": "巡检发现制冷单元压差异常",
                     "故障发生时间": "2026-07-17 09:30",
                     "所属数据中心/楼栋-使用": "南通C楼",
                 },
-                "raw_fields": {},
+                "raw_fields": {"关联事件单": _kwargs["source_event_id"]},
             }
             with projects_guard:
                 projects.append(created)
             return {
-                "record_id": "rec_project_serialized",
+                "record_id": created["record_id"],
                 "warnings": [],
             }
 
@@ -35362,7 +35380,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     service.ensure_repair_management_record_for_event_notice(
                         event_record_id=event_record_id,
                         notice_data={},
-                        remote_fields={},
+                        remote_fields={"是否转检修": True},
                         scope="C",
                     )
                 )
@@ -35380,15 +35398,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual(len(projects), 1)
+        self.assertEqual(len(projects), 2)
         self.assertEqual(len(results), 2)
         self.assertEqual(
             {item["record_id"] for item in results},
-            {"rec_project_serialized"},
+            {"rec_project_for_rec_event_current", "rec_project_for_rec_event_archived"},
         )
         self.assertEqual(
             sorted(bool(item.get("created")) for item in results),
-            [False, True],
+            [True, True],
         )
 
     def test_event_notice_repair_prefill_uses_remote_alarm_description_as_phenomenon(self):

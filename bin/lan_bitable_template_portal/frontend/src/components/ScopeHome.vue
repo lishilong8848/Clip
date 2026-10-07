@@ -1,5 +1,6 @@
 <template>
   <section class="home-shell" :class="{ 'dashboard-mode': !activeMode }">
+    <UiTransition name="ui-page" :appear="false">
     <HomeDashboard
       v-if="!activeMode"
       :modules="moduleCards"
@@ -8,6 +9,7 @@
       :broadcast-items="homeBroadcastItems"
       :broadcast-summary="homeBroadcastSummary"
       :module-metrics="homeModuleMetrics"
+      :refreshing="overviewLoading"
       @select-action="selectModuleAction"
       @activate-broadcast="activateBroadcastItem"
       @request-permission="$emit('request-permission')"
@@ -137,7 +139,7 @@
         class="scope-loading-state"
         role="status"
       >
-        正在读取水耗楼栋数据
+        <LoadingIndicator>正在读取水耗楼栋数据</LoadingIndicator>
       </div>
 
       <div v-else-if="!isEntryMenu" class="scope-grid scope-overview-grid">
@@ -234,13 +236,14 @@
               @focus="prefetchNoticeWorkbench(scope.value)"
               @click="enterNoticeWorkbench(scope.value)"
             >
-              {{ isOpeningWorkbench(scope.value) ? "正在进入" : activeConfig.actionLabel }}
+              <LoadingIndicator v-if="isOpeningWorkbench(scope.value)">正在进入</LoadingIndicator><template v-else>{{ activeConfig.actionLabel }}</template>
             </button>
           </div>
           <span class="scope-building-art" aria-hidden="true"></span>
         </article>
       </div>
     </section>
+    </UiTransition>
   </section>
 </template>
 
@@ -271,6 +274,7 @@ const props = defineProps<{
   initialMode?: string;
   scopeOptions: Array<{ value: string; label: string }>;
   overview: Record<string, Dict>;
+  overviewLoading?: boolean;
   handoverLinks: Record<string, string>;
   canRequestMoreScopes?: boolean;
 }>();
@@ -511,6 +515,7 @@ const homeBroadcastStats = computed(() => {
 });
 
 const homeModuleMetrics = computed<Record<string, ScopeHomeModuleMetric>>(() => {
+  const value = (count: number) => Object.keys(props.overview).length ? count : '…';
   const maintenance = aggregateWorkTypeCounts("maintenance");
   const change = aggregateWorkTypeCounts("change");
   const repair = aggregateWorkTypeCounts("repair");
@@ -518,27 +523,27 @@ const homeModuleMetrics = computed<Record<string, ScopeHomeModuleMetric>>(() => 
   return {
     event: {
       primaryLabel: "本月事件",
-      primaryValue: stats.events,
+      primaryValue: value(stats.events),
       secondaryLabel: "处理中",
-      secondaryValue: stats.processingEvents,
+      secondaryValue: value(stats.processingEvents),
     },
     maintenance: {
       primaryLabel: "待发起",
-      primaryValue: maintenance.pending,
+      primaryValue: value(maintenance.pending),
       secondaryLabel: "进行中",
-      secondaryValue: maintenance.ongoing,
+      secondaryValue: value(maintenance.ongoing),
     },
     change: {
       primaryLabel: "待发起",
-      primaryValue: change.pending,
+      primaryValue: value(change.pending),
       secondaryLabel: "进行中",
-      secondaryValue: change.ongoing,
+      secondaryValue: value(change.ongoing),
     },
     repair_management: {
       primaryLabel: "待发起",
-      primaryValue: repair.pending,
+      primaryValue: value(repair.pending),
       secondaryLabel: "进行中",
-      secondaryValue: repair.ongoing,
+      secondaryValue: value(repair.ongoing),
     },
   };
 });
@@ -557,6 +562,7 @@ const homeBroadcastItems = computed<ScopeHomeBroadcastItem[]>(() => {
     ];
   }
   if (items.length) return items;
+  if (!Object.keys(props.overview).length) return [{ key: 'loading', label: '动态', text: props.overviewLoading ? '正在读取工作动态…' : '工作动态暂未读取', tone: 'quiet' }];
   return [{
     key: "quiet",
     label: "就绪",
@@ -568,7 +574,7 @@ const homeBroadcastItems = computed<ScopeHomeBroadcastItem[]>(() => {
 const homeBroadcastSummary = computed(() => {
   const stats = homeBroadcastStats.value;
   const scopeCount = broadcastScopes.value.length || displayScopeOptions.value.length;
-  return `楼栋 ${scopeCount} · 进行中 ${stats.ongoing} · 待发起 ${stats.pending} · 事件 ${stats.events}`;
+  return Object.keys(props.overview).length ? `楼栋 ${scopeCount} · 进行中 ${stats.ongoing} · 待发起 ${stats.pending} · 事件 ${stats.events}` : `楼栋 ${scopeCount} · 统计待读取`;
 });
 
 function aggregateWorkTypeCounts(workType: string): { pending: number; ongoing: number } {
@@ -840,6 +846,7 @@ onBeforeUnmount(clearWaterBuildingsPoll);
   display: grid;
   gap: 10px;
 }
+.home-shell > * { grid-area: 1 / 1; }
 
 .home-shell.dashboard-mode {
   padding: 0;

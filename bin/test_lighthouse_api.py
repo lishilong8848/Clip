@@ -5,6 +5,7 @@ import ast
 from datetime import datetime
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -366,9 +367,10 @@ class PortalAPICatalogTests(unittest.TestCase):
         self.assertIn("POST /api/capacity/water/records", ids)
         self.assertIn("POST /api/notice-target-candidates", ids)
         self.assertIn("POST /api/_assistant/parse-notice", ids)
-        # Business admin is included.
-        self.assertIn("GET /api/admin/mop-settings", ids)
-        self.assertIn("POST /api/admin/mop-settings", ids)
+        # Homepage AdminTools/settings are excluded from the assistant entirely:
+        # only the original admin page stays reachable through secure navigation.
+        self.assertNotIn("GET /api/admin/mop-settings", ids)
+        self.assertNotIn("POST /api/admin/mop-settings", ids)
         # excluded endpoints
         self.assertNotIn("POST /api/assistant/chat", ids)
         self.assertNotIn("GET /api/auth/login", ids)
@@ -380,6 +382,9 @@ class PortalAPICatalogTests(unittest.TestCase):
         self.assertNotIn("GET /api/system/runtime", ids)
         self.assertNotIn("POST /api/assistant/recursive", ids)
         self.assertNotIn("GET /api/admin/system/reload", ids)
+        # 学练(learning)整体未集成到助手目录:原正向端点被排除。
+        self.assertNotIn("GET /api/learning/task", ids)
+        self.assertNotIn("GET /api/learning/papers", ids)
 
     def test_discover_groups_and_page_size(self):
         result = self.catalog.discover(page_size=10)
@@ -390,6 +395,34 @@ class PortalAPICatalogTests(unittest.TestCase):
         # page_size is clamped to <= 50
         self.assertEqual(self.catalog.discover(page_size=999)["page_size"], 50)
         self.assertEqual(self.catalog.discover(page_size=0)["page_size"], 1)
+
+    def test_direct_table_access_is_read_only_but_business_writes_remain(self):
+        from types import SimpleNamespace
+        calls = []
+        async def raw_table_handler(request: Request):
+            calls.append((request.method, request.headers.get("cookie")))
+            return {"ok": True, "data": {"record_id": "fixture-record"}}
+
+        paths = ("/api/bitable/records/{record_id}", "/api/feishu/bitable/tables/{table_id}",
+                 "/api/tables/{table_id}/records", "/api/records/{record_id}")
+        for path in paths:
+            self.app.add_api_route(path, raw_table_handler, methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+        catalog = PortalAPICatalog(self.app)
+        for role in ("admin", "duty"):
+            cookie = "fixture-role=" + role
+            request = SimpleNamespace(base_url="http://testserver/", headers={"cookie": cookie}, client=None)
+            for path in paths:
+                self.assertTrue(catalog.get("GET " + path)["read_only"])
+                path_params = {field: "fixture" for field in re.findall(r"\{([^{}]+)\}", path)}
+                result = asyncio.run(catalog.invoke({"api_id": "GET " + path, "path_params": path_params}, request))
+                self.assertTrue(result["ok"])
+                self.assertEqual(calls[-1], ("GET", cookie))
+                before = len(calls)
+                for method in ("POST", "PUT", "PATCH", "DELETE"):
+                    with self.subTest(path=path, method=method, role=role), self.assertRaises(AssistantError):
+                        asyncio.run(catalog.invoke({"api_id": method + " " + path, "path_params": path_params}, request))
+                self.assertEqual(len(calls), before)
+        self.assertFalse(catalog.get("POST /api/capacity/water/records")["read_only"])
 
     def test_discover_pagination_and_group_filter(self):
         result = self.catalog.discover(group="通告与事件", page_size=1, page=1)
@@ -425,7 +458,6 @@ class PortalAPICatalogTests(unittest.TestCase):
             ("维修进度", "GET /api/repair-management/status", "维修单与跟进", "/repair-status"),
             ("机柜 文本填充", "POST /api/cabinet-power/batches/{batch_id}/text-apply", "机柜上下电", "/cabinet-power"),
             ("用水量", "GET /api/capacity/water/records", "容量与水耗", "/water-management"),
-            ("学习 试卷", "GET /api/learning/papers", "画像学练", "/learning"),
             ("每日任务清单", "GET /api/daily-tasks", "日常工作", "/daily-tasks"),
             ("晨会 生成", "POST /api/daily-tasks/morning-meeting/generate", "日常工作", "/daily-tasks"),
             ("屏蔽记录", "GET /api/plan-convergence/blocks", "计划收敛审查", "/plan-convergence"),
@@ -434,9 +466,9 @@ class PortalAPICatalogTests(unittest.TestCase):
             ("应急演练 生成", "POST /api/drills/{drill_id}/generate", "演练", "/drill-management"),
             ("MOP 签名选择", "POST /api/engineer/mop/fill", "维护单", "/engineer/mop"),
             ("签名分配", "PUT /api/drills/{drill_id}/execution", "演练", "/drill-management"),
-            ("签名选择", "GET /api/signatures/management/people", "人员与签名管理", "/signature-management"),
+            ("签名选择", "GET /api/signatures/people", "人员与签名管理", "/signature-management"),
             ("重点保障 填报", "PUT /api/critical-guard/responses/{response_id}", "重保管理", "/critical-guard"),
-            ("通告历史", "POST /api/admin/notice-memory/history-scan", "通告历史", "/admin/history-memory"),
+            ("通告历史", "GET /api/history-summary", "通告历史", "/admin/history-memory"),
         )
         for keyword, api_id, group, page in cases:
             with self.subTest(keyword=keyword):
@@ -455,8 +487,11 @@ class PortalAPICatalogTests(unittest.TestCase):
         for api_id in (
             "GET /api/events/monthly", "GET /api/repair-management/followups",
             "GET /api/repair-management/status", "GET /api/daily-tasks",
-            "GET /api/signatures/management/people", "GET /api/drills/{drill_id}/execution",
+            "GET /api/signatures/people", "GET /api/drills/{drill_id}/execution",
             "POST /api/cabinet-power/batches/{batch_id}/text-preview",
+            "POST /api/plan-convergence/compare", "POST /api/plan-convergence/rulesets/{id}/match",
+            "POST /api/plan-convergence/maintenance/check", "POST /api/plan-convergence/snapshots",
+            "POST /api/plan-convergence/rule-view",
         ):
             with self.subTest(api_id=api_id):
                 self.assertTrue(catalog.get(api_id)["read_only"])
@@ -464,11 +499,10 @@ class PortalAPICatalogTests(unittest.TestCase):
         for api_id in (
             "GET /api/maintenance-refresh", "POST /api/events/transfer-repair",
             "POST /api/workbench-actions", "POST /api/daily-tasks/send",
-            "POST /api/learning/papers/{id}/reveal", "POST /api/plan-convergence/compare",
             "POST /api/cabinet-power/batches/{batch_id}/text-apply",
             "POST /api/engineer/mop/fill", "POST /api/drills/{drill_id}/generate",
             "POST /api/signatures/usage-confirmations/send",
-            "PUT /api/critical-guard/responses/{response_id}", "POST /api/signatures/management/merge",
+            "PUT /api/critical-guard/responses/{response_id}",
         ):
             with self.subTest(api_id=api_id):
                 self.assertFalse(catalog.get(api_id)["read_only"])
@@ -482,37 +516,66 @@ class PortalAPICatalogTests(unittest.TestCase):
             "GET /api/signatures/management/request", "POST /api/signatures/management/requests",
             "POST /api/signatures/management/submit", "POST /api/signatures/management/temporary",
             "POST /api/signatures/management/people", "GET /api/signatures/management/merge",
+            "POST /api/signatures/management/merge",
+            "GET /api/admin/mop-settings", "POST /api/admin/mop-settings",
+            "POST /api/admin/notice-memory/history-scan", "POST /api/admin/notice-memory/history-save",
+            # 学练只读；提示、作答和管理动作仍在原页面。
+            "POST /api/learning/papers/{id}/reveal",
+            "POST /api/learning/issues",
         ):
             with self.subTest(api_id=api_id), self.assertRaises(AssistantError):
                 catalog.validate_operation({"api_id": api_id, "path_params": {"operation": "submit"}})
 
-    def test_concrete_signature_management_routes_reuse_native_guards(self):
+    def test_signature_management_and_admin_ops_blocked_before_native_call(self):
+        """Every signature-management dispatcher operation and the homepage
+        AdminTools/settings (MOP config, notice-memory import) are excluded from
+        the assistant catalog.  Even a cookie that would authenticate an admin must
+        never reach the native endpoint: the block happens during operation
+        validation, before any ASGI/native call is made."""
         from types import SimpleNamespace
-        from lan_bitable_template_portal.signature_management import dispatch, SignatureManagementError
+        from fastapi import Request
 
         app = FastAPI()
-        manager = SimpleNamespace(people=lambda payload: {"people": [{"record_id": "person-fixture", "name": "测试人员"}]})
+        native_calls = []
 
         @app.api_route("/api/signatures/management/{operation}", methods=["GET", "POST"])
         async def management(operation: str, request: Request):
-            try:
-                actor = "fixture" if request.headers.get("cookie") == "session=test-session" else ""
-                data = dispatch(manager, request.method, operation, {}, actor=actor, is_admin=False)
-                return {"ok": True, "data": data}
-            except SignatureManagementError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status)
+            native_calls.append(("signatures", operation))
+            return {"ok": True, "data": {}}
+
+        @app.api_route("/api/admin/mop-settings", methods=["GET", "POST"])
+        async def mop_settings(request: Request):
+            native_calls.append(("admin", "mop-settings"))
+            return {"ok": True, "data": {}}
+
+        @app.api_route("/api/admin/notice-memory/history-scan", methods=["POST"])
+        async def history_scan(request: Request):
+            native_calls.append(("admin", "history-scan"))
+            return {"ok": True, "data": {}}
 
         catalog = PortalAPICatalog(app)
 
-        async def run(cookie, api_id):
-            request = SimpleNamespace(base_url="http://testserver/", headers={"cookie": cookie, "origin": "http://testserver"}, client=None)
-            return await catalog.invoke({"api_id": api_id, "path_params": {"operation": "submit"}}, request)
+        # An admin-looking session cookie: even existing admin auth must not let a
+        # previously ready operation run, because these routes are no longer in the
+        # assistant catalog at all (the block is pre-native in validate_operation).
+        request = SimpleNamespace(base_url="http://testserver/", headers={
+            "cookie": "session=admin-session", "origin": "http://testserver"}, client=None)
 
-        api_id = "GET /api/signatures/management/people"
-        self.assertEqual(asyncio.run(run("", api_id))["status"], 401)
-        result = asyncio.run(run("session=test-session", api_id))
-        self.assertEqual(result["data"]["people"][0]["record_id"], "person-fixture")
-        self.assertEqual(asyncio.run(run("session=test-session", "POST /api/signatures/management/associate"))["status"], 403)
+        for api_id in (
+            "GET /api/signatures/management/people", "POST /api/signatures/management/people",
+            "POST /api/signatures/management/submit", "POST /api/signatures/management/associate",
+            "POST /api/signatures/management/merge", "POST /api/signatures/management/migrate",
+            "POST /api/signatures/management/temporary", "GET /api/signatures/management/request",
+            "GET /api/admin/mop-settings", "POST /api/admin/mop-settings",
+            "POST /api/admin/notice-memory/history-scan",
+        ):
+            with self.subTest(api_id=api_id):
+                operation = api_id.rsplit("/", 1)[-1]
+                with self.assertRaises(AssistantError):
+                    asyncio.run(catalog.invoke({"api_id": api_id, "path_params": {"operation": operation}}, request))
+
+        # No native endpoint was ever reached: exclusion happens inside the catalog.
+        self.assertEqual(native_calls, [])
 
     def test_safe_person_assignment_schema_keeps_native_field_names(self):
         from clipflow_backend.api_models import (
@@ -610,42 +673,30 @@ class PortalAPICatalogTests(unittest.TestCase):
         self.assertEqual(result["data"]["schema"]["properties"], {})
         self.assertNotIn("fixture", json.dumps(result["data"]))
 
-    def test_learning_dispatch_schema_describes_native_writes(self):
+    def test_learning_queries_are_admitted_but_writes_remain_excluded(self):
+        """Only native reads are admitted; no answer, reveal or admin mutations."""
         catalog = _native_route_catalog()
-        cases = (
-            ("POST", "papers/{id}/answer", {"question_id", "version", "operation_id"}, {"option_ids", "answer_text", "self_rating", "practice"}),
-            ("POST", "papers/{id}/reveal", {"question_id"}, {"kind"}),
-            ("POST", "papers/{id}/notes", {"question_id"}, {"note", "favorite"}),
-            ("POST", "questions", set(), {"stem", "bank", "options", "correct_option_ids", "new_id"}),
-            ("PUT", "questions/{id}", {"version"}, {"stem", "type", "status", "reason", "answer_text"}),
-            ("POST", "questions/{id}/status", {"status"}, {"ids", "versions", "version"}),
-            ("POST", "questions/{id}/copy", set(), {"version"}),
-            ("POST", "issues", {"paper_id", "question_id", "description"}, {"suggestion", "category"}),
-            ("PATCH", "issues/{id}", {"version"}, {"status", "remark", "description"}),
-            ("PUT", "settings", set(), {"enabled", "publish_time", "reminder_enabled", "reminder_time"}),
-            ("POST", "import", {"questions"}, {"preview"}),
-            ("POST", "publish", set(), {"date"}),
-            ("POST", "refresh", set(), set()),
-            ("DELETE", "attachments/{id}", set(), {"version"}),
+        for path in ('papers', 'questions', 'history', 'review', 'profile'):
+            self.assertTrue(catalog.get('GET /api/learning/' + path)['read_only'])
+        endpoints = (
+            "GET /api/learning/bootstrap",
+            "GET /api/learning/export", "GET /api/learning/attachments",
+            "POST /api/learning/papers/{id}/answer", "POST /api/learning/papers/{id}/reveal",
+            "POST /api/learning/papers/{id}/notes", "POST /api/learning/questions",
+            "PUT /api/learning/questions/{id}", "POST /api/learning/questions/{id}/status",
+            "POST /api/learning/questions/{id}/copy", "POST /api/learning/issues",
+            "PATCH /api/learning/issues/{id}", "PUT /api/learning/settings",
+            "POST /api/learning/import", "POST /api/learning/publish",
+            "POST /api/learning/refresh", "POST /api/learning/attachments",
+            "DELETE /api/learning/attachments/{id}",
         )
-        for method, path, required, optional in cases:
-            with self.subTest(path=path):
-                descriptor = catalog.get(f"{method} /api/learning/{path}")
-                body = descriptor["schema"]["body"]
-                self.assertEqual(set(body["required"]), required)
-                self.assertTrue(required | optional <= body["properties"].keys())
-                self.assertFalse(descriptor["read_only"])
-        answer = catalog.get("POST /api/learning/papers/{id}/answer")["schema"]["body"]
-        self.assertEqual(answer["properties"]["version"]["type"], "integer")
-        questions = catalog.get("POST /api/learning/import")["schema"]["body"]["properties"]["questions"]
-        self.assertEqual(questions["maxItems"], 500)
-        self.assertIn("text", questions["items"]["properties"]["options"]["items"]["properties"])
-        attachment = catalog.get("POST /api/learning/attachments")
-        self.assertTrue(attachment["multipart"])
-        self.assertTrue({"question_id", "issue_id", "kind", "version"} <= set(attachment["schema"]["query"]))
-        _, missing = catalog.validate_operation({"api_id": "POST /api/learning/papers/{id}/answer",
-                                                "path_params": {"id": "paper-fixture"}})
-        self.assertEqual({field["path"] for field in missing}, {"question_id", "version", "operation_id"})
+        for api_id in endpoints:
+            with self.subTest(api_id=api_id):
+                with self.assertRaises(AssistantError):
+                    catalog.get(api_id)
+                with self.assertRaises(AssistantError):
+                    catalog.validate_operation({"api_id": api_id})
+        self.assertEqual(catalog.discover(keyword="试卷")["total"], 0)
 
     def test_single_scope_metadata_uses_exact_native_routes(self):
         catalog = _native_route_catalog()
@@ -653,8 +704,6 @@ class PortalAPICatalogTests(unittest.TestCase):
             ("GET /api/capacity/water/records", "ABCDEH", "params", True),
             ("POST /api/capacity/water/records", "ABCDEH", "body", True),
             ("PATCH /api/capacity/water/records/{record_id}", "ABCDEH", "body", True),
-            ("GET /api/learning/papers", "ABCDEH", "params", False),
-            ("POST /api/learning/issues", "ABCDEH", "body", False),
             ("GET /api/drills", "ABCDE", "params", False),
             ("PUT /api/drills/{drill_id}/execution", "ABCDE", "params", True),
             ("GET /api/critical-guard/tasks", "ABCDE", "params", True),
@@ -672,8 +721,7 @@ class PortalAPICatalogTests(unittest.TestCase):
         for api_id in (
             "GET /api/capacity/water/buildings", "POST /api/capacity/water/refresh",
             "GET /api/critical-guard/bootstrap", "POST /api/critical-guard/tasks",
-            "GET /api/critical-guard/images/{response_id}", "GET /api/learning/questions",
-            "GET /api/learning/papers/{id}", "PUT /api/drills/{drill_id}/configuration",
+            "GET /api/critical-guard/images/{response_id}", "PUT /api/drills/{drill_id}/configuration",
         ):
             self.assertNotIn("scope_mode", catalog.get(api_id), api_id)
 
@@ -722,11 +770,6 @@ class PortalAPICatalogTests(unittest.TestCase):
     def test_single_scope_preserves_native_actor_and_record_defaults(self):
         catalog = _native_route_catalog()
         for operation in (
-            {"api_id": "GET /api/learning/papers"},
-            {"api_id": "GET /api/learning/profile"},
-            {"api_id": "GET /api/learning/papers/{id}", "path_params": {"id": "paper-fixture"}},
-            {"api_id": "POST /api/learning/papers/{id}/reveal", "path_params": {"id": "paper-fixture"}, "body": {"question_id": "question-fixture"}},
-            {"api_id": "POST /api/learning/issues", "body": {"paper_id": "paper-fixture", "question_id": "question-fixture", "description": "fixture"}},
             {"api_id": "GET /api/drills"},
             {"api_id": "GET /api/critical-guard/tasks", "params": {"admin": "1"}},
         ):
@@ -736,8 +779,6 @@ class PortalAPICatalogTests(unittest.TestCase):
                 self.assertNotIn("scope", normalized["body"])
                 self.assertNotIn("scope", normalized["params"])
         for api_id, path_params, section in (
-            ("GET /api/learning/papers", {}, "params"),
-            ("POST /api/learning/issues", {}, "body"),
             ("GET /api/drills", {}, "params"),
             ("PUT /api/drills/{drill_id}/execution", {"drill_id": "fixture"}, "params"),
             ("GET /api/critical-guard/tasks", {}, "params"),
@@ -947,8 +988,8 @@ class PortalAPICatalogTests(unittest.TestCase):
             "body": {"scope": "A"},
         })
         ids = next(f for f in missing_a if f["path"] == "attachment_ids")
-        self.assertEqual(ids["type"], "textarea")
-        self.assertEqual(ids["value_format"], "json")
+        self.assertEqual(ids["type"], "array")
+        self.assertEqual(ids["item"]["type"], "text")
 
     def test_full_required_body_passes_validation(self):
         norm, missing = self.catalog.validate_operation({
@@ -1084,14 +1125,6 @@ class PortalAPICatalogTests(unittest.TestCase):
     def test_shared_dispatch_get_body_is_optional_and_readonly(self):
         app = FastAPI()
 
-        async def learning_endpoint(request: Request):
-            payload = {}
-            if request.method != "GET":
-                payload = await request.json()
-            if request.method == "POST":
-                return {"ok": True, "data": {"q": payload.get("question")}}
-            return {"ok": True, "data": payload.get("scope")}
-
         async def plan_endpoint(request: Request):
             payload = {}
             if request.method != "GET":
@@ -1100,21 +1133,16 @@ class PortalAPICatalogTests(unittest.TestCase):
                 return {"ok": True, "data": payload.get("items")}
             return {"ok": True, "data": payload.get("name")}
 
-        app.add_api_route("/api/learning/papers", learning_endpoint, methods=["GET"])
-        app.add_api_route("/api/learning/refresh", learning_endpoint, methods=["POST"])
         app.add_api_route("/api/plan-convergence/rulesets", plan_endpoint, methods=["GET", "POST"])
 
         catalog = PortalAPICatalog(app)
-        get_learning = catalog.get("GET /api/learning/papers")
-        self.assertTrue(get_learning["read_only"])
-        self.assertEqual(get_learning["schema"]["body"]["required"], [])
-        self.assertIn("scope", get_learning["schema"]["body"]["properties"])
-
         get_plan = catalog.get("GET /api/plan-convergence/rulesets")
         self.assertTrue(get_plan["read_only"])
         self.assertEqual(get_plan["schema"]["body"]["required"], [])
-        # POST refresh remains a write (not read-only, missing fields never fabricated).
-        self.assertFalse(catalog.get("POST /api/learning/refresh")["read_only"])
+        # 学练(learning)端点整体排除, 不再作为 shared-dispatch GET 体可选/只读的样例。
+        for api_id in ("GET /api/learning/papers", "POST /api/learning/refresh"):
+            with self.assertRaises(AssistantError):
+                catalog.get(api_id)
 
     # -- dynamically composed cabinet add_api_route coverage ----------------
     def test_cabinet_dynamic_add_api_route_covered(self):
@@ -1178,9 +1206,11 @@ class PortalAPICatalogTests(unittest.TestCase):
         self.assertEqual(body_schema["request_id"]["type"], "string")
         self.assertEqual(body_schema["sources"]["type"], "array")
         self.assertEqual(body_schema["rows"]["type"], "array")
-        # Arrays/objects must render as JSON textareas, never plain string.
-        self.assertEqual(_frontend_field(body_schema["sources"], body_schema)["type"], "textarea")
-        self.assertEqual(_frontend_field(body_schema["sources"], body_schema)["value_format"], "json")
+        # Declared rows render as structured controls, not JSON textareas.
+        control = _frontend_field(body_schema["sources"], body_schema)
+        self.assertEqual(control["type"], "array")
+        self.assertEqual(control["item"]["type"], "object")
+        self.assertTrue({"id", "text"} <= {field["path"] for field in control["item"]["children"]})
 
         update = catalog.get("PATCH /api/cabinet-power/batches/{batch_id}")
         update_props = update["schema"]["body"]["properties"]
@@ -1468,6 +1498,94 @@ class PortalAPICatalogTests(unittest.TestCase):
             self.catalog.validate_operation({"api_id": "POST /api/custom/made-up"})
 
     # -- invoke ------------------------------------------------------------
+    def test_response_conversion_runs_off_event_loop(self):
+        import threading
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        request = SimpleNamespace(base_url="http://testserver/", client=None,
+            headers={"cookie": "session=test-session", "origin": "http://testserver"})
+        consume = self.catalog._consume_response
+
+        async def run(operation):
+            loop_thread = threading.get_ident()
+            parser_threads = []
+
+            def consume_recorded(response, api_id):
+                parser_threads.append(threading.get_ident())
+                return consume(response, api_id)
+
+            with patch.object(self.catalog, "_consume_response", side_effect=consume_recorded):
+                result = await self.catalog.invoke(operation, request)
+            self.assertEqual(len(parser_threads), 1)
+            self.assertNotEqual(parser_threads[0], loop_thread)
+            return result
+
+        cases = (
+            ({"api_id": "GET /api/notice/large"}, True),
+            ({"api_id": "GET /api/download-binary"}, True),
+            ({"api_id": "POST /api/workbench/soft-fail"}, False),
+        )
+        for operation, expected in cases:
+            with self.subTest(operation=operation):
+                result = asyncio.run(run(operation))
+                self.assertEqual(result["ok"], expected)
+                if operation["api_id"] == "GET /api/notice/large":
+                    self.assertTrue(result["truncated"])
+                    self.assertEqual(result["data"]["total"], 60)
+                    self.assertEqual(len(result["_raw"]["items"]), 60)
+                elif operation["api_id"] == "GET /api/download-binary":
+                    self.assertEqual(result["_binary"]["content"], b"\x89PNG\r\n\x1a\nbinary-data")
+                else:
+                    self.assertIn("invalid", result["error"])
+
+    def test_parallel_requests_keep_response_conversion_bounded(self):
+        import threading
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        async def run():
+            app, arrived = FastAPI(), asyncio.Event()
+            arrivals = 0
+
+            @app.get("/api/notice/list")
+            async def notice_list():
+                nonlocal arrivals
+                arrivals += 1
+                if arrivals == 20:
+                    arrived.set()
+                await arrived.wait()
+                return {"ok": True, "data": {"total": 1}}
+
+            catalog = PortalAPICatalog(app)
+            request = SimpleNamespace(base_url="http://testserver/", headers={}, client=None)
+            consume = catalog._consume_response
+            active, peak = 0, 0
+            guard = threading.Lock()
+
+            def consume_recorded(response, api_id):
+                nonlocal active, peak
+                with guard:
+                    active += 1
+                    peak = max(peak, active)
+                try:
+                    time.sleep(.02)
+                    return consume(response, api_id)
+                finally:
+                    with guard:
+                        active -= 1
+
+            with patch.object(catalog, "_consume_response", side_effect=consume_recorded):
+                results = await asyncio.wait_for(asyncio.gather(*(
+                    catalog.invoke({"api_id": "GET /api/notice/list"}, request)
+                    for _ in range(20))), 5)
+            self.assertEqual(arrivals, 20)
+            self.assertEqual(peak, 1)
+            self.assertTrue(all(result["ok"] and result["_raw"]["total"] == 1 for result in results))
+
+        asyncio.run(run())
+
     def test_invoke_forwards_cookie_and_origin(self):
         from unittest.mock import Mock
 

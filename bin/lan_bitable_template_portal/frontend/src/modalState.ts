@@ -9,9 +9,14 @@ export function acquireModal() {
   }
   owners.add(owner);
   return {
-    isTop: () => Array.from(owners)[owners.size - 1] === owner,
+    isTop: (event?: Event, element?: Element | null) => Array.from(owners)[owners.size - 1] === owner
+      && (!event || !isAssistantEvent(event) || !!element?.contains(event.target as Node)),
     release: () => {
       if (owners.delete(owner) && !owners.size) document.body.style.overflow = originalOverflow;
     },
   };
+}
+
+export function isAssistantEvent(event: Event): boolean {
+  return event.composedPath().some(node => node instanceof Element && node.matches('.lighthouse,.lighthouse-launcher,[data-assistant-control="true"]'));
 }

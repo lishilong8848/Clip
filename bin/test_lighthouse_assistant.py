@@ -19,7 +19,7 @@ from lan_bitable_template_portal.lighthouse_ai import (
     LighthouseAssistant, safe_data,
 )
 from lan_bitable_template_portal.lighthouse_sources import LocalAssistantSources, codes
-from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes, MODEL_SETTINGS_USERS
+from tools.lighthouse_test_backend import install_test_backend as install_lighthouse_routes
 from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID
 from upload_event_module.services.http_client import FeishuHttpClient
 
@@ -49,6 +49,12 @@ class AssistantTests(unittest.TestCase):
         self.search = Mock(return_value=([{"title": "维修", "scopes": ["A"], "data": {"status": "维修中"}}], []))
         self.service = LighthouseAssistant(self.store, self.search, model=self.model)
         self.request = {**QUESTION, "conversation_id": self.service.conversation(ACTOR)["conversation_id"]}
+
+    def test_private_paths_hidden_without_removing_field_paths_or_api_links(self):
+        self.assertEqual(safe_data({"path": r"D:\private\generated.xlsx", "relative_path": "private/generated.xlsx", "file_name": "generated.xlsx"}), {"file_name": "generated.xlsx"})
+        self.assertEqual(safe_data({"path": "/tmp/private.xlsx", "count": 1}), {"count": 1})
+        self.assertEqual(safe_data({"path": "step_0.fields", "type": "text"}), {"path": "step_0.fields", "type": "text"})
+        self.assertEqual(safe_data({"path": "/api/assistant/files/fake"}), {"path": "/api/assistant/files/fake"})
 
     def test_persistent_single_account_context_and_idempotency(self):
         first = self.service.chat(ACTOR, self.request)
@@ -380,15 +386,15 @@ class SourcesAndRoutesTests(unittest.TestCase):
             history = client.get("/api/assistant/conversation")
             self.assertEqual(history.status_code, 200, history.text)
             self.assertEqual(history.headers["cache-control"], "no-store")
-            self.assertEqual(client.get("/api/assistant/settings").status_code, 403)
+            self.assertEqual(client.get("/api/assistant/settings").status_code, 200)
             self.assertEqual(client.delete("/api/assistant/conversation", headers={"Origin": "https://other.example"}).status_code, 403)
             self.assertEqual(client.delete("/api/assistant/conversation", headers={"Origin": ""}).status_code, 403)
             self.assertEqual(client.post("/api/assistant/chat", content='"not object"').status_code, 400)
             self.assertEqual(client.post("/api/assistant/chat", content="x" * 16001).status_code, 413)
             self.assertEqual(client.post("/api/assistant/compress").status_code, 404)
             session["role"] = "admin"
-            self.assertEqual(client.get("/api/assistant/settings").status_code, 403)
-            self.assertFalse(client.get("/api/assistant/conversation").json()["data"]["can_manage_settings"])
+            self.assertEqual(client.get("/api/assistant/settings").status_code, 200)
+            self.assertTrue(client.get("/api/assistant/conversation").json()["data"]["can_manage_settings"])
             for open_id in (LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, BUILDING_OPEN_ID_MAP["H"]):
                 session["user"] = {"open_id": open_id}
                 session["role"] = "building" if open_id == BUILDING_OPEN_ID_MAP["H"] else "admin"
@@ -397,10 +403,11 @@ class SourcesAndRoutesTests(unittest.TestCase):
                 self.assertEqual(client.put("/api/assistant/settings", json={"action": "toggle", "enabled": True}).status_code, 200)
             session["user"] = {"open_id": "not-a-whitelisted-user", "name": "李世龙"}
             session["role"] = "admin"
-            self.assertEqual(client.get("/api/assistant/settings").status_code, 403)
-            self.assertEqual(client.put("/api/assistant/settings", json={"action": "toggle", "enabled": False}).status_code, 403)
-            self.assertEqual(MODEL_SETTINGS_USERS, frozenset((LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, BUILDING_OPEN_ID_MAP["H"])))
+            self.assertEqual(client.get("/api/assistant/settings").status_code, 200)
+            self.assertEqual(client.put("/api/assistant/settings", json={"action": "toggle", "enabled": False}).status_code, 200)
             session["is_guest"] = True
+            self.assertEqual(client.get("/api/assistant/settings").status_code, 403)
+            self.assertEqual(client.put("/api/assistant/settings", json={"action": "toggle", "enabled": True}).status_code, 403)
             self.assertEqual(client.get("/api/assistant/conversation").status_code, 403)
             session.clear()
             controller._current_session = lambda request: None

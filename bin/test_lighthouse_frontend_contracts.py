@@ -15,10 +15,12 @@ import copy
 import json
 import re
 import sys
+import textwrap
 import unittest
 import uuid
 from datetime import date, datetime, time
 from pathlib import Path
+from unittest import mock
 
 BIN_DIR = Path(__file__).resolve().parent
 PORTAL_DIR = BIN_DIR / "lan_bitable_template_portal"
@@ -30,6 +32,7 @@ sys.path.insert(0, str(BIN_DIR))
 from fastapi import (FastAPI, Request, Response, UploadFile, File, Form, Body,  # noqa: E402
                      Query, Path, Header, Cookie, Depends, Security, BackgroundTasks)  # noqa: E402
 
+import lan_bitable_template_portal.lighthouse_api as lighthouse_api  # noqa: E402
 from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog  # noqa: E402
 
 
@@ -101,6 +104,15 @@ def build_native_catalog():
     async def _dummy_endpoint():
         raise AssertionError("metadata audit must not invoke business operations")
 
+    # 每个 main.py 路由 -> 真实 AST 函数源码。lighthouse_api._build_descriptor
+    # 通过 _endpoint_source(route) 读取 `_read_model_request(...)` 等命名提示来
+    # 解析真实 Pydantic body 模型;而目录里的路由是用正文换成 raise 的签名 stub
+    # 注册的,若让 _endpoint_source 返回 stub 源码会丢掉 _read_model_request -> 空 schema 假象。
+    # 这里在构建 PortalAPICatalog 期间仅对 _endpoint_source 打桩,按 (path,methods)
+    # 返回 main.py 的真实函数源码,继续让 API 签名走签名 stub(不导入/运行 main),
+    # 模型名经 lighthouse_api._resolve_model 的 clipflow_backend.api_models 兜底解析。
+    real_source: dict[tuple, str] = {}
+
     tree = ast.parse(MAIN_PY.read_text(encoding="utf-8-sig"))
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -118,6 +130,7 @@ def build_native_catalog():
                 methods = [method.upper()]
             else:
                 methods = next(ast.literal_eval(kw.value) for kw in decorator.keywords if kw.arg == "methods")
+            real_source[(path, frozenset(methods))] = textwrap.dedent(ast.unparse(node)).strip()
             app.add_api_route(path, _make_signature_stub(node) or _dummy_endpoint, methods=methods)
 
     for filename, prefix in (("learning_routes.py", "learning"),
@@ -135,7 +148,18 @@ def build_native_catalog():
             if isinstance(routes, ast.Dict):
                 for path, methods in ast.literal_eval(routes).items():
                     app.add_api_route(f"/api/{prefix}/{path}", _dummy_endpoint, methods=list(methods))
-    return PortalAPICatalog(app)
+
+    original_source = lighthouse_api._endpoint_source
+
+    def _real_or_stub_source(route):
+        key = (route.path, frozenset(route.methods or ()))
+        src = real_source.get(key)
+        if src is not None:
+            return src
+        return original_source(route)
+
+    with mock.patch.object(lighthouse_api, "_endpoint_source", side_effect=_real_or_stub_source):
+        return PortalAPICatalog(app)
 
 
 def _norm_path(path: str) -> str:
@@ -144,15 +168,20 @@ def _norm_path(path: str) -> str:
 
 
 class FrontendContract:
-    """一条已核实的前端业务API合同。"""
+    """一条已核实的前端业务API合同。
 
-    def __init__(self, contract_id, method, path, transport, source, note=""):
+    ``excluded=True`` 表示该端点按策略应从助手目录中整体排除(例如 learning
+    未集成到助手);核对时要求 ``catalog.get`` 必须抛错,否则记为\"不应存在\"缺口。
+    """
+
+    def __init__(self, contract_id, method, path, transport, source, note="", excluded=False):
         self.id = contract_id
         self.method = method
         self.path = path               # 目录 id 用的带 {param} 路径
         self.transport = transport     # "json" | "multipart" | "raw"
         self.source = source           # frontend 文件:行 的实际请求
         self.note = note
+        self.excluded = excluded       # True=目录必须排除该端点
 
     def catalog_id(self):
         return f"{self.method} {_norm_path(self.path)}"
@@ -179,11 +208,12 @@ def _contracts():
             "water_uploads", "POST", "/api/capacity/water/uploads", "raw",
             f"{f}/components/WaterManagementPage.vue:1242 requestBinaryJson(path, file, Content-Type:mime)",
             "前端以二进制原始体上传照片,目录应标注 upload_format=raw。"),
-        # --- 已正确声明的 multipart 上传(对照,不应报缺口)---
+        # --- 应被排除的端点(learning 未集成到助手目录)---
         FrontendContract(
             "learning_attachments", "POST", "/api/learning/attachments", "multipart",
             f"{f}/components/LearningPage.vue:841 new FormData()+files",
-            "对照项:learning 附件本已 multipart。"),
+            "排除项:learning 端点整体不在助手目录,前端原生调用不上目录。",
+            excluded=True),
         FrontendContract(
             "cabinet_batches_recognize", "POST", "/api/cabinet-power/batches/recognize", "multipart",
             f"{f}/components/CabinetPowerBatchPage.vue:614 new FormData()+files",
@@ -265,8 +295,28 @@ class FrontendContractTests(unittest.TestCase):
         unseen = [g for g in self.gaps if g[1].startswith("未找到")]
         self.assertEqual(unseen, [])
 
+    def test_learning_exclusion_contracts_stay_excluded(self):
+        # learning 整体未集成到助手目录:这些前端原生调用不能出现在目录里。
+        bad = [g for g in self.gaps if g[1].startswith("不应存在")]
+        self.assertEqual(
+            bad, [],
+            "以下本应被排除的 learning 前端端点却出现在目录中:\n" + "\n".join(
+                f"  {msg}" for _, msg in bad))
+        for contract in _contracts():
+            if contract.excluded:
+                with self.subTest(contract_id=contract.id):
+                    with self.assertRaises(Exception):
+                        self.catalog.get(contract.catalog_id())
+
     def test_contract_table_is_populated(self):
         self.assertGreaterEqual(len(self.found), 10)
+
+    def test_unused_legacy_notice_endpoints_do_not_compete_with_current_workbench(self):
+        from lan_bitable_template_portal.lighthouse_ai import AssistantError
+        for api_id in ("POST /api/generate", "POST /api/send-generated"):
+            with self.assertRaises(AssistantError):
+                self.catalog.get(api_id)
+        self.assertFalse(self.catalog.get("POST /api/workbench-actions")["read_only"])
 
     def test_signature_image_session_handwrite_stay_excluded(self):
         # 凭证/签名图片、token会话与临时手写采集不返回模型,必须继续排除。
@@ -282,9 +332,33 @@ class FrontendContractTests(unittest.TestCase):
         for cid in still_excluded:
             self.assertNotIn(cid, all_ids, f"敏感签名端点不应出现在业务目录:{cid}")
 
+    def test_fixture_surfaces_real_body_models_not_empty_stub(self):
+        # 回归:目录 fixture 必须经 _endpoint_source 打桩读取 main.py 真实源码的
+        # _read_model_request(...) 提示并解析真实 Pydantic 模型。若回归为无参 stub,
+        # 这些 body 会变成空 schema,掩盖前端真正要填的对象/数组字段(只能用 JSON 文本)。
+        expectations = {
+            "POST /api/polling-sops": ({"scope", "name", "steps"}, {"scope", "name"}),
+            "POST /api/repair-management/records": ({"fields", "source_repair_ids", "operation_id"}, None),
+            "POST /api/capacity/water/records": ({"meter", "frequency", "shift", "statistic_date", "upload_ids"}, {"meter", "scope"}),
+            "PUT /api/critical-guard/responses/{response_id}": ({"cells", "signatures", "scope", "expected_version"}, {"scope"}),
+        }
+        for cid, (want_props, want_required) in expectations.items():
+            body = self.catalog.get(cid)["schema"]["body"]
+            props = set(body.get("properties", {}))
+            for name in sorted(want_props):
+                self.assertIn(name, props, f"{cid} 真实 body 模型缺字段 {name}")
+            if want_required is not None:
+                req = set(body.get("required", []))
+                for name in sorted(want_required):
+                    self.assertIn(name, req, f"{cid} 真实 body 模型应要求 {name}")
+
 
 def _run_checks(catalog):
-    """对每条合同检查并返回 (found_ids, [(contract_id, message), ...])。"""
+    """对每条合同检查并返回 (found_ids, [(contract_id, message), ...])。
+
+    普通合同要求目录中存在且传输格式一致;``excluded=True`` 合同要求目录必须
+    排除该端点(``catalog.get`` 抛错),否则记为\"不应存在\"缺口。
+    """
     found = []
     gaps = []
     for contract in _contracts():
@@ -292,6 +366,14 @@ def _run_checks(catalog):
         try:
             desc = catalog.get(cid)
         except Exception:
+            desc = None
+        if contract.excluded:
+            if desc is not None:
+                gaps.append((contract.id, f"不应存在 {cid}: 该 learning 端点应被排除 ({contract.source})"))
+            else:
+                found.append(contract.id)
+            continue
+        if desc is None:
             gaps.append((contract.id, f"目录缺失 {cid} ({contract.source})"))
             continue
         found.append(contract.id)

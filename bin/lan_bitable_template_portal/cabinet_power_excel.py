@@ -830,14 +830,15 @@ def export_workbook(content, config, operations):
             xf=copy.deepcopy(xfs[style]); xf.set('numFmtId',str(time_format)); xf.set('applyNumberFormat','1')
             date_styles[style]=len(xfs); xfs.append(xf); book.styles.append(copy.deepcopy(book.styles[style]))
         return date_styles[style]
-    def colored_style(style_id,state):
-        key=(str(style_id or "0"),state)
+    def colored_style(style_id,state,color=None):
+        color=color or COLORS[state]
+        key=(str(style_id or "0"),color)
         if key not in painted:
             fill=ET.SubElement(fills,T("fill")); pattern=ET.SubElement(fill,T("patternFill"),patternType="solid")
-            ET.SubElement(pattern,T("fgColor"),rgb="FF"+COLORS[state].lstrip("#")); ET.SubElement(pattern,T("bgColor"),indexed="64")
+            ET.SubElement(pattern,T("fgColor"),rgb="FF"+color.lstrip("#")); ET.SubElement(pattern,T("bgColor"),indexed="64")
             xf=copy.deepcopy(xfs[int(key[0])]); xf.set("fillId",str(len(fills)-1)); xf.set("applyFill","1")
             painted[key]=len(xfs); xfs.append(xf)
-            book.styles.append({**book.styles[int(key[0])],"fill":COLORS[state]})
+            book.styles.append({**book.styles[int(key[0])],"fill":color})
         return painted[key]
     def write(name,ref,value,preserve_formula=False):
         cells=cell_maps[name]; prior=cells.get(ref)
@@ -1182,6 +1183,18 @@ def export_workbook(content, config, operations):
         if all(ref in cell_maps[name] and cell_maps[name][ref].findtext(T("f"))==expanded_shared[(name,ref)] and cell_maps[name][ref].find(T("f")) is not None for ref,_ in members):
             for ref,original in members:
                 cell=cell_maps[name][ref]; cell.remove(cell.find(T("f"))); cell.insert(0,original)
+    action_states={**STATES,"未上电":"off","转正式电":"formal","转测试电":"test"}
+    action_pattern=re.compile(OP_PATTERN.pattern+"|未上电|转正式电|转测试电")
+    # Paint each operation cell, including expanded history and merged anchors.
+    for name,fmt in formats.items():
+        action_columns={group["action"] for group in fmt["groups"]}
+        for ref,cell in cell_maps[name].items():
+            col,row=coord(ref)
+            if row<=fmt["header"] or col not in action_columns: continue
+            actions=action_pattern.findall(text_value(book.value(cell)).replace(" ",""))
+            if actions:
+                state=action_states[actions[-1]]
+                cell.set("s",str(colored_style(cell.get("s","0"),state,"#FFFF00" if state=="test" else None)))
     fills.set("count",str(len(fills))); xfs.set("count",str(len(xfs)))
     # Retain style identities, VBA, drawings, relationships, print ranges and sheet names.
     parts={e.filename:book.archive.read(e.filename) for e in book.archive.infolist()}

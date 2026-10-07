@@ -312,6 +312,7 @@ def is_local_record_id(record_id: str) -> bool:
         or record_id.startswith("localid")
         or record_id.startswith("placeholder-")
         or record_id.startswith("manual:")
+        or record_id.startswith("manual_")
         or record_id.startswith("draft:")
     )
 

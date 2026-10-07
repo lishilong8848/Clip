@@ -1,0 +1,7 @@
+/* Only assistant transitions are loaded on legacy business pages. */
+@view-transition { navigation: auto; }
+:is(.lighthouse, .bot-settings-backdrop) :is(.ui-overlay-enter-active, .ui-overlay-leave-active, .ui-popover-enter-active, .ui-popover-leave-active),
+.bot-settings-backdrop:is(.ui-overlay-enter-active, .ui-overlay-leave-active) { transition: opacity 180ms ease, transform 180ms ease; }
+:is(.lighthouse, .bot-settings-backdrop) :is(.ui-overlay-enter-from, .ui-overlay-leave-to, .ui-popover-enter-from, .ui-popover-leave-to),
+.bot-settings-backdrop:is(.ui-overlay-enter-from, .ui-overlay-leave-to) { opacity: 0; transform: translateY(6px); }
+@media (prefers-reduced-motion: reduce) { :is(.lighthouse, .bot-settings-backdrop) :is(.ui-overlay-enter-active, .ui-overlay-leave-active, .ui-popover-enter-active, .ui-popover-leave-active), .bot-settings-backdrop { transition: none !important; } }

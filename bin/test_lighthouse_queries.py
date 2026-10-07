@@ -13,11 +13,53 @@ from lan_bitable_template_portal.lighthouse_ai import AssistantError
 from lan_bitable_template_portal.lighthouse_model import LighthouseModel
 from lan_bitable_template_portal.lighthouse_pending import collect_pending, pending_reply
 from lan_bitable_template_portal.lighthouse_queries import (
-    EventQuery, TZ, all_pending_modules, business_domains, collect_events, current_pending_query, date_window, effective_question, event_date, event_reply,
+    EventQuery, PortalOperation, TZ, all_pending_modules, business_domains, collect_events, current_pending_query, date_window, effective_question, event_date, event_reply, query_refinement,
 )
 
 
 class QueryTests(unittest.IsolatedAsyncioTestCase):
+    def test_common_date_followups_keep_the_previous_business_subject(self):
+        for question in ("9月呢", "近一个月呢", "过去7天", "上星期", "2026-09-01呢", "10月4日呢", "还剩几条？", "还有多少呢"):
+            with self.subTest(question=question):
+                self.assertTrue(query_refinement(question))
+                self.assertIn("事件", effective_question({"question": question, "prompt": "今天发生了几条事件\n" + question}))
+        self.assertFalse(query_refinement("你是谁，还有什么能力"))
+        self.assertFalse(query_refinement("今天南通天气怎么样"))
+
+    def test_public_search_confirmation_keeps_the_original_subject(self):
+        original = '讲一讲deepseek和豆包的优劣点'
+        for question in ('需要联网', '联网核对一下', '请联网查询', '上网查一下', '需要联网。'):
+            with self.subTest(question=question):
+                self.assertTrue(query_refinement(question))
+                self.assertIn(original, effective_question({'question': question,
+                    'prompt': '之前的问题：' + original + '\n本次补充：' + question}))
+        self.assertFalse(query_refinement('联网查询南通天气'))
+        self.assertFalse(query_refinement('你能联网吗'))
+
+    def test_common_date_ranges_use_beijing_calendar_without_guessing(self):
+        today = dt.date(2026, 10, 4)
+        cases = {"9月": (dt.date(2026, 9, 1), dt.date(2026, 9, 30)),
+                 "近一个月": (dt.date(2026, 9, 5), today),
+                 "过去7天": (dt.date(2026, 9, 28), today),
+                 "上星期": (dt.date(2026, 9, 21), dt.date(2026, 9, 27)),
+                 "10月4日": (today, today),
+                 "去年": (dt.date(2025, 1, 1), dt.date(2025, 12, 31))}
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(date_window(question, today), expected)
+        with self.assertRaises(AssistantError):
+            date_window("13月", today)
+
+    def test_read_and_write_operation_envelopes_share_typed_sections(self):
+        operation = PortalOperation.model_validate({"api_id": "POST /api/workbench-actions", "body": {
+            "command_format": "notice_command", "patch": {"progress": "已完成60%"}}})
+        self.assertEqual(operation.params, {})
+        self.assertEqual(operation.model_dump()["body"]["patch"]["progress"], "已完成60%")
+        for bad in ({"api_id": "POST /api/workbench-actions", "progress": "错放顶层"},
+                    {"api_id": "POST /api/workbench-actions", "body": "invalid"}):
+            with self.assertRaises(ValueError):
+                PortalOperation.model_validate(bad)
+
     def setUp(self):
         self.actor = {"id": "fixture", "scopes": ["E"]}
         self.calls = []
@@ -108,7 +150,7 @@ class QueryTests(unittest.IsolatedAsyncioTestCase):
             ("未结束的检修通告", "repair_notices"), ("维修单", "repairs"), ("维修跟进记录", "followups"),
             ("未完成维保通告", "notices"), ("未完成维护单", "mops"), ("SOP工单", "orders"),
             ("机柜测试电", "batches"), ("水耗", "water"), ("演练", "drills"), ("重保", "guard"),
-            ("学练题单", "learning"), ("工作报告", "daily"), ("收敛核对台", "convergence"), ("工号", "people"),
+            ("学练题单", "learning"), ("题库面试题", "question_bank"), ("工作报告", "daily"), ("收敛核对台", "convergence"), ("工号", "people"),
         ):
             with self.subTest(question=question):
                 self.assertEqual(business_domains(question), {domain})

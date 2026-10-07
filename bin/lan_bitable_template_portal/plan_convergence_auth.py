@@ -3,6 +3,8 @@ import base64
 import json
 import threading
 import time
+import atexit
+from http.cookiejar import DefaultCookiePolicy
 from pathlib import Path
 from urllib.parse import quote
 
@@ -13,6 +15,33 @@ CONFIG_FILE = Path(get_data_file_path('plan_convergence')) / 'auth.json'
 DEFAULTS = {'login_name': '', 'display_name': '', 'token': '', 'token_owner_note': ''}
 _store = None
 _lock = threading.RLock()
+_client = None
+
+
+def request(method, url, **kwargs):
+    import httpx
+    from upload_event_module.services.http_client import verified_tls_context
+    global _client
+    with _lock:
+        if _client is None:
+            _client = httpx.Client(verify=verified_tls_context(trust_env=False), trust_env=False,
+                follow_redirects=False, limits=httpx.Limits(max_connections=6, max_keepalive_connections=6))
+            _client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=()))
+        client = _client
+    follow_redirects = kwargs.pop('follow_redirects', False)
+    outgoing = client.build_request(method, url, **kwargs)
+    return client.send(outgoing, follow_redirects=follow_redirects)
+
+
+def close_client():
+    global _client
+    with _lock:
+        client, _client = _client, None
+    if client is not None:
+        client.close()
+
+
+atexit.register(close_client)
 
 
 def bind_store(store):
@@ -127,10 +156,11 @@ def token_auth(token, cfg=None):
 
 
 def test_connection(token=None):
-    import requests
+    import httpx
     headers, cookies = token_auth(token) if token is not None else build_auth()
-    response = requests.post(ZH_BASE + '/api/alarm/alarmBlock/getAlarmBlock', headers=headers, cookies=cookies,
-                             json={'page': 1, 'size': 1}, timeout=(5, 15))
+    response = request('POST', ZH_BASE + '/api/alarm/alarmBlock/getAlarmBlock', headers=headers, cookies=cookies,
+                          json={'page': 1, 'size': 1}, timeout=httpx.Timeout(connect=5, read=15, write=15, pool=5),
+                          follow_redirects=False)
     if response.status_code in {401, 403}:
         raise ValueError('智航认证无效，请重新登录智航')
     response.raise_for_status()

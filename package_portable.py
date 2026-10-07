@@ -21,6 +21,7 @@ import time
 import zipfile
 
 from pathlib import Path
+from functools import lru_cache
 from bin.frontend_assets import FRONTEND_INDEX, is_frontend_asset, referenced_assets
 
 from urllib.parse import urlencode, urlparse
@@ -122,6 +123,10 @@ EXCLUDE_TOP_LEVEL = {
 
 
 EXCLUDE_DIR_NAMES = {
+    ".deepcode",
+    ".agents",
+    ".codex",
+    ".claude",
 
     ".git",
 
@@ -144,6 +149,7 @@ EXCLUDE_DIR_NAMES = {
 
 RUNTIME_DATA_DIR_PARTS = (
     ("bin", "data"),
+    ("bin", "runtime"),
     ("data",),
 )
 
@@ -166,8 +172,28 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin") / "upload_event_module" / "web" / "index.html",
 
     Path("bin") / "upload_event_module" / "services" / "process_lifetime.py",
+    Path("启动程序.bat"),
+    Path("bin/refactored_main.py"),
+    Path("bin/openclaw_service/__main__.py"),
+    Path("bin/openclaw_service/launcher.py"),
+    Path("bin/openclaw_service/client.py"),
+    Path("bin/openclaw_service/protocol.py"),
+    Path("bin/openclaw_service/update.py"),
+    Path("bin/lan_bitable_template_portal/lighthouse_routes.py"),
+    Path("bin/lan_bitable_template_portal/lighthouse_bridge.py"),
+    Path("bin/openclaw_service/assistant/openclaw/runtime.json"),
+    Path("bin/openclaw_service/assistant/openclaw/native-paths.mjs"),
+    Path("bin/openclaw_service/assistant/openclaw/distribution.json"),
+    Path("bin/openclaw_service/assistant/openclaw/plugin/index.mjs"),
+    Path("bin/openclaw_service/assistant/openclaw/plugin/package.json"),
+    Path("bin/openclaw_service/assistant/openclaw/plugin/openclaw.plugin.json"),
+    Path("bin/openclaw_service/assistant/openclaw/skills/registry.json"),
+    Path("bin/openclaw_service/assistant/openclaw/skills/alert-tagging/references/rules.md"),
+    Path("bin/openclaw_service/assistant/openclaw/skills/workbuddy-registry.json"),
 
 }
+
+IMPORTED_SKILLS_DIR = Path("bin/openclaw_service/assistant/openclaw/skills/workbuddy")
 
 RUNTIME_TOOL_FILES = {
 
@@ -189,6 +215,7 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "httpx": "httpx",
     "websocket": "websocket-client",
+    "websockets": "websockets==16.0",
 
     "cryptography": "cryptography",
 
@@ -197,6 +224,7 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "openpyxl": "openpyxl",
 
     "pypdf": "pypdf",
+    "yaml": "PyYAML",
 
     "anyio": "anyio",
 
@@ -254,6 +282,7 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
 
     "httpx",
     "websocket",
+    "websockets",
 
     "cryptography",
 
@@ -262,6 +291,7 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "openpyxl",
 
     "pypdf",
+    "yaml",
 
     "anyio",
 
@@ -298,6 +328,19 @@ if sys.platform == "win32":
 
 
 SMOKE_IMPORT_MODULES = [
+    "openclaw_service.__main__",
+    "openclaw_service.server",
+    "openclaw_service.client",
+    "openclaw_service.protocol",
+    "openclaw_service.store",
+    "openclaw_service.bridge",
+    "openclaw_service.launcher",
+    "openclaw_service.update",
+    "openclaw_service.gateway_log",
+    "openclaw_service.assistant.routes",
+    "openclaw_service.assistant.lighthouse_commands",
+    "openclaw_service.assistant.lighthouse_shared_skills",
+    "lan_bitable_template_portal.lighthouse_bridge",
     "upload_event_module.services.event_relay_server",
     "upload_event_module.services.process_lifetime",
     "upload_event_module.ui.event_relay_bridge",
@@ -311,9 +354,22 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.server",
     "lan_bitable_template_portal.plan_convergence",
     "lan_bitable_template_portal.lighthouse_routes",
+    "lan_bitable_template_portal.lighthouse_appearance",
+    "lan_bitable_template_portal.lighthouse_widget",
     "lan_bitable_template_portal.lighthouse_model",
+    "lan_bitable_template_portal.lighthouse_notice_sop",
+    "lan_bitable_template_portal.lighthouse_notice_identity",
+    "lan_bitable_template_portal.lighthouse_water",
+    "lan_bitable_template_portal.lighthouse_downloads",
     "lan_bitable_template_portal.lighthouse_queries",
     "lan_bitable_template_portal.lighthouse_stream",
+    "lan_bitable_template_portal.lighthouse_gateway",
+    "lan_bitable_template_portal.lighthouse_runtime",
+    "lan_bitable_template_portal.lighthouse_startup_log",
+    "lan_bitable_template_portal.lighthouse_openclaw",
+    "lan_bitable_template_portal.lighthouse_public",
+    "lan_bitable_template_portal.lighthouse_distribution",
+    "lan_bitable_template_portal.lighthouse_skills",
     "clipflow_backend.main",
     "clipflow_backend.process_controller",
     "lan_bitable_template_portal.cabinet_power_batches",
@@ -324,10 +380,12 @@ SMOKE_IMPORT_MODULES = [
 ]
 
 PACKAGING_PREFLIGHT_MODULES = [
+    "yaml",
     "pydantic_ai",
     "openai",
     "httpx",
     "websocket",
+    "websockets",
     "anyio",
     "apscheduler",
     "pydantic",
@@ -1006,7 +1064,7 @@ def _missing_runtime_modules(venv_python: Path) -> list[str]:
     script_lines = [
         "import importlib",
         "import importlib.metadata",
-        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1')}",
+        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0')}",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
@@ -1039,7 +1097,7 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
     script_lines = [
         "import importlib",
         "import importlib.metadata",
-        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1')}",
+        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0')}",
         "import sys",
         "for path in " + repr(runtime_site_packages) + ":",
         "    if path not in sys.path:",
@@ -1268,15 +1326,37 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
     log("运行时依赖安装完成。")
 
 
+@lru_cache(maxsize=4)
+def _registered_skill_resources(registry_path: str, modified: int, size: int) -> frozenset[str]:
+    if size > 1024 * 1024:
+        raise RuntimeError('WorkBuddy skill registry exceeds packaging limit')
+    records = json.loads(Path(registry_path).read_text(encoding='utf-8'))
+    if not isinstance(records, list) or len(records) > 40:
+        raise RuntimeError('WorkBuddy skill registry is invalid')
+    result = set()
+    for record in records:
+        name = record.get('name', '')
+        if not re.fullmatch(r'[a-z][a-z0-9-]{0,60}', name) or record.get('kind') != 'workflow_guide':
+            raise RuntimeError('WorkBuddy skill registry entry is invalid')
+        prefix = 'workbuddy/' + name + '/'
+        for value in [record.get('path', ''), *record.get('references', [])]:
+            if not isinstance(value, str) or not value.startswith(prefix) or '\\' in value or '..' in Path(value).parts:
+                raise RuntimeError('WorkBuddy skill resource path is invalid')
+            result.add(value)
+    return frozenset(result)
+
+
 def _is_development_only_path(path: Path, root: Path) -> bool:
     try:
         rel = path.resolve().relative_to(root.resolve())
     except Exception:
         return False
+    if rel in FORCE_PATCH_INCLUDE_FILES:
+        return False
     parts = tuple(part.lower() for part in rel.parts)
     if not parts:
         return False
-    if parts[0] in {".codex-audit", ".pytest_cache", "docs"} or parts[0].startswith(".patch-"):
+    if parts[0] in {".codex-audit", ".pytest_cache", "docs", ".deepcode", ".agents", ".codex", ".claude"} or parts[0].startswith(".patch-"):
         return True
     if parts[:2] == ("bin", "tests"):
         return True
@@ -1290,6 +1370,17 @@ def _is_development_only_path(path: Path, root: Path) -> bool:
     if parts[:3] == frontend and len(parts) > 3 and parts[3] not in {"data", "dist"}:
         return True
     name = path.name.lower()
+    if parts[:5] == ('bin', 'openclaw_service', 'assistant', 'openclaw', 'skills') and name == 'skill.md':
+        return False
+    if parts[:5] == ('bin', 'openclaw_service', 'assistant', 'openclaw', 'skills'):
+        registry = root / 'bin/openclaw_service/assistant/openclaw/skills/workbuddy-registry.json'
+        if registry.is_file():
+            stamp = registry.stat()
+            registered = _registered_skill_resources(str(registry.resolve()), stamp.st_mtime_ns, stamp.st_size)
+            if Path(*rel.parts[5:]).as_posix() in registered:
+                return False
+            if len(parts) > 5 and parts[5] == 'workbuddy' and path.is_file():
+                return True
     return (
         ".legacy_conflict_" in name
         or name == ".gitignore"
@@ -1307,6 +1398,10 @@ def _ignore_names(dirpath: str, names: list[str]) -> set[str]:
     base = Path(dirpath)
 
     for name in names:
+
+        if (base / name).resolve() == (PROJECT_ROOT / IMPORTED_SKILLS_DIR).resolve():
+            ignore.add(name)
+            continue
 
         if _is_development_only_path(base / name, PROJECT_ROOT):
 
@@ -1482,11 +1577,24 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_ai.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_sources.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_routes.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_appearance.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_widget.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_pending.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_scope.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_model.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_notice_sop.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_notice_identity.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_water.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_downloads.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_queries.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_stream.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_gateway.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_runtime.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_startup_log.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_openclaw.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_public.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_distribution.py",
+        PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_skills.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_routes.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_compare.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_auth.py",
@@ -1519,6 +1627,8 @@ def _run_packaging_preflight_tests() -> None:
             (PROJECT_ROOT / "bin" / "upload_event_module" / "ui").rglob("*.py")
         )
     )
+    py_targets.extend(sorted((PROJECT_ROOT / "bin/openclaw_service").rglob("*.py")))
+    py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_bridge.py")
     py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))
 
     if py_targets:
@@ -1568,11 +1678,45 @@ def _run_packaging_preflight_tests() -> None:
     log("通告 ID 边界测试通过。")
 
     subprocess.run(
-        [sys.executable, "-m", "unittest", "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_lighthouse_assistant", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope", "bin.test_lighthouse_stream", "bin.test_lighthouse_queries", "bin.test_lighthouse_api", "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows", "bin.test_lighthouse_business_matrix", "bin.test_lighthouse_reference_workflows", "bin.test_lighthouse_frontend_contracts"],
+        [sys.executable, "-m", "unittest",
+         "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud",
+         "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
+         "bin.test_lighthouse_stream", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
+         "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
+         "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls",
+         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes",
+         "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
+         "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",
+         "bin.test_lighthouse_mop_fields", "bin.test_lighthouse_mop_workflows", "bin.test_lighthouse_plan_workflows",
+         "bin.test_lighthouse_plan_rule_editor", "bin.test_lighthouse_daily_water_workflows", "bin.test_lighthouse_upload_fields",
+         "bin.test_lighthouse_notice_image_workflows", "bin.test_lighthouse_cabinet_text_workflows", "bin.test_lighthouse_cabinet_batch_actions",
+         "bin.test_lighthouse_cabinet_edit_fields", "bin.test_lighthouse_cabinet_edit_workflows", "bin.test_lighthouse_cabinet_proof_workflows",
+         "bin.test_lighthouse_interactive_intent", "bin.test_event_month_selection", "bin.test_lighthouse_reference_ids",
+         "bin.test_lighthouse_business_matrix", "bin.test_lighthouse_reference_workflows",
+         "bin.test_lighthouse_drill_configuration_fields", "bin.test_lighthouse_drill_configuration_workflows",
+         "bin.test_lighthouse_creation_fields", "bin.test_lighthouse_creation_workflows", "bin.test_lighthouse_drill_upload",
+         "bin.test_lighthouse_water_fields", "bin.test_lighthouse_water_workflows",
+         "bin.test_lighthouse_download_links", "bin.test_lighthouse_download_workflows", "bin.test_lighthouse_query_pages", "bin.test_lighthouse_question_bank",
+         "bin.test_lighthouse_question_materials", "bin.test_lighthouse_work_order_queries",
+         "bin.test_lighthouse_business_addresses", "bin.test_lighthouse_interactive_coverage",
+         "bin.test_lighthouse_dynamic_endpoints",
+         "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
+         "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
+         "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("画像学练与灯塔助手专项测试通过。")
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_openclaw_service", "bin.test_openclaw_service_client",
+         "bin.test_openclaw_service_launcher", "bin.test_openclaw_service_store", "bin.test_openclaw_service_update",
+         "bin.test_openclaw_backend_proxy", "bin.test_openclaw_packaging_imports",
+         "bin.test_openclaw_gateway_log",
+         "bin.test_openclaw_connection_pool", "bin.test_openclaw_plan_nonblocking",
+         "bin.test_openclaw_plan_io", "bin.test_openclaw_early_exit",
+         "bin.test_openclaw_portal_startup", "bin.test_openclaw_python_entry"], cwd=PROJECT_ROOT, check=True,
+    )
+    log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
 
     subprocess.run(
         [sys.executable, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_points_adapter"],
@@ -1584,7 +1728,7 @@ def _run_packaging_preflight_tests() -> None:
     subprocess.run(
         [sys.executable, "-m", "unittest", "bin.test_submission_reliability",
          "bin.test_event_remote_atomicity", "bin.test_notice_upload_reliability", "bin.test_notice_undo",
-         "bin.test_repair_snapshot_cache", "bin.test_process_lifetime"],
+         "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -1741,7 +1885,8 @@ def _should_force_include_in_patch(relative_path: Path) -> bool:
     norm = Path(str(relative_path).replace("\\", "/"))
 
     cabinet_templates = Path("bin/lan_bitable_template_portal/templates/cabinet_power")
-    return norm in FORCE_PATCH_INCLUDE_FILES or norm.is_relative_to(cabinet_templates)
+    return (norm in FORCE_PATCH_INCLUDE_FILES or norm.is_relative_to(cabinet_templates)
+            or norm.is_relative_to(Path("bin/openclaw_service")))
 
 
 def _include_frontend_generation(root: Path, patch_dir: Path) -> int:
@@ -2435,6 +2580,7 @@ def copy_project(dist_dir: Path) -> None:
 
             shutil.copy2(item, target)
 
+    _include_assistant_skills(PROJECT_ROOT, dist_dir)
     _assert_no_runtime_data_in_output(dist_dir, "完整构建产物")
     _assert_no_development_files_in_output(dist_dir, "完整构建产物")
 
@@ -2538,6 +2684,36 @@ def _detect_base_build_id(default_build_id: str) -> str:
 
 
 
+def _include_assistant_skills(root: Path, destination: Path) -> int:
+    """Keep approved resources byte-identical without long extracted paths."""
+    skills = root / IMPORTED_SKILLS_DIR.parent
+    registry = skills / "workbuddy-registry.json"
+    if not registry.is_file():
+        return 0
+    stamp = registry.stat()
+    resources = _registered_skill_resources(str(registry.resolve()), stamp.st_mtime_ns, stamp.st_size)
+    if not resources:
+        return 0
+    target = destination / IMPORTED_SKILLS_DIR.parent / "workbuddy.zip"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for relative in sorted(resources):
+            source = skills / relative
+            current = source
+            while current != skills:
+                if current.is_symlink() or current.is_junction():
+                    raise RuntimeError("Approved skill resource contains an external link")
+                current = current.parent
+            if not source.resolve().is_relative_to(skills.resolve()) or not source.is_file():
+                raise RuntimeError("Approved skill resource is missing")
+            if source.stat().st_size > 512 * 1024:
+                raise RuntimeError("Approved skill resource exceeds the reader limit")
+            archive.write(source, relative)
+    if target.stat().st_size > 20 * 1024 * 1024:
+        raise RuntimeError("Approved skill bundle exceeds the reader limit")
+    return len(resources)
+
+
 def build_patch(
 
     dist_dir: Path,
@@ -2615,6 +2791,9 @@ def build_patch(
     for src in current_files:
 
         rel = src.relative_to(PROJECT_ROOT)
+
+        if rel.is_relative_to(IMPORTED_SKILLS_DIR):
+            continue
 
         if rel.suffix.lower() == ".py":
 
@@ -2694,6 +2873,8 @@ def build_patch(
     if bundled_frontend_assets:
         log(f"已补齐当前前端资源: {bundled_frontend_assets} 个。")
 
+    _include_assistant_skills(PROJECT_ROOT, patch_dir)
+
     deleted = 0
 
     deleted_paths: list[str] = []
@@ -2717,6 +2898,12 @@ def build_patch(
 
                 deleted_paths.append(str(rel))
 
+
+    # Cumulative patches must also retire entries added after the base release.
+    for retired in ("启动程序openclaw.bat", "启动程序openclaw.py"):
+        if retired not in deleted_paths:
+            deleted_paths.append(retired)
+            deleted += 1
 
 
     manifest = patch_dir / "patch_manifest.txt"
@@ -2825,6 +3012,21 @@ def build_patch(
 
 
 
+
+
+def _ensure_lighthouse_distribution(python_exe):
+    spec = BIN_DIR / 'openclaw_service/assistant/openclaw/distribution.json'
+    if spec.is_file():
+        subprocess.run([str(python_exe), '-c',
+            "import json,sys;sys.path.insert(0,'bin');from lan_bitable_template_portal.lighthouse_distribution import SPEC,validate_spec;validate_spec(json.loads(SPEC.read_text(encoding='utf-8')))"],
+            cwd=PROJECT_ROOT, check=True)
+        log('灯塔助手固定依赖镜像清单校验通过（运行目录不进入补丁）。')
+        return
+    runtime = BUILD_DIR / 'lighthouse_openclaw'
+    subprocess.run([str(python_exe), str(BIN_DIR / 'tools/prepare_lighthouse_openclaw.py'), '--destination', str(runtime)],
+        cwd=PROJECT_ROOT, check=True)
+    subprocess.run([str(python_exe), str(BIN_DIR / 'tools/publish_lighthouse_runtime.py'), '--runtime', str(runtime),
+        '--output', str(BUILD_DIR / 'lighthouse_dependencies'), '--publish'], cwd=PROJECT_ROOT, check=True)
 
 
 def main() -> None:
@@ -3075,6 +3277,8 @@ def main() -> None:
     elif not build_python:
 
         log("未找到可用的打包解释器，跳过运行时依赖安装。")
+
+    _ensure_lighthouse_distribution(build_python or sys.executable)
 
     current_venv_hash = ""
 

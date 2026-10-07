@@ -9,7 +9,7 @@ import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -840,6 +840,20 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             self.assertEqual(document["registration_state"], "cancelled")
             self.assertEqual(document["operator_link"], "")
             self.assertEqual(manager.get_group(manager.target_record_id)["relay"]["operator_link"], "")
+
+    def test_cancelled_groups_do_not_repeat_reads_or_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / 'state.sqlite3')
+            manager = FakeWorkOrders(store)
+            clock = FakeClock()
+            connector = PollingWorkOrderRelayConnector(store, manager, config=_config(), transport=FakeRelayTransport(_config(), clock), clock=clock)
+            for public_id in ('', 'public-old'):
+                original = {'target_record_id': 'old', 'registration_state': 'cancelled', 'public_group_id': public_id}
+                store.put_document(POLLING_RELAY_GROUP_NAMESPACE, 'old', original)
+                with patch.object(manager, 'open_groups', return_value=[]), patch.object(manager, 'get_group', side_effect=AssertionError('terminal history must not be read again')), patch.object(store, 'put_document', side_effect=AssertionError('terminal history must not be rewritten')):
+                    for _ in range(3):
+                        self.assertEqual(connector.reconcile_groups()['cancelled'], 1)
+                        self.assertEqual(connector.cancel_registration('old', reason='local_terminal'), original)
 
 if __name__ == "__main__":
     unittest.main()

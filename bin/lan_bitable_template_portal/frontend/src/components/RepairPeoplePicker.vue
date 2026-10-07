@@ -1,5 +1,5 @@
 <template>
-  <div ref="rootRef" class="repair-people-picker">
+  <div ref="rootRef" class="repair-people-picker" @keydown.esc="closePickerOnEscape">
     <label class="repair-people-label" :for="inputId">{{ label }}</label>
 
     <div v-if="selectedPeople.length" class="repair-people-selected">
@@ -44,9 +44,10 @@
       <LoaderCircle v-if="loading" :size="16" class="spinning" aria-hidden="true" />
     </div>
 
+    <UiTransition name="ui-popover" appear>
     <div v-if="open" class="repair-people-popover">
       <div v-if="errorText" class="repair-people-state failed">{{ errorText }}</div>
-      <div v-else-if="loading && !results.length" class="repair-people-state">正在搜索</div>
+      <div v-else-if="loading && !results.length" class="repair-people-state" role="status"><LoadingIndicator>正在搜索</LoadingIndicator></div>
       <div v-else-if="!results.length" class="repair-people-state">未找到人员</div>
       <div v-else class="repair-people-results" role="listbox" aria-label="随工人员搜索结果">
         <button
@@ -76,13 +77,14 @@
           :disabled="loading"
           @click.stop="loadPeople(false)"
         >
-          {{ loading ? "加载中" : "加载更多人员" }}
+          <LoadingIndicator v-if="loading">加载中</LoadingIndicator><template v-else>加载更多人员</template>
         </button>
         <small v-if="peopleResultNote" class="repair-people-result-note">
           {{ peopleResultNote }}
         </small>
       </div>
     </div>
+    </UiTransition>
   </div>
 </template>
 
@@ -212,12 +214,14 @@ function moveActiveResult(direction: 1 | -1): void {
   }
 }
 
+function closePickerOnEscape(event: KeyboardEvent): void {
+  if (!open.value) return;
+  event.stopPropagation();
+  event.preventDefault();
+  open.value = false;
+}
+
 function handleSearchKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") {
-    event.stopPropagation();
-    open.value = false;
-    return;
-  }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     if (!open.value) openPicker();

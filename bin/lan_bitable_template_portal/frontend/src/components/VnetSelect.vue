@@ -53,11 +53,14 @@
       <ChevronDown :size="16" aria-hidden="true" />
     </button>
 
-    <Teleport to="body">
+    <Teleport :to="menuHost || 'body'">
+      <UiTransition name="ui-popover" appear>
       <div
         v-if="open"
         ref="menuRef"
         class="vnet-select-menu"
+        :popover="menuHost ? 'manual' : undefined"
+        :data-assistant-control="assistantControl ? 'true' : undefined"
         :style="menuStyle"
         @keydown="handleMenuKeydown"
       >
@@ -89,7 +92,7 @@
             class="vnet-select-option"
             :class="{ active: index === activeIndex, selected: option === modelValue }"
             :aria-selected="option === modelValue"
-            @mouseenter="activeIndex = index"
+            @pointermove="activeIndex = index"
             @click="selectOption(option)"
           >
             <span>{{ option }}</span>
@@ -98,6 +101,7 @@
           <div v-if="!filteredOptions.length" class="vnet-select-empty">没有匹配选项</div>
         </div>
       </div>
+      </UiTransition>
     </Teleport>
   </div>
 </template>
@@ -105,6 +109,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, ChevronDown, Search } from "lucide-vue-next";
+import { inheritedControlTheme } from "../controlTheme";
 
 const props = withDefaults(defineProps<{
   modelValue?: string;
@@ -116,6 +121,7 @@ const props = withDefaults(defineProps<{
   required?: boolean;
   error?: string;
   allowCustom?: boolean;
+  menuZIndex?: number;
 }>(), {
   modelValue: "",
   label: "",
@@ -136,13 +142,16 @@ const listboxId = `vnet-select-list-${instanceId}`;
 const rootRef = ref<HTMLElement | null>(null);
 const triggerRef = ref<HTMLButtonElement | HTMLInputElement | null>(null);
 const menuRef = ref<HTMLElement | null>(null);
+const menuHost = ref<HTMLElement | null>(null), assistantControl = ref(false);
 const searchRef = ref<HTMLInputElement | null>(null);
 const open = ref(false);
 const query = ref("");
 const activeIndex = ref(-1);
 const menuPosition = ref({ top: 0, left: 0, width: 220 });
+const menuTheme = ref<Record<string, string>>({});
 let positionFrame = 0;
 let globalListenersAttached = false;
+let restoringTriggerFocus = false;
 
 const normalizedOptions = computed(() => Array.from(new Set(
   props.options.map((item) => String(item || "").trim()).filter(Boolean),
@@ -160,9 +169,11 @@ const activeDescendant = computed(() => (
   open.value && activeIndex.value >= 0 ? optionId(activeIndex.value) : undefined
 ));
 const menuStyle = computed(() => ({
+  ...menuTheme.value,
   top: `${menuPosition.value.top}px`,
   left: `${menuPosition.value.left}px`,
   width: `${menuPosition.value.width}px`,
+  ...(props.menuZIndex == null ? {} : { zIndex: props.menuZIndex }),
 }));
 
 function optionId(index: number): string {
@@ -221,11 +232,15 @@ function initialActiveIndex(): number {
 
 async function showMenu(initialQuery = ""): Promise<void> {
   if (props.disabled || open.value) return;
+  menuTheme.value = inheritedControlTheme(rootRef.value);
+  menuHost.value = rootRef.value?.closest<HTMLElement>('.lighthouse-layer, dialog:modal') || null;
+  assistantControl.value = !!rootRef.value?.closest('.lighthouse');
   query.value = initialQuery;
   open.value = true;
   attachGlobalListeners();
   activeIndex.value = initialActiveIndex();
   await nextTick();
+  if (menuHost.value) menuRef.value?.showPopover?.();
   updatePosition();
   if (searchable.value) searchRef.value?.focus();
   else scrollActiveIntoView();
@@ -237,7 +252,11 @@ function closeMenu(focusTrigger = false): void {
   detachGlobalListeners();
   query.value = "";
   activeIndex.value = -1;
-  if (focusTrigger) nextTick(() => triggerRef.value?.focus());
+  if (focusTrigger) nextTick(() => {
+    restoringTriggerFocus = true;
+    try { triggerRef.value?.focus(); }
+    finally { restoringTriggerFocus = false; }
+  });
 }
 
 function toggle(): void {
@@ -246,7 +265,7 @@ function toggle(): void {
 }
 
 function openCustomMenu(): void {
-  if (!open.value) void showMenu();
+  if (!open.value && !restoringTriggerFocus) void showMenu();
 }
 
 async function handleCustomInput(event: Event): Promise<void> {
@@ -255,6 +274,7 @@ async function handleCustomInput(event: Event): Promise<void> {
   emit("change", value);
   query.value = value;
   if (!open.value && !props.disabled) {
+    menuTheme.value = inheritedControlTheme(rootRef.value);
     open.value = true;
     activeIndex.value = initialActiveIndex();
     await nextTick();
@@ -278,8 +298,9 @@ function handleCustomKeydown(event: KeyboardEvent): void {
   } else if (event.key === "Enter" && open.value) {
     event.preventDefault();
     selectActive();
-  } else if (event.key === "Escape") {
+  } else if (event.key === "Escape" && open.value) {
     event.preventDefault();
+    event.stopPropagation();
     closeMenu(true);
   }
 }
@@ -317,7 +338,9 @@ function handleTriggerKeydown(event: KeyboardEvent): void {
     if (event.key === "ArrowDown") moveActive(1);
     else if (event.key === "ArrowUp") moveActive(-1);
     else selectActive();
-  } else if (event.key === "Escape") {
+  } else if (event.key === "Escape" && open.value) {
+    event.preventDefault();
+    event.stopPropagation();
     closeMenu(true);
   }
 }
@@ -334,6 +357,7 @@ function handleMenuKeydown(event: KeyboardEvent): void {
     selectActive();
   } else if (event.key === "Escape") {
     event.preventDefault();
+    event.stopPropagation();
     closeMenu(true);
   }
 }
@@ -362,6 +386,7 @@ onBeforeUnmount(() => {
 .vnet-select {
   min-width: 0;
 }
+.vnet-select-menu[popover] { margin: 0; pointer-events: auto; }
 
 .vnet-combobox-control {
   width: 100%;
@@ -369,9 +394,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: stretch;
   overflow: hidden;
-  border: 1px solid #cbd8e8;
+  border: 1px solid var(--lh-input-border, #cbd8e8);
   border-radius: 8px;
-  background: #fff;
+  background: var(--lh-surface-subtle, #fff);
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
 
@@ -382,14 +407,14 @@ onBeforeUnmount(() => {
   outline: 0;
   padding: 0 11px;
   background: transparent;
-  color: #142b49;
+  color: var(--lh-charcoal, #142b49);
   font: inherit;
   font-size: 14px;
   font-weight: 500;
 }
 
 .vnet-combobox-control input::placeholder {
-  color: #8291a6;
+  color: var(--lh-faint-muted, #8291a6);
 }
 
 .vnet-combobox-toggle {
@@ -398,16 +423,16 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border: 0;
-  border-left: 1px solid #dbe5f1;
-  background: #f7faff;
-  color: #47709e;
+  border-left: 1px solid var(--lh-border, #dbe5f1);
+  background: var(--lh-surface-hover, #f7faff);
+  color: var(--lh-accent, #47709e);
   cursor: pointer;
 }
 
 .vnet-select.open .vnet-combobox-control,
 .vnet-combobox-control:focus-within {
-  border-color: #1e63ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.14);
+  border-color: var(--lh-accent, #1e63ff);
+  box-shadow: 0 0 0 3px var(--lh-accent-ring, rgba(30, 99, 255, 0.14));
 }
 
 .vnet-select.open .vnet-combobox-toggle svg {
@@ -415,12 +440,12 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select.invalid .vnet-combobox-control {
-  border-color: #e1495b;
+  border-color: var(--lh-danger, #e1495b);
 }
 
 .vnet-select.disabled .vnet-combobox-control {
-  background: #f3f6fa;
-  color: #8a99ac;
+  background: var(--lh-surface-subtle, #f3f6fa);
+  color: var(--lh-faint-muted, #8a99ac);
 }
 
 .vnet-combobox-control input:disabled,
@@ -435,11 +460,11 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border: 1px solid #cbd8e8;
+  border: 1px solid var(--lh-input-border, #cbd8e8);
   border-radius: 8px;
   padding: 0 10px 0 11px;
-  background: #fff;
-  color: #142b49;
+  background: var(--lh-surface-subtle, #fff);
+  color: var(--lh-charcoal, #142b49);
   font: inherit;
   font-size: 14px;
   font-weight: 500;
@@ -457,20 +482,20 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select-trigger .placeholder {
-  color: #8291a6;
+  color: var(--lh-faint-muted, #8291a6);
 }
 
 .vnet-select-trigger svg {
   flex: 0 0 auto;
-  color: #47709e;
+  color: var(--lh-accent, #47709e);
   transition: transform 160ms ease;
 }
 
 .vnet-select.open .vnet-select-trigger,
 .vnet-select-trigger:focus-visible {
-  border-color: #1e63ff;
+  border-color: var(--lh-accent, #1e63ff);
   outline: 0;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.14);
+  box-shadow: 0 0 0 3px var(--lh-accent-ring, rgba(30, 99, 255, 0.14));
 }
 
 .vnet-select.open .vnet-select-trigger svg {
@@ -478,22 +503,23 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select.invalid .vnet-select-trigger {
-  border-color: #e1495b;
+  border-color: var(--lh-danger, #e1495b);
 }
 
 .vnet-select-trigger:disabled {
   cursor: not-allowed;
-  background: #f3f6fa;
-  color: #8a99ac;
+  background: var(--lh-surface-subtle, #f3f6fa);
+  color: var(--lh-faint-muted, #8a99ac);
 }
 
 .vnet-select-menu {
   position: fixed;
   z-index: 2100;
   overflow: hidden;
-  border: 1px solid #c9d8eb;
+  border: 1px solid var(--lh-border-strong, #c9d8eb);
   border-radius: 10px;
-  background: #fff;
+  background: var(--lh-surface, #fff);
+  color: var(--lh-charcoal, #142b49);
   box-shadow: 0 16px 42px rgba(22, 58, 105, 0.2);
 }
 
@@ -503,15 +529,15 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 7px;
   margin: 7px;
-  border: 1px solid #d5e1ef;
+  border: 1px solid var(--lh-input-border, #d5e1ef);
   border-radius: 8px;
   padding: 0 9px;
-  color: #56708f;
+  color: var(--lh-muted, #56708f);
 }
 
 .vnet-select-search:focus-within {
-  border-color: #1e63ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
+  border-color: var(--lh-accent, #1e63ff);
+  box-shadow: 0 0 0 3px var(--lh-accent-ring, rgba(30, 99, 255, 0.12));
 }
 
 .vnet-select-search input {
@@ -520,7 +546,7 @@ onBeforeUnmount(() => {
   border: 0;
   outline: 0;
   background: transparent;
-  color: #142b49;
+  color: var(--lh-charcoal, #142b49);
   font: inherit;
   font-size: 13px;
 }
@@ -544,7 +570,7 @@ onBeforeUnmount(() => {
   border-radius: 7px;
   padding: 7px 9px;
   background: transparent;
-  color: #183353;
+  color: var(--lh-charcoal, #183353);
   font: inherit;
   font-size: 13px;
   text-align: left;
@@ -559,12 +585,12 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select-option.active {
-  background: #edf4ff;
+  background: var(--lh-surface-hover, #edf4ff);
 }
 
 .vnet-select-option.selected {
-  background: #e4efff;
-  color: #0b56bd;
+  background: var(--lh-accent-soft, #e4efff);
+  color: var(--lh-accent-strong, #0b56bd);
   font-weight: 700;
 }
 
@@ -581,12 +607,12 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select-legacy {
-  background: #fff7ed;
-  color: #9a4c10;
+  background: var(--lh-warn-soft, #fff7ed);
+  color: var(--lh-warn, #9a4c10);
 }
 
 .vnet-select-empty {
-  color: #6c7f96;
+  color: var(--lh-muted, #6c7f96);
   text-align: center;
 }
 </style>

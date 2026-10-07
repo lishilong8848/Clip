@@ -37,6 +37,7 @@
         :text="`最近刷新失败，当前仍显示上一次成功数据：${lastFailedError}`"
       />
       <EventStatsCards :cards="statCards" @select="openMetricRecords" />
+      <MessageBanner v-if="unknownTimeCount" tone="warning" :text="`${unknownTimeCount} 条记录缺少有效的事件发生时间，未计入所选月份。`" />
 
       <div class="event-work-surface" :class="{ detail: showingDetails }">
         <EventBuildingOverview
@@ -100,7 +101,7 @@
       </div>
 
       <div v-if="loading" class="event-empty">
-        <strong>正在读取事件数据</strong>
+        <strong><LoadingIndicator>正在读取事件数据</LoadingIndicator></strong>
       </div>
       <div v-else-if="!detailEvents.length" class="event-empty">
         <strong>本月暂无事件</strong>
@@ -116,6 +117,7 @@
       />
     </div>
 
+    <UiTransition name="ui-overlay" appear>
     <div v-if="metricModalKey" class="event-metric-backdrop" @click.self="closeMetricRecords">
       <section class="event-metric-dialog" role="dialog" aria-modal="true" :aria-label="metricModalTitle">
         <header>
@@ -128,7 +130,7 @@
         </header>
         <MessageBanner v-if="metricErrorText" tone="failed" :text="metricErrorText" />
         <div v-if="metricLoading" class="event-empty compact">
-          <strong>正在读取事件记录</strong>
+          <strong><LoadingIndicator>正在读取事件记录</LoadingIndicator></strong>
         </div>
         <div v-else-if="!metricFilteredRecords.length" class="event-empty compact">
           <strong>本月暂无对应记录</strong>
@@ -141,7 +143,9 @@
         />
       </section>
     </div>
+    </UiTransition>
 
+    <UiTransition name="ui-drawer" appear>
     <div v-if="selectedEvent" class="event-drawer-backdrop" @click.self="selectedEvent = null">
       <aside class="event-drawer">
         <header>
@@ -169,7 +173,7 @@
             :disabled="eventTransferBusy || eventTransferEnabled(selectedEvent)"
             @click="markSelectedEventTransferred"
           >
-            {{ eventTransferBusy ? "处理中" : eventTransferEnabled(selectedEvent) ? "已转检修" : "标记转检修" }}
+            <LoadingIndicator v-if="eventTransferBusy">处理中</LoadingIndicator><template v-else>{{ eventTransferEnabled(selectedEvent) ? "已转检修" : "标记转检修" }}</template>
           </button>
           <button type="button" class="btn primary" @click="openRepairManagementForSelectedEvent">
             填写/选择维修单
@@ -223,6 +227,7 @@
             </template>
           </dl>
         </section>
+        <NoticeAlertTags :record-id="eventRecordId(selectedEvent)" work-type="event" />
         <footer class="event-drawer-footer">
           <button type="button" class="btn primary" @click="openRepairManagementForScope">
             进入检修管理
@@ -230,12 +235,14 @@
         </footer>
       </aside>
     </div>
+    </UiTransition>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import {
   EVENT_BUILDING_SCOPE_CODES as BUILDING_SCOPE_CODES,
   EVENT_BUILDING_ORDER as BUILDING_ORDER,
@@ -267,6 +274,7 @@ import EventBuildingOverview from "./EventBuildingOverview.vue";
 import EventPriorityPanel from "./EventPriorityPanel.vue";
 import EventStatsCards from "./EventStatsCards.vue";
 import EventVirtualList from "./EventVirtualList.vue";
+import NoticeAlertTags from "./NoticeAlertTags.vue";
 import MessageBanner from "./MessageBanner.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 
@@ -298,6 +306,8 @@ const errorText = ref("");
 const events = ref<LooseDict[]>([]);
 const stats = ref<LooseDict>({});
 const overviewStats = ref<LooseDict>({});
+const overviewUnknownTimeCount = ref(0), detailUnknownTimeCount = ref(0);
+const unknownTimeCount = computed(() => showingDetails.value ? detailUnknownTimeCount.value : overviewUnknownTimeCount.value);
 const overviewBuildingStats = ref<LooseDict[]>([]);
 const lastRefreshedAt = ref(0);
 const lastFailed = ref<LooseDict>({});
@@ -603,7 +613,7 @@ async function loadMetricSourceRecords(): Promise<void> {
     }
     const responses = await Promise.allSettled(
       requestScopes.map(async (scope) => {
-        const params = new URLSearchParams({ scope, month: requestMonth });
+        const params = new URLSearchParams({ scope, month: requestMonth, date_field: "occurrence_time" });
         return requestJson(`/api/events/monthly?${params.toString()}`);
       }),
     );
@@ -804,16 +814,18 @@ async function loadEvents(): Promise<void> {
     if (loadVersion === eventLoadVersion) loading.value = false;
   }
 }
+usePageReadRefresh(url => ['/api/events/overview','/api/events/monthly'].includes(url.pathname) && url.searchParams.get('month') === selectedMonth.value, loadEvents, () => !loading.value && !refreshing.value);
 
 async function loadMonthlyEvents(
   scope: string,
   signal?: AbortSignal,
   loadVersion = eventLoadVersion,
 ): Promise<void> {
-  const params = new URLSearchParams({ scope, month: selectedMonth.value });
+  const params = new URLSearchParams({ scope, month: selectedMonth.value, date_field: "occurrence_time" });
   const payload = await requestJson(`/api/events/monthly?${params.toString()}`, { signal });
   if (loadVersion !== eventLoadVersion || signal?.aborted) return;
   events.value = Array.isArray(payload.records) ? payload.records : [];
+  detailUnknownTimeCount.value = Number(payload.unknown_time_count || 0);
   stats.value = payload.stats && typeof payload.stats === "object" ? payload.stats : {};
   lastRefreshedAt.value = Number(payload.last_refreshed_at || lastRefreshedAt.value || 0);
   lastFailed.value = payload.last_failed && typeof payload.last_failed === "object" ? payload.last_failed : {};
@@ -829,6 +841,7 @@ async function loadEventOverview(
   const payload = await requestJson(`/api/events/overview?${params.toString()}`, { signal });
   if (loadVersion !== eventLoadVersion || signal?.aborted) return;
   overviewStats.value = payload.stats && typeof payload.stats === "object" ? payload.stats : {};
+  overviewUnknownTimeCount.value = Number(payload.unknown_time_count || 0);
   overviewBuildingStats.value = Array.isArray(payload.building_stats) ? payload.building_stats : [];
   lastRefreshedAt.value = Number(payload.last_refreshed_at || lastRefreshedAt.value || 0);
   lastFailed.value = payload.last_failed && typeof payload.last_failed === "object" ? payload.last_failed : {};

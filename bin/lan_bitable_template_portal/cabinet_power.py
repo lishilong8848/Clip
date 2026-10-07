@@ -45,7 +45,7 @@ def layout_identity(config):
                  for rack in config.get("inventory",[]))
     return digest([rooms,racks])
 
-EXPORT_FORMAT_VERSION = 3
+EXPORT_FORMAT_VERSION = 4
 
 
 def export_snapshot(config,operations):

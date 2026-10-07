@@ -29,16 +29,14 @@
       </div>
       <div class="followup-conflict-actions">
         <button type="button" @click="copyCurrentFollowupDraft">复制当前填写</button>
-        <button type="button" class="primary" :disabled="loading" @click="reloadLatestFollowup">
-          {{ loading ? "读取中" : "读取最新内容" }}
-        </button>
+        <button type="button" class="primary" :disabled="loading" @click="reloadLatestFollowup"><LoadingIndicator v-if="loading">读取中</LoadingIndicator><template v-else>读取最新内容</template></button>
         <button type="button" @click="conflictState = null">稍后处理</button>
       </div>
     </section>
 
     <div v-if="!summaryRecordId" class="followup-empty">未选择维修项目</div>
     <div v-else-if="loading && !fields.length" class="followup-empty" aria-live="polite">
-      正在读取当前维修项目的跟进记录...
+      <LoadingIndicator>正在读取当前维修项目的跟进记录...</LoadingIndicator>
     </div>
     <div v-else class="followup-workspace">
       <aside class="followup-timeline" aria-label="跟进记录时间线">
@@ -63,7 +61,7 @@
           </button>
         </div>
         <div class="followup-timeline-list" role="listbox" aria-label="选择跟进记录">
-          <div v-if="loading && !timelineRecords.length" class="followup-empty">正在读取...</div>
+          <div v-if="loading && !timelineRecords.length" class="followup-empty"><LoadingIndicator>正在读取...</LoadingIndicator></div>
           <div v-else-if="!timelineRecords.length" class="followup-empty">暂无匹配的跟进记录</div>
           <button
             v-for="record in timelineRecords"
@@ -112,6 +110,13 @@
           </div>
           <button v-if="!readOnly" type="button" class="followup-button quiet" :disabled="saving" @click="openCmdbPicker">
             {{ cmdbRecordIds.length ? "重新选择" : "选择设备" }}
+          </button>
+        </div>
+
+        <div v-show="!readOnly || Boolean(editingRecordId)" class="cmdb-line">
+          <div><b>台账设备（可多选）</b><span>{{ selectedLedgerLabel }}</span></div>
+          <button v-if="!readOnly" type="button" class="followup-button quiet" :disabled="saving" @click="ledgerPickerOpen = true">
+            {{ ledgerDeviceIds.length ? '重新选择台账设备' : '选择台账设备' }}
           </button>
         </div>
 
@@ -231,6 +236,9 @@
       @resolve="resolveDiscardConfirmation"
     />
 
+    <RepairLedgerPicker :open="ledgerPickerOpen" :scope="scope" :selected-ids="ledgerDeviceIds" :selected-records="ledgerDevices"
+      @close="ledgerPickerOpen = false" @confirm="confirmLedger" />
+
     <RecordPickerDialog
       :open="bindPickerOpen"
       title="绑定已有跟进记录"
@@ -317,6 +325,12 @@ import {
   repairDraftInputValue,
   repairDisplayTime,
   repairFieldUsesTextarea,
+  repairModelsForBrand,
+  resolveRepairDeviceCatalog,
+  REPAIR_SUPPLIER_FIELDS as SUPPLIER_FIELD_NAMES,
+  REPAIR_SPARE_PART_FIELDS as SPARE_PART_FIELD_NAMES,
+  repairFollowupFieldDisabled,
+  repairFollowupFieldPlaceholder,
 } from "../repairManagementUtils";
 import {
   clearRepairFollowupCache,
@@ -329,6 +343,7 @@ import MessageBanner from "./MessageBanner.vue";
 import RecordPickerDialog from "./RecordPickerDialog.vue";
 import RepairFieldControl from "./RepairFieldControl.vue";
 import RepairPeoplePicker from "./RepairPeoplePicker.vue";
+import RepairLedgerPicker from "./RepairLedgerPicker.vue";
 
 const props = withDefaults(defineProps<{
   scope: string;
@@ -371,13 +386,11 @@ const DEVICE_NUMBER_FIELD_NAME = "设备编号";
 const BRAND_FIELD_NAME = "设备品牌";
 const MODEL_FIELD_NAME = "设备型号";
 const REPAIR_PARTY_FIELD_NAME = "维修方";
-const SUPPLIER_FIELD_NAMES = new Set(["供应商名称", "供应商维修人员"]);
 const WORKER_FIELD_NAME = "随工人员（我方维修人员）";
 const DEVICE_PRODUCTION_DATE_FIELD_NAME = "设备生产日期";
 const DEVICE_USAGE_YEARS_FIELD_NAME = "设备使用年限";
 const DEVICE_CAPACITY_FIELD_NAME = "设备容量KW/AH";
 const EVENT_EMERGENCY_FIELD_NAME = "事件应急措施";
-const SPARE_PART_FIELD_NAMES = new Set(["更换备件名称", "更换备件数量"]);
 const DEFAULT_FOLLOWUP_FIELD_VALUES: Record<string, string> = {
   [DEVICE_PRODUCTION_DATE_FIELD_NAME]: "2021-03-31T00:00",
   [DEVICE_USAGE_YEARS_FIELD_NAME]: "4",
@@ -443,6 +456,21 @@ const cmdbPickerMessageTone = ref<"info" | "success" | "warning" | "error">("inf
 const cmdbCanForceRefresh = ref(false);
 const cmdbCacheRefreshing = ref(false);
 const cmdbRecordIds = ref<string[]>([]);
+const ledgerPickerOpen = ref(false), ledgerDeviceIds = ref<string[]>([]), ledgerDevices = ref<LooseDict[]>([]);
+const selectedLedgerLabel = computed(() => {
+  if (!ledgerDeviceIds.value.length) return '未选择';
+  const labels = ledgerDeviceIds.value.slice(0, 3).map(id => {
+    const item = ledgerDevices.value.find(row => row.record_id === id);
+    return [item?.['设备编号'], item?.['设备名称']].filter(Boolean).join(' ') || id;
+  });
+  return `${labels.join('、')}${ledgerDeviceIds.value.length > 3 ? ` 等 ${ledgerDeviceIds.value.length} 台` : ''}`;
+});
+function confirmLedger(ids: string[], rows: LooseDict[]): void {
+  if (props.readOnly || saving.value) return;
+  const changed = JSON.stringify([...ids].sort()) !== JSON.stringify([...ledgerDeviceIds.value].sort());
+  ledgerDeviceIds.value = [...ids]; ledgerDevices.value = rows; ledgerPickerOpen.value = false;
+  if (changed) setDirty(true);
+}
 const bindPickerOpen = ref(false);
 const bindLoading = ref(false);
 const binding = ref(false);
@@ -546,6 +574,7 @@ const selectedModelOptions = computed(() => {
 });
 const hasDraftContent = computed(() => Boolean(
   cmdbRecordIds.value.length
+  || ledgerDeviceIds.value.length
   || workerPeople.value.length
   || editableFields.value.some((field) => {
     const fieldName = String(field.field_name || "");
@@ -694,13 +723,8 @@ function isWorkerField(field: LooseDict): boolean {
   return String(field.field_name || "") === WORKER_FIELD_NAME;
 }
 
-function isSupplierField(field: LooseDict): boolean {
-  return SUPPLIER_FIELD_NAMES.has(String(field.field_name || ""));
-}
-
 function isFollowupFieldDisabled(field: LooseDict): boolean {
-  if (isModelField(field) && !selectedBrand.value) return true;
-  return isSupplierField(field) && isInternalRepairParty.value;
+  return repairFollowupFieldDisabled(String(field.field_name || ""), draft);
 }
 
 function normalizeWorkerPeople(value: unknown): LooseDict[] {
@@ -729,59 +753,20 @@ function normalizeWorkerPeople(value: unknown): LooseDict[] {
   return result;
 }
 
-function splitDeviceNames(value: unknown): string[] {
-  return Array.from(new Set(
-    String(value || "")
-      .split(/[、,，;；\r\n]+/)
-      .map((item) => item.trim())
-      .filter(Boolean),
-  ));
-}
-
-function normalizedCatalogKey(value: unknown): string {
-  return String(value || "").replace(/\s+/g, "").toLocaleLowerCase();
-}
-
 function resolveDeviceCatalog(value: unknown): {
   matched: boolean;
   brandModels: Record<string, string[]>;
 } {
-  const deviceNames = splitDeviceNames(value);
-  if (!deviceNames.length) return { matched: false, brandModels: {} };
-  const catalogEntries = Object.entries(deviceBrandModelOptions.value);
-  const merged: Record<string, string[]> = {};
-  let matched = false;
-  for (const deviceName of deviceNames) {
-    const direct = deviceBrandModelOptions.value[deviceName];
-    const brandModels = direct || catalogEntries.find(
-      ([catalogName]) => normalizedCatalogKey(catalogName) === normalizedCatalogKey(deviceName),
-    )?.[1];
-    if (!brandModels || typeof brandModels !== "object") continue;
-    matched = true;
-    for (const [brand, models] of Object.entries(brandModels)) {
-      if (!Array.isArray(models)) continue;
-      const mergedModels = merged[brand] || [];
-      for (const model of models) {
-        const normalizedModel = String(model || "").trim();
-        if (normalizedModel && !mergedModels.includes(normalizedModel)) {
-          mergedModels.push(normalizedModel);
-        }
-      }
-      if (mergedModels.length) merged[brand] = mergedModels;
-    }
-  }
-  return { matched, brandModels: merged };
+  return resolveRepairDeviceCatalog(value, deviceBrandModelOptions.value);
 }
 
 function modelsForBrand(brand: unknown, deviceValue: unknown): string[] {
-  const normalizedBrand = String(brand || "").trim();
-  if (!normalizedBrand) return [];
-  const deviceCatalog = resolveDeviceCatalog(deviceValue);
-  const source = deviceCatalog.matched
-    ? deviceCatalog.brandModels
-    : brandModelOptions.value;
-  const models = source[normalizedBrand];
-  return Array.isArray(models) ? models : [];
+  return repairModelsForBrand(
+    brand,
+    deviceValue,
+    deviceBrandModelOptions.value,
+    brandModelOptions.value,
+  );
 }
 
 function reconcileDeviceBrandModelSelection(deviceValue: unknown): void {
@@ -814,12 +799,7 @@ function selectOptionsForField(field: LooseDict): string[] | null {
 }
 
 function fieldPlaceholder(field: LooseDict): string {
-  if (isSupplierField(field) && isInternalRepairParty.value) {
-    return "维修方为我方，无需填写";
-  }
-  if (!isModelField(field)) return "";
-  if (!selectedBrand.value) return "请先选择设备品牌";
-  return "选择或输入设备型号";
+  return repairFollowupFieldPlaceholder(String(field.field_name || ""), draft);
 }
 
 function fieldLabel(fieldName: unknown): string {
@@ -960,6 +940,7 @@ function startCreate(): void {
   editingRecordId.value = "";
   selectedRecord.value = null;
   cmdbRecordIds.value = [];
+  ledgerDeviceIds.value = []; ledgerDevices.value = []; ledgerPickerOpen.value = false;
   clearDraft();
   applyNewFollowupDefaults();
   setDirty(false);
@@ -980,6 +961,9 @@ function selectRecord(record: LooseDict): void {
   creatingNewFollowup.value = false;
   editingRecordId.value = String(record.record_id || "");
   selectedRecord.value = record;
+  ledgerDeviceIds.value = Array.isArray(record.ledger_device_ids) ? [...record.ledger_device_ids] : [];
+  ledgerDevices.value = Array.isArray(record.ledger_devices) ? record.ledger_devices : [];
+  ledgerPickerOpen.value = false;
   cmdbRecordIds.value = Array.isArray(record.cmdb_record_ids)
     ? Array.from(new Set(record.cmdb_record_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)))
     : [];
@@ -1078,6 +1062,7 @@ function resetForParent(): void {
   followupFocusRecordId.value = "";
   selectedRecord.value = null;
   cmdbRecordIds.value = [];
+  ledgerDeviceIds.value = []; ledgerDevices.value = []; ledgerPickerOpen.value = false;
   message.value = "";
   clearDraft();
   setDirty(false);
@@ -1364,6 +1349,8 @@ function applySavedFollowupRecord(
     raw_fields: rawFields,
     display_fields: displayFields,
     cmdb_record_ids: cmdbRecordIds.value.slice(),
+    ledger_device_ids: ledgerDeviceIds.value.slice(),
+    ledger_devices: ledgerDevices.value.slice(),
     record_version: recordVersion || String(existing.record_version || ""),
   };
   const existingIndex = records.value.findIndex(
@@ -1420,6 +1407,7 @@ async function saveRecord(): Promise<void> {
       scope: props.scope || "ALL",
       summary_record_id: props.summaryRecordId,
       cmdb_record_ids: cmdbRecordIds.value,
+      ledger_device_ids: ledgerDeviceIds.value,
       fields: buildFields(),
     };
     const body = JSON.stringify({
@@ -1885,6 +1873,7 @@ watch(
   (readOnly) => {
     if (!readOnly) return;
     cmdbPickerOpen.value = false;
+    ledgerPickerOpen.value = false;
     deleteDialogOpen.value = false;
     discardDialogOpen.value = false;
     pendingDiscardAction = null;

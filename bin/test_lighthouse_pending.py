@@ -1,11 +1,15 @@
 """Isolated unfinished-work checks. No live data or cloud writes."""
+import asyncio
 import copy
+import gc
+import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi import FastAPI, Request
@@ -19,6 +23,12 @@ ACTOR = {"id": "fixture-a", "scopes": ["A"], "is_admin": False}
 
 
 class PendingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_learning_without_permission_is_not_zero(self):
+        with self.assertRaises(AssistantError) as error:
+            await collect_pending(ACTOR, 'A楼学练还有多少未答题', self.invoke, self.cached, groups_only={'learning'})
+        self.assertEqual(error.exception.status, 403)
+        self.assertEqual(self.calls, [])
+
     def setUp(self):
         self.calls = []
         self.rows = [{"record_id": "n" + str(i), "title": "A楼旧维保" + str(i), "scope": "A", "status": "进行中", "work_type": "maintenance", "start_time": "2025-09-01"} for i in range(41)]
@@ -39,10 +49,10 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
             data = {"items": [{"batch_id": "b1", "scopes": ["A"], "title": "A楼图片批次", "is_todo": True, "pending_rows": 2}], "total": 1}
         elif api == "GET /api/drills":
             data = {"items": [{"drill_id": "d1", "name": "演练", "status": "published", "execution": {"status": "completed"}}]}
-        elif api == "GET /api/learning/papers":
-            data = {"items": [{"id": "l1", "date": "2026-10-01", "scope": "A", "status": "completed"}], "total": 100}
         elif api == "GET /api/critical-guard/tasks":
             data = {"tasks": []}
+        elif api == 'GET /api/learning/papers':
+            data = {'items': [{'id': 'learning_' + params['scope'], 'date': '2026-10-03', 'scope': params['scope'], 'status': 'pending', 'stats': {'total': 10, 'answered': 3}}], 'total': 1}
         else:
             raise AssertionError("Unexpected API " + api)
         # The public samples are deliberately truncated: counting must use raw API data.
@@ -62,7 +72,8 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(groups["notices"]["remaining"], 32)
         self.assertEqual(groups["repairs"]["count"], 1)
         self.assertEqual(groups["repairs"]["items"][0]["status"], "未开始")
-        self.assertEqual(groups["learning"]["count"], 0)
+        self.assertNotIn("learning", groups)
+        self.assertFalse([c for c in self.calls if "learning" in c["api_id"]])
         self.assertEqual(groups["drills"]["count"], 0)
         board = [call for call in self.calls if call["api_id"] == "GET /api/workbench" and call["params"].get("sections") == "ongoing"]
         self.assertEqual([call["params"]["ongoing_page"] for call in board], [1, 2, 3])
@@ -74,7 +85,28 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("未命名事件", reply)
         self.assertIn("不相加为独立工作总数", reply)
 
-    async def test_pending_plans_and_unanswered_papers_are_included_without_duplicate_started_plan(self):
+    async def test_unassigned_repair_is_not_a_complete_count_or_a_scope_guess(self):
+        async def invoke(operation):
+            result = await self.invoke(operation)
+            if operation['api_id'] == 'GET /api/repair-management/records':
+                result['_raw']['records'].append({'record_id': 'unassigned', 'title': '未填写楼栋的项目',
+                    'is_completed': False, 'workflow': '维修中'})
+                result['_raw']['total'] += 1
+            return result
+        actor = {**ACTOR, 'scopes': ['110', 'A', 'B', 'C', 'D', 'E', 'H']}
+        data = await collect_pending(actor, '现在未完成的维修项目', invoke, self.cached, groups_only={'repairs'})
+        group = data['groups'][0]
+        self.assertFalse(group['available'])
+        self.assertIsNone(group['count'])
+        self.assertEqual(group['known_count'], 1)
+        self.assertEqual([row['id'] for row in group['items']], ['r1'])
+        self.assertIn('楼栋', '；'.join(group['warnings']))
+        reply = pending_reply(data, details=False)
+        self.assertIn('已核对 1', reply)
+        self.assertNotIn('未填写楼栋的项目', reply)
+        self.assertNotIn('为 **0', reply)
+
+    async def test_pending_plans_are_included_without_duplicate_started_plan(self):
         self.rows[0]["source_record_id"] = "started"
         async def more(op):
             result = await self.invoke(op)
@@ -82,19 +114,27 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                 result["_raw"].update(records=[
                     {"record_id": "started", "scope": "A", "work_type": "maintenance", "source_progress": "未开始", "title": "已开始的计划"},
                     {"record_id": "new", "scope": "A", "work_type": "maintenance", "source_progress": "未开始", "title": "尚未发送计划"}], records_pagination={"total": 2})
-            if op["api_id"] == "GET /api/learning/papers":
-                self.assertEqual(op["params"]["today"], "1")
-                result["_raw"]["items"][0].update(status="pending", stats={"total": 10, "answered": 4})
             return result
         progress = []
         async def emit(label): progress.append(label)
         data = await collect_pending(ACTOR, "今天未结束的工作有哪些", more, self.cached, on_progress=emit)
         groups = {row["key"]: row for row in data["groups"]}
         self.assertEqual(groups["plans"]["count"], 1)
-        self.assertEqual(groups["learning"]["count"], 1)
-        self.assertIn("6 / 10", groups["learning"]["items"][0]["status"])
+        self.assertNotIn("learning", groups)
         self.assertIn("尚未发送计划", pending_reply(data))
-        self.assertTrue(any("学练" in step for step in progress))
+        self.assertFalse(any("学练" in step for step in progress))
+        self.assertFalse([call for call in self.calls if "learning" in call["api_id"]])
+
+    async def test_only_ongoing_notice_count_does_not_query_other_modules(self):
+        data = await collect_pending(ACTOR, '今天有多少条进行中的通告', self.invoke, self.cached, groups_only={'notices'})
+        self.assertEqual({call['api_id'] for call in self.calls}, {'GET /api/workbench'})
+        self.assertTrue(all(call['params']['sections'] == 'ongoing' for call in self.calls))
+        reply = pending_reply(data, details=False)
+        self.assertIn('42 条', reply)
+        self.assertIn('维保 41 条', reply)
+        self.assertNotIn('未完成工作', reply)
+        self.assertNotIn('维修项目', reply)
+        self.assertNotIn('学练', reply)
 
     async def test_user_benchmark_250_plans_7_ongoing_and_per_type_counts(self):
         plans = [{"record_id": f"p{i}", "scope": "A", "source_progress": "未开始", "title": f"隔离计划{i}",
@@ -117,15 +157,11 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(groups["plans"]["type_counts"]["检修"], 1)
         self.assertEqual(groups["notices"]["type_counts"]["检修"], 5)
 
-    async def test_unpublished_is_not_completed_or_unanswered(self):
-        async def unpublished(op):
-            self.assertEqual(op["api_id"], "GET /api/learning/papers")
-            return {"ok": True, "_raw": {"items": [], "total": 0}}
-        data = await collect_pending(ACTOR, "未答题", unpublished, self.cached, groups_only={"learning"})
-        self.assertEqual(data["groups"][0]["count"], 0)
-        self.assertEqual(data["learning_not_published_scopes"], ["A"])
-        self.assertIn("尚未发布", pending_reply(data))
-        self.assertNotIn("全部完成", pending_reply(data))
+    async def test_learning_scopes_never_queried_or_included_in_pending(self):
+        data = await collect_pending(ACTOR, "未答题", self.invoke, self.cached)
+        self.assertNotIn("learning", {row["key"] for row in data["groups"]})
+        self.assertFalse([c for c in self.calls if "learning" in c["api_id"]])
+        self.assertNotIn("学练", pending_reply(data))
 
     async def test_partial_failure_and_broken_paging_are_unknown_not_zero(self):
         async def broken(op):
@@ -188,13 +224,58 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         records = [{"record_id": "event1", "display_fields": {"告警描述": "A楼冷水机组故障", "机楼": "A楼", "最终状态": "进行中"}},
                    {"record_id": "closed", "display_fields": {"告警描述": "A楼已闭环转检修", "机楼": "A楼", "最终状态": "检修中", "事件目前进展": "事件闭环"}},
                    {"record_id": "secret-b", "display_fields": {"告警描述": "B楼故障", "机楼": "B楼", "最终状态": "进行中"}}]
-        service._load_repair_management_event_records = Mock(return_value=([], {}, records))
-        store = SimpleNamespace(get_repair_snapshot_meta=lambda _: {"exists": True}, list_visible_qt_active_items=lambda: [])
-        rows, warnings = cached_items("events", ["A"], SimpleNamespace(service=service, state_store=store))
+        service._load_repair_management_event_records = Mock()
+        service._event_source_config = Mock(return_value=("app", "events_table", "event_notice"))
+        service._repair_snapshot_requires_workflow_refresh = Mock(return_value=False)
+        service._repair_snapshot_from_local = Mock(return_value=([], {}, records))
+        snapshot = {"status": "active", "refreshed_at": time.time(), "app_token": "app",
+                    "table_id": "events_table", "fields": [], "records": records}
+        store = SimpleNamespace(get_repair_snapshot_meta=lambda _: {"exists": True},
+                                get_repair_snapshot=lambda _: snapshot,
+                                list_visible_qt_active_items=lambda: [])
+        result = cached_items("events", ["A"], SimpleNamespace(service=service, state_store=store))
+        self.assertEqual(len(result), 3)
+        rows, warnings, metadata = result
+        service._load_repair_management_event_records.assert_not_called()
         self.assertEqual(warnings, [])
         self.assertEqual([row["id"] for row in rows], ["event1"])
         self.assertEqual(rows[0]["title"], "A楼冷水机组故障")
         self.assertEqual(rows[0]["scopes"], ["A"])
+        self.assertEqual(metadata['source_freshness'][0]['last_cloud_sync_at'], snapshot['refreshed_at'])
+
+    async def test_cached_event_provenance_survives_bridge_json_and_zero_counts(self):
+        stamp = 1750000000
+        freshness = {'kind': 'local_cache', 'last_cloud_sync_at': stamp, 'includes_qt_changes': True}
+        for items in ([{'id': 'event-local', 'title': '缓存事件', 'scopes': ['A'], 'status': '处理中'}], []):
+            loaded = json.loads(json.dumps((items, [], {'source_freshness': [freshness]})))
+            data = await collect_pending(ACTOR, '未闭环事件', self.invoke, lambda *_: loaded, groups_only={'events'})
+            group = data['groups'][0]
+            self.assertTrue(group['available'])
+            self.assertEqual(group['count'], len(items))
+            self.assertEqual(group['source_freshness'], [freshness])
+            reply = pending_reply(data)
+            self.assertIn('本机已知记录', reply)
+            self.assertIn('2025-06-15 23:06:40', reply)
+            self.assertIn('未重新同步云端', reply)
+            self.assertNotIn('当前**', reply)
+        self.assertEqual(self.calls, [])
+
+    def test_events_stale_empty_snapshot_is_unknown_not_zero(self):
+        from lan_bitable_template_portal.portal_service import MaintenancePortalService
+        service = MaintenancePortalService.__new__(MaintenancePortalService)
+        service._event_source_config = Mock(return_value=("app", "events_table", "event_notice"))
+        service._repair_snapshot_requires_workflow_refresh = Mock(return_value=False)
+        service._repair_snapshot_from_local = Mock()
+        snapshot = {"status": "active", "refreshed_at": 0.0, "app_token": "app",
+                    "table_id": "events_table", "fields": [], "records": []}
+        store = SimpleNamespace(get_repair_snapshot_meta=lambda _: {"exists": True},
+                                get_repair_snapshot=lambda _: snapshot,
+                                list_visible_qt_active_items=lambda: [])
+        service._load_repair_management_event_records = Mock()
+        with self.assertRaises(AssistantError) as error:
+            cached_items("events", ["A"], SimpleNamespace(service=service, state_store=store))
+        self.assertEqual(error.exception.status, 503)
+        service._load_repair_management_event_records.assert_not_called()
 
     # ---- 重保守卫统计（collect_pending.guard + guard_reply）----
     @staticmethod
@@ -390,44 +471,226 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("暂无法确认", reply)
         self.assertNotIn("当前重保任务", reply)
 
-    # ---- 学习楼栋权限：learning_scopes 交集 ----
-    def _learning_runner(self, papers_by_scope):
+    async def test_learning_pending_only_reads_own_building_for_broad_h_account(self):
+        actor = {"id": "h", "scopes": ["A", "B", "C", "D", "E", "H"],
+                 "learning_scopes": ["H"], "is_admin": False}
+        data = await collect_pending(actor, "学练未答题", self.invoke, self.cached, groups_only={'learning'})
+        self.assertEqual(data['groups'][0]['count'], 1)
+        self.assertEqual(data['groups'][0]['items'][0]['status'], '待答 7 题')
+        learning_calls = [call for call in self.calls if "learning" in call["api_id"]]
+        self.assertEqual([call['params']['scope'] for call in learning_calls], ['H'])
+        self.assertTrue(all(call['api_id'].startswith('GET ') for call in self.calls))
+
+    async def test_learning_unpublished_is_not_zero_unanswered(self):
+        async def unpublished(op):
+            self.assertEqual(op['api_id'], 'GET /api/learning/papers')
+            return {'ok': True, '_raw': {'items': [], 'total': 0}}
+        data = await collect_pending({**ACTOR, 'learning_scopes': ['A']}, '学练', unpublished, self.cached, groups_only={'learning'})
+        self.assertIn('未发布', pending_reply(data))
+        self.assertEqual(data['groups'][0]['stats']['unpublished_scopes'], ['A'])
+
+
+    async def test_slow_early_module_does_not_block_guard_learning_and_order_is_stable(self):
+        notices_blocked = asyncio.Event()
+        guard_started, learning_started = asyncio.Event(), asyncio.Event()
+        actor = {**ACTOR, "learning_scopes": ["A"]}
+
+        async def invoke(op):
+            api = op["api_id"]
+            params = op.get("params") or {}
+            if api == "GET /api/workbench" and params.get("sections") == "ongoing":
+                await notices_blocked.wait()
+                return {"ok": True, "_raw": {"source_snapshot_ready": True, "ongoing": [], "ongoing_pagination": {"total": 0}}}
+            if api == "GET /api/workbench" and params.get("sections") == "records":
+                return {"ok": True, "_raw": {"source_snapshot_ready": True, "records": [], "records_pagination": {"total": 0}}}
+            if api == "GET /api/critical-guard/tasks":
+                guard_started.set()
+                return {"ok": True, "_raw": {"tasks": []}}
+            if api == "GET /api/learning/papers":
+                learning_started.set()
+                return {"ok": True, "_raw": {"items": [], "total": 0}}
+            raise AssertionError("Unexpected API " + api)
+
+        task = asyncio.ensure_future(collect_pending(actor, "未完成", invoke, self.cached,
+                                                     groups_only={"notices", "guard", "learning"}))
+        await asyncio.wait_for(asyncio.gather(guard_started.wait(), learning_started.wait()), timeout=2)
+        notices_blocked.set()
+        data = await asyncio.wait_for(task, timeout=2)
+        keys = [group["key"] for group in data["groups"]]
+        self.assertEqual(keys, ["notices", "guard", "learning"])
+        guard = next(group for group in data["groups"] if group["key"] == "guard")
+        self.assertTrue(guard["available"])
+        self.assertEqual(guard["stats"]["task_count"], 0)
+        learning = next(group for group in data["groups"] if group["key"] == "learning")
+        self.assertTrue(learning["available"])
+        self.assertEqual(learning["stats"]["unpublished_scopes"], ["A"])
+
+    async def test_notices_plans_share_ongoing_paging_once(self):
+        ongoing_calls = []
+
         async def invoke(op):
             api, params = op["api_id"], op.get("params") or {}
-            if api == "GET /api/learning/papers":
-                papers = papers_by_scope.get(params.get("scope"), [])
-                return {"ok": True, "status": 200, "data": {"items": []}, "_raw": {"items": papers, "total": len(papers)}}
+            if api == "GET /api/workbench":
+                if params.get("sections") == "ongoing":
+                    page = int(params.get("ongoing_page", 1))
+                    ongoing_calls.append(page)
+                    rows = [{"record_id": "n%d" % i, "scope": "A", "status": "进行中", "work_type": "maintenance"}
+                            for i in range(25)]
+                    page_rows = rows[(page - 1) * 20: page * 20]
+                    return {"ok": True, "_raw": {"source_snapshot_ready": True, "ongoing": page_rows,
+                                                 "ongoing_pagination": {"total": 25, "has_more": page * 20 < 25}}}
+                return {"ok": True, "_raw": {"source_snapshot_ready": True, "records": [], "records_pagination": {"total": 0}}}
             raise AssertionError("Unexpected API " + api)
-        return invoke
 
-    async def test_learning_no_permission_is_not_zero(self):
-        actor = {"id": "p", "scopes": ["A", "B"], "learning_scopes": [], "is_admin": False}
-        data = await collect_pending(actor, "全部学练", self.invoke, self.cached, groups_only={"learning"})
-        self.assertTrue(data["learning_no_permission"])
-        self.assertEqual(data["learning_checked_scopes"], [])
-        self.assertIsNone(data["groups"][0]["count"])
-        self.assertFalse(data["groups"][0]["available"])
-        self.assertFalse([c for c in self.calls if c["api_id"] == "GET /api/learning/papers"])
-        reply = pending_reply(data)
-        self.assertIn("无权限", reply)
-        self.assertNotIn("0 项", reply)
+        data = await collect_pending(ACTOR, "未完成", invoke, self.cached, groups_only={"notices", "plans"})
+        self.assertEqual(len(ongoing_calls), 2)
+        self.assertEqual(sorted(ongoing_calls), [1, 2])
+        groups = {group["key"]: group for group in data["groups"]}
+        self.assertEqual(groups["notices"]["count"], 25)
+        self.assertEqual(groups["plans"]["count"], 0)
 
-    async def test_learning_H_duty_generic_all_queries_only_H(self):
-        actor = {"id": "h", "scopes": ["A", "B", "C", "D", "E", "H"], "learning_scopes": ["H"], "is_admin": False}
-        data = await collect_pending(actor, "全部学练", self.invoke, self.cached, groups_only={"learning"})
-        self.assertEqual(data["learning_checked_scopes"], ["H"])
-        scopes = [c["params"]["scope"] for c in self.calls if c["api_id"] == "GET /api/learning/papers"]
-        self.assertEqual(scopes, ["H"])
-        reply = pending_reply(data)
-        self.assertIn("学练实际查询范围：H楼（按账号授权）", reply)
+    async def test_bounded_timeout_marks_hung_cached_unknown(self):
+        import bin.openclaw_service.assistant.lighthouse_pending as lp
+        captured = {}
 
-    async def test_learning_admin_multi_building_queries_all(self):
-        actor = {"id": "admin", "scopes": ["A", "B", "C", "D", "E", "H"],
-                 "learning_scopes": ["A", "B", "C", "D", "E", "H"], "is_admin": True}
-        data = await collect_pending(actor, "全部学练", self.invoke, self.cached, groups_only={"learning"})
-        self.assertEqual(data["learning_checked_scopes"], ["A", "B", "C", "D", "E", "H"])
-        scopes = [c["params"]["scope"] for c in self.calls if c["api_id"] == "GET /api/learning/papers"]
-        self.assertEqual(scopes, ["A", "B", "C", "D", "E", "H"])
+        async def raising_wait_for(awaitable, timeout):
+            captured["timeout"] = timeout
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            raise asyncio.TimeoutError()
+
+        def never_success(kind, scopes):
+            raise AssertionError("read_cached must not be reached when the wait is bounded")
+
+        with patch.object(lp.asyncio, "wait_for", raising_wait_for):
+            data = await collect_pending(ACTOR, "未完成", self.invoke, never_success, groups_only={"events"})
+        self.assertIn("timeout", captured)
+        # Per-group loader is capped by the round deadline (min(remaining, 10)).
+        self.assertLessEqual(captured["timeout"], 10)
+        self.assertGreater(captured["timeout"], 0)
+        events = next(group for group in data["groups"] if group["key"] == "events")
+        self.assertFalse(events["available"])
+        self.assertIsNone(events["count"])
+        self.assertIn("读取超时", events["error"])
+
+    async def test_cancellation_of_pending_collect_is_prompt(self):
+        never = asyncio.Event()
+
+        async def hang(op):
+            await never.wait()
+            raise AssertionError("unreachable")
+
+        task = asyncio.ensure_future(collect_pending(ACTOR, "A楼未完成", hang, self.cached, groups_only={"drills"}))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+
+    async def test_whole_loader_budget_bounds_early_paginated_groups_and_later_guard_learning_run(self):
+        # 用模块常量 patch 成毫秒级预算，短时验证“整组 loader 预算”确实限制了
+        # 分页数据集占满并发槽位，且后续的 guard/learning 仍会真实执行（非仅源码字符串断言）。
+        import openclaw_service.assistant.lighthouse_pending as lp
+        guard_called, learning_called = 0, 0
+        notices_pages = 0
+
+        async def invoke(op):
+            nonlocal guard_called, learning_called, notices_pages
+            api, params = op["api_id"], op.get("params") or {}
+            if api == "GET /api/workbench":
+                # ongoing 永远分页下去（has_more=True），共享读取自身也有预算，会超时；
+                # plans 与 notices 复用同一个 ongoing 读取，因此也被该“整体读取超时”挡住。
+                # 用极短 sleep 让事件循环正常调度，避免紧循环把其他分组饿死（真实网络调用同理）。
+                notices_pages += 1
+                await asyncio.sleep(0.001)
+                return {"ok": True, "_raw": {"source_snapshot_ready": True,
+                    "ongoing": [{"record_id": "n%d" % notices_pages, "scope": "A", "status": "进行中", "work_type": "maintenance"}],
+                    "ongoing_pagination": {"total": 10 ** 9, "has_more": True}}}
+            if api == "GET /api/repair-management/records":
+                return {"ok": True, "_raw": {"records": [], "total": 0, "has_more": False}}
+            if api == "GET /api/cabinet-power/batches":
+                return {"ok": True, "_raw": {"items": [], "total": 0}}
+            if api == "GET /api/drills":
+                return {"ok": True, "_raw": {"items": []}}
+            if api == "GET /api/critical-guard/tasks":
+                guard_called += 1
+                return {"ok": True, "_raw": {"tasks": []}}
+            if api == "GET /api/learning/papers":
+                learning_called += 1
+                return {"ok": True, "_raw": {"items": [], "total": 0}}
+            raise AssertionError("Unexpected API " + api)
+
+        actor = {**ACTOR, "learning_scopes": ["A"]}
+        with patch.object(lp, "WHOLE_LOADER_BUDGET_SECONDS", 0.2), \
+             patch.object(lp, "SHARED_BOARD_BUDGET_SECONDS", 0.2), \
+             patch.object(lp, "ROUND_DEADLINE_SECONDS", 30):
+            data = await collect_pending(actor, "未完成", invoke, self.cached)
+        keys = [group["key"] for group in data["groups"]]
+        self.assertEqual(keys, ["notices", "plans", "events", "repairs", "batches",
+                                "orders", "mops", "drills", "guard", "learning"])
+        self.assertGreaterEqual(notices_pages, 1)
+        self.assertEqual(guard_called, 1)
+        self.assertEqual(learning_called, 1)
+        by = {group["key"]: group for group in data["groups"]}
+        # 整组/共享读取超时按 unknown（count=None）处理，绝不当作零条。
+        for key in ("notices", "plans"):
+            self.assertFalse(by[key]["available"])
+            self.assertIsNone(by[key]["count"])
+            self.assertIn("整体读取超时", by[key]["error"])
+        self.assertTrue(by["guard"]["available"])
+        self.assertEqual(by["guard"]["stats"]["task_count"], 0)
+        self.assertTrue(by["learning"]["available"])
+        self.assertEqual(by["learning"]["stats"]["unpublished_scopes"], ["A"])
+
+    async def test_cancellation_closes_in_flight_shared_board_task(self):
+        # 共享通告读取在 collect 取消时不能遗留 detached 请求：必须被显式取消并等待。
+        ongoing_started = asyncio.Event()
+        ongoing_cancelled = asyncio.Event()
+
+        async def invoke(op):
+            api, params = op["api_id"], op.get("params") or {}
+            if api == "GET /api/workbench" and params.get("sections") == "ongoing":
+                if not ongoing_started.is_set():
+                    ongoing_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    ongoing_cancelled.set()
+                    raise
+                return {"ok": True, "_raw": {"source_snapshot_ready": True, "ongoing": [], "ongoing_pagination": {"total": 0}}}
+            if api == "GET /api/workbench" and params.get("sections") == "records":
+                return {"ok": True, "_raw": {"source_snapshot_ready": True, "records": [], "records_pagination": {"total": 0}}}
+            raise AssertionError("Unexpected API " + api)
+
+        task = asyncio.ensure_future(collect_pending(ACTOR, "未完成", invoke, self.cached,
+                                                     groups_only={"notices", "plans"}))
+        await asyncio.wait_for(ongoing_started.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        self.assertTrue(ongoing_cancelled.is_set())
+
+    async def test_timed_out_consumer_retrieves_later_shared_task_failure(self):
+        import openclaw_service.assistant.lighthouse_pending as lp
+
+        async def invoke(operation):
+            await asyncio.Event().wait()
+
+        async def progress(label):
+            if '部分资料暂不可用' in label:
+                await asyncio.sleep(0.04)
+
+        loop = asyncio.get_running_loop()
+        with patch.object(lp, 'WHOLE_LOADER_BUDGET_SECONDS', 0.01), \
+                patch.object(lp, 'SHARED_BOARD_BUDGET_SECONDS', 0.02), \
+                patch.object(loop, 'call_exception_handler') as errors:
+            data = await collect_pending(ACTOR, '未结束通告', invoke, self.cached,
+                groups_only={'notices'}, on_progress=progress)
+            await asyncio.sleep(0)
+            gc.collect()
+            errors.assert_not_called()
+        self.assertIsNone(data['groups'][0]['count'])
+        self.assertIn('读取超时', data['groups'][0]['error'])
+
 
 
 if __name__ == "__main__":

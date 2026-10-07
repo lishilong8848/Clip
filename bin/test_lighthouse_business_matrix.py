@@ -10,7 +10,6 @@ secrets.
 Covered typed reads (via LighthouseModel driven by pydantic_ai FunctionModel):
   * daily checklist      -> GET /api/daily-tasks        (tasks/categories/stats)
   * water records        -> GET /api/capacity/water/records
-  * learning published   -> GET /api/learning/papers   (learning_today_state)
   * plan-convergence     -> GET /api/plan-convergence/blocks
   * drills               -> GET /api/drills/{drill_id}/execution
   * critical-guard list  -> GET /api/critical-guard/tasks
@@ -53,7 +52,7 @@ from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog
 from lan_bitable_template_portal.lighthouse_files import LighthouseFiles
 from lan_bitable_template_portal.lighthouse_model import LighthouseModel
 
-ACTOR = {"id": "business-matrix-fixture", "scopes": ["D"], "is_admin": False}
+ACTOR = {"id": "business-matrix-fixture", "scopes": ["D"], "is_admin": False, "learning_scopes": ["D"]}
 
 
 def _make_request():
@@ -117,6 +116,7 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.files = LighthouseFiles(self.store)
 
         self.scope_hits = {}          # api_id -> [scope,...]
+        self.learning_hits = []       # (scope, today) for GET /api/learning/papers
         self.notice_writes = []
         self.execution_writes = []
         self.generate_writes = []
@@ -166,14 +166,6 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
                 record = {"record_id": "w2", "building_codes": ["E"], "meter_value": 999,
                           "water_current_value": 999, "water_previous_value": 1, "water_change_ratio": 999}
             return {"ok": True, "data": {"scope": scope, "total": 1, "records": [record]}}
-
-        @app.get("/api/learning/papers")
-        async def learning_papers(scope: str, today: str = "0", page: int = 1, page_size: int = 20, request: Request = None):
-            self.scope_hits.setdefault("GET /api/learning/papers", []).append(scope)
-            return {"ok": True, "data": {"scope": scope, "total": 1, "page": page, "page_size": page_size,
-                                         "items": [{"id": "paper-d-1001", "date": "2026-10-01", "scope": scope,
-                                                    "status": "pending",
-                                                    "stats": {"total": 3, "answered": 1}}]}}
 
         @app.get("/api/plan-convergence/blocks")
         async def convergence_blocks(scope: str, request: Request = None):
@@ -264,6 +256,11 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
             self.generate_writes.append(body.model_dump())
             return {"ok": True, "data": {"queued": True, "drill_id": drill_id, "scope": scope, "execution": {"execution_version": 1, "status": "queued"}}}
 
+        @app.get("/api/learning/papers")
+        async def learning_papers(scope: str, today: str = "0"):
+            self.learning_hits.append((scope, today))
+            return {"ok": True, "data": {"items": [{"id": "paper-d-1001", "scope": scope}], "total": 1}}
+
         self.catalog = PortalAPICatalog(app)
         self.agent = PortalAgent(self.assistant, self.catalog, self.files)
         self.request = _make_request()
@@ -324,15 +321,17 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(record["water_change_ratio"], 0.118)
         self.assertEqual(record["building_codes"], ["D"])
 
-    async def test_learning_today_state_native_fields_and_scope(self):
-        engine = self._new_engine("learning_today_state", {}, "今日D楼学练题单已发布，尚有待答题。")
+    async def test_learning_today_state_returns_only_original_page_link_no_native_read(self):
+        engine = self._new_engine("query",
+                                  {"operation": {"api_id": "GET /api/learning/papers",
+                                                  "params": {"scope": "D", "today": "0"}}},
+                                  "今日D楼学练题单已发布（paper-d-1001），画像学练见 /learning 学习页。")
         result = await self._run_answer(engine, "今天D楼学练题单发布了吗")
-        self.assertEqual(self.scope_hits["GET /api/learning/papers"], ["D"])
-        groups = result["sources"][0]["data"]["groups"]
-        learning = next(group for group in groups if group["key"] == "learning")
-        self.assertEqual(learning["count"], 1)
-        self.assertEqual(learning["items"][0]["title"], "2026-10-01学练题单")
-        self.assertIn("待答", learning["items"][0]["status"])
+        self.assertEqual(self.learning_hits, [("D", "0")])
+        self.assertEqual(len(result["sources"]), 1)
+        self.assertIn("/learning", result["answer"])
+        self.assertIn("画像学练", result["answer"])
+        self.assertIn("paper-d-1001", result["answer"])
 
     async def test_all_water_reads_split_by_permission_and_keep_partial_failure(self):
         actor = {**ACTOR, "scopes": ["A", "D"]}
@@ -470,6 +469,8 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
         draft = {
             "title": "D楼设备维护", "progress": "已完成60%",
             "start_time": "2026-09-30 09:00", "end_time": "2026-09-30 11:00",
+            "location": "D楼机房", "content": "维护检查", "reason": "例行维保", "impact": "无业务影响",
+            "specialty": "暖通", "maintenance_cycle": "每月", "execution_party": "自维", "building_codes": ["D"],
         }
         decision = {
             "operations": [{
@@ -480,6 +481,7 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
                     "work_type": "maintenance",
                     "action": "start",
                     "manual": True,
+                    "polling_work_order_exempt": True,
                     "manual_binding_choice": "unbound",
                     "patch": {"$query": {"ref": qref, "path": "draft"}},
                 },
@@ -487,6 +489,10 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
         }
         queries = {qref: {"draft": draft}}
         plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], queries=queries)
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertTrue(any(field.get("native_notice") for field in plan["fields"]))
+        self.assertEqual(self.notice_writes, [])
+        plan = self.agent.amend(ACTOR, plan["id"], {"version": plan["version"], "values": {}})
         self.assertEqual(plan["status"], "awaiting_confirmation")
         self.assertEqual(plan["risk"], "high")
         # Never executed before confirmation.
@@ -537,6 +543,7 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
                         "participants": [
                             {"source": "staff", "record_id": "p-p1", "name": "王参演1"},
                             {"source": "external", "record_id": "ext-2", "name": "外聘赵"},
+                            {"source": "staff", "record_id": "p-eva", "name": "李评估"},
                         ],
                         "step_signers": {"task_confirm": ["p-cmd"], "scene_exec": ["p-p1", "p-eva"]},
                     },
@@ -549,9 +556,15 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         }
-        plan = self.agent.prepare(ACTOR, decision, self.operation_id, [])
+        execution = {**decision["operations"][0]["body"], "drill_id": "drill-01", "scope": "D", "version": 0}
+        definition = {"drill_id": "drill-01", "scope": "D", "configuration": {"steps": [
+            {"row": "task_confirm", "signature_slots": 1}, {"row": "scene_exec", "signature_slots": 2}]}}
+        plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], queries={"current": {"drill": definition, "execution": execution}})
+        self.assertEqual(plan["status"], "needs_input")
+        public = self.agent.public_plan(plan)
+        plan = self.agent.amend(ACTOR, plan["id"], {"version": plan["version"], "values": {field["name"]: field["value"] for field in public["fields"]}})
         self.assertEqual(plan["status"], "awaiting_confirmation")
-        preview = self.agent.public_plan(plan)["operations"][0]["body"]
+        preview = plan["operations"][0]["body"]
         self.assertEqual(preview["signature_time"], "10:30")
         self.assertEqual(preview["evaluation_time"], "11:45")
         self.assertEqual(plan["risk"], "high")
@@ -577,8 +590,9 @@ class BusinessMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["commander"]["name"], "张指挥")
         self.assertEqual(body["evaluator"]["record_id"], "p-eva")
         self.assertEqual(body["evaluator"]["name"], "李评估")
-        self.assertEqual(body["participants"][0]["record_id"], "p-p1")
-        self.assertEqual(body["participants"][1]["name"], "外聘赵")
+        self.assertEqual(body["participants"][0]["record_id"], "p-cmd")
+        self.assertEqual(body["participants"][1]["record_id"], "p-p1")
+        self.assertEqual(body["participants"][2]["name"], "外聘赵")
         self.assertEqual(body["step_signers"]["task_confirm"], ["p-cmd"])
         self.assertEqual(body["step_signers"]["scene_exec"], ["p-p1", "p-eva"])
         # Signature and evaluation times stay independent.

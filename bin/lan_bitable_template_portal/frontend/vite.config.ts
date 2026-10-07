@@ -11,6 +11,7 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     rollupOptions: {
+      input: { main: fileURLToPath(new URL('./index.html', import.meta.url)), assistant: fileURLToPath(new URL('./assistant.html', import.meta.url)) },
       output: {
         entryFileNames: "assets/index-[hash].js",
         chunkFileNames: "assets/c-[hash].js",

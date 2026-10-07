@@ -3,16 +3,42 @@ from __future__ import annotations
 
 import atexit
 import email.utils
+import os
 import random
+import ssl
 import threading
 import time
 import weakref
+from types import SimpleNamespace
+from http.cookiejar import DefaultCookiePolicy
 from typing import Any
+
+import certifi
 
 
 DEFAULT_TIMEOUT = None
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 _CLIENTS: "weakref.WeakSet[FeishuHttpClient]" = weakref.WeakSet()
+_tls_contexts = {}
+_tls_lock = threading.Lock()
+
+
+def verified_tls_context(*, trust_env=True, cafile=None):
+    with _tls_lock:
+        ca_file = cafile or (os.environ.get('SSL_CERT_FILE') if trust_env else None)
+        ca_dir = os.environ.get('SSL_CERT_DIR') if trust_env and not ca_file else None
+        policy = (ca_file or '', ca_dir or '')
+        if policy not in _tls_contexts:
+            import httpx
+            # Preserve the CA policy; loading identical PEM bytes avoids slow Windows file I/O.
+            if cafile:
+                kwargs = {'capath': cafile} if os.path.isdir(cafile) else {'cafile': cafile}
+                _tls_contexts[policy] = ssl.create_default_context(**kwargs)
+            elif ca_file or ca_dir:
+                _tls_contexts[policy] = httpx.create_ssl_context(trust_env=True)
+            else:
+                _tls_contexts[policy] = ssl.create_default_context(cadata=certifi.contents())
+        return _tls_contexts[policy]
 
 
 class FeishuHTTPError(RuntimeError):
@@ -49,10 +75,12 @@ class FeishuHttpClient:
         timeout: Any = DEFAULT_TIMEOUT,
         retries: int = 2,
         transport: Any = None,
+        verify: Any = None,
     ) -> None:
         self.timeout = timeout
         self.retries = max(0, int(retries or 0))
         self._transport = transport
+        self._verify = verify
         self._client: Any = None
         self._lock = threading.RLock()
         _CLIENTS.add(self)
@@ -69,6 +97,8 @@ class FeishuHttpClient:
         client_kwargs = {"timeout": timeout, "follow_redirects": False}
         if self._transport is not None:
             client_kwargs["transport"] = self._transport
+        else:
+            client_kwargs["verify"] = self._verify if self._verify is not None else verified_tls_context()
         client = httpx.Client(**client_kwargs)
         self._client = client
         return client
@@ -295,6 +325,49 @@ def close_all_clients() -> None:
 
 
 atexit.register(close_all_clients)
+
+_sdk_http_client = None
+_sdk_http_lock = threading.Lock()
+
+
+def _sdk_request(method, url, *, headers=None, params=None, data=None, timeout=None, files=None):
+    """Keep SDK serialization/response handling, reuse verified TLS and sockets."""
+    import httpx
+    from requests.exceptions import ConnectionError, Timeout, ReadTimeout
+
+    global _sdk_http_client
+    with _sdk_http_lock:
+        if _sdk_http_client is None:
+            # Match requests' CA policy; never downgrade to an unverified context.
+            ca = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('CURL_CA_BUNDLE')
+            _sdk_http_client = FeishuHttpClient(retries=0, verify=verified_tls_context(trust_env=False, cafile=ca))
+            _sdk_http_client._client_for_request().cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=()))
+        client = _sdk_http_client
+    headers = dict(headers or {})
+    content = data
+    if hasattr(data, 'read'):
+        if getattr(data, 'len', None) is not None:
+            headers.setdefault('Content-Length', str(data.len))
+        content = iter(lambda: data.read(65536), b'')
+    if isinstance(timeout, tuple):
+        connect, read = timeout
+        timeout = httpx.Timeout(connect=connect, read=read, write=read, pool=connect)
+    try:
+        return client._client_for_request().request(method, url, headers=headers,
+            params=params, timeout=timeout, follow_redirects=True,
+            **({"data": data, "files": files} if files is not None else {"content": content}))
+    except httpx.ReadTimeout as exc:
+        raise ReadTimeout(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise Timeout(str(exc)) from exc
+    except httpx.RequestError as exc:
+        raise ConnectionError(str(exc)) from exc
+
+
+def reuse_lark_http_client():
+    # Patch only the SDK's transport dependency, never the global requests module.
+    from lark_oapi.core.http import transport
+    transport.requests = SimpleNamespace(request=_sdk_request)
 
 
 def request_json(

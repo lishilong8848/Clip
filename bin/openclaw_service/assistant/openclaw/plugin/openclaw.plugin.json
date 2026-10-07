@@ -1,0 +1,6 @@
+{
+  "id": "lighthouse-tools",
+  "name": "Lighthouse Business Tools",
+  "description": "Authorized queries and proposals. Business writes require the original portal confirmation.",
+  "configSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+}

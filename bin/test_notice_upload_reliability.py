@@ -5,7 +5,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_event_remote_atomicity as fixtures
@@ -53,6 +53,84 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
             remote.update(fields)
             return True, record_id
         return update
+
+    def test_replacement_reuses_original_create_identity_and_survives_restart(self):
+        store = PortalRuntime.state_store
+        root, current = 'notice_action:original', 'notice_action:latest'
+        for identity in (root, current):
+            store.begin_notice_remote_operation(operation_id=identity, operation_type='start')
+        frozen = {'名称': 'original', '内容': 'original fields', '附件': [{'file_token': 'old-image'}]}
+        token = str(uuid.uuid4())
+        store.mark_notice_remote_operation(root, status='failed', target_record_id='manual_original',
+            result={'create_fields': frozen, 'create_client_token': token})
+        prepared = {'_remote_operation_id': current}
+        with patch.object(feishu, 'create_bitable_record_fields', return_value=(True, 'rec-original')) as create:
+            target = PortalRuntime._replacement_start_target(prepared, '维保通告', root)
+            self.assertEqual(target, 'rec-original')
+            create.assert_called_once_with('维保通告', frozen, client_token=token)
+        self.assertEqual(store.get_notice_remote_operation(current)['target_record_id'], 'rec-original')
+        self.assertEqual(store.get_notice_remote_operation(root)['result']['robot_delivery_state'], 'superseded')
+        store.shutdown_write_worker(timeout=2)
+        PortalRuntime.state_store = LanPortalStateStore(Path(self._tmp.name) / 'state.sqlite3')
+        with patch.object(feishu, 'create_bitable_record_fields', side_effect=AssertionError('must not create twice')):
+            self.assertEqual(PortalRuntime._replacement_start_target(prepared, '维保通告', root), 'rec-original')
+
+    def test_replacement_without_original_fields_refuses_a_fresh_create(self):
+        from lan_bitable_template_portal.portal_service import PortalError
+        PortalRuntime.state_store.begin_notice_remote_operation(operation_id='notice_action:missing', operation_type='start')
+        with patch.object(feishu, 'create_bitable_record_fields') as create:
+            with self.assertRaisesRegex(PortalError, '原创建内容缺失'):
+                PortalRuntime._replacement_start_target({'_remote_operation_id': 'notice_action:new'}, '维保通告', 'notice_action:missing')
+        create.assert_not_called()
+
+    def test_previous_generation_payload_reconstructs_only_original_create(self):
+        from dataclasses import asdict
+        payload = PortalRuntime._prepared_to_notice_payload(self.request()['data_dict'])
+        root, current = 'notice_action:legacy', 'notice_action:new'
+        for identity in (root, current):
+            PortalRuntime.state_store.begin_notice_remote_operation(operation_id=identity, operation_type='start')
+        PortalRuntime.state_store.mark_notice_remote_operation(root, status='failed',
+            result={'robot_payload': asdict(payload)})
+        token, fields = str(uuid.uuid4()), {'原始通告': payload.text}
+        handler = SimpleNamespace(build_create_fields=lambda original: {'原始通告': original.text}, get_table_id=lambda _: 'fixture-table')
+        with (
+            patch.object(server, 'get_notice_handler', return_value=handler),
+            patch.object(feishu, '_filter_missing_optional_fields', side_effect=lambda _, value: value),
+            patch.object(feishu, '_notice_create_client_token', return_value=token),
+            patch.object(feishu, 'create_bitable_record_fields', return_value=(True, 'rec-original')) as create,
+        ):
+            self.assertEqual(PortalRuntime._replacement_start_target({'_remote_operation_id': current}, '维保通告', root), 'rec-original')
+        create.assert_called_once_with('维保通告', fields, client_token=token)
+
+    def test_latest_fields_update_original_id_without_create_or_old_group_message(self):
+        payload = PortalRuntime._prepared_to_notice_payload(self.request()['data_dict'])
+        fields = {'名称': 'latest', '内容': 'latest content'}
+        handler = SimpleNamespace(build_create_fields=lambda _: fields)
+        with (
+            patch.object(feishu, 'check_token_status'),
+            patch.object(feishu, 'config', SimpleNamespace(user_token='synthetic')),
+            patch.object(feishu, '_resolve_handler', return_value=(handler, 'fixture-table', '')),
+            patch.object(feishu, '_filter_missing_optional_fields', side_effect=lambda _, value: value),
+            patch.object(feishu, '_build_client', side_effect=AssertionError('no create client')),
+            patch.object(feishu, 'update_bitable_record_fields', return_value=(True, 'rec-original')) as update,
+            patch.object(feishu, '_send_robot_message') as send,
+        ):
+            self.assertEqual(feishu.create_bitable_record_by_payload('维保通告', payload, target_record_id='rec-original'), (True, 'rec-original'))
+        update.assert_called_once_with('rec-original', '维保通告', fields)
+        send.assert_called_once_with(handler, payload)
+        self.assertEqual(payload._clipflow_written_fields, fields)
+
+    def test_superseded_notice_does_not_deliver_old_pending_group_message(self):
+        store = PortalRuntime.state_store
+        root = 'notice_action:old-job'
+        store.begin_notice_remote_operation(operation_id=root, operation_type='start')
+        store.put_document('notice_action_job', 'old-job', {'superseded_by_job_id': 'new-job'})
+        store.mark_notice_remote_operation(root, status='completed', result={
+            'robot_delivery_state': 'pending', 'robot_background': True, 'robot_notice_type': '维保通告'})
+        with patch.object(server, 'send_robot_message_by_payload') as send:
+            PortalRuntime.process_notice_robot_messages()
+        send.assert_not_called()
+        self.assertEqual(store.get_notice_remote_operation(root)['status'], 'superseded')
 
     def test_power_start_and_replay_enqueue_one_handoff(self):
         for notice_type in ("上电通告", "下电通告"):
@@ -122,7 +200,35 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
             result = client.post("/api/qt/commands", json={"command": "notice_upload", "payload": request}).json()["data"]
             self.assertTrue(result["ok"], result)
             create.assert_called_once()
+
         self.assertEqual(len(PortalRuntime.state_store.list_outbox_events("notice_robot")), 1)
+
+    def test_native_web_api_skips_list_only_for_new_standalone_start(self):
+        import clipflow_backend.main as backend
+        native = Mock()
+        native.create_action_job.return_value = ("job-original", False)
+        native.get_job.return_value = {"business_audit_id": "audit-original", "phase": "processing"}
+        native.expand_workbench_action_command.side_effect = lambda payload, **_kw: payload
+        with patch.object(backend, "LanPortalStateStore", return_value=PortalRuntime.state_store):
+            controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        with patch.object(PortalRuntime, "service", native), \
+             patch.object(controller, "_current_session", return_value={"user": {"open_id": "fixture", "name": "fixture"}}), \
+             patch.object(controller, "_authorized_scope_or_error", return_value="A"), \
+             patch.object(controller, "_get_ongoing", return_value=[{"record_id": "rec-existing"}]) as ongoing:
+            client = TestClient(controller._build_app())
+            for action, choice, active, expected_reads in (("start", "unbound", "", 0), ("start", "bind", "", 1),
+                                                          ("start", "unbound", "active-existing", 1), ("update", "unbound", "", 1), ("end", "unbound", "", 1)):
+                ongoing.reset_mock()
+                response = client.post("/api/workbench-actions", json={"scope": "A", "action": action, "work_type": "maintenance",
+                    "command_format": "notice_command", "manual_binding_choice": choice, "active_item_id": active,
+                    "patch": {"title": "fixture-title"}})
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(ongoing.call_count, expected_reads, (action, choice, active))
+                self.assertEqual(native.expand_workbench_action_command.call_args.kwargs["ongoing_items"], [] if not expected_reads else [{"record_id": "rec-existing"}])
+                submitted = native.create_action_job.call_args.args[0]
+                self.assertEqual(submitted["patch"], {"title": "fixture-title"})
+                self.assertEqual(submitted["_auth_open_id"], "fixture")
+                self.assertTrue(submitted["_web_action_request"])
 
     def test_concurrent_update_rejects_stale_read_then_preserves_both_attachments(self):
         field = MAINTENANCE_NOTICE_FIELDS["notice_images"]
@@ -194,7 +300,6 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
     def test_robot_is_deferred_and_restart_retry_never_reuploads(self):
         request = self.request()
         request["robot_group_choice"] = "auto"
-        feishu._ensure_lark_sdk_loaded()
         handler = MaintenanceNoticeHandler("维保通告")
         response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(record=SimpleNamespace(record_id="rec-robot")))
         with (
@@ -334,7 +439,6 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
 
     def test_expired_lock_after_waiting_for_feishu_client_blocks_actual_http(self):
         from unittest.mock import MagicMock
-        feishu._ensure_lark_sdk_loaded()
         payload = PortalRuntime._prepared_to_notice_payload(self.request()["data_dict"])
         payload._clipflow_write_guard = PortalRuntime._check_request_notice_locks
         client = MagicMock()
@@ -345,15 +449,14 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
                 patch.object(feishu, "config", SimpleNamespace(user_token="audit", app_token="audit")),
                 patch.object(feishu, "_resolve_handler", return_value=(MaintenanceNoticeHandler("维保通告"), "table", "")),
                 patch.object(feishu, "_filter_missing_optional_fields", side_effect=lambda _n, fields: fields),
-                patch.object(feishu, "_build_client", return_value=client),
+                patch.object(feishu, "_feishu_request", client),
                 patch.object(PortalRuntime.state_store, "renew_notice_operation_lock", return_value=False),
             ):
                 for send in (lambda: feishu.create_bitable_record_by_payload("维保通告", payload),
                              lambda: feishu.update_bitable_record_by_payload("record", "维保通告", payload)):
                     with self.assertRaisesRegex(server.PortalError, "锁已过期"):
                         send()
-            client.bitable.v1.app_table_record.create.assert_not_called()
-            client.bitable.v1.app_table_record.update.assert_not_called()
+            client.assert_not_called()
         finally:
             server._request_notice_locks.reset(token)
 

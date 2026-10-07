@@ -365,6 +365,7 @@ class _FakeRepairEventRouteService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         scope: str = "ALL",
     ) -> dict:
@@ -375,6 +376,7 @@ class _FakeRepairEventRouteService:
                 summary_record_id,
                 tuple(cmdb_record_ids or []),
                 dict(fields or {}),
+                tuple(ledger_device_ids or []),
             )
         )
         return {"record_id": "rec-followup-new"}
@@ -386,6 +388,7 @@ class _FakeRepairEventRouteService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         expected_version: str = "",
         scope: str = "ALL",
@@ -400,6 +403,7 @@ class _FakeRepairEventRouteService:
                 dict(fields or {}),
                 operation_id,
                 expected_version,
+                tuple(ledger_device_ids or []),
             )
         )
         return {"record_id": record_id}
@@ -929,6 +933,7 @@ class BackendApiModelTests(unittest.TestCase):
                         "scope": "E",
                         "summary_record_id": "rec-summary",
                         "cmdb_record_ids": ["rec-cmdb-1", "rec-cmdb-2"],
+                        "ledger_device_ids": ["rec-ledger-1"],
                         "fields": {"维修进展描述": "处理中"},
                     },
                 )
@@ -939,6 +944,7 @@ class BackendApiModelTests(unittest.TestCase):
                         "scope": "E",
                         "summary_record_id": "rec-summary",
                         "cmdb_record_ids": ["rec-cmdb-1", "rec-cmdb-2"],
+                        "ledger_device_ids": ["rec-ledger-2"],
                         "operation_id": "followup-update-op",
                         "expected_version": "followup-version-1",
                         "fields": {"维修进度": 1},
@@ -1064,6 +1070,7 @@ class BackendApiModelTests(unittest.TestCase):
                         "rec-summary",
                         ("rec-cmdb-1", "rec-cmdb-2"),
                         {"维修进展描述": "处理中"},
+                        ("rec-ledger-1",),
                     ),
                     (
                         "update_followup",
@@ -1074,6 +1081,7 @@ class BackendApiModelTests(unittest.TestCase):
                         {"维修进度": 1},
                         "followup-update-op",
                         "followup-version-1",
+                        ("rec-ledger-2",),
                     ),
                     (
                         "delete_followup",

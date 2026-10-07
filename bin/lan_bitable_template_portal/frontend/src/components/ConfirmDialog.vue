@@ -1,4 +1,5 @@
 <template>
+  <UiTransition name="ui-overlay" appear>
   <div v-if="open" class="confirm-backdrop" @click.self="emit('resolve', false)">
     <section
       ref="dialog"
@@ -33,6 +34,7 @@
       </div>
     </section>
   </div>
+  </UiTransition>
 </template>
 
 <script setup lang="ts">
@@ -69,7 +71,7 @@ const titleId = `confirm-${Math.random().toString(36).slice(2)}`;
 let modal: ReturnType<typeof acquireModal> | undefined;
 let returnFocus: HTMLElement | null = null;
 function keydown(event: KeyboardEvent): void {
-  if (!modal?.isTop() || !dialog.value) return;
+  if (!modal?.isTop(event, dialog.value) || !dialog.value) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopImmediatePropagation();

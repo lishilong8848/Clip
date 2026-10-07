@@ -16,4 +16,7 @@ assert.deepEqual(roomToSelParam({level: 'room', key: 'R1', name: 'R1', devices: 
 const room = {level: 'room' as const, key: 'R1', name: 'R1', devices: 1, _checked: true,
   zone: 'Z1', building: 'B1', floor: 'F1'};
 assert.notEqual(roomNodeKey(room), roomNodeKey({...room, building: 'B2'}));
+const sameName: Draft[] = [{ label: 'same names', rule_type: 'normal', items: [{ scope_type: 'device', inst_name: '设备', ins_id: 'one' }, { scope_type: 'device', inst_name: '设备', ins_id: 'two' }] }];
+assert.equal(allDraftItems(sameName).length, 2);
+assert.deepEqual(restoreDrafts(allDraftItems(sameName))[0].items.map(item => item.ins_id), ['one', 'two']);
 console.log('[PlanConvergenceCheck] OK');

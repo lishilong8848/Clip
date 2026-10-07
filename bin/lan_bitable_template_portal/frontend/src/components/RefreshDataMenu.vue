@@ -9,6 +9,7 @@
     >
       刷新数据
     </button>
+    <UiTransition name="ui-popover" appear>
     <div v-if="open" class="refresh-menu-panel" role="menu" @click.stop>
       <button type="button"
         class="refresh-option"
@@ -23,11 +24,13 @@
         <b>{{ eventRefreshing ? "读取中" : cooldownEvent ? "稍后再试" : "读取" }}</b>
       </button>
     </div>
+    </UiTransition>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
+import { isAssistantEvent } from '../modalState';
 
 const props = defineProps<{
   open: boolean;
@@ -56,6 +59,7 @@ function handlePointerDown(event: MouseEvent): void {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
+  if (isAssistantEvent(event)) return;
   if (event.key === "Escape") emit("update:open", false);
 }
 

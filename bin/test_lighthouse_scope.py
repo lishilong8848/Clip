@@ -15,6 +15,15 @@ D_ACTOR = {"id": "fixture-d", "scopes": ["D"]}
 
 
 class ScopeTests(unittest.TestCase):
+    def test_general_questions_do_not_treat_code_identifiers_as_buildings(self):
+        for text in ("Python里的 A_B 变量是什么？", "解释代码里的 E_TEMP 变量", "用JavaScript把 C_STATUS 转成字符串"):
+            with self.subTest(text=text):
+                self.assertEqual(resolve_scopes(D_ACTOR, text), ["D"])
+                self.assertEqual(resolve_scopes({"scopes": list(SCOPES)}, text, ["E"]), sorted(SCOPES))
+        for text in ("用Python查询A楼维修单实际数据", "解释E楼的维修记录", "查询C楼变量设备的通告"):
+            with self.subTest(text=text), self.assertRaises(AssistantError):
+                resolve_scopes(D_ACTOR, text)
+
     def test_d_only_unqualified(self):
         self.assertEqual(resolve_scopes(D_ACTOR, "现在还有哪些检修"), ["D"])
         self.assertEqual(resolve_scopes(D_ACTOR, "选择A还是B？110加2是多少"), ["D"])
@@ -53,6 +62,18 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(resolve_scopes({"scopes": ["D", "ALL", "CAMPUS", "X"], "is_admin": True}, "ALL"), ["D"])
         self.assertEqual(resolve_scopes({"scopes": []}, "还有呢"), [])
         self.assertEqual(resolve_scopes({"scopes": ["D", "H", "110"]}, "110站、H楼", ["D"]), ["110", "H"])
+
+    def test_target_buildings_are_narrowed_before_preparing_business(self):
+        from lan_bitable_template_portal.lighthouse_model import scoped_operation
+        actor = {**D_ACTOR, "is_admin": True}
+        descriptor = {"schema": {"body": {"properties": {"target_scopes": {"type": "array"}}}}}
+        operation = {"api_id": "POST /api/critical-guard/tasks", "body": {"target_scopes": ["D"]}}
+        self.assertEqual(scoped_operation(operation, descriptor, actor)["body"]["target_scopes"], ["D"])
+        for scopes in (["E"], ["D", "E"]):
+            with self.assertRaises(AssistantError):
+                scoped_operation({**operation, "body": {"target_scopes": scopes}}, descriptor, actor)
+        # Empty choices are filled by the native task form, never widened here.
+        self.assertEqual(scoped_operation({**operation, "body": {"target_scopes": []}}, descriptor, actor)["body"]["target_scopes"], [])
 
 
 def record(identity, **fields):

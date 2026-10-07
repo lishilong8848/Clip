@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -9,8 +11,10 @@ import time
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import httpx
 
@@ -39,6 +43,193 @@ class _Item:
 
 
 class PerformanceGuardTests(unittest.TestCase):
+    def test_heavy_maintenance_is_separate_from_time_sensitive_jobs(self):
+        from clipflow_backend.main import FastAPIPortalController
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from upload_event_module.services.process_lifetime import lower_current_thread_priority
+        controller = object.__new__(FastAPIPortalController)
+        controller._scheduler = None
+        controller._write_runtime_heartbeat = Mock()
+        with patch.object(BackgroundScheduler, 'start'):
+            controller._start_scheduler()
+        scheduler = controller._scheduler
+        pool = scheduler._executors['maintenance']._pool
+        try:
+            self.assertEqual(pool._max_workers, 1)
+            self.assertIs(pool._initializer, lower_current_thread_priority)
+            jobs = {job.id: job for job in scheduler.get_jobs()}
+            for name in ('job_cleanup', 'job_cleanup_startup', 'sqlite_maintenance', 'repair_maintenance', 'water_consumption_refresh', 'daily_report_recipient_refresh'):
+                self.assertEqual(jobs[name].executor, 'maintenance')
+                self.assertEqual(jobs[name].misfire_grace_time, 3600)
+            for name in ('notice_robot', 'polling_delay_reminders', 'repair_summary_sync', 'daily_work_report'):
+                self.assertEqual(jobs[name].executor, 'default')
+        finally:
+            pool.shutdown(wait=False)
+
+    def test_learning_ignores_inactive_notifications_before_reading_settings(self):
+        from lan_bitable_template_portal.learning import LearningService, now
+        with tempfile.TemporaryDirectory() as temp:
+            sender = Mock()
+            service = LearningService(root=temp, cloud=Mock(), send_message=sender)
+            with service.transaction() as conn:
+                for i in range(40):
+                    service._put('notification', str(i), {'id': str(i), 'status': 'sent'}, conn, False)
+                service._put('notification', 'future', {'id': 'future', 'status': 'pending',
+                             'retry_at': time.time() + 3600}, conn, False)
+            with patch.object(service, 'settings', return_value={'enabled': True, 'reminder_enabled': False}) as settings:
+                service.send_notifications(now())
+                settings.assert_called_once_with()
+            sender.assert_not_called()
+
+    def test_learning_list_reads_all_payloads_in_one_query(self):
+        from lan_bitable_template_portal.learning import LearningService
+        with tempfile.TemporaryDirectory() as temp:
+            service = LearningService(root=temp, cloud=Mock())
+            with service.transaction() as conn:
+                for key in ('c', 'b', 'a'):
+                    service._put('fixture', key, {'id': key, 'value': 1}, conn)
+                service._put('fixture', 'a', {'id': 'a', 'value': 2}, conn, False)
+                service._put('other', 'd', {'id': 'd'}, conn)
+            expected = [service._get('fixture', key) for key in ('a', 'b', 'c')]
+            with closing(service._connect()) as conn:
+                queries = []
+                conn.set_trace_callback(queries.append)
+                self.assertEqual(service._all('fixture', conn), expected)
+                self.assertEqual(len([q for q in queries if q.startswith('SELECT')]), 1)
+                self.assertEqual(conn.execute('SELECT 1').fetchone()[0], 1)
+            self.assertEqual(service._all('fixture'), expected)
+            self.assertEqual(service._all('missing'), [])
+
+    def test_failed_repair_backfill_does_not_wake_the_worker_with_a_terminal_id(self):
+        from lan_bitable_template_portal.server import PortalRuntime
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / 'state.sqlite3')
+            channel = PortalRuntime.event_repair_queue_channel
+            old = {'event_record_id': 'rec-old-failed', 'scope': 'A'}
+            identity = store.enqueue_outbox_event(channel, {'idempotency_key': 'event_repair:rec-old-failed', **old})
+            with patch('lan_bitable_template_portal.state_store.time.time', return_value=time.time() - 901):
+                store.mark_outbox_event(identity, 'failed', error='fixture terminal failure')
+            candidates = [old]
+            service = SimpleNamespace(list_unlinked_transferred_events_for_repair=lambda **_: candidates)
+            with patch.object(PortalRuntime, 'state_store', store), patch.object(PortalRuntime, 'service', service), \
+                    patch.object(store, 'enqueue_outbox_event', wraps=store.enqueue_outbox_event) as enqueue:
+                self.assertEqual(PortalRuntime._enqueue_unlinked_event_repair_project(), 0)
+                enqueue.assert_not_called()
+                candidates.append({'event_record_id': 'rec-new-transfer', 'scope': 'A'})
+                new_id = PortalRuntime._enqueue_unlinked_event_repair_project()
+                self.assertGreater(new_id, identity)
+                self.assertEqual(PortalRuntime._enqueue_unlinked_event_repair_project(), 0)
+                self.assertEqual(enqueue.call_count, 1)
+            self.assertEqual(store.count_outbox_events(channel), {'failed': 1, 'pending': 1})
+
+    def test_daily_backup_finishes_on_one_snapshot_while_writes_continue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / 'state.sqlite3')
+            store.put_document('fixture', 'record', {'value': 'preserved'})
+            real_connect = sqlite3.connect
+            writer = real_connect(store.db_path)
+            try:
+                writer.execute('CREATE TABLE backup_fixture (id INTEGER PRIMARY KEY, value BLOB)')
+                writer.executemany('INSERT INTO backup_fixture VALUES (?, zeroblob(4096))', ((i,) for i in range(128)))
+                writer.execute('CREATE TABLE backup_counter (value INTEGER)')
+                writer.execute('INSERT INTO backup_counter VALUES (0)')
+                writer.commit()
+                steps = []
+
+                class ConcurrentConnection(sqlite3.Connection):
+                    def backup(self, target, **kwargs):
+                        def progress(status, remaining, total):
+                            steps.append(remaining)
+                            if len(steps) > 64:
+                                raise RuntimeError('backup repeatedly restarted by concurrent writes')
+                            writer.execute('UPDATE backup_counter SET value = value + 1')
+                            writer.commit()
+                        kwargs.update(pages=8, progress=progress)
+                        return super().backup(target, **kwargs)
+
+                def connect(*args, **kwargs):
+                    return real_connect(*args, factory=ConcurrentConnection, **kwargs)
+
+                with patch('lan_bitable_template_portal.state_store.sqlite3.connect', side_effect=connect):
+                    result = store.backup_database()
+                self.assertTrue(result['created'])
+                self.assertGreater(len(steps), 1)
+                self.assertEqual(steps[-1], 0)
+                self.assertEqual(sorted(steps, reverse=True), steps)
+                with closing(real_connect(result['backup_path'])) as backup:
+                    self.assertEqual(backup.execute('SELECT value FROM backup_counter').fetchone()[0], 0)
+                    self.assertEqual(backup.execute('PRAGMA quick_check').fetchone()[0], 'ok')
+                self.assertEqual(writer.execute('SELECT value FROM backup_counter').fetchone()[0], len(steps))
+                self.assertEqual(store.get_document('fixture', 'record'), {'value': 'preserved'})
+            finally:
+                writer.close()
+
+    def test_queue_stats_reads_details_once(self):
+        from clipflow_backend.main import PortalRuntime, _queue_stats
+        details = {'message': {'queued_due': 2, 'queued_future': 1}, 'qt_action': {'queued_due': 4}}
+        store = Mock()
+        store.count_outbox_events.return_value = {}
+        store.runtime_queue_details.return_value = details
+        store.runtime_queue_counts.return_value = {'message': 3}
+        store.get_write_worker_stats.return_value = {}
+        with patch.object(PortalRuntime, 'state_store', store), patch.object(PortalRuntime, 'runtime_limits', return_value={}), \
+                patch.object(PortalRuntime, 'runtime_pressure', return_value={}):
+            result = _queue_stats()
+        store.runtime_queue_details.assert_called_once_with()
+        self.assertEqual(result['runtime_queue_details'], details)
+        self.assertEqual(result['message_queue_size'], 3)
+        self.assertEqual(result['qt_queue_size'], 4)
+
+    def test_sse_heartbeat_reads_database_outside_event_loop(self):
+        from clipflow_backend.main import FastAPIPortalController
+        main_thread = threading.get_ident()
+        thread_ids = []
+        def stats():
+            thread_ids.append(threading.get_ident())
+            return {'fixture': True}
+        async def run():
+            controller = SimpleNamespace(_stopping_event=threading.Event())
+            async def connected(): return False
+            stream = FastAPIPortalController._heartbeat_stream(controller, SimpleNamespace(is_disconnected=connected), event_name='fixture')
+            try:
+                self.assertIn(b'"fixture": true', await stream.__anext__())
+            finally:
+                await stream.aclose()
+        with patch('clipflow_backend.main._queue_stats', side_effect=stats):
+            asyncio.run(run())
+        self.assertEqual(len(thread_ids), 1)
+        self.assertNotEqual(thread_ids[0], main_thread)
+
+    def test_qt_drag_uses_native_movement_without_manual_move_events(self):
+        from PyQt6.QtCore import QPointF, Qt
+        from upload_event_module.ui.main_window_ui import MainWindowUiMixin
+        window = SimpleNamespace(drag_position='old', windowHandle=Mock(return_value=SimpleNamespace(startSystemMove=Mock(return_value=True))),
+                                 frameGeometry=Mock(), move=Mock())
+        event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, buttons=lambda: Qt.MouseButton.LeftButton,
+                                globalPosition=lambda: QPointF(120, 180), accept=Mock())
+        MainWindowUiMixin.mousePressEvent(window, event)
+        MainWindowUiMixin.mouseMoveEvent(window, event)
+        window.windowHandle.return_value.startSystemMove.assert_called_once()
+        window.frameGeometry.assert_not_called()
+        window.move.assert_not_called()
+        self.assertIsNone(window.drag_position)
+
+    def test_qt_drag_fallback_stops_after_release(self):
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from upload_event_module.ui.main_window_ui import MainWindowUiMixin
+        window = SimpleNamespace(drag_position=None, windowHandle=Mock(return_value=SimpleNamespace(startSystemMove=Mock(return_value=False))),
+                                 frameGeometry=Mock(return_value=SimpleNamespace(topLeft=lambda: QPoint(20, 30))), move=Mock())
+        event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, buttons=lambda: Qt.MouseButton.LeftButton,
+                                globalPosition=Mock(return_value=QPointF(120, 180)), accept=Mock())
+        MainWindowUiMixin.mousePressEvent(window, event)
+        event.globalPosition.return_value = QPointF(140, 200)
+        MainWindowUiMixin.mouseMoveEvent(window, event)
+        window.move.assert_called_once_with(QPoint(40, 50))
+        MainWindowUiMixin.mouseReleaseEvent(window, event)
+        MainWindowUiMixin.mouseMoveEvent(window, event)
+        self.assertEqual(window.move.call_count, 1)
+        self.assertIsNone(window.drag_position)
+
     def test_active_index_reuses_snapshot_until_invalidated(self):
         calls = 0
         item = _Item("one")
@@ -80,6 +271,52 @@ class PerformanceGuardTests(unittest.TestCase):
             third = store.enqueue_outbox_event("qt_action", {"idempotency_key": "delete:r2", "kind": "active_delete", "payload": {"record_id": "r2"}})
             self.assertEqual(first, second)
             self.assertNotEqual(first, third)
+
+    def test_empty_outbox_poll_is_read_only_and_recovers_expired_leases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            statements = []
+
+            class Store(LanPortalStateStore):
+                def _connect(self):
+                    conn = super()._connect()
+                    conn.set_trace_callback(statements.append)
+                    return conn
+
+            store = Store(Path(temp) / 'state.sqlite3')
+            store.get_settings()
+            statements.clear()
+            self.assertEqual(store.lease_outbox_events('qt_action'), [])
+            self.assertFalse(any(sql.lstrip().upper().startswith(('UPDATE ', 'BEGIN ')) for sql in statements))
+            identity = store.enqueue_outbox_event('qt_action', {'kind': 'fixture'})
+            leased = store.lease_outbox_events('qt_action')
+            self.assertEqual([row['id'] for row in leased], [identity])
+            statements.clear()
+            self.assertEqual(store.lease_outbox_events('qt_action'), [])
+            self.assertFalse(any(sql.lstrip().upper().startswith(('UPDATE ', 'BEGIN ')) for sql in statements))
+            with patch('lan_bitable_template_portal.state_store.time.time', return_value=time.time() + 31):
+                recovered = store.lease_outbox_events('qt_action')
+            self.assertEqual([row['id'] for row in recovered], [identity])
+
+    def test_outbox_count_is_read_only_without_expired_leases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            statements = []
+            class Store(LanPortalStateStore):
+                def _connect(self):
+                    conn = super()._connect()
+                    conn.set_trace_callback(statements.append)
+                    return conn
+            store = Store(Path(temp) / 'state.sqlite3')
+            store.get_settings()
+            statements.clear()
+            self.assertEqual(store.count_outbox_events('qt_action'), {})
+            self.assertFalse(any(sql.lstrip().upper().startswith('UPDATE ') for sql in statements))
+            store.enqueue_outbox_event('qt_action', {'kind': 'fixture'})
+            store.lease_outbox_events('qt_action')
+            statements.clear()
+            self.assertEqual(store.count_outbox_events('qt_action'), {'leased': 1})
+            self.assertFalse(any(sql.lstrip().upper().startswith('UPDATE ') for sql in statements))
+            with patch('lan_bitable_template_portal.state_store.time.time', return_value=time.time() + 31):
+                self.assertEqual(store.count_outbox_events('qt_action', stale_lease_seconds=30), {'pending': 1})
 
     def test_http_client_allows_parallel_requests_and_honors_retry_after(self):
         lock = threading.Lock()

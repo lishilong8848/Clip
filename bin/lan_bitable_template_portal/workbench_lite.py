@@ -1357,6 +1357,10 @@ def _pasted_notice_type(text: str) -> str:
 
 def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_type: str = "") -> dict[str, Any]:
     work = _work_type(work_type) if work_type else _item_work_type(record)
+    if work != "event" and record.get("active_item_id") and record.get("text"):
+        parsed_work, _, parsed = parse_pasted_notice_to_draft(str(record["text"]), fallback_work_type=work)
+        if parsed_work == work:
+            record = {**record, **{key: value for key, value in parsed.items() if record.get(key) in (None, "", [])}}
     title = _record_title(record)
     if manual:
         title = ""
@@ -1436,6 +1440,9 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
         draft["source_work_type"] = source_work_type
     if converted_to:
         draft["converted_to_work_type"] = converted_to
+    submitted = record.get("submitted_draft")
+    if work != "event" and isinstance(submitted, dict):
+        draft.update({key: value for key, value in submitted.items() if key in draft})
     return draft
 
 
@@ -1812,6 +1819,7 @@ def _ongoing_rows(
         f"<a class=\"ongoing-row{active}{needs_site_class}{needs_mop_class}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
         f" aria-current=\"{'true' if active else 'false'}\""
         f" data-row-kind=\"ongoing\""
+        f" data-polling-group-id=\"{_e(str(item.get('polling_work_order_group_id') or ''))}\""
         f" data-direct-navigation=\"\""
         f" data-local-only=\"0\""
         f" data-work-type=\"{_e(row_work_type)}\""
@@ -2859,6 +2867,11 @@ def render_workbench_lite(
   <script src="/assets/connection-guard.js" defer></script>
   <title>南通基地-运维灯塔工作台</title>
   <style>
+    .notice-alert-tags {{ border-top:1px solid #dce5ef; margin-top:14px; padding-top:12px; font-size:13px; line-height:1.6; overflow-wrap:anywhere; }}
+    .notice-alert-tags header {{ display:flex; align-items:center; gap:8px; }}
+    .notice-alert-tags p {{ margin:5px 0 10px; white-space:pre-wrap; color:#425269; }}
+    .notice-alert-tags .tag-loading {{ width:13px; height:13px; border:2px solid #cfdae8; border-top-color:#2364b4; border-radius:50%; animation:notice-tag-spin 1s linear infinite; }}
+    @keyframes notice-tag-spin {{ to {{ transform:rotate(360deg); }} }}
     * {{ box-sizing: border-box; }}
     body {{ margin:0; min-height:100vh; font-family:"Microsoft YaHei", Arial, sans-serif; color:#08204a; background:linear-gradient(180deg,#eaf3ff 0,#f6f9ff 42%,#eef5ff 100%); }}
     .visually-hidden {{ position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }}
@@ -2959,6 +2972,11 @@ def render_workbench_lite(
     .workspace.is-switching > * {{ opacity:0; pointer-events:none; }}
     .workspace.is-switching::before {{ content:""; position:absolute; inset:0; z-index:3; border:1px solid #d8e5f7; border-radius:20px; background:linear-gradient(135deg,rgba(255,255,255,.96),rgba(238,246,255,.94)); box-shadow:0 14px 32px rgba(15,73,153,.08); }}
     .workspace.is-switching::after {{ content:attr(data-loading-text); position:absolute; left:50%; top:50%; z-index:4; transform:translate(-50%,-50%); min-width:180px; min-height:42px; border-radius:999px; padding:11px 22px; display:flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; border:1px solid #cfe0ff; box-shadow:0 12px 28px rgba(31,99,255,.14); font-size:14px; font-weight:950; }}
+    .workspace-loading-spinner {{ display:none; }}
+    .workspace.is-switching > .workspace-loading-spinner {{ display:block; opacity:1; position:absolute; left:calc(50% - 112px); top:calc(50% - 8px); z-index:5; width:16px; height:16px; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
+    .lite-loading-state::before {{ content:""; display:inline-block; width:14px; height:14px; margin-right:8px; vertical-align:middle; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
+    .panel.loading::before {{ width:14px; height:14px; top:20px; left:auto; right:98px; z-index:6; background:none; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
+    .panel.notice-detail-drawer.loading::before {{ display:block; top:90px; right:106px; }}
     .task-inbox {{ position:relative; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; overflow:visible; align-self:start; }}
     .task-inbox.panel {{ padding:10px; }}
     .inbox-head {{ grid-column:1 / -1; display:grid; grid-template-columns:minmax(0,1fr) minmax(240px,360px); gap:12px; align-items:center; }}
@@ -2975,8 +2993,8 @@ def render_workbench_lite(
     .notice-detail-overlay {{ position:fixed; z-index:180; inset:0; display:none; justify-content:flex-end; background:rgba(8,25,52,.5); backdrop-filter:blur(3px); }}
     .notice-detail-overlay.open {{ display:flex; }}
     @media (min-width:1181px) {{
-      .notice-detail-overlay.manual-binding-mode {{ pointer-events:none; background:transparent; backdrop-filter:none; }}
-      .notice-detail-overlay.manual-binding-mode .notice-detail-drawer {{ width:min(860px,52vw); pointer-events:auto; }}
+      .notice-detail-overlay[data-work-type]:not([data-work-type="event"]) {{ pointer-events:none; background:transparent; backdrop-filter:none; }}
+      .notice-detail-overlay[data-work-type]:not([data-work-type="event"]) .notice-detail-drawer {{ width:min(860px,52vw); pointer-events:auto; }}
     }}
     .panel.notice-detail-drawer {{ width:min(1180px,calc(100vw - 72px)); height:100%; min-width:0; overflow:hidden; display:grid; grid-template-rows:auto minmax(0,1fr); border-radius:16px 0 0 16px; border-right:0; padding:0; background:#fff; box-shadow:-18px 0 56px rgba(8,37,82,.22); isolation:isolate; }}
     .panel.notice-detail-drawer::before {{ display:none; }}
@@ -3191,6 +3209,18 @@ def render_workbench_lite(
     .form-actions .btn.primary,.form-actions .btn.danger,.form-actions .btn.danger-ghost {{ min-width:104px; box-shadow:0 12px 24px rgba(21,99,255,.14); }}
     .end-check-backdrop {{ position:fixed; inset:0; z-index:240; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
     .end-check-backdrop[hidden] {{ display:none; }}
+    @view-transition {{ navigation:auto; }}
+    ::view-transition-old(root),::view-transition-new(root) {{ animation-duration:180ms; }}
+    .end-check-backdrop,.notice-detail-overlay,.manual-menu,.refresh-menu,.polling-person-results,.paste-drawer-content {{ opacity:1; transition:opacity 180ms ease,display 180ms allow-discrete; }}
+    .end-check-backdrop[hidden],.notice-detail-overlay:not(.open),.manual-picker:not(.open) .manual-menu,.refresh-picker:not(.open) .refresh-menu,.polling-person-results[hidden],.paste-drawer-content[hidden] {{ opacity:0; pointer-events:none; }}
+    .end-check-backdrop > section,.notice-detail-drawer {{ transition:translate 180ms ease; }}
+    .end-check-backdrop[hidden] > section {{ translate:0 8px; }}
+    .notice-detail-overlay:not(.open) .notice-detail-drawer {{ translate:20px 0; }}
+    @starting-style {{
+      .end-check-backdrop:not([hidden]),.notice-detail-overlay.open,.manual-picker.open .manual-menu,.refresh-picker.open .refresh-menu,.polling-person-results:not([hidden]),.paste-drawer-content:not([hidden]) {{ opacity:0; }}
+      .end-check-backdrop:not([hidden]) > section {{ translate:0 8px; }}
+      .notice-detail-overlay.open .notice-detail-drawer {{ translate:20px 0; }}
+    }}
     .end-check-dialog {{ width:min(560px,100%); border:1px solid #d8e5f7; border-radius:24px; background:#fff; box-shadow:0 28px 70px rgba(8,32,74,.24); overflow:hidden; }}
     .end-check-head {{ position:relative; padding:15px 62px 15px 18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
     .end-check-head span {{ display:inline-flex; width:max-content; border-radius:999px; padding:5px 10px; color:#0a57d8; background:#eaf3ff; font-weight:900; font-size:12px; }}
@@ -3348,7 +3378,7 @@ def render_workbench_lite(
     body.has-dirty-lite-form .job-status.failed {{ color:#b42318; }}
     .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
-    @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} }}
+    @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} .btn.is-busy::after,.btn[aria-busy="true"]::after,.refresh-menu button[aria-busy="true"]::after,.workspace-loading-spinner,.lite-loading-state::before,.panel.loading::before {{ animation:liteSpin 1.2s linear infinite !important; }} }}
     @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .task-inbox {{ position:relative; top:auto; max-height:none; grid-template-columns:1fr; overflow:visible; }} .inbox-head {{ grid-column:auto; grid-template-columns:1fr; }} .inbox-section .list {{ max-height:42vh; }} .toolbar {{ flex-wrap:wrap; }} .notice-detail-drawer {{ width:min(1000px,calc(100vw - 28px)); }} .notice-bind-action {{ display:none !important; }} .notice-row-wrap.can-bind-manual .notice-row {{ padding-bottom:8px; }} }}
     @media (max-width: 900px) {{
       .topbar {{ min-height:auto; padding:18px 20px; flex-direction:column; align-items:stretch; gap:16px; }}
@@ -3378,6 +3408,8 @@ def render_workbench_lite(
       .notice-drawer-body {{ padding:10px 12px 18px; }}
     }}
     @media (max-width: 820px) {{
+      .polling-loop-add,.polling-repeat-remove {{ min-height:44px; }}
+      .polling-repeat-remove {{ min-width:44px; flex-basis:44px; }}
       .polling-sop-attachment > a {{ min-height:44px; display:flex; align-items:center; min-width:0; overflow-wrap:anywhere; }}
       .type-tab,.btn,.toolbar select,.toolbar input,.refresh-menu button,.scope-select {{ min-height:44px !important; }}
       input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),select {{ min-height:44px !important; }}
@@ -3489,8 +3521,8 @@ def render_workbench_lite(
         <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
         <details class="rail-fold undo" id="lite-undo-fold" data-loaded="{'1' if undo_items else '0'}"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
       </aside>
-      <!--LITE_FRAGMENT:detail:START--><div class="notice-detail-overlay{' open' if detail_drawer_open else ''}" id="lite-notice-detail-overlay" data-open-on-load="{'1' if detail_drawer_open else '0'}" aria-hidden="{'false' if detail_drawer_open else 'true'}">
-        <section class="panel detail-panel notice-detail-drawer" id="detail-panel" role="dialog" aria-modal="true" aria-labelledby="lite-notice-drawer-title" tabindex="-1">
+      <!--LITE_FRAGMENT:detail:START--><div class="notice-detail-overlay{' open' if detail_drawer_open else ''}" id="lite-notice-detail-overlay" data-work-type="{_e(detail_work)}" data-open-on-load="{'1' if detail_drawer_open else '0'}" aria-hidden="{'false' if detail_drawer_open else 'true'}">
+        <section class="panel detail-panel notice-detail-drawer" id="detail-panel" role="dialog" aria-modal="{'true' if detail_work == 'event' else 'false'}" aria-labelledby="lite-notice-drawer-title" tabindex="-1">
           <header class="notice-drawer-head">
             <div class="notice-drawer-title">
               <span>当前通告</span>
@@ -3512,6 +3544,7 @@ def render_workbench_lite(
               </div>
             </section>
             {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
+            <section id="lite-alert-tags" class="notice-alert-tags" aria-live="polite" hidden></section>
           </div>
         </section>
       </div><!--LITE_FRAGMENT:detail:END-->
@@ -3648,6 +3681,49 @@ def render_workbench_lite(
   <script>
     const initialScope = {_json_dumps(scope)};
     const liteIsAdmin = {_json_dumps(bool(is_admin_session))};
+    const liteAssistantFrame = window.parent !== window && new URLSearchParams(location.search).get('_assistant_frame') === '1';
+    function setLiteLocation(value, replace = false) {{
+      const url = new URL(value, location.origin);
+      if (liteAssistantFrame) url.searchParams.set('_assistant_frame', '1');
+      history[replace || liteAssistantFrame ? 'replaceState' : 'pushState']({{ lite: true }}, '', url.pathname + url.search + url.hash);
+      if (liteAssistantFrame) {{
+        url.searchParams.delete('_assistant_frame'); url.searchParams.delete('_frame_retry');
+        window.parent.postMessage({{ type: 'clipflow:workbench-location', url: url.pathname + url.search + url.hash, replace }}, location.origin);
+      }}
+    }}
+    function litePageNavigate(value) {{
+      const url = new URL(value, location.origin);
+      if (liteAssistantFrame && url.origin === location.origin) {{
+        if (url.pathname.startsWith('/api/auth/')) {{ window.top.location.assign(url.href); return; }}
+        if (url.pathname.replace(/\\/$/, '') === '/workbench-lite') {{
+          url.searchParams.set('_assistant_frame', '1');
+          location.replace(url.href); return;
+        }} else {{
+          window.parent.postMessage({{ type: 'clipflow:workbench-navigate', url: url.pathname + url.search + url.hash }}, location.origin);
+          return;
+        }}
+      }}
+      location.assign(url.href);
+    }}
+    if (liteAssistantFrame) {{
+      let pointerFrame = 0, latestPointer = null;
+      document.addEventListener('pointermove', event => {{
+        if (event.pointerType === 'touch') return;
+        latestPointer = {{ x: event.clientX, y: event.clientY }};
+        if (!pointerFrame) pointerFrame = requestAnimationFrame(() => {{
+          pointerFrame = 0;
+          window.parent.postMessage({{ type: 'clipflow:workbench-pointer', ...latestPointer }}, location.origin);
+        }});
+      }}, {{ passive: true }});
+      document.addEventListener('click', async event => {{
+        const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+        if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0 || link.target === '_blank' || link.hasAttribute('download')) return;
+        const url = new URL(link.href, location.origin);
+        if (url.origin !== location.origin || url.pathname.replace(/\\/$/, '') === '/workbench-lite' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/polling-work-order')) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (await prepareLiteNavigation()) litePageNavigate(url.href);
+      }}, true);
+    }}
     let liteFormDirty = false;
     let liteDraftRestoring = false;
     let liteDraftContextKey = '';
@@ -3731,7 +3807,7 @@ def render_workbench_lite(
     function closePollingSopDeleteConfirm() {{const modal=document.getElementById('lite-polling-sop-delete-confirm'),returnFocus=litePollingSopDeleteReturnFocus;if(modal)modal.hidden=true;litePollingSopDeleteTarget=null;litePollingSopDeleteReturnFocus=null;if(returnFocus?.isConnected)requestAnimationFrame(()=>returnFocus.focus())}}
     async function confirmPollingSopDelete(button) {{const target=litePollingSopDeleteTarget;if(!target)return;const error=document.getElementById('lite-polling-sop-delete-error');setButtonBusy(button,true);try{{await pollingApi(`/api/polling-sops/${{encodeURIComponent(target.sop_id)}}?expected_version=${{target.version}}`,{{method:'DELETE'}})}}catch(exc){{if(error){{error.textContent=exc.message||'删除 SOP 失败';error.hidden=false}}showLiteError(exc.message);setButtonBusy(button,false);return}}closePollingSopDeleteConfirm();litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft();litePollingSelectedSop=null;try{{await loadPollingSops();renderPollingSopList();renderPollingSopEditor();setPollingSopFeedback(`已删除：${{target.name}}`)}}catch(exc){{setPollingSopFeedback(`SOP 已删除，列表刷新失败：${{exc.message}}`,true)}}finally{{setButtonBusy(button,false)}}}}
     function pollingSopTypeIssue(sop,target) {{const tokens=pollingSopPlaceholderTokens(sop);if(target==='maintenance'&&tokens.size)return '维保 SOP 不能使用设备指向占位符，请先修改相关步骤。';if(target==='adjust'&&tokens.size&&!(tokens.size===1&&tokens.has('{{{{from}}}}')))return '调整 SOP 只能是不含占位符的普通调整，或仅使用 {{{{from}}}} 的制冷单元调整。';return ''}}
-    async function browsePollingSopType(target) {{if(!Object.hasOwn(litePollingSopTypeLabels,target)||pollingSopWorkType()===target)return;const modal=pollingSopModal(),list=document.getElementById('lite-polling-sop-list'),sequence=++litePollingSopOpenSequence,loading=document.createElement('div');litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft(target);loading.className='empty';loading.textContent=`正在读取${{litePollingSopTypeLabels[target]}} SOP…`;list.replaceChildren(loading);setPollingSopFeedback('');document.getElementById('lite-polling-sop-title').textContent=`${{pollingSopLabel()}} SOP步骤填写`;renderPollingSopEditor();requestAnimationFrame(()=>document.querySelector('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]')?.focus());try{{await loadPollingSops();if(sequence!==litePollingSopOpenSequence||modal.hidden)return;renderPollingSopList()}}catch(error){{if(sequence!==litePollingSopOpenSequence||modal.hidden)return;setPollingSopFeedback(`SOP 列表加载失败：${{error.message}}`,true);const failed=document.createElement('div');failed.className='empty compact';failed.textContent='SOP 列表加载失败，请重试';list.replaceChildren(failed)}}}}
+    async function browsePollingSopType(target) {{if(!Object.hasOwn(litePollingSopTypeLabels,target)||pollingSopWorkType()===target)return;const modal=pollingSopModal(),list=document.getElementById('lite-polling-sop-list'),sequence=++litePollingSopOpenSequence,loading=document.createElement('div');litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft(target);loading.className='empty lite-loading-state';loading.textContent=`正在读取${{litePollingSopTypeLabels[target]}} SOP…`;list.replaceChildren(loading);setPollingSopFeedback('');document.getElementById('lite-polling-sop-title').textContent=`${{pollingSopLabel()}} SOP步骤填写`;renderPollingSopEditor();requestAnimationFrame(()=>document.querySelector('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]')?.focus());try{{await loadPollingSops();if(sequence!==litePollingSopOpenSequence||modal.hidden)return;renderPollingSopList()}}catch(error){{if(sequence!==litePollingSopOpenSequence||modal.hidden)return;setPollingSopFeedback(`SOP 列表加载失败：${{error.message}}`,true);const failed=document.createElement('div');failed.className='empty compact';failed.textContent='SOP 列表加载失败，请重试';list.replaceChildren(failed)}}}}
     function openPollingSopTypeConfirm(sop,target,trigger) {{if(!sop?.sop_id)return;if(litePollingPendingSopFiles.length){{setPollingSopFeedback('请先保存或移除待上传附件，再转换适用类型。',true);return}}const from=String(sop.work_type||'polling');if(from===target||!Object.hasOwn(litePollingSopTypeLabels,target))return;litePollingSopTypeChange={{sop_id:String(sop.sop_id),version:Number(sop.version||0),from,to:target,name:String(sop.name||'未命名 SOP')}};litePollingSopTypeReturnFocus=trigger instanceof HTMLElement?trigger:null;const parent=pollingSopModal(),modal=document.getElementById('lite-polling-sop-type-confirm'),summary=document.getElementById('lite-polling-sop-type-summary'),error=document.getElementById('lite-polling-sop-type-error'),apply=document.getElementById('lite-polling-sop-type-apply'),issue=pollingSopTypeIssue(sop,target);if(summary)summary.textContent=`${{litePollingSopTypeChange.name}}：${{litePollingSopTypeLabels[from]}} → ${{litePollingSopTypeLabels[target]}}`;if(error){{error.textContent=issue;error.hidden=!issue}}if(apply)apply.disabled=Boolean(issue);if(parent)parent.inert=true;if(modal){{modal.inert=false;modal.hidden=false}};(issue?document.getElementById('lite-polling-sop-type-cancel'):apply)?.focus()}}
     function closePollingSopTypeConfirm(restoreFocus=true) {{const parent=pollingSopModal(),modal=document.getElementById('lite-polling-sop-type-confirm'),returnFocus=litePollingSopTypeReturnFocus;if(modal?.contains(document.activeElement))document.activeElement.blur();if(modal){{modal.hidden=true;modal.inert=true}}if(parent)parent.inert=false;litePollingSopTypeChange=null;litePollingSopTypeReturnFocus=null;if(restoreFocus&&returnFocus?.isConnected)returnFocus.focus({{preventScroll:true}})}}
     async function confirmPollingSopTypeChange(button) {{const change=litePollingSopTypeChange,sop=litePollingEditingSop,error=document.getElementById('lite-polling-sop-type-error');if(!change||!sop||String(sop.sop_id)!==change.sop_id||Number(sop.version||0)!==change.version){{if(error){{error.textContent='SOP 已变化，请关闭后重新选择。';error.hidden=false}}return}}const issue=pollingSopTypeIssue(sop,change.to);if(issue){{if(error){{error.textContent=issue;error.hidden=false}}button.disabled=true;return}}setButtonBusy(button,true);try{{const body={{sop_id:sop.sop_id,work_type:change.to,scope:pollingSopScope(),name:sop.name||'',expected_version:Number(sop.version||0),steps:sop.steps||[]}},saved=await pollingApi(`/api/polling-sops/${{encodeURIComponent(sop.sop_id)}}`,{{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});litePollingEditingSop=saved;document.getElementById('lite-polling-sop-title').textContent=`${{pollingSopLabel()}} SOP步骤填写`;closePollingSopTypeConfirm(false);let refreshError='';try{{await loadPollingSops()}}catch(exc){{refreshError=exc.message||'列表刷新失败';litePollingSops=[saved]}}renderPollingSopList();renderPollingSopEditor();requestAnimationFrame(()=>document.querySelector('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]')?.focus());setPollingSopFeedback(`已将 ${{saved.name}} 从${{litePollingSopTypeLabels[change.from]}}转换为${{litePollingSopTypeLabels[change.to]}}。${{refreshError?`列表刷新失败：${{refreshError}}`:''}}`,Boolean(refreshError));setLiteStatus('SOP 适用类型已转换')}}catch(exc){{if(error){{error.textContent=exc.message||'SOP 类型转换失败';error.hidden=false}}setPollingSopFeedback(`转换失败：${{exc.message}}`,true)}}finally{{if(button.isConnected)setButtonBusy(button,false)}}}}
@@ -3860,7 +3936,7 @@ def render_workbench_lite(
       const requestedWorkType=pollingCurrentSopWorkType();if(mode==='manage'&&(!litePollingEditingSop||litePollingEditingSop.scope!==pollingSopScope()||litePollingEditingSop.work_type!==requestedWorkType)){{litePollingPendingSopFiles=[];litePollingEditingSop=pollingNewDraft(requestedWorkType)}}
       const sequence=++litePollingSopOpenSequence;
       setPollingSopFeedback('');
-      const list=document.getElementById('lite-polling-sop-list'),editor=document.getElementById('lite-polling-sop-editor'),loading=document.createElement('div');loading.className='empty';loading.textContent='正在读取 SOP…';list.replaceChildren(loading);const editorLoading=document.createElement('div');editorLoading.className='empty';editorLoading.textContent=mode==='select'?'正在读取 SOP 和人员…':'正在读取 SOP…';editor.replaceChildren(editorLoading);modal.hidden=false;requestAnimationFrame(()=>document.getElementById('lite-polling-sop-close')?.focus());
+      const list=document.getElementById('lite-polling-sop-list'),editor=document.getElementById('lite-polling-sop-editor'),loading=document.createElement('div');loading.className='empty lite-loading-state';loading.textContent='正在读取 SOP…';list.replaceChildren(loading);const editorLoading=document.createElement('div');editorLoading.className='empty lite-loading-state';editorLoading.textContent=mode==='select'?'正在读取 SOP 和人员…':'正在读取 SOP…';editor.replaceChildren(editorLoading);modal.hidden=false;requestAnimationFrame(()=>document.getElementById('lite-polling-sop-close')?.focus());
       document.getElementById('lite-polling-sop-title').textContent=mode==='select'?'选择操作步骤':`${{pollingSopLabel()}} SOP步骤填写`;document.getElementById('lite-polling-sop-new').hidden=mode==='select';
       const peoplePromise=mode==='select'?loadPollingPeople().then(()=>null,error=>error):Promise.resolve(null);
       try{{
@@ -3925,8 +4001,9 @@ def render_workbench_lite(
       }}
     }}
     function liteAuthLoginUrl() {{
-      const next = location.pathname + location.search + location.hash;
-      return '/api/auth/login?next=' + encodeURIComponent(next || '/');
+      const next = new URL(location.href);
+      next.searchParams.delete('_assistant_frame'); next.searchParams.delete('_frame_retry');
+      return '/api/auth/login?next=' + encodeURIComponent(next.pathname + next.search + next.hash || '/');
     }}
     function isLiteAuthRequired(response, data, text) {{
       const message = String(text || (data && data.error) || '');
@@ -3942,7 +4019,7 @@ def render_workbench_lite(
     function redirectLiteAuthRequired() {{
       setLiteFormDirty(false);
       setLiteStatus('登录已过期，正在跳转飞书扫码登录...');
-      location.href = liteAuthLoginUrl();
+      litePageNavigate(liteAuthLoginUrl());
     }}
     function handleLiteAuthRequired(response, data, text) {{
       if (!isLiteAuthRequired(response, data, text)) return false;
@@ -4160,6 +4237,7 @@ def render_workbench_lite(
       liteSitePhotos = [];
       liteAliConfirmationImage = null;
     }}
+    function isLiteNavigationDirty() {{ return liteFormDirty; }}
     async function prepareLiteNavigation() {{
       const form = document.getElementById('lite-notice-form');
       if (!form) return true;
@@ -4253,6 +4331,7 @@ def render_workbench_lite(
       overlay.setAttribute('aria-hidden', 'false');
       document.body.classList.add('notice-drawer-open');
       updateNoticeDrawerTitle(title);
+      syncManualSourceBindingControls(document.getElementById('lite-notice-form'));
       if (!wasOpen) {{
         requestAnimationFrame(() => {{
           const body = overlay.querySelector('.notice-drawer-body');
@@ -4262,8 +4341,14 @@ def render_workbench_lite(
       }}
     }}
     function closeNoticeDrawer({{ resetUrl = true }} = {{}}) {{
+      stopNoticeTags();
       const overlay = noticeDrawerOverlay();
       if (!overlay) return;
+      if (liteNavigateController) {{
+        liteNavigationGeneration++;
+        liteNavigateController.abort(); liteNavigateController = null;
+        setPanelLoading(false);
+      }}
       overlay.dataset.openOnLoad = '0';
       overlay.classList.remove('open');
       overlay.setAttribute('aria-hidden', 'true');
@@ -4279,7 +4364,7 @@ def render_workbench_lite(
       for (const key of ['active_item_id', 'record_id', 'manual', 'repair_management_record_id']) {{
         url.searchParams.delete(key);
       }}
-      history.replaceState({{ lite: true }}, '', url.pathname + url.search + url.hash);
+      setLiteLocation(url.href, true);
       const returnFocus = lastNoticeDrawerTrigger;
       lastNoticeDrawerTrigger = null;
       if (returnFocus?.isConnected) {{
@@ -4299,6 +4384,12 @@ def render_workbench_lite(
       if (!workspace) return;
       workspace.classList.toggle('is-switching', Boolean(enabled));
       workspace.setAttribute('aria-busy', enabled ? 'true' : 'false');
+      if (enabled && !workspace.querySelector(':scope > .workspace-loading-spinner')) {{
+        const spinner = document.createElement('span');
+        spinner.className = 'workspace-loading-spinner';
+        spinner.setAttribute('aria-hidden', 'true');
+        workspace.append(spinner);
+      }}
       if (enabled) workspace.dataset.loadingText = label || '正在加载通告';
       else delete workspace.dataset.loadingText;
     }}
@@ -4396,6 +4487,7 @@ def render_workbench_lite(
         }});
       }});
     }}
+    let litePageSuspended = false;
     let liteQtActiveStream = null;
     let liteQtActiveStreamKey = '';
     let liteRepairStream = null;
@@ -4458,7 +4550,7 @@ def render_workbench_lite(
     }}
     function scheduleLiteQtActiveRefresh() {{
       if (
-        document.hidden
+        (document.hidden || litePageSuspended)
         || liteFormDirty
         || noticeDrawerOverlay()?.classList.contains('open')
         || document.getElementById('detail-panel')?.classList.contains('loading')
@@ -4517,7 +4609,7 @@ def render_workbench_lite(
     }}
     function ensureLiteQtActiveStream() {{
       if (typeof EventSource === 'undefined') return;
-      if (document.hidden) {{
+      if (document.hidden || litePageSuspended) {{
         closeLiteQtActiveStream();
         return;
       }}
@@ -4571,7 +4663,7 @@ def render_workbench_lite(
       const workType = document.querySelector('#lite-notice-form [name="work_type"]')?.value
         || new URLSearchParams(location.search).get('work_type')
         || '';
-      if (typeof EventSource === 'undefined' || document.hidden || workType !== 'repair') {{
+      if (typeof EventSource === 'undefined' || document.hidden || litePageSuspended || workType !== 'repair') {{
         closeLiteRepairStream();
         return;
       }}
@@ -4598,7 +4690,8 @@ def render_workbench_lite(
       }});
     }}
     document.addEventListener('visibilitychange', () => {{
-      if (document.hidden) {{
+      if (document.hidden || litePageSuspended) stopNoticeTags(); else refreshNoticeTags();
+      if (document.hidden || litePageSuspended) {{
         closeLiteQtActiveStream();
         closeLiteRepairStream();
       }}
@@ -4608,12 +4701,24 @@ def render_workbench_lite(
         if (liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
       }}
     }});
+    window.addEventListener('clipflow:workbench-visibility', event => {{
+      litePageSuspended = event.detail?.active === false;
+      if (litePageSuspended) stopNoticeTags(); else refreshNoticeTags();
+      if (litePageSuspended) {{
+        closeLiteQtActiveStream(); closeLiteRepairStream();
+        if (liteQtActiveRefreshTimer !== null) window.clearTimeout(liteQtActiveRefreshTimer);
+        liteQtActiveRefreshTimer = null;
+      }} else {{
+        ensureLiteQtActiveStream(); ensureLiteRepairStream();
+        if (liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
+      }}
+    }});
     function applyLiteDocument(nextDoc, url, push, selectors) {{
       const replaceSelectors = selectors || ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'];
       for (const selector of replaceSelectors) {{
         replaceFromDocument(nextDoc, selector);
       }}
-      if (push && url) history.pushState({{ lite: true }}, '', url);
+      if (push && url) setLiteLocation(url);
       requestAnimationFrame(() => {{
         hydrateLitePreview();
         ensureLiteQtActiveStream();
@@ -4689,10 +4794,18 @@ def render_workbench_lite(
         throw new Error(detailOnly ? '通告详情返回不完整' : '工作台局部页面返回不完整');
       }}
       for (const item of prepared) {{
-        item.current.replaceWith(item.next);
+        if (detailOnly) {{
+          const body = item.current.querySelector('.notice-drawer-body'), nextBody = item.next.querySelector('.notice-drawer-body');
+          const title = item.current.querySelector('#lite-notice-drawer-title'), nextTitle = item.next.querySelector('#lite-notice-drawer-title');
+          if (!body || !nextBody || !title || !nextTitle) throw new Error('通告详情返回不完整');
+          // Keep the drawer shell: replacing it restarts its opening animation.
+          body.replaceWith(nextBody); title.textContent = nextTitle.textContent;
+          item.current.dataset.workType = item.next.dataset.workType;
+          item.current.dataset.openOnLoad = item.next.dataset.openOnLoad;
+        }} else item.current.replaceWith(item.next);
       }}
       const canonicalUrl = String(data?.canonical_url || fallbackUrl || '');
-      if (push && canonicalUrl) history.pushState({{ lite: true }}, '', canonicalUrl);
+      if (push && canonicalUrl) setLiteLocation(canonicalUrl);
       syncLiteTopbar(canonicalUrl || fallbackUrl);
       requestAnimationFrame(() => {{
         hydrateLitePreview();
@@ -6123,11 +6236,23 @@ def render_workbench_lite(
       const drawerOpen = document.getElementById('lite-notice-detail-overlay')?.classList.contains('open');
       const panel = drawerOpen ? activeForm?.querySelector('[data-manual-source-binding]') : null;
       const overlay = document.getElementById('lite-notice-detail-overlay');
-      overlay?.classList.toggle('manual-binding-mode', Boolean(panel));
-      overlay?.querySelector('.notice-detail-drawer')?.setAttribute('aria-modal', panel ? 'false' : 'true');
       const workType = previewValue(activeForm, 'work_type') || activeForm?.dataset.workType || '';
       const selectedSourceId = previewValue(activeForm, 'source_record_id');
       const choice = previewValue(activeForm, 'manual_binding_choice');
+      const optionalUpdate = String(activeForm?.dataset.action || '') === 'update';
+      const bindingOpen = Boolean(panel && !selectedSourceId);
+      if (overlay && workType) overlay.dataset.workType = workType;
+      overlay?.querySelector('.notice-detail-drawer')?.setAttribute('aria-modal', workType === 'event' ? 'true' : 'false');
+      const heading = panel?.querySelector('.manual-source-binding-head strong');
+      if (heading) heading.textContent = selectedSourceId ? '源表' : optionalUpdate ? '源表事项关联（更新前可选）' : '计划通告关联（必须选择一种）';
+      const recommendations = panel?.querySelector('.manual-source-recommendations');
+      if (recommendations) recommendations.hidden = Boolean(selectedSourceId);
+      const empty = panel?.querySelector('.manual-source-empty');
+      if (empty) empty.textContent = optionalUpdate ? '当前筛选范围没有可绑定的源表事项。' : '当前筛选范围没有可绑定记录，可选择不绑定。';
+      const bindButton = panel?.querySelector('.manual-source-binding-actions [data-manual-binding-mode="bind"]');
+      if (bindButton) bindButton.textContent = selectedSourceId ? '重新绑定' : optionalUpdate ? '绑定源表事项' : '绑定已有计划通告（推荐）';
+      const unboundButton = panel?.querySelector('.manual-source-binding-actions [data-manual-binding-mode="unbound"]');
+      if (unboundButton) unboundButton.hidden = optionalUpdate || Boolean(selectedSourceId);
       panel?.querySelectorAll('.manual-source-binding-actions [data-manual-binding-mode]').forEach(button => {{
         const active = button.getAttribute('data-manual-binding-mode') === choice;
         button.classList.toggle('active', active);
@@ -6136,7 +6261,6 @@ def render_workbench_lite(
       const status = panel?.querySelector('#lite-manual-binding-status');
       if (status) {{
         const bindingReady = choice === 'unbound' || (choice === 'bind' && Boolean(selectedSourceId));
-        const optionalUpdate = String(activeForm.dataset.action || '') === 'update';
         status.textContent = choice === 'bind'
           ? (selectedSourceId ? (boundTitle || '已绑定计划通告') : '请选择要绑定的计划通告')
           : (choice === 'unbound' ? '不绑定计划通告' : (optionalUpdate ? '尚未绑定源表事项' : '请选择绑定方式'));
@@ -6146,7 +6270,7 @@ def render_workbench_lite(
         const wrapper = button.closest('.notice-row-wrap');
         const row = wrapper?.querySelector('.notice-row');
         const sourceId = String(parseJsonAttr(button, 'data-candidate').source_record_id || '').trim();
-        const available = Boolean(panel && row && row.dataset.workType === workType && !row.classList.contains('is-disabled'));
+        const available = Boolean(bindingOpen && row && row.dataset.workType === workType && !row.classList.contains('is-disabled'));
         wrapper?.classList.toggle('can-bind-manual', available);
         button.hidden = !available;
         if (available) {{
@@ -6246,7 +6370,7 @@ def render_workbench_lite(
       const unboundConfirm = document.getElementById('lite-manual-source-unbound-confirm');
       if (liteManualSourceMode === 'unbound-warning' && unboundConfirm) unboundConfirm.disabled = true;
       const loading = document.createElement('div');
-      loading.className = 'target-candidate-empty';
+      loading.className = 'target-candidate-empty lite-loading-state';
       loading.textContent = '正在读取计划通告...';
       list.replaceChildren(loading);
       const url = new URL('/api/workbench/source-options', location.origin);
@@ -6558,7 +6682,7 @@ def render_workbench_lite(
       const controller = new AbortController();
       liteRepairEventRequestController = controller;
       const loading = document.createElement('div');
-      loading.className = 'target-candidate-empty';
+      loading.className = 'target-candidate-empty lite-loading-state';
       loading.textContent = '正在读取事件转检修记录...';
       list.replaceChildren(loading);
       const url = new URL('/api/workbench/repair-event-candidates', location.origin);
@@ -6847,7 +6971,7 @@ def render_workbench_lite(
       if (!fold || fold.dataset.loaded === '1' || fold.dataset.loading === '1') return;
       fold.dataset.loading = '1';
       const list = fold.querySelector('.undo-panel-list');
-      if (list) list.innerHTML = '<div class="empty compact">正在读取...</div>';
+      if (list) list.innerHTML = '<div class="empty compact lite-loading-state">正在读取...</div>';
       try {{
         const params = new URLSearchParams({{
           scope: getCurrentScope(),
@@ -7213,6 +7337,49 @@ def render_workbench_lite(
       syncManualSourceBindingControls(form);
       resetLiteDraftTracking(form);
       restoreLiteDraft(form).catch(() => null);
+      refreshNoticeTags();
+    }}
+    let noticeTagsTimer = 0, noticeTagsRequest = null, noticeTagsSequence = 0;
+    function stopNoticeTags() {{
+      noticeTagsSequence++;
+      window.clearTimeout(noticeTagsTimer);
+      noticeTagsRequest?.abort(); noticeTagsRequest = null;
+    }}
+    async function refreshNoticeTags() {{
+      stopNoticeTags();
+      const form = document.getElementById('lite-notice-form'), panel = document.getElementById('lite-alert-tags');
+      if (!form || !panel || document.hidden || litePageSuspended || !noticeDrawerOverlay()?.classList.contains('open')) return;
+      const target = String(previewValue(form, 'target_record_id') || '').trim();
+      if (isMissingTargetRecordId(target)) {{ panel.hidden = true; return; }}
+      const sequence = noticeTagsSequence, controller = new AbortController();
+      noticeTagsRequest = controller;
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
+      const line = (tag, text) => {{ const node = document.createElement(tag); node.textContent = text; panel.appendChild(node); return node; }};
+      let pending = false;
+      try {{
+        const query = new URLSearchParams({{target_record_id:target,work_type:String(previewValue(form,'work_type')||'')}});
+        const response = await fetch('/api/notice-alert-tags?' + query, {{credentials:'same-origin',signal:controller.signal}});
+        const value = await response.json();
+        if (sequence !== noticeTagsSequence || !panel.isConnected) return;
+        if (!response.ok || value.ok === false) throw new Error('推荐标签暂不可用，通告业务不受影响。');
+        const data = value.data;
+        panel.replaceChildren(); panel.hidden = !data;
+        if (!data) return;
+        const heading = line('header', '已发通告推荐标签 · ' + (data.action === 'start' ? '开始' : '更新'));
+        pending = data.status === 'pending';
+        if (pending) {{ const spinner = document.createElement('span'); spinner.className = 'tag-loading'; heading.prepend(spinner); line('p','正在后台生成推荐标签…'); }}
+        else if (data.status === 'ready') {{
+          for (const tag of data.tags || []) {{ line('strong','【' + tag.label + '】' + tag.content); line('p','依据：' + tag.basis + '\\n注意：' + tag.notes); }}
+        }} else line('p', data.error || '推荐标签获取失败，通告业务不受影响。');
+        if (data.message_warning) line('p', data.message_warning);
+      }} catch (error) {{
+        if (sequence !== noticeTagsSequence || !panel.isConnected) return;
+        panel.replaceChildren(); panel.hidden = false;
+        line('p','推荐标签暂不可用，通告发送不受影响。');
+      }} finally {{
+        window.clearTimeout(timeout);
+        if (sequence === noticeTagsSequence) {{ noticeTagsRequest = null; if (pending) noticeTagsTimer = window.setTimeout(refreshNoticeTags,5000); }}
+      }}
     }}
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
@@ -7286,18 +7453,20 @@ def render_workbench_lite(
     }}
     function applySourceRowToDetail(link) {{
       const form = document.getElementById('lite-notice-form');
-      if (!form || !link || !link.matches('.notice-row')) return false;
+      if (!form || !link || !link.matches('.notice-row,.ongoing-row')) return false;
+      const isOngoing = link.matches('.ongoing-row');
       const workType = link.getAttribute('data-work-type') || '';
       if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
       const draft = draftFromRow(link);
-      const linkedOngoing = link.getAttribute('data-linked-ongoing') === '1';
-      const action = linkedOngoing ? 'update' : (link.getAttribute('data-action') || 'start');
+      const linkedOngoing = isOngoing || link.getAttribute('data-linked-ongoing') === '1';
+      const action = linkedOngoing && link.getAttribute('data-target-record-id') ? 'update' : (link.getAttribute('data-action') || 'start');
       const title = link.getAttribute('data-title') || draft.title || '选择左侧事项';
       form.dataset.action = action;
       form.dataset.detailMode = linkedOngoing ? 'ongoing' : 'source';
       form.dataset.localOnly = '';
       form.dataset.targetEnded = '';
       delete form.dataset.submitOperationId;
+      delete form.dataset.pendingActionJobId;
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
       resetSourceTypeFields(form);
@@ -7305,7 +7474,7 @@ def render_workbench_lite(
       for (const [key, value] of Object.entries(draft)) {{
         setFormValue(form, key, value);
       }}
-      const sourceRecordId = link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '';
+      const sourceRecordId = link.getAttribute('data-source-record-id') || (!isOngoing ? link.getAttribute('data-record-id') : '') || '';
       const sourceEventId = link.getAttribute('data-source-event-id') || '';
       const sourceEventTitle = link.getAttribute('data-source-event-title') || '';
       const targetRecordId = linkedOngoing ? (link.getAttribute('data-target-record-id') || '') : '';
@@ -7322,7 +7491,7 @@ def render_workbench_lite(
       if (repairEventStatus && workType === 'repair') {{
         repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
       }}
-      setSourceLinkDisplay(form, sourceRecordId, '已关联');
+      setSourceLinkDisplay(form, sourceRecordId, sourceRecordId ? '已关联' : '未关联');
       setFormValue(form, 'target_record_id', targetRecordId);
       setFormValue(
         form,
@@ -7333,38 +7502,83 @@ def render_workbench_lite(
       );
       setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
       setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
+      if (isOngoing) {{
+        litePollingSelection = null;
+        const selector = form.querySelector('[data-polling-work-order-select]');
+        if (selector) selector.hidden = action !== 'start';
+        form.querySelectorAll('[data-polling-group-id]').forEach(node => node.remove());
+        const groupId = link.getAttribute('data-polling-group-id');
+        if (groupId) {{
+          const panel = document.createElement('section'); panel.className = 'form-section polling-work-order-status';
+          panel.setAttribute('data-polling-group-id', groupId); panel.textContent = '正在读取本条工单状态…';
+          form.querySelector('.form-actions')?.before(panel);
+        }}
+        setFormValue(form, 'manual', !targetRecordId && !sourceRecordId ? '1' : '');
+        setFormValue(form, 'manual_id', !targetRecordId && !sourceRecordId ? link.getAttribute('data-active-item-id') || '' : '');
+        setFormValue(form, 'manual_binding_choice', sourceRecordId ? 'bind' : '');
+      }} else {{
+        const selector = form.querySelector('[data-polling-work-order-select]');
+        if (selector) selector.hidden = linkedOngoing && action !== 'start';
+        form.querySelectorAll('[data-polling-group-id]').forEach(node => node.remove());
+        litePollingSelection = null;
+      }}
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       setDetailModeNote('');
       syncImagePanelsFromRow(form, link);
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
       resetAliConfirmationState(form);
-      if (linkedOngoing) setOngoingSubmitButtons(form);
+      if (isOngoing && !targetRecordId) setUnuploadedSubmitButtons(form);
+      else if (linkedOngoing) setOngoingSubmitButtons(form);
       else setSubmitButtons(form, action);
       updateNoticePreview(form);
-      setLiteStatus(linkedOngoing
+      setLiteStatus(isOngoing && !targetRecordId
+        ? '该通告尚未上传首条，可继续编辑后发送'
+        : linkedOngoing
         ? '该事项已在进行中，可发送更新、结束或删除'
         : '已选择计划通告，可继续编辑后发送');
       openNoticeDrawer(title, link);
       resetLiteDraftTracking(form);
+      syncManualSourceBindingControls(form);
       restoreLiteDraft(form).catch(() => null);
       return true;
     }}
     async function navigateLite(url, options = {{}}) {{
+      if (options.reuseWorkspace) {{
+        const current = liteTargetUrl(location.href), next = liteTargetUrl(url);
+        const month = new Intl.DateTimeFormat('en-GB', {{timeZone:'Asia/Shanghai', month:'numeric'}}).format(new Date()) + '月';
+        const defaults = {{scope:initialScope, work_type:'all', month, search:'', specialty:'', pending_page:'1', ongoing_page:'1'}};
+        const sameWorkspace = Object.entries(defaults).every(([key, fallback]) => (current.searchParams.get(key) || fallback) === (next.searchParams.get(key) || fallback));
+        const selectionKeys = ['active_item_id', 'record_id', 'manual', 'repair_management_record_id'];
+        const knownKeys = new Set([...Object.keys(defaults), ...selectionKeys, '_assistant_frame', '_frame_retry']);
+        if (sameWorkspace && Array.from(next.searchParams.keys()).every(key => knownKeys.has(key)) && !selectionKeys.some(key => next.searchParams.has(key))) {{
+          if (noticeDrawerOverlay()?.classList.contains('open')) {{
+            if (!(await prepareLiteNavigation())) return;
+            closeNoticeDrawer({{resetUrl:false}});
+          }}
+          setLiteLocation(url, true);
+          return;
+        }}
+      }}
       const useWorkspaceSwitch = Boolean(options.workspaceSwitch);
       const silent = Boolean(options.silent);
       const selectors = Array.isArray(options.selectors) ? options.selectors : [];
       const detailOnly = Boolean(options.detailOnly) || selectors.includes('#detail-panel');
       const generation = ++liteNavigationGeneration;
-      if (!silent) setPanelLoading(true);
-      if (useWorkspaceSwitch) setWorkspaceSwitching(true, options.loadingText || options.label || '正在加载通告');
+      const initialForm = document.getElementById('lite-notice-form');
+      const initialRevision = liteDraftRevision;
+      setPanelLoading(!silent);
+      setWorkspaceSwitching(useWorkspaceSwitch, options.loadingText || options.label || '正在加载通告');
       if (!silent) setLiteStatus(options.label || '正在切换...');
       const scrollPositions = options.preserveWorkspaceScroll ? captureWorkspaceScroll() : null;
+      let timeout = 0, timedOut = false;
+      let controller;
       try {{
         if (liteNavigateController) liteNavigateController.abort();
-        liteNavigateController = new AbortController();
+        controller = liteNavigateController = new AbortController();
+        timeout = window.setTimeout(() => {{ timedOut = true; controller.abort(); }}, 15000);
         const response = await fetch(liteFragmentUrl(url, detailOnly), {{
           credentials: 'same-origin',
-          signal: liteNavigateController.signal,
+          signal: controller.signal,
           headers: {{ 'Accept': 'application/json' }},
         }});
         const payload = await response.json().catch(() => ({{}}));
@@ -7376,15 +7590,25 @@ def render_workbench_lite(
         const data = payload.data && typeof payload.data === 'object'
           ? payload.data
           : payload;
+        if (options.protectDraft && (liteFormDirty || liteDraftRevision !== initialRevision || initialForm !== document.getElementById('lite-notice-form') || initialForm?.dataset.pendingActionJobId)) {{
+          const next = fragmentElement(data.fragments?.detail || '');
+          const nextStatus = next?.querySelector('[data-polling-group-id]');
+          const oldStatus = initialForm?.querySelector('[data-polling-group-id]');
+          if (nextStatus && oldStatus && nextStatus.getAttribute('data-polling-group-id') === oldStatus.getAttribute('data-polling-group-id')) oldStatus.replaceWith(nextStatus);
+          return;
+        }}
         applyLiteFragments(data, url, options.push !== false, detailOnly);
         if (options.preserveWorkspaceScroll) restoreWorkspaceScroll(scrollPositions);
       }} catch (error) {{
+        if (timedOut) throw new Error('通告读取超时，当前列表和填写已保留，请稍后重试。');
         if (error && error.name === 'AbortError') return;
         throw error;
       }} finally {{
+        window.clearTimeout(timeout);
+        if (liteNavigateController === controller) liteNavigateController = null;
         if (generation === liteNavigationGeneration) {{
-          if (!silent) setPanelLoading(false);
-          if (useWorkspaceSwitch) setWorkspaceSwitching(false);
+          setPanelLoading(false);
+          setWorkspaceSwitching(false);
           if (!silent && liteQtActiveRefreshPending) scheduleLiteQtActiveRefresh();
         }}
       }}
@@ -7629,7 +7853,7 @@ def render_workbench_lite(
       const list = document.getElementById('lite-change-confirmation-list');
       if (list) {{
         const loading = document.createElement('div');
-        loading.className = 'empty compact';
+        loading.className = 'empty compact lite-loading-state';
         loading.textContent = '正在加载...';
         list.replaceChildren(loading);
       }}
@@ -7821,7 +8045,7 @@ def render_workbench_lite(
       if (backLink) {{
         event.preventDefault();
         if (!(await prepareLiteNavigation())) return;
-        location.assign(backLink.href);
+        litePageNavigate(backLink.href);
         return;
       }}
       const nativePickerInput = target.matches('input[type="date"],input[type="time"],input[type="month"],input[type="datetime-local"]') ? target : null;
@@ -8103,7 +8327,7 @@ def render_workbench_lite(
         if (navLink.getAttribute('data-direct-navigation') === '1') {{
           if (!(await prepareLiteNavigation())) return;
           setLiteFormDirty(false);
-          window.location.assign(navLink.href);
+          litePageNavigate(navLink.href);
           return;
         }}
         if (navLink.matches('.ongoing-row.optimistic')) {{
@@ -8127,7 +8351,7 @@ def render_workbench_lite(
           }});
         }}
         const detailNeedsReload = noticeDrawerOverlay()?.dataset.detailNeedsReload === '1';
-        const appliedLocally = isRow && navLink.matches('.notice-row') && !detailNeedsReload && applySourceRowToDetail(navLink);
+        const appliedLocally = isRow && !detailNeedsReload && applySourceRowToDetail(navLink);
         if (appliedLocally) {{
           const selectingOngoing = navLink.matches('.ongoing-row');
           document.querySelectorAll('.notice-row').forEach(node => {{
@@ -8139,7 +8363,8 @@ def render_workbench_lite(
             node.setAttribute('aria-current', selectingOngoing && node === navLink ? 'true' : 'false');
           }});
           navLink.classList.remove('is-loading');
-          history.replaceState({{ lite: true }}, '', navLink.href);
+          setLiteLocation(navLink.href, true);
+          if (selectingOngoing) void navigateLite(navLink.href, {{ push:false, silent:true, detailOnly:true, protectDraft:true }}).catch(() => {{ setLiteStatus('当前显示本地填写，最新状态暂未核对，请稍后刷新'); }});
           return;
         }}
         const selectors = isRow ? ['.status', '#detail-panel'] : (isTypeTab ? ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] : undefined);
@@ -8313,7 +8538,7 @@ def render_workbench_lite(
             workspaceSwitch: true,
           }});
         }} catch (error) {{
-          location.href = url;
+          litePageNavigate(url);
         }}
         return;
       }}
@@ -8331,7 +8556,7 @@ def render_workbench_lite(
         params.delete('manual');
         const url = '/workbench-lite?' + params.toString();
         try {{ await navigateLite(url, {{ label: '正在切换楼栋...', selectors: ['.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'], workspaceSwitch: true }}); }}
-        catch (error) {{ location.href = url; }}
+        catch (error) {{ litePageNavigate(url); }}
         return;
       }}
       if (event.target && event.target.id === 'lite-polling-work-order-exempt') {{
@@ -8585,7 +8810,7 @@ def render_workbench_lite(
       for (const key of ['active_item_id', 'record_id', 'manual', 'repair_management_record_id']) {{
         url.searchParams.delete(key);
       }}
-      history.replaceState({{ lite: true }}, '', url.pathname + url.search + url.hash);
+      setLiteLocation(url.href, true);
       closeEndCheck();
       closeNoticeDrawer({{ resetUrl: false }});
       return true;
@@ -8929,6 +9154,7 @@ def render_workbench_lite(
       return true;
     }}
     function applyJobPatch(jobPatch, payload, ok, message) {{
+      if (ok && window.parent !== window) window.parent.postMessage({{type:'clipflow:business-changed'}}, location.origin);
       const patch = jobPatch && typeof jobPatch === 'object' ? jobPatch : null;
       if (!patch || patch.kind !== 'notice_action_result') {{
         if (ok && payload?.action === 'start') {{
@@ -9074,6 +9300,7 @@ def render_workbench_lite(
               Boolean(job.frontend_patch?.source_fallback_active),
               Boolean(job.frontend_patch?.projection_superseded_by_terminal)
             ));
+            refreshNoticeTags();
             return true;
           }}
           if (phase === 'failed') {{
@@ -9192,7 +9419,7 @@ def render_workbench_lite(
         setLiteFormDirty(false);
         const url = filterForm.action + '?' + new URLSearchParams(new FormData(filterForm)).toString();
         try {{ await navigateLite(url, {{ label: '正在筛选...', workspaceSwitch: true }}); }}
-        catch (error) {{ location.href = url; }}
+        catch (error) {{ litePageNavigate(url); }}
         return;
       }}
       const form = event.target.closest('#lite-notice-form');
@@ -9327,12 +9554,19 @@ def render_workbench_lite(
 _POLLING_WORK_ORDER_STYLE = r"""*{box-sizing:border-box}html{background:#eef4ff}body{margin:0;min-height:100vh;overflow-x:hidden;background:linear-gradient(145deg,#eef4ff,#f8fbff 46%,#eef5ff);color:#0f274d;font-family:"Microsoft YaHei",system-ui,sans-serif}.shell{width:min(760px,100%);margin:auto;padding:18px 14px 34px}.head{position:sticky;top:0;z-index:5;margin-bottom:12px;padding:14px 16px;border:1px solid #cfe0f7;border-radius:20px;background:#fffffff2;box-shadow:0 14px 32px #174f9417;backdrop-filter:blur(12px)}.head span{color:#1663d8;font-size:12px;font-weight:900}.head h1{margin:4px 0;font-size:20px}.head p{margin:0;color:#526780;font-size:12px}.status{margin:10px 0;padding:10px 12px;border-radius:13px;background:#fff;color:#52657f;font-size:12px;font-weight:800}.status.error{background:#fff1f0;color:#b42318}.status.success{background:#e9fff3;color:#087443}.work-orders,.steps{display:grid;gap:10px}.work-order{width:100%;min-height:76px;padding:15px;border:1px solid #cfe0f7;border-radius:17px;background:#fff;text-align:left;color:#0c244d;cursor:pointer;transition:border-color .2s,box-shadow .2s}.work-order strong,.work-order small,.work-order span{display:block}.work-order strong{font-size:16px}.work-order small{margin:5px 0;color:#1663d8;font-weight:900}.work-order span{color:#536a84;font-size:12px}.work-order.active{border:2px solid #1678ff;box-shadow:0 12px 28px #1467e220}.work-order.completed{background:#effbf4;border-color:#b9e4ca}.work-order:disabled{cursor:not-allowed;opacity:.67}.toolbar{display:flex;gap:9px;margin:10px 0}.back,.secondary{min-height:44px;padding:9px 12px;border:1px solid #b9ccea;border-radius:12px;background:#fff;color:#0757d7;font-weight:900;cursor:pointer}.secondary.danger{border-color:#f2b8b5;color:#b42318}.rollback{width:100%;margin-top:10px}.step{min-width:0;border:1px solid #d7e4f6;border-radius:18px;padding:13px;background:#ffffffcf;opacity:.66}.step.current{border:2px solid #1678ff;padding:16px;background:#fff;opacity:1;box-shadow:0 18px 40px #1467e22b;transform:scale(1.01)}.step header{display:flex;justify-content:space-between;gap:8px;align-items:center}.step header b{color:#0757d7}.step header span{border-radius:999px;padding:4px 8px;background:#eef5ff;color:#4d6582;font-size:11px;font-weight:900}.step small{display:block;margin-top:7px;color:#0757d7;font-weight:900}.step p{margin:10px 0;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.checks{display:flex;flex-wrap:wrap;gap:6px}.checks em{border-radius:999px;padding:4px 8px;background:#f0f4f8;color:#526780;font-size:11px;font-style:normal;font-weight:850}.checks em.done{background:#e8fff3;color:#087443}.checks em.waiting{background:#fff4d6;color:#8a4b00}.photos{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.photo-thumb{display:block;width:84px;height:64px;border:1px solid #c9daf1;border-radius:10px;object-fit:cover;background:#eef5ff}.photo-upload{display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:10px;border:1px dashed #8db5ea;border-radius:12px;color:#0757d7;background:#f5f9ff;font-size:12px;font-weight:900;cursor:pointer}.photo-upload input{display:none}.action{width:100%;min-height:48px;margin-top:13px;border:0;border-radius:16px;background:linear-gradient(135deg,#1f63ff,#0757d7);color:#fff;font-size:15px;font-weight:950;cursor:pointer}.action:disabled{opacity:.55;cursor:not-allowed}button:focus-visible,a:focus-visible,.photo-upload:focus-within{outline:3px solid #005bff55;outline-offset:2px}.links{margin-top:12px;color:#526780;font-size:11px}@media(max-width:520px){.shell{padding:10px 9px 26px}.head{border-radius:16px}.step.current{transform:none}.step p{font-size:16px}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}"""
 
 
+_POLLING_WORK_ORDER_STYLE += r"""
+.status.loading::before{content:"";display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:8px;border:2px solid #cfe0ff;border-top-color:#075bd8;border-radius:50%;animation:work-order-loading 1s linear infinite}
+@keyframes work-order-loading{to{transform:rotate(360deg)}}
+@view-transition{navigation:auto}::view-transition-old(root),::view-transition-new(root){animation-duration:180ms}
+@media(prefers-reduced-motion:reduce){::view-transition-old(root),::view-transition-new(root){animation-duration:.01ms!important}}
+"""
+
 def render_polling_work_order_page() -> str:
     return r"""<!doctype html>
 <html lang="zh-CN"><head><script src="/assets/connection-guard.js" defer></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单总览</title><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
-<body><main class="shell"><section class="head"><span id="role">轮巡工单总览</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status" role="status" aria-live="polite">正在读取工单状态...</div><button id="retry" class="action" type="button" hidden>重试上传工单附件</button><div class="toolbar"><button id="cancel-selection" class="secondary danger" type="button" hidden>取消当前选择</button></div><section id="overview" class="work-orders" aria-label="轮巡工单列表"></section><p class="links">选择一个未完成工单后，将进入独立步骤页面。</p></main>
+<body><main class="shell"><section class="head"><span id="role">轮巡工单总览</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status loading" role="status" aria-live="polite">正在读取工单状态...</div><button id="retry" class="action" type="button" hidden>重试上传工单附件</button><div class="toolbar"><button id="cancel-selection" class="secondary danger" type="button" hidden>取消当前选择</button></div><section id="overview" class="work-orders" aria-label="轮巡工单列表"></section><p class="links">选择一个未完成工单后，将进入独立步骤页面。</p></main>
 <script>
-const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false,loading=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type};const stepsUrl=run=>`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`;
+const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false,loading=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const stepsUrl=run=>`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`;
 function workOrderCard(order){const button=document.createElement('button'),strong=document.createElement('strong'),label=document.createElement('small'),progress=document.createElement('span');button.type='button';button.className=`work-order ${order.state}`;button.disabled=!order.selectable||busy;strong.textContent=`工单 ${order.run_index}`;label.textContent=order.label;progress.textContent=`已完成 ${order.completed_steps}/${order.step_count} 步 · ${order.state==='completed'?'已完成':order.state==='active'?'已选择，进入步骤':order.state==='available'?'可选择':'另一工单执行中'}`;button.append(strong,label,progress);button.onclick=()=>openWorkOrder(order);return button}
 function render(data){current=data;const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;q('overview').replaceChildren(...(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?'步骤已全部完成，正在上传工单表格...':data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
 async function openWorkOrder(order){if(!current||busy||!order.selectable)return;busy=true;let message='',refresh=false;render(current);status(`正在进入工单 ${order.run_index}...`);try{const r=await fetch('/api/polling-work-orders/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(order.run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false){refresh=r.status===409;throw new Error(body.error||'工单进入失败')}location.assign(stepsUrl(body.data.current_run_index||order.run_index));return}catch(error){message=error.message||'工单进入失败'}finally{busy=false;if(refresh)await load();else if(current)render(current);if(message)status(message,'error')}}
@@ -9346,9 +9580,9 @@ q('retry').onclick=retryUpload;q('cancel-selection').onclick=cancelSelection;if(
 def render_polling_work_order_steps_page() -> str:
     return r"""<!doctype html>
 <html lang="zh-CN"><head><script src="/assets/connection-guard.js" defer></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单步骤</title><link rel="stylesheet" href="/assets/page-navigation.css"><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
-<body><main class="shell"><section id="page-navigation" class="head"><div id="page-back-slot"><button id="back" class="vnet-back-button" type="button" aria-label="返回" title="返回工单总览"><span aria-hidden="true">&#8592;</span>返回</button></div><span id="role">轮巡工单步骤</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status" role="status" aria-live="polite">正在读取工单状态...</div><section id="steps" class="steps" aria-label="当前工单步骤"></section><p class="links">页面会自动刷新；浏览器返回不会取消当前选择。</p></main>
+<body><main class="shell"><section id="page-navigation" class="head"><div id="page-back-slot"><button id="back" class="vnet-back-button" type="button" aria-label="返回" title="返回工单总览"><span aria-hidden="true">&#8592;</span>返回</button></div><span id="role">轮巡工单步骤</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status loading" role="status" aria-live="polite">正在读取工单状态...</div><section id="steps" class="steps" aria-label="当前工单步骤"></section><p class="links">页面会自动刷新；浏览器返回不会取消当前选择。</p></main>
 <script>
-const params=new URLSearchParams(location.search),token=params.get('token')||'',runIndex=Number.parseInt(params.get('run_index')||'',10),overviewUrl=`/polling-work-order?token=${encodeURIComponent(token)}`;let current=null,timer=0,clock=0,busy=false,loading=false,navigating=false,receivedAt=Date.now();const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type};const remaining=step=>Math.max(0,Math.ceil(Number(step.remaining_seconds||0)-(Date.now()-receivedAt)/1000));const goOverview=()=>{if(!navigating){navigating=true;location.replace(overviewUrl)}};const goSelected=run=>{if(!navigating){navigating=true;location.replace(`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`)}};
+const params=new URLSearchParams(location.search),token=params.get('token')||'',runIndex=Number.parseInt(params.get('run_index')||'',10),overviewUrl=`/polling-work-order?token=${encodeURIComponent(token)}`;let current=null,timer=0,clock=0,busy=false,loading=false,navigating=false,receivedAt=Date.now();const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const remaining=step=>Math.max(0,Math.ceil(Number(step.remaining_seconds||0)-(Date.now()-receivedAt)/1000));const goOverview=()=>{if(!navigating){navigating=true;location.replace(overviewUrl)}};const goSelected=run=>{if(!navigating){navigating=true;location.replace(`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`)}};
 function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`第 ${Number(step.step_index||0)} 步`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';head.append(title,badge);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;checks.append(mark)}const photoRequired=step.photo_required!==false,photoCount=(step.photos||[]).length,hasPhoto=photoCount>0,photoMark=document.createElement('em');photoMark.className=hasPhoto||!photoRequired?'done':'waiting';photoMark.textContent=hasPhoto?`操作照片 ${photoCount} 张`:photoRequired?'操作照片待拍':'无需拍照';checks.append(photoMark);const wait=remaining(step);if(step.position==='current'&&wait>0){const mark=document.createElement('em');mark.className='waiting';mark.dataset.countdown='1';mark.textContent=`倒计时 ${wait} 秒`;checks.append(mark)}article.append(head,run,content,checks);if(hasPhoto){const gallery=document.createElement('div');gallery.className='photos';for(const photo of step.photos){const link=document.createElement('a'),image=document.createElement('img');link.href=photo.preview_url;link.target='_blank';link.rel='noopener';image.className='photo-thumb';image.src=photo.preview_url;image.alt=photo.name||'操作照片';image.loading='eager';image.decoding='async';image.onerror=()=>status('操作照片已保存，但缩略图加载失败，请刷新页面重试','error');link.append(image);gallery.append(link)}article.append(gallery)}if(photoRequired&&step.position==='current'&&current&&!step.operator_confirmed&&!step.reviewer_confirmed){const upload=document.createElement('label'),input=document.createElement('input');upload.className='photo-upload';upload.textContent=hasPhoto?'继续添加照片':'拍照/上传操作照片';input.type='file';input.accept='image/*';input.setAttribute('capture','environment');input.disabled=busy;input.onchange=()=>uploadStepPhoto(step,input.files&&input.files[0]);upload.append(input);article.append(upload)}if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.dataset.confirmAction='1';button.textContent=busy?'处理中...':done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0;button.onclick=()=>confirmStep(step.step_key);article.append(button);if(current.role==='reviewer'&&current.can_rollback_previous){const rollback=document.createElement('button');rollback.type='button';rollback.className='secondary danger rollback';rollback.textContent='回退上一步';rollback.disabled=busy;rollback.onclick=()=>rollbackPrevious(step.step_key);article.append(rollback)}}return article}
 function render(data){current=data;const selected=Number(data.current_run_index||0);if(!selected){goOverview();return}if(selected!==runIndex){goSelected(selected);return}const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单步骤`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;const order=(data.work_orders||[]).find(item=>Number(item.run_index)===runIndex);q('summary').textContent=`${data.sop_name||''} · 工单 ${runIndex} · ${order?.label||''}`;q('back').title=data.can_release_selection?'退出当前工单并重新选择':'返回工单总览';q('steps').replaceChildren(...(data.steps||[]).filter(step=>Number(step.run_index)===runIndex).map(card));status(data.last_error||`工单 ${runIndex} · ${order?.label||''}`,data.last_error?'error':'')}
 function refreshCountdown(){if(!current||busy)return;const step=(current.steps||[]).find(item=>item.position==='current'&&Number(item.run_index)===runIndex);if(!step)return;const wait=remaining(step),mark=document.querySelector('[data-countdown]'),button=document.querySelector('[data-confirm-action]');if(mark){if(wait>0)mark.textContent=`倒计时 ${wait} 秒`;else mark.remove()}if(!button)return;const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed,photoRequired=step.photo_required!==false,hasPhoto=(step.photos||[]).length>0;button.textContent=done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0}

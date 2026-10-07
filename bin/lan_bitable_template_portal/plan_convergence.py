@@ -1,12 +1,14 @@
 """Native portal service for plan-convergence review; the original matching rules are retained."""
 import io
+import hashlib
+import json
 import threading
 import time
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from contextlib import closing
 
-import requests
+import httpx
 
 from . import plan_convergence_auth as auth
 from . import plan_convergence_rules as rules
@@ -14,8 +16,17 @@ from . import plan_convergence_maintenance as maintenance
 from .plan_convergence_compare import compare_scenarios_to_details
 from . import plan_convergence_points as points
 from .plan_convergence_browser_login import BrowserLogin
+from upload_event_module.services.process_lifetime import lower_current_thread_priority
 
 BASE = auth.ZH_BASE + '/api/alarm/alarmBlock'
+QUERY_SECONDS = 60
+
+
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError('核对读取超时，本次未产生核对结论，请检查 VPN 后重试。')
+    return seconds
 
 
 class PlanConvergenceService:
@@ -23,8 +34,13 @@ class PlanConvergenceService:
         self.store = store
         self._ongoing_provider = ongoing_provider
         self._blocks_lock = threading.Lock()
+        self._details_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='PlanDetail', initializer=lower_current_thread_priority)
         self.browser_login = BrowserLogin(store)
         auth.bind_store(store)
+
+    def close(self):
+        self._details_pool.shutdown(wait=False, cancel_futures=True)
+        self.browser_login.close()
 
     def bootstrap(self, admin):
         credentials = auth.settings_view()
@@ -39,10 +55,15 @@ class PlanConvergenceService:
                 'blocks': self.store.get_document('plan_convergence', 'blocks') or {'items': [], 'loaded_at': 0}}
 
     @staticmethod
-    def remote(method, path, payload=None, credentials=None):
+    def remote(method, path, payload=None, credentials=None, *, deadline=None):
         headers, cookies = credentials or auth.build_auth()
-        response = requests.request(method, BASE + path, headers=headers, cookies=cookies,
-                                    json=payload, timeout=(5, 25))
+        seconds = min(25, remaining(deadline)) if deadline is not None else 25
+        response = auth.request(method, BASE + path, headers=headers, cookies=cookies,
+                                 json=payload,
+                                 timeout=httpx.Timeout(connect=min(5, seconds), read=seconds, write=seconds, pool=min(5, seconds)),
+                                 follow_redirects=False)
+        if deadline is not None:
+            remaining(deadline)
         response.raise_for_status()
         result = response.json()
         if not isinstance(result, dict) or result.get('code') != 200 or not result.get('success'):
@@ -51,15 +72,18 @@ class PlanConvergenceService:
             raise ValueError('智航返回数据不完整，已停止核对')
         return result['data']
 
-    def blocks(self, refresh=False):
+    def blocks(self, refresh=False, *, deadline=None):
         if not refresh:
             return self.store.get_document('plan_convergence', 'blocks') or {'items': [], 'loaded_at': 0}
-        with self._blocks_lock:
+        deadline = deadline or time.monotonic() + QUERY_SECONDS
+        if not self._blocks_lock.acquire(timeout=remaining(deadline)):
+            raise TimeoutError('屏蔽列表读取超时，请稍后重试。')
+        try:
             items, seen, cursor, seen_pages = [], set(), None, set()
             credentials = auth.build_auth()
             for page in range(1, 101):
                 payload = {} if page == 1 else {'page': page, 'size': 100, 'searchAfter': cursor}
-                data = self.remote('POST', '/getAlarmBlock', payload, credentials)
+                data = self.remote('POST', '/getAlarmBlock', payload, credentials, deadline=deadline)
                 chunk = data.get('content')
                 if not isinstance(chunk, list):
                     raise ValueError('智航分页内容不完整')
@@ -82,11 +106,13 @@ class PlanConvergenceService:
                     break
                 cursor = data.get('searchAfter')
             raise ValueError('智航分页未完整返回，已停止核对')
+        finally:
+            self._blocks_lock.release()
 
-    def block(self, block_id):
+    def block(self, block_id, *, deadline=None):
         if not str(block_id).isdigit():
             raise ValueError('屏蔽记录 ID 无效')
-        data = self.remote('GET', '/getAlarmBlockDetail/' + str(block_id))
+        data = self.remote('GET', '/getAlarmBlockDetail/' + str(block_id), deadline=deadline)
         if not isinstance(data.get('alarmBlockDetailResultList'), list):
             raise ValueError('屏蔽记录明细不完整，不能核对')
         data.setdefault('blockId', str(block_id))
@@ -95,12 +121,13 @@ class PlanConvergenceService:
     def remote_rows(self, kind, payload):
         paths = {'snapshots': '/getBlockInstanceSnapshot', 'rule-view': '/getRuleView'}
         rows, credentials, signatures = [], auth.build_auth(), set()
+        deadline = time.monotonic() + QUERY_SECONDS
         for page in range(1, 501):
-            data = self.remote('POST', paths[kind], {**payload, 'page': page, 'size': 100}, credentials)
+            data = self.remote('POST', paths[kind], {**payload, 'page': page, 'size': 100}, credentials, deadline=deadline)
             chunk = data.get('content')
             if not isinstance(chunk, list):
                 raise ValueError('智航明细分页结构无效')
-            signature = str(chunk)
+            signature = hashlib.sha256(json.dumps(chunk, sort_keys=True, ensure_ascii=False).encode()).digest()
             if signature in signatures and data.get('hasNext'):
                 raise ValueError('智航重复返回同一页，已停止读取')
             signatures.add(signature)
@@ -223,15 +250,31 @@ class PlanConvergenceService:
         return records
 
     def maintenance_check(self, record_id=None):
+        deadline = time.monotonic() + QUERY_SECONDS
         records = self.maintenance_records(record_id)
-        blocks = [row for row in self.blocks(refresh=True)['items'] if str(row.get('status')) == '1']
+        blocks = [row for row in self.blocks(refresh=True, deadline=deadline)['items'] if str(row.get('status')) == '1']
         details = {}
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            futures = {executor.submit(self.block, str(row.get('blockId') or row.get('id'))):
-                       str(row.get('blockId') or row.get('id')) for row in blocks}
-            for future in as_completed(futures):
-                # Missing upstream detail must stop the audit, never produce a false match result.
-                details[futures[future]] = future.result()
+        pending, rows = {}, iter(blocks)
+        def submit_next():
+            row = next(rows, None)
+            if row is not None:
+                remaining(deadline)
+                ident = str(row.get('blockId') or row.get('id'))
+                pending[self._details_pool.submit(self.block, ident, deadline=deadline)] = ident
+        try:
+            for _ in range(4):
+                submit_next()
+            while pending:
+                completed, _ = wait(pending, timeout=remaining(deadline), return_when=FIRST_COMPLETED)
+                if not completed:
+                    raise TimeoutError('检修核对读取超时，未把不完整数据作为核对结论。')
+                for future in completed:
+                    details[pending.pop(future)] = future.result()
+                for _ in completed:
+                    submit_next()
+        finally:
+            for future in pending:
+                future.cancel()
         result, orphans = maintenance.match_records(records, blocks, details)
         return {'records': result, 'orphan_block_ids': orphans,
                 'stats': {'maintenance': len(records), 'blocks': len(blocks),

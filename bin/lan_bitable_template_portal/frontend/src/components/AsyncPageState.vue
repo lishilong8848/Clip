@@ -1,6 +1,7 @@
 <template>
   <section class="async-page-state" :class="{ failed: Boolean(error) }" role="status">
-    <span class="state-mark" aria-hidden="true"></span>
+    <span v-if="error" class="state-mark" aria-hidden="true"></span>
+    <LoadingIndicator v-else />
     <div class="state-copy">
       <strong>{{ error ? "页面加载失败" : "正在打开页面" }}</strong>
       <p v-if="error">当前模块未能加载，请重新加载页面。</p>

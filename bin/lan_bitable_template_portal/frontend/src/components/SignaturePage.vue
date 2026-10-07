@@ -29,7 +29,7 @@
               aria-label="重新读取签名人员"
               @click="loadPeople()"
             >
-              {{ loading ? "读取" : "刷新" }}
+              <LoadingIndicator v-if="loading">读取</LoadingIndicator><template v-else>刷新</template>
             </button>
           </div>
           <small class="search-inline-status">{{ searchStatusText }}</small>

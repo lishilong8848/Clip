@@ -23,6 +23,7 @@ import threading
 import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from upload_event_module.services.process_lifetime import lower_current_thread_priority
 from contextlib import suppress
 from collections import deque
 from pathlib import Path
@@ -311,7 +312,7 @@ def _queue_stats() -> dict:
         "runtime_pressure": PortalRuntime.runtime_pressure(),
         "sqlite_write_worker": PortalRuntime.state_store.get_write_worker_stats(),
         "runtime_queue_counts": PortalRuntime.state_store.runtime_queue_counts(),
-        "runtime_queue_details": PortalRuntime.state_store.runtime_queue_details(),
+        "runtime_queue_details": runtime_queue_details,
     }
 
 
@@ -403,10 +404,12 @@ class FastAPIPortalController:
                 _env_float("CLIPFLOW_BACKEND_BG_WORKERS", 6, minimum=2, maximum=24)
             ),
             thread_name_prefix="ClipFlowBackendBg",
+            initializer=lower_current_thread_priority,
         )
         self._drill_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="ClipFlowDrill",
+            initializer=lower_current_thread_priority,
         )
 
     def _submit_background(self, name: str, fn, *args) -> bool:
@@ -734,7 +737,11 @@ class FastAPIPortalController:
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes
-        install_lighthouse_routes(app, self, PortalRuntime)
+        recommend_notice_tags = install_lighthouse_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.notice_alert_tags import install_notice_alert_tag_routes
+        install_notice_alert_tag_routes(app, self, PortalRuntime, recommend_notice_tags)
+        from lan_bitable_template_portal.message_delivery_routes import install_message_delivery_routes
+        install_message_delivery_routes(app, self, PortalRuntime)
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
@@ -827,10 +834,14 @@ class FastAPIPortalController:
             session = self._current_session(request)
             if session is None:
                 next_path = str(request.url.path or "/workbench-lite")
-                if str(request.url.query or ""):
-                    next_path += "?" + str(request.url.query)
+                next_params = [(key, value) for key, value in request.query_params.multi_items()
+                               if key not in {"_assistant_frame", "_frame_retry"}]
+                if next_params:
+                    next_path += "?" + urlencode(next_params)
                 login_url = f"/api/auth/login?{urlencode({'next': next_path})}"
                 return Response(status_code=302, headers={"Location": login_url})
+            if str(request.url.path).rstrip('/') == '/workbench-lite' and request.query_params.get('_assistant_frame') != '1':
+                return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
             try:
                 route_started_at = time.perf_counter()
                 self._ensure_source_snapshot_background()
@@ -919,7 +930,21 @@ class FastAPIPortalController:
                     ),
                 )
                 stage_started_at = time.perf_counter()
-                payload = await payload_task
+                if active_item_id:
+                    draft_reader = getattr(PortalRuntime.service, 'submitted_notice_draft', None)
+                    if callable(draft_reader):
+                        for item in ongoing:
+                            if str(item.get('active_item_id') or item.get('target_record_id') or item.get('record_id') or '') == active_item_id:
+                                item['submitted_draft'] = await asyncio.to_thread(draft_reader, item, open_id)
+                selected = next((item for item in ongoing if str(item.get('active_item_id') or item.get('target_record_id') or item.get('record_id') or '') == active_item_id), None) if getattr(request.state, 'workbench_detail_only', False) and active_item_id else None
+                if selected is not None:
+                    # Opening an ongoing notice needs its current local projection,
+                    # not another full plan-list/stats/CMDB query. Binding candidates
+                    # are loaded by the existing picker on demand.
+                    payload_task.close()
+                    payload = {'records': [], 'ongoing': [selected]}
+                else:
+                    payload = await payload_task
                 query_ms = (time.perf_counter() - stage_started_at) * 1000.0
                 notice_undos: list[dict[str, Any]] = []
                 prefill_source_record = repair_notice_prefill.get("source_record")
@@ -998,6 +1023,9 @@ class FastAPIPortalController:
                     "total_ms": round(total_ms, 2),
                 }
                 request.state.workbench_timings = timings
+                if request.query_params.get('_assistant_frame') != '1':
+                    from lan_bitable_template_portal.lighthouse_widget import inject_lighthouse_widget
+                    html_body = await asyncio.to_thread(inject_lighthouse_widget, html_body, session, portal_index_file())
                 return Response(
                     content=html_body.encode("utf-8"),
                     media_type="text/html; charset=utf-8",
@@ -1022,6 +1050,7 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             started = time.perf_counter()
+            request.state.workbench_detail_only = detail_only
             page_response = await workbench_lite_page(request)
             if int(getattr(page_response, "status_code", 500) or 500) != 200:
                 message = "工作台加载失败"
@@ -1155,6 +1184,9 @@ class FastAPIPortalController:
                     paste_text=paste_text,
                     notice_undos=notice_undos if isinstance(notice_undos, list) else [],
                 )
+                if request.headers.get("sec-fetch-dest") != "iframe":
+                    from lan_bitable_template_portal.lighthouse_widget import inject_lighthouse_widget
+                    html_body = await asyncio.to_thread(inject_lighthouse_widget, html_body, session, portal_index_file())
                 return Response(
                     content=html_body.encode("utf-8"),
                     media_type="text/html; charset=utf-8",
@@ -1317,14 +1349,14 @@ class FastAPIPortalController:
                         "vue_enabled": portal_frontend_dist_enabled(),
                     },
                     "time": time.time(),
-                    "runtime": PortalRuntime.state_store.get_backend_runtime("backend") or {},
+                    "runtime": await asyncio.to_thread(PortalRuntime.state_store.get_backend_runtime, "backend") or {},
                 },
             }
             self._read_cache_put(("health",), payload, ttl=1.5, stale_ttl=5.0)
             return payload
 
         @app.get("/api/backend/stats")
-        async def stats(request: Request):
+        def stats(request: Request):
             session = self._current_session(request)
             if session is None:
                 return self._auth_required_response()
@@ -1507,7 +1539,7 @@ class FastAPIPortalController:
             }
 
         @app.get("/api/backend/queues")
-        async def backend_queues(request: Request):
+        def backend_queues(request: Request):
             admin_response, _session = self._require_admin_response(request)
             if admin_response is not None:
                 return admin_response
@@ -1535,7 +1567,7 @@ class FastAPIPortalController:
             }
 
         @app.get("/api/backend/perf")
-        async def backend_perf(request: Request):
+        def backend_perf(request: Request):
             admin_response, _session = self._require_admin_response(request)
             if admin_response is not None:
                 return admin_response
@@ -2124,16 +2156,27 @@ class FastAPIPortalController:
                 return self._auth_required_response()
             try:
                 self._ensure_source_snapshot_background()
-                ongoing = await asyncio.to_thread(self._get_ongoing, "ALL")
-                self._reconcile_orphan_started_items("ALL", ongoing)
+                requested_scope = request.query_params.get("scope")
+                if requested_scope:
+                    try:
+                        scope = self._authorized_scope_or_error(session, requested_scope)
+                    except PortalError as exc:
+                        return self._portal_error_response(exc, default_status=403)
+                else:
+                    scope = "ALL"
                 allowed_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS, session
                 )
+                if scope != "ALL":
+                    selected = {*"ABCDE", "CAMPUS"} if scope == "CAMPUS" else {scope}
+                    allowed_options = [option for option in allowed_options if option.get("value") in selected]
                 allowed_scopes = [
                     str(option.get("value") or "")
                     for option in allowed_options
                     if str(option.get("value") or "").strip()
                 ]
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
+                await asyncio.to_thread(self._reconcile_orphan_started_items, scope, ongoing)
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 data = await asyncio.to_thread(
                     self._cached_service_payload,
@@ -2149,6 +2192,7 @@ class FastAPIPortalController:
                         include_prepared=False,
                     ),
                 )
+                data = {**data, "scope_options": allowed_options}
                 data = PortalRuntime.auth_manager.filter_scope_overview(data, session)
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -4603,6 +4647,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.get_event_monthly_snapshot,
                     scope=scope,
                     month=month,
+                    date_field=str(request.query_params.get("date_field") or "").strip(),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -4828,6 +4873,38 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/repair-management/ledger-candidates")
+        async def repair_ledger_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                from lan_bitable_template_portal import repair_ledger
+                from lan_bitable_template_portal.repair_ledger_catalog import FILTER_FIELDS
+                scope = self._authorized_scope_or_error(session, request.query_params.get("scope") or "ALL")
+                data = await asyncio.to_thread(
+                    repair_ledger.candidates, PortalRuntime.service, scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    filters={field: request.query_params.get(field, "") for field in FILTER_FIELDS},
+                    page=max(1, int(request.query_params.get("page") or 1)),
+                )
+                data["can_force_refresh"] = PortalRuntime.auth_manager.is_admin(session)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/ledger-cache/refresh")
+        async def repair_ledger_refresh(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                from lan_bitable_template_portal import repair_ledger
+                data = await asyncio.to_thread(repair_ledger.start_refresh, PortalRuntime.service)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
         @app.get("/api/repair-management/cmdb-cache/status")
         async def repair_management_cmdb_cache_status(request: Request):
             session = self._current_session(request)
@@ -5028,6 +5105,7 @@ class FastAPIPortalController:
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
                     cmdb_record_ids=payload.get("cmdb_record_ids"),
+                    ledger_device_ids=payload.get("ledger_device_ids"),
                     operation_id=str(payload.get("operation_id") or ""),
                     scope=scope,
                 )
@@ -5064,6 +5142,7 @@ class FastAPIPortalController:
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
                     cmdb_record_ids=payload.get("cmdb_record_ids"),
+                    ledger_device_ids=payload.get("ledger_device_ids"),
                     operation_id=str(payload.get("operation_id") or ""),
                     expected_version=str(payload.get("expected_version") or ""),
                     scope=scope,
@@ -6161,17 +6240,23 @@ class FastAPIPortalController:
                 return self._portal_error_response(exc, default_status=400)
 
         @app.get("/polling-work-order")
-        async def polling_work_order_page():
+        async def polling_work_order_page(request: Request):
+            from lan_bitable_template_portal.lighthouse_widget import inject_lighthouse_widget
+            html_body = await asyncio.to_thread(inject_lighthouse_widget, render_polling_work_order_page(),
+                                               self._current_session(request), portal_index_file())
             return Response(
-                content=render_polling_work_order_page(),
+                content=html_body,
                 media_type="text/html; charset=utf-8",
                 headers={"Cache-Control": "no-store"},
             )
 
         @app.get("/polling-work-order/steps")
-        async def polling_work_order_steps_page():
+        async def polling_work_order_steps_page(request: Request):
+            from lan_bitable_template_portal.lighthouse_widget import inject_lighthouse_widget
+            html_body = await asyncio.to_thread(inject_lighthouse_widget, render_polling_work_order_steps_page(),
+                                               self._current_session(request), portal_index_file())
             return Response(
-                content=render_polling_work_order_steps_page(),
+                content=html_body,
                 media_type="text/html; charset=utf-8",
                 headers={"Cache-Control": "no-store"},
             )
@@ -6565,7 +6650,13 @@ class FastAPIPortalController:
                 )
                 payload["_web_action_request"] = True
                 if str(payload.get("command_format") or "") == "notice_command":
-                    ongoing = await asyncio.to_thread(self._get_ongoing, scope)
+                    standalone_start = (
+                        payload.get("action") == "start"
+                        and payload.get("manual_binding_choice") == "unbound"
+                        and not payload.get("active_item_id")
+                        and not payload.get("target_record_id")
+                    )
+                    ongoing = [] if standalone_start else await asyncio.to_thread(self._get_ongoing, scope)
                     payload = await asyncio.to_thread(
                         PortalRuntime.service.expand_workbench_action_command,
                         payload,
@@ -6578,11 +6669,12 @@ class FastAPIPortalController:
                         user.get("name") or user.get("en_name") or ""
                     )
                     payload["_web_action_request"] = True
-                job_id, should_start = PortalRuntime.service.create_action_job(payload)
-                job = PortalRuntime.service.get_job(job_id) or {}
+                job_id, should_start = await asyncio.to_thread(PortalRuntime.service.create_action_job, payload)
+                job = await asyncio.to_thread(PortalRuntime.service.get_job, job_id) or {}
                 audit_id = str(job.get("business_audit_id") or "").strip()
                 if should_start or not audit_id:
-                    audit_id = begin_business_audit(
+                    audit_id = await asyncio.to_thread(
+                        begin_business_audit,
                         PortalRuntime.state_store,
                         domain="notice",
                         action=str(payload.get("action") or "submit"),
@@ -6601,7 +6693,8 @@ class FastAPIPortalController:
                     )
                     mark_job = getattr(PortalRuntime.service, "mark_job", None)
                     if callable(mark_job):
-                        mark_job(
+                        await asyncio.to_thread(
+                            mark_job,
                             job_id,
                             business_audit_id=audit_id,
                             _persist=True,
@@ -6610,7 +6703,8 @@ class FastAPIPortalController:
                         not should_start
                         and str(job.get("phase") or "") == "success"
                     ):
-                        finish_business_audit(
+                        await asyncio.to_thread(
+                            finish_business_audit,
                             PortalRuntime.state_store,
                             audit_id,
                             success=True,
@@ -6641,7 +6735,7 @@ class FastAPIPortalController:
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
-                job = PortalRuntime.service.get_job(job_id) or job
+                job = await asyncio.to_thread(PortalRuntime.service.get_job, job_id) or job
                 return JSONResponse(
                     {
                         "ok": True,
@@ -6649,6 +6743,7 @@ class FastAPIPortalController:
                             "job_id": job_id,
                             "accepted_at": job.get("accepted_at") or 0,
                             "initial_phase": job.get("phase") or "accepted",
+                            "supersedes_job_ids": job.get("supersedes_job_ids") or [],
                         },
                     },
                     status_code=202,
@@ -11595,6 +11690,7 @@ class FastAPIPortalController:
                 else {}
             )
             item = normalize_notice_identity_payload(dict(payload or {}))
+            item['_local_updated_at'] = float(active_item.get('updated_at') or 0)
             item.setdefault("active_item_id", str(active_item.get("active_item_id") or ""))
             item.setdefault("target_record_id", str(active_item.get("record_id") or ""))
             item.setdefault("record_id", str(active_item.get("record_id") or ""))
@@ -12910,6 +13006,7 @@ class FastAPIPortalController:
         self._polling_relay_stop = stop_event
 
         def run() -> None:
+            lower_current_thread_priority()
             delay = 2.0
             while not stop_event.is_set():
                 try:
@@ -13108,12 +13205,16 @@ class FastAPIPortalController:
             return
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
+            from apscheduler.executors.pool import ThreadPoolExecutor as SchedulerThreadPool
         except Exception:
             log_warning("APScheduler 不可用，后端定时任务降级为旧线程。")
             return
         scheduler = BackgroundScheduler(
             timezone="Asia/Shanghai",
             daemon=True,
+            executors={"maintenance": SchedulerThreadPool(
+                max_workers=1, pool_kwargs={"initializer": lower_current_thread_priority,
+                                           "thread_name_prefix": "ClipFlowMaintenance"})},
         )
         scheduler.add_job(
             self._write_runtime_heartbeat,
@@ -13128,6 +13229,8 @@ class FastAPIPortalController:
             "interval",
             hours=1,
             id="job_cleanup",
+            executor="maintenance",
+            misfire_grace_time=3600,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -13150,6 +13253,8 @@ class FastAPIPortalController:
             "interval",
             minutes=30,
             id="sqlite_maintenance",
+            executor="maintenance",
+            misfire_grace_time=3600,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -13177,6 +13282,8 @@ class FastAPIPortalController:
             "interval",
             hours=6,
             id="repair_maintenance",
+            executor="maintenance",
+            misfire_grace_time=3600,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -13186,6 +13293,8 @@ class FastAPIPortalController:
             "interval",
             minutes=30,
             id="water_consumption_refresh",
+            executor="maintenance",
+            misfire_grace_time=3600,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -13266,6 +13375,8 @@ class FastAPIPortalController:
             hour=17,
             minute=40,
             id="daily_report_recipient_refresh",
+            executor="maintenance",
+            misfire_grace_time=3600,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -13284,6 +13395,8 @@ class FastAPIPortalController:
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
             id="job_cleanup_startup",
+            executor="maintenance",
+            misfire_grace_time=3600,
             replace_existing=True,
             max_instances=1,
         )
@@ -13366,7 +13479,7 @@ class FastAPIPortalController:
                         "failed",
                     }
                 else:
-                    payload = {"stats": _queue_stats(), "time": time.time()}
+                    payload = {"stats": await asyncio.to_thread(_queue_stats), "time": time.time()}
                     terminal = False
                 raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
                 if raw != last_payload:
@@ -13486,7 +13599,7 @@ class FastAPIPortalController:
     ) -> AsyncIterator[bytes]:
         while not self._stopping_event.is_set() and not await request.is_disconnected():
             payload = json.dumps(
-                {"time": time.time(), "stats": _queue_stats()},
+                {"time": time.time(), "stats": await asyncio.to_thread(_queue_stats)},
                 ensure_ascii=False,
                 sort_keys=True,
             )
@@ -13529,7 +13642,7 @@ class FastAPIPortalController:
                 if now - last_heartbeat >= heartbeat_seconds:
                     last_heartbeat = now
                     payload = json.dumps(
-                        {"time": time.time(), "stats": _queue_stats()},
+                        {"time": time.time(), "stats": await asyncio.to_thread(_queue_stats)},
                         ensure_ascii=False,
                         sort_keys=True,
                     )
@@ -13592,72 +13705,78 @@ class FastAPIPortalController:
             finally:
                 wake_event.clear()
 
+        def _read_snapshot() -> tuple[str, str]:
+            ongoing_meta = PortalRuntime.state_store.get_ongoing_snapshot_meta()
+            source_active = PortalRuntime.state_store.active_source_snapshot_meta()
+            qt_active_meta = PortalRuntime.state_store.qt_active_items_meta()
+            source_signature = ":".join(
+                [
+                    str(source_active.get("snapshot_id") or ""),
+                    str(source_active.get("updated_at") or ""),
+                ]
+            )
+            version_signature = hashlib.sha1(
+                "|".join(
+                    [
+                        str(scope),
+                        month_key,
+                        str(ongoing_meta.get("snapshot_id") or ""),
+                        str(ongoing_meta.get("updated_at") or ""),
+                        str(ongoing_meta.get("count") or 0),
+                        str(ongoing_meta.get("hash") or ""),
+                        source_signature,
+                        str(qt_active_meta.get("active") or 0),
+                        str(qt_active_meta.get("deleted") or 0),
+                        str(qt_active_meta.get("updated_at") or 0),
+                    ]
+                ).encode("utf-8")
+            ).hexdigest()
+            if last_payload and version_signature == last_version_signature:
+                return version_signature, last_payload
+            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
+            scoped_signature, scoped_count = self._scoped_ongoing_signature(
+                scope, list(snapshot.get("items") or [])
+            )
+            qt_scoped_signature, qt_scoped_count = self._scoped_qt_active_signature(
+                scope,
+                month_key=month_key,
+            )
+            active_identities = self._scoped_qt_active_identities(
+                scope,
+                month_key=month_key,
+            )
+            qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
+            qt_active_items.pop("checked_at", None)
+            display_signature = hashlib.sha1(
+                f"{scoped_signature}|{qt_scoped_signature}|{source_signature}".encode("utf-8")
+            ).hexdigest()
+            payload = json.dumps(
+                {
+                    "scope": scope,
+                    "snapshot_id": snapshot.get("snapshot_id", ""),
+                    "count": snapshot.get("count", 0),
+                    "scope_count": scoped_count,
+                    "qt_scope_count": qt_scoped_count,
+                    "scope_signature": scoped_signature,
+                    "qt_scope_signature": qt_scoped_signature,
+                    "active_identities": active_identities,
+                    "display_signature": display_signature,
+                    "source_snapshot_id": source_active.get("snapshot_id", ""),
+                    "source_snapshot_updated_at": source_active.get("updated_at", 0),
+                    "updated_at": snapshot.get("updated_at", 0),
+                    "qt_active_items": qt_active_items,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            return version_signature, payload
+
         try:
             while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
-                ongoing_meta = PortalRuntime.state_store.get_ongoing_snapshot_meta()
-                source_active = PortalRuntime.state_store.active_source_snapshot_meta()
-                qt_active_meta = PortalRuntime.state_store.qt_active_items_meta()
-                source_signature = ":".join(
-                    [
-                        str(source_active.get("snapshot_id") or ""),
-                        str(source_active.get("updated_at") or ""),
-                    ]
-                )
-                version_signature = hashlib.sha1(
-                    "|".join(
-                        [
-                            str(scope),
-                            month_key,
-                            str(ongoing_meta.get("snapshot_id") or ""),
-                            str(ongoing_meta.get("updated_at") or ""),
-                            str(ongoing_meta.get("count") or 0),
-                            str(ongoing_meta.get("hash") or ""),
-                            source_signature,
-                            str(qt_active_meta.get("active") or 0),
-                            str(qt_active_meta.get("deleted") or 0),
-                            str(qt_active_meta.get("updated_at") or 0),
-                        ]
-                    ).encode("utf-8")
-                ).hexdigest()
-                if last_payload and version_signature == last_version_signature:
-                    await _wait_for_change(idle_interval)
-                    continue
-                snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
-                scoped_signature, scoped_count = self._scoped_ongoing_signature(
-                    scope, list(snapshot.get("items") or [])
-                )
-                qt_scoped_signature, qt_scoped_count = self._scoped_qt_active_signature(
-                    scope,
-                    month_key=month_key,
-                )
-                active_identities = self._scoped_qt_active_identities(
-                    scope,
-                    month_key=month_key,
-                )
-                qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
-                qt_active_items.pop("checked_at", None)
-                display_signature = hashlib.sha1(
-                    f"{scoped_signature}|{qt_scoped_signature}|{source_signature}".encode("utf-8")
-                ).hexdigest()
-                payload = json.dumps(
-                    {
-                        "scope": scope,
-                        "snapshot_id": snapshot.get("snapshot_id", ""),
-                        "count": snapshot.get("count", 0),
-                        "scope_count": scoped_count,
-                        "qt_scope_count": qt_scoped_count,
-                        "scope_signature": scoped_signature,
-                        "qt_scope_signature": qt_scoped_signature,
-                        "active_identities": active_identities,
-                        "display_signature": display_signature,
-                        "source_snapshot_id": source_active.get("snapshot_id", ""),
-                        "source_snapshot_updated_at": source_active.get("updated_at", 0),
-                        "updated_at": snapshot.get("updated_at", 0),
-                        "qt_active_items": qt_active_items,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
+                # SQLite locks and list hashing must not stall page/health requests.
+                version_signature, payload = await asyncio.to_thread(_read_snapshot)
+                if not self._sse_active(sse_key, sse_id):
+                    break
                 if payload != last_payload:
                     event_id = hashlib.sha1(payload.encode("utf-8")).hexdigest()
                     yield (

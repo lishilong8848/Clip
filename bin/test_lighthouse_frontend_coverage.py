@@ -15,8 +15,8 @@
 ----
 - covered  : 前端实际调用在目录中存在(方法+路径形态一致)
 - missing  : 前端调用在目录中缺失(业务接口或目录漏注册,需人工复核)
-- excluded : 目录有意排除的系统/登录/Qt/原始签名图片/工单执行轮巡等端点
-              前端若调用它们,不计入“覆盖”,单列说明
+- excluded : 目录有意排除的系统/登录/Qt/原始签名图片/工单执行轮巡/学习
+              等端点。前端若调用它们,不计入“覆盖”,单列说明证据,绝不隐藏缺失
 - unresolved: 路径为变量/三元/拼接且本静态审计无法可靠解析,留待人工复核
 
 约束
@@ -39,48 +39,15 @@ FRONTEND_SRC = PORTAL_DIR / "frontend" / "src"
 sys.path.insert(0, str(BIN_DIR))
 
 from test_lighthouse_frontend_contracts import build_native_catalog  # noqa: E402
+from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: E402
 
 #: 前端的传输函数调用(不含 transport 层内部定义)。requestLearning 为学练专用封装。
 TRANSPORT_CALLS = ("requestJson", "requestBinaryJson", "downloadFile", "requestLearning", "fetch")
 
-#: 目录有意排除而前端/页面仍会调用的端点前缀(不应计入“缺失”)。
-#: 与 lighthouse_api._EXCLUDED_PREFIXES/_SIGNATURE_EXCLUDED_PREFIXES 对齐:
-#: 登录、系统后端、Qt 投影流、浏览器事件流、轮巡工单执行、计划收敛的
-#: settings/browser-login(浏览器登录凭证管理),以及原始签名/令牌会话/保存/使用确认
-#: 等保留给原生界面的流程。
-EXCLUDED_PREFIXES = (
-    "/api/polling-work-orders",          # 用户明确:工单执行保持原接口,助手目录不暴露
-    "/api/auth",                         # 登录/登出
-    "/api/qt-active-items",              # Qt 投影流
-    "/api/repair-management/stream",     # 浏览器事件流(非业务可调目录)
-    "/api/plan-convergence/settings",    # 浏览器登录/凭证管理(目录排除)
-    "/api/signatures/save",              # 原始签名保存流程
-    "/api/signatures/usage-confirm",     # 原生使用确认页
-    "/api/signatures/usage-confirmations",  # 发送/确认流程(Codex 待开 send)
-    "/api/signatures/send-link",         # 临时发送链接
-    "/api/signatures/management/request",
-    "/api/signatures/management/submit",
-    "/api/signatures/management/temporary",
-    "/api/signatures/external",          # 外部跨上下文写入
-    "/api/signatures/temporary/",        # 临时签名/令牌会话(management/原始/保存等)
-    "/api/signatures/temp",
-)
-# 原始签名图片/令牌会话/手写采集仍不返回模型(目录 _SIGNATURE_EXCLUDED_PREFIXES)。
-EXCLUDED_EXACT = (
-    "/api/signatures/image",
-    "/api/signatures/temporary/session",
-    "/api/signatures/temporary/image",
-    "/api/signatures/temporary/handwrite",
-)
-
-#: 目录当前排除、但 Codex 已明确要开放给助手模型的 3 个签名业务端点
-#: (见 lighthouse_api._SIGNATURE_BUSINESS_PATHS)。审计单独列 reserved,不当作缺失,
-#: 也不静默当已覆盖。
-PENDING_OPEN_CODEX = (
-    "/api/signatures/temporary/people",
-    "/api/signatures/temporary/list",
-    "/api/signatures/usage-confirmations/send",
-)
+#: 排除分类不再维护本地白名单:exclusion 统一由真实 lighthouse_api._route_excluded
+#: 判定(反映当前目录的实际排除规则)。被排除表示“未集成到助手目录”或“用户/安全
+#: 边界”,不代表已经覆盖——前端仍见到这些端点,因此审计把它们单列 excluded 证据,
+#: 绝不作为已覆盖或隐藏缺失。
 
 #: Python 渲染的页面来源(工作台 + 签名使用确认页面)。这些文件里的嵌入 JS/表单
 #: 是浏览器真实请求,属于“Python 渲染页面”审计范围。
@@ -105,10 +72,16 @@ def _scan_call_spans(text: str, fn_name: str):
     """扫描 ``fn_name(`` 的所有调用,返回 (start, open_idx, end_idx) 列表。
 
     end_idx 是匹配的右括号下标;调用体为 text[open_idx+1:end_idx]。
+    会跳过函数名声明(如 ``function fetch(`` / ``async function pollingApi(``),
+    它们不是实际调用。
     """
     out = []
     for m in re.finditer(r"(?<![A-Za-z0-9_])%s\s*\(" % re.escape(fn_name), text):
         start = m.start()
+        # 跳过函数声明:名字紧跟在 function(或 async function)之后。
+        before = text[max(0, start - 40):start]
+        if re.search(r"\bfunction\s*$", before):
+            continue
         open_idx = m.end() - 1
         depth = 0
         i = open_idx
@@ -538,6 +511,51 @@ _PY_FORM_RE2 = re.compile(
     re.IGNORECASE)
 
 
+def _function_body(text: str, fn_start: int) -> str:
+    """从 ``function NAME(`` 的起始下标定位函数体(到大括号平衡),返回包含 body 的片段。"""
+    m = re.search(r"\{", text[fn_start:])
+    if not m:
+        return ""
+    start = fn_start + m.end()
+    depth = 1
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    return text[fn_start:i + 1]
+
+
+def _find_page_wrappers(file_text: str):
+    """发现页面内实际定义、并包装了 ``fetch`` 的传输函数(如 workbench 的 pollingApi)。
+
+    只收“本页源码里实际定义、以 url/path 为首参并对该参数直接调用 fetch、
+    且不在 TRANSPORT_CALLS 中”的函数名,不做任意假设——即真正的 transport 包装,
+    不是随便一个内部会调 fetch 的业务函数(后者由 fetch 扫描本身覆盖)。
+    """
+    names = set()
+    for m in re.finditer(r"\b(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)",
+                         file_text):
+        name = m.group(1)
+        params = [p.strip().split("=")[0].strip() for p in _top_level_split(m.group(2))]
+        if not params or name in TRANSPORT_CALLS:
+            continue
+        p1 = params[0]
+        if not re.fullmatch(r"(?:url|path|u|endpoint|target|resource)", p1):
+            continue
+        body = _function_body(file_text, m.end())
+        # 必须是对首参直接 fetch(包装调用),如 `fetch(url, {...})`。
+        if re.search(r"\bfetch\s*\(\s*" + re.escape(p1) + r"\s*[,)]", body):
+            names.add(name)
+    return names
+
+
 def _extract_python_page_calls(file_text: str, file_path: Path, module_label=""):
     """抽取 Python 渲染页面里的浏览器调用(fetch/requestJson/表单 action)。
 
@@ -557,8 +575,9 @@ def _extract_python_page_calls(file_text: str, file_path: Path, module_label="")
             "resolved": resolved, "reason": reason, "raw_call": (raw_call or raw)[:120],
         })
 
-    # fetch / requestJson 浏览器调用:用调用括号扫描 + 解析器(单行/多行/模板/拼接一致处理)。
-    for fn in ("fetch", "requestJson", "requestBinaryJson"):
+    wrappers = sorted(_find_page_wrappers(file_text))
+    # fetch / requestJson/requestBinaryJson + 页面内实际的 fetch 包装(如 pollingApi)。
+    for fn in ("fetch", "requestJson", "requestBinaryJson") + tuple(wrappers):
         for start, _o, end in _scan_call_spans(file_text, fn):
             lineno = file_text.count("\n", 0, start) + 1
             body = file_text[_o + 1:end]
@@ -566,14 +585,17 @@ def _extract_python_page_calls(file_text: str, file_path: Path, module_label="")
             if not parts:
                 continue
             expr = parts[0].strip()
-            if expr[:1] in "\"'`" or "+" in expr or "?" in expr:
-                norm, why = _resolve_simple_path(expr, file_text)
-                if norm:
-                    default = "POST" if fn == "requestBinaryJson" else "GET"
-                    method = _method_from_options(body, default, file_text)
-                    push(lineno, "fetch", expr, method, "json", norm, True, "", expr)
-                    continue
-                push(lineno, "fetch/unresolved", expr, "unresolved", None, None, False,
+            # 首参可能是字面量、变量、三元或拼接:一律尝试解析,解析失败也产出 unresolved,
+            # 绝不因首参是标识符而静默跳过。
+            norm, why = _resolve_simple_path(expr, file_text)
+            if norm:
+                default = "POST" if fn == "requestBinaryJson" else "GET"
+                method = _method_from_options(body, default, file_text)
+                transport = _transport_from_body(body, fn, file_text)
+                push(lineno, "fetch" if fn not in TRANSPORT_CALLS else fn, expr,
+                     method, transport, norm, True, "", expr)
+            else:
+                push(lineno, f"{fn}/unresolved", expr, "unresolved", None, None, False,
                      why or "未能解析", expr)
     # 表单 action->/api/...(签名使用确认页面按 method 决定请求方法)
     for m in list(_PY_FORM_RE.finditer(file_text)) + list(_PY_FORM_RE2.finditer(file_text)):
@@ -607,17 +629,6 @@ def _gather_all_sources():
     return sources
 
 
-def _is_excluded(norm_path: str) -> bool:
-    path = norm_path.rstrip("/")
-    if path in EXCLUDED_EXACT:
-        return True
-    for prefix in EXCLUDED_PREFIXES:
-        stem = prefix.rstrip("/")
-        if path == stem or path.startswith(stem + "/"):
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # 审计主流程
 # ---------------------------------------------------------------------------
@@ -631,7 +642,13 @@ def build_native_ids(catalog) -> list:
 
 
 def classify(call, native_ids) -> dict:
-    """返回带 status 的分类:covered/missing/excluded/unresolved。"""
+    """返回带 status 的分类:covered/missing/excluded/unresolved。
+
+    顺序:先匹配真实 native 目录(covered);再以真实 lighthouse_api._route_excluded
+    判定“有意的排除”(excluded,即未集成/系统/登录/安全边界,但并非覆盖);
+    无法证明的裸占位拼尾(末段动态)归 unresolved;其余为 missing。不维护本地
+    独立排除白名单——避免“列表自己在压掉缺失而脱离当前代码”的问题。
+    """
     out = dict(call)
     norm = call.get("norm_path")
     if not call.get("resolved") or not norm or call.get("method") == "unresolved":
@@ -639,33 +656,25 @@ def classify(call, native_ids) -> dict:
         out["note"] = call.get("reason") or ("" if call.get("resolved") else "路径未解析")
         return out
     method = (call.get("method") or "GET").upper()
-    # Codex 明确要开放给助手的签名业务端点:先于排除判定,单独列 reserved,
-    # 不误报为缺失也不假覆盖(即使当前临时签名异常被目录排除)。
-    if norm.rstrip("/") in PENDING_OPEN_CODEX:
-        for cid in native_ids:
-            if cid.startswith(method + " ") and _shape_equal(norm, cid.split(" ", 1)[1]):
-                out["status"] = "covered"
-                out["note"] = "目录已覆盖(Codex 已开放)"
-                return out
-        out["status"] = "reserved"
-        out["note"] = "Codex 待开放的签名业务端点(当前目录排除,不应缺省)"
-        return out
-    if _is_excluded(norm):
-        out["status"] = "excluded"
-        out["note"] = "目录有意排除(系统/登录/Qt/原始签名/工单执行轮巡/计划收敛设置)"
-        return out
-    # 裸占位符(前无 /)不是合法路由形态:多半是 base + 动态变量拼接,归为待人工复核。
-    if re.search(r"[^/]\{param\}", norm):
-        out["status"] = "unresolved"
-        out["note"] = f"动态变量直接拼在末段,具体子路径未知:{norm}"
-        return out
+    # 1) 先匹配真实目录:覆盖优先于排除判断。
     for cid in native_ids:
         if cid.startswith(method + " ") and _shape_equal(norm, cid.split(" ", 1)[1]):
             out["status"] = "covered"
             out["note"] = f"匹配目录 {cid}"
             return out
+    # 2) 真实目录的有意排除(系统/登录/Qt/原始签名/工单执行轮巡等)。被排除是
+    #    “未集成/边界”,不是覆盖;仍列 excluded 证据供前端能力审计。
+    if _route_excluded(norm, method):
+        out["status"] = "excluded"
+        out["note"] = "被真实 lighthouse_api._route_excluded 排除(系统/登录/Qt/轮巡执行/原始签名等边界)"
+        return out
+    # 3) 裸占位符拼在末段(前无 /)不是合法路由形态:多是 base+动态变量拼接,待人工复核。
+    if re.search(r"[^/]\{param\}", norm):
+        out["status"] = "unresolved"
+        out["note"] = f"动态变量直接拼在末段,具体子路径未知:{norm}"
+        return out
     out["status"] = "missing"
-    out["note"] = "目录中未找到该方法+路径形态"
+    out["note"] = "目录中未找到该方法+路径形态,且未被目录排除"
     return out
 
 
@@ -693,7 +702,7 @@ def run_audit():
     ordered = sorted(seen.values(), key=lambda r: (r["source"], r["line"], r["norm_path"] or r["raw_path"]))
     # 汇总
     summary = {"total_unique": len(ordered), "covered": 0, "missing": 0,
-                   "excluded": 0, "unresolved": 0, "reserved": 0}
+                   "excluded": 0, "unresolved": 0}
     by_module = {}
     for r in ordered:
         summary[r["status"]] += 1
@@ -726,20 +735,20 @@ def _render_text(result):
     lines.append(
         f"前端唯一调用形态: {s['total_unique']}  (covered={s['covered']}, "
         f"missing={s['missing']}, excluded={s['excluded']}, "
-        f"reserved={s.get('reserved', 0)}, unresolved={s['unresolved']})")
+        f"unresolved={s['unresolved']})")
     lines.append("")
     lines.append("--- 按业务模块覆盖 ---")
     mod = {}
     for r in result["records"]:
         g = _group_label(r["norm_path"]) if r["norm_path"] else r["source"]
         mod.setdefault(g, {"covered": 0, "missing": 0, "excluded": 0, "unresolved": 0,
-                           "reserved": 0, "sources": set()})
+                           "sources": set()})
         mod[g][r["status"]] += 1
         mod[g]["sources"].add(r["source"])
     for g in sorted(mod):
         m = mod[g]
         lines.append(f"  {g:<24} covered={m['covered']}  missing={m['missing']}  "
-                     f"excluded={m['excluded']}  reserved={m.get('reserved', 0)}  "
+                     f"excluded={m['excluded']}  "
                      f"unresolved={m['unresolved']}  (文件:{len(m['sources'])})")
     lines.append("")
     lines.append("--- MISSING(前端调用在目录缺失)---")
@@ -747,11 +756,6 @@ def _render_text(result):
                     key=lambda x: (x["source"], x["line"])):
         lines.append(f"  [{r['method']}] {r['norm_path'] or r['raw_path']}  <- {r['source']}:{r['line']}  "
                      f"({r['raw_path']})")
-    lines.append("")
-    lines.append("--- RESERVED(Codex 明确待开放的签名业务端点,当前目录排除)---")
-    for r in sorted([x for x in result["records"] if x["status"] == "reserved"],
-                    key=lambda x: (x["source"], x["line"])):
-        lines.append(f"  [{r['method']}] {r['norm_path']}  <- {r['source']}:{r['line']}")
     lines.append("")
     lines.append("--- UNRESOLVED(动态路径未解析,需人工复核)---")
     for r in sorted([x for x in result["records"] if x["status"] == "unresolved"],
@@ -765,7 +769,7 @@ def _render_text(result):
         lines.append(f"  [{r['method']}] {r['norm_path']}  <- {r['source']}:{r['line']}")
     lines.append("")
     lines.append("--- 高价值覆盖样例(covered 代表性)---")
-    covered_probe = ["/api/learning", "/api/critical-guard", "/api/cabinet-power",
+    covered_probe = ["/api/critical-guard", "/api/cabinet-power",
                      "/api/repair-management", "/api/drills", "/api/capacity/water",
                      "/api/engineer/mop", "/api/signatures", "/api/workbench", "/api/polling-sops"]
     shown = set()
@@ -789,8 +793,9 @@ def _render_text(result):
 # unittest:保护代表性抽取 + 清单确定性
 # ---------------------------------------------------------------------------
 class FrontendCoverageAuditTests(unittest.TestCase):
-    def setUp(self):
-        self.result = run_audit()
+    @classmethod
+    def setUpClass(cls):
+        cls.result = run_audit()
 
     def test_representative_frontend_calls_extracted(self):
         recs = self.result["records"]
@@ -825,6 +830,50 @@ class FrontendCoverageAuditTests(unittest.TestCase):
         for r in wo:
             self.assertEqual(r["status"], "excluded")
 
+    def test_learningpage_calls_enumerated_as_excluded(self):
+        # 学练(learning)已按新边界引入查询能力:合法的 GET 查询端点被归为 covered,
+        # 其余学习操作/写入(publish/answer/reveal/notes/issues/questions/attachments/
+        # import/settings/bootstrap/export 等)仍按真实排除规则归为 excluded——
+        # 既不当作 covered,也不隐藏成 missing。
+        learning = [r for r in self.result["records"]
+                    if "LearningPage" in r["source"] and (r["norm_path"] or "").startswith("/api/learning/")]
+        self.assertTrue(learning, "LearningPage 学练调用应被抽取为证据(不能隐藏)")
+
+        # 合法学习查询的 GET 端点(受 learning_scopes 约束)应分类为 covered。
+        permitted_queries = {
+            "/api/learning/papers", "/api/learning/papers/{param}",
+            "/api/learning/history", "/api/learning/review", "/api/learning/profile",
+            "/api/learning/issues", "/api/learning/questions", "/api/learning/questions/{param}",
+            "/api/learning/{param}",
+        }
+        covered_queries = [r for r in learning
+                           if r["resolved"] and (r["method"] or "").upper() == "GET"
+                           and r["norm_path"] in permitted_queries and r["status"] == "covered"]
+        self.assertTrue(covered_queries, "合法的学习查询 GET 端点应被分类为 covered")
+        self.assertTrue(
+            any(r["norm_path"] == "/api/learning/papers" and r["status"] == "covered"
+                for r in covered_queries),
+            "学练题单 GET /api/learning/papers 应被分类为 covered")
+
+        # 学习操作/写入端点仍归 excluded。
+        self.assertTrue(
+            any(r["resolved"] and (r["method"] or "").upper() == "POST"
+                and r["norm_path"] == "/api/learning/papers/{param}/answer"
+                and r["status"] == "excluded" for r in learning),
+            "LearningPage 答题写入端点应被抽取并归属 excluded")
+
+        # 除被允许的 GET 查询(covered)外,其余学习端点都必须为 excluded,不得错报。
+        wrong = [r for r in learning
+                 if r["resolved"] and r["method"] != "unresolved"
+                 and not ((r["method"] or "").upper() == "GET" and r["norm_path"] in permitted_queries
+                          and r["status"] == "covered")
+                 and r["status"] != "excluded"]
+        self.assertEqual(
+            wrong, [],
+            "学习端点只能对合法 GET 查询归 covered、其余归 excluded:\n" + "\n".join(
+                f"  [{r['method']}] {r['norm_path']} {r['status']} <- {r['source']}:{r['line']}"
+                for r in wrong))
+
     def test_missing_and_unresolved_are_visible_not_hidden(self):
         s = self.result["summary"]
         # 不强制断言数量(避免人为忽略);但保证它们被如实记录,不被任意忽略列表掩盖。
@@ -832,6 +881,63 @@ class FrontendCoverageAuditTests(unittest.TestCase):
         self.assertIn("unresolved", s)
         self.assertGreaterEqual(s["total_unique"], 40)
         self.assertGreaterEqual(s["covered"], 10)
+
+    def test_python_page_identifier_fetch_resolves_or_unresolved(self):
+        # 第1点回归:首参为标识符也必须产出证据——能解析的解析,真未知的标 unresolved,绝不静默跳过。
+        from pathlib import Path as _P
+        sample = (
+            "<script>\n"
+            "const url = '/api/change-confirmations';\n"
+            "async function a(){ const r = await fetch(url,{method:'POST'}); }\n"
+            "async function b(){ const r = await fetch(completelyUnknownVar,{method:'DELETE'}); }\n"
+            "</script>"
+        )
+        fake = _P(BIN_DIR) / "_scan_fixture.html"
+        recs = _extract_python_page_calls(sample, fake, "fixture")
+        resolved = [r for r in recs if r["resolved"]]
+        unresolved = [r for r in recs if not r["resolved"]]
+        self.assertTrue(any(r["norm_path"] == "/api/change-confirmations" and r["method"] == "POST"
+                            for r in resolved), "可解析的 fetch(url) 应产出 covered 证据")
+        self.assertTrue(any("completelyUnknownVar" in (r["raw_call"] or "") for r in unresolved),
+                        "未知 fetch 变量必须显式归 unresolved,不得静默丢弃")
+
+    def test_function_declarations_are_not_calls(self):
+        # 第4点回归:函数声明(function fetch / async function pollingApi)不能被当成调用抽取。
+        sample = (
+            "<script>\n"
+            "function fetch(url, o) { return window.call(url, o); }\n"
+            "async function pollingApi(url, o = {}) { return fetch(url, o); }\n"
+            "pollingApi('/api/polling-sops');\n"
+            "</script>"
+        )
+        fake = Path(BIN_DIR) / "_scan_fixture.html"
+        recs = _extract_python_page_calls(sample, fake, "fixture")
+        decl = [r for r in recs if r.get("fn") in ("fetch", "pollingApi") and not r["resolved"]
+                and "function" in (r["raw_call"] or "")]
+        self.assertEqual(decl, [], "函数声明不应作为调用被抽取")
+        self.assertTrue(any(r["norm_path"] == "/api/polling-sops" for r in recs),
+                        "真实 pollingApi('/api/polling-sops')  调用应被抽出")
+
+    def test_python_page_polling_sop_crud_and_attachments(self):
+        # 第2点回归:页面内实际的 fetch 包装(pollingApi)的业务调用——SOP CRUD 与附件
+        # multipart 上传——必须被包含,并保留 method/transport 元数据。
+        sop = [r for r in self.result["records"]
+               if "/api/polling-sops" in (r["norm_path"] or "")]
+        self.assertTrue(sop, "Python 工作台页的 polling-sops 调用应被抽取")
+        wanted = {
+            ("GET", "/api/polling-sops"),
+            ("POST", "/api/polling-sops/refresh"),
+            ("DELETE", "/api/polling-sops/{param}"),
+            ("PUT", "/api/polling-sops/{param}"),
+            ("POST", "/api/polling-sops/{param}/attachments"),
+        }
+        got = {(r["method"], r["norm_path"]) for r in sop if r["resolved"] and r["method"] != "unresolved"}
+        self.assertTrue(wanted.issubset(got),
+                        f"滚动 SOP CRUD/附件缺失; want⊆got => {wanted - got}")
+        # 附件上传须为 multipart
+        self.assertTrue(any(r["method"] == "POST" and r["norm_path"] == "/api/polling-sops/{param}/attachments"
+                            and r["transport"] == "multipart" for r in sop),
+                        "SOP 附件上传应标 multipart")
 
 
 def _serialize_for_hash(result):

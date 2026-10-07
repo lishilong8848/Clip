@@ -187,8 +187,10 @@ class _SmokePortalService:
         })
         return stats
 
-    def get_event_monthly_snapshot(self, *, scope: str, month: str = "") -> dict:
+    def get_event_monthly_snapshot(self, *, scope: str, month: str = "", date_field: str = "") -> dict:
         records = [self._smoke_event()] if self._normalize_scope(scope) in {"ALL", "A"} else []
+        for record in records:
+            record["occurrence_time"] = (month or time.strftime("%Y-%m")) + "-11 10:30"
         return {
             "scope": self._normalize_scope(scope),
             "month": month or time.strftime("%Y-%m"),
@@ -1496,11 +1498,16 @@ class _SmokePortalService:
 
 def _build_playwright_script(url: str, session_id: str) -> str:
     no_scope_session_id = f"{session_id}-no-scope"
+    cabinet_chunks = [asset.name for asset in (BIN_DIR / "lan_bitable_template_portal/frontend/dist/assets").glob("*.js")
+                      if '"cabinet-page"' in asset.read_text(encoding="utf-8")]
+    if len(cabinet_chunks) != 1:
+        raise RuntimeError("未找到唯一的机柜生产页面资源，不能验证页面加载失败恢复。")
     payload = {
         "url": url,
         "session_id": session_id,
         "no_scope_session_id": no_scope_session_id,
         "cookie_name": AUTH_COOKIE_NAME,
+        "cabinet_chunk": cabinet_chunks[0],
     }
     return textwrap.dedent(
         f"""
@@ -2096,7 +2103,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (await stateAction.count() !== 1) throw new Error('cabinet state action is unavailable');
           await stateAction.click();
           await page.waitForSelector('.editor-layer form');
-          const actualInput = page.locator('.editor-layer input[type="datetime-local"]').nth(1);
+          const groups = page.locator('.editor-layer .group-editor');
+          if (await groups.count() !== 2) throw new Error('state switch must preserve the original operation and append the new one');
+          if (await groups.first().getByLabel('实际完成时间', {{ exact: true }}).inputValue() === '') throw new Error('state switch lost the original operation time');
+          const actualInput = groups.last().getByLabel('实际完成时间', {{ exact: true }});
           if (await actualInput.inputValue() !== '' || !(await actualInput.evaluate(node => node.required))) throw new Error('state switch must require manual operation data');
           if (await page.locator('.editor-layer form').evaluate(form => form.checkValidity())) throw new Error('empty state-switch form must not submit');
           await page.getByRole('button', {{ name: '关闭编辑', exact: true }}).click();
@@ -2128,7 +2138,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!batchCreated.ok || !batchCreated.data?.batch_id) throw new Error(`cabinet batch fixture failed: ${{JSON.stringify(batchCreated)}}`);
           await page.goto(new URL(`/cabinet-power/batches?scope=A&batch_id=${{batchCreated.data.batch_id}}`, cfg.url).toString());
           await page.waitForSelector('.batch-summary');
-          if (!(await page.locator('.batch-summary').innerText()).includes('待新增')) throw new Error('cabinet batch summary missing');
+          const cabinetTotal = page.locator('.batch-summary .metrics > div').filter({{ has: page.locator('dt', {{ hasText: /^机柜$/ }}) }}).locator('dd');
+          if (await cabinetTotal.innerText() !== '1') throw new Error('cabinet batch summary count must match the created row');
           const batchHeaders = await page.locator('.detail-table th').allTextContents();
           if (!batchHeaders.includes('机柜') || batchHeaders.includes('供应商机柜号') || batchHeaders.includes('下单时间')) throw new Error(`cabinet batch dynamic columns failed: ${{batchHeaders.join('|')}}`);
           const batchDesktopOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
@@ -2194,11 +2205,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}),
           }}));
           const expectedToolLabels = [
+            '画像学练/学练',
             '每日任务清单/今日',
             '上/下电通告/通告',
             '设备轮巡/通告',
             '设备调整/通告',
             '交接班审核页/链接',
+            '计划收敛审查/审查',
           ];
           if (toolLandingState.scopeCardCount !== 0 || JSON.stringify(toolLandingState.toolLabels) !== JSON.stringify(expectedToolLabels)) {{
             throw new Error(`other tools landing mismatch: ${{JSON.stringify(toolLandingState)}}`);
@@ -2639,7 +2652,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               throw new Error(`lite row click did not preserve list scroll: ${{JSON.stringify(restoredScroll)}}`);
             }}
             const sourceLinkProbe = await page.evaluate(() => {{
-              const field = document.querySelector('.source-link-field');
+              const field = document.querySelector('.source-link-field, .manual-source-binding');
               const select = document.querySelector('select[name="source_record_id"]');
               const hidden = document.querySelector('input[type="hidden"][name="source_record_id"]');
               return {{
@@ -2656,6 +2669,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                && !sourceLinkProbe.options.some(text => text.includes('冷机月度巡检'))
               && !sourceLinkProbe.text.includes('源表未关联')
               && !sourceLinkProbe.text.includes('未关联'))
+               && !sourceLinkProbe.text.includes('绑定源表事项')
             ) {{
               throw new Error(`source link options missing expected record: ${{JSON.stringify(sourceLinkProbe)}}`);
             }}
@@ -2721,7 +2735,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               throw new Error(`lite refresh menu did not close on Escape: ${{JSON.stringify(refreshClosedByEscape)}}`);
             }}
             let sopRefreshCalls = 0, sopRefreshFail = false, sopConversionPayload = null, convertedSop = null;
-            const sopItems = (scope, workType, fresh) => [convertedSop && convertedSop.scope===scope && convertedSop.work_type===workType?convertedSop:{{sop_id:'manual_refresh_sop',scope,work_type:workType,name:'同步示例 SOP',version:fresh?2:1,ready:true,steps:[{{step_id:'step_manual_123',content:fresh?'多维最新步骤':'本地旧步骤',operator_required:true,reviewer_required:true,photo_required:false,time_limit_seconds:0}}],attachments:[{{attachment_id:'file_manual_123',name:'guide.txt',size:10,download_url:'#'}}]}},...(fresh?[{{sop_id:'manual_refresh_new',scope,work_type:workType,name:'多维新增 SOP',version:1,ready:true,steps:[{{content:'新增步骤',operator_required:true}}],attachments:[{{name:'guide.txt',size:10}}]}}]:[])];
+            const sopItems = (scope, workType, fresh) => [convertedSop && convertedSop.scope===scope && convertedSop.work_type===workType?convertedSop:{{sop_id:'manual_refresh_sop',scope,work_type:workType,name:'同步示例 SOP',version:fresh?2:1,ready:true,steps:[{{step_id:'step_manual_123',content:fresh?'多维最新步骤':'本地旧步骤',operator_required:true,reviewer_required:true,photo_required:false,time_limit_seconds:0,delay_reminder_minutes:0,repeat_rules:[]}}],attachments:[{{attachment_id:'file_manual_123',name:'guide.txt',size:10,download_url:'#'}}]}},...(fresh?[{{sop_id:'manual_refresh_new',scope,work_type:workType,name:'多维新增 SOP',version:1,ready:true,steps:[{{step_id:'step_manual_new',content:'新增步骤',operator_required:true,reviewer_required:true,photo_required:false,time_limit_seconds:0,delay_reminder_minutes:0,repeat_rules:[]}}],attachments:[{{name:'guide.txt',size:10}}]}}]:[])];
             await page.route('**/api/polling-sops?*', route => {{const url=new URL(route.request().url());return route.fulfill({{json:{{ok:true,data:{{items:sopItems(url.searchParams.get('scope'),url.searchParams.get('work_type'),false)}}}}}})}});
             await page.route('**/api/polling-sops/manual_refresh_sop', route => {{
               if(route.request().method()!=='PUT')return route.fallback();
@@ -3052,14 +3066,15 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await bindingPage.unroute('**/api/workbench/source-options?*');
             await bindingPage.close();
             const recoveryPage = await context.newPage();
-            await recoveryPage.route('**/CabinetPowerPage-*.js', route => route.abort());
+            const blockedChunk = '**/assets/' + cfg.cabinet_chunk;
+            await recoveryPage.route(blockedChunk, route => route.abort());
             await recoveryPage.goto(new URL('/cabinet-power?scope=A', cfg.url).toString());
             await recoveryPage.getByText('页面加载失败', {{ exact: true }}).waitFor();
             await recoveryPage.locator('.async-page-state > button').click();
             const reloadDialog = recoveryPage.getByRole('dialog', {{ name: '重新加载页面？', exact: true }});
             await reloadDialog.getByRole('button', {{ name: '取消', exact: true }}).click();
             await recoveryPage.getByText('页面加载失败', {{ exact: true }}).waitFor();
-            await recoveryPage.unroute('**/CabinetPowerPage-*.js');
+            await recoveryPage.unroute(blockedChunk);
             await recoveryPage.locator('.async-page-state > button').click();
             await reloadDialog.getByRole('button', {{ name: '重新加载', exact: true }}).click();
             await recoveryPage.locator('.cabinet-page .metrics').waitFor();

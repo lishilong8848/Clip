@@ -17,9 +17,8 @@ export function useGuardedPolling(task: () => Promise<void> | void, intervalMs: 
       .then(task)
       .catch(() => undefined)
       .finally(() => {
-        if (generation === runGeneration) {
-          inFlight = false;
-        }
+        inFlight = false;
+        if (generation !== runGeneration && shouldRun) tick();
       });
   }
 
@@ -48,7 +47,6 @@ export function useGuardedPolling(task: () => Promise<void> | void, intervalMs: 
       clearInterval(timer);
       timer = null;
     }
-    inFlight = false;
     unbindVisibility();
   }
 

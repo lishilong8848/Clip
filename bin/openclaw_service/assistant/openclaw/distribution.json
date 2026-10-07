@@ -1,0 +1,107 @@
+{
+  "format": 1,
+  "version": "2026.8.1",
+  "node_version": "24.16.0",
+  "sha256": "4a9270952a0f240807ee9ee8cc88f009a46d31141e1b5bff51ee6e46d8668e66",
+  "size": 169785460,
+  "base": "H7DLbpdQiaIw4ssg5sCcSoGMn5M",
+  "table": "tblUECEItaUpOWvd",
+  "parts": [
+    {
+      "index": 1,
+      "size": 14680064,
+      "sha256": "cd864fcf5af5bad91f1a0f597200de8bc4c3959ec9f557c9be6bd36477ed7587",
+      "name": "lighthouse_openclaw.zip.001",
+      "record_id": "recvwZapt9mIwW",
+      "file_token": "JQgMbZZ3Hob9Q4xLWnpc1Q3Mn7c"
+    },
+    {
+      "index": 2,
+      "size": 14680064,
+      "sha256": "3e39c0201ee25b658d717d111207195aa795a1cb1f34cb0541c66d38ddd4cddf",
+      "name": "lighthouse_openclaw.zip.002",
+      "record_id": "recvwZar4mgbX1",
+      "file_token": "JR7xboxY3om8tuxVFojcKYGqnOe"
+    },
+    {
+      "index": 3,
+      "size": 14680064,
+      "sha256": "a1fbf6e76ae8ab149a9b1cf06014fd069deec1ce6e7ac7cac6ce63baedbaf467",
+      "name": "lighthouse_openclaw.zip.003",
+      "record_id": "recvwZasrblrfh",
+      "file_token": "EL8sbL9jOo8iNhxWamdc5IuYnje"
+    },
+    {
+      "index": 4,
+      "size": 14680064,
+      "sha256": "ef1d98feee1d49c7d2e2070034798880c48ca9b56d4291c26ee161642b09821d",
+      "name": "lighthouse_openclaw.zip.004",
+      "record_id": "recvwZatENuUH7",
+      "file_token": "A29BbHLNuoIBf7x8zsscuBW1nle"
+    },
+    {
+      "index": 5,
+      "size": 14680064,
+      "sha256": "15efe3219b3cb0d0a872d95da1560ca780fe9dd41b0423ffab575c3cf3e2d7d2",
+      "name": "lighthouse_openclaw.zip.005",
+      "record_id": "recvwZauVxMO6G",
+      "file_token": "HigcbhDOXolJttxKGYrcUdZJnof"
+    },
+    {
+      "index": 6,
+      "size": 14680064,
+      "sha256": "847aa6b0f95cdc5b7eaeeceb155bec4406be8456e5e75603df1b73e2c979c361",
+      "name": "lighthouse_openclaw.zip.006",
+      "record_id": "recvwZaw2vzb4l",
+      "file_token": "PtfMb19XFo82JPx61UScJVWGn8c"
+    },
+    {
+      "index": 7,
+      "size": 14680064,
+      "sha256": "05e537d8fe52061e37db0335c52d5dccb48a5520221cd62cfc0c2fa2208da94b",
+      "name": "lighthouse_openclaw.zip.007",
+      "record_id": "recvwZaxaLyn7r",
+      "file_token": "V47FbQsqaoncSSxJyXxcoaytneb"
+    },
+    {
+      "index": 8,
+      "size": 14680064,
+      "sha256": "4cf642c4aa9fbb536927cee315c3bc2d09233ede1aa73e3320775a5599baa6c3",
+      "name": "lighthouse_openclaw.zip.008",
+      "record_id": "recvwZayloC2G9",
+      "file_token": "OmElbmavTobwG0xvQkHce33BnFc"
+    },
+    {
+      "index": 9,
+      "size": 14680064,
+      "sha256": "fed65439fb945f121d816152ad07ebf22d6204d4888c0b47a48fd2ff2e2a4714",
+      "name": "lighthouse_openclaw.zip.009",
+      "record_id": "recvwZazpLOsxH",
+      "file_token": "DcqVbEnqDooHeWxqX6ecqYAmn2f"
+    },
+    {
+      "index": 10,
+      "size": 14680064,
+      "sha256": "a4d0d5083db7a5f04f9a82a582fad108aa8dd456525fb9db824f2c64988477ab",
+      "name": "lighthouse_openclaw.zip.010",
+      "record_id": "recvwZaAsGfLxs",
+      "file_token": "W8cCbKYceoxvFmxpPuAc7qdXnmb"
+    },
+    {
+      "index": 11,
+      "size": 14680064,
+      "sha256": "cb6874caf5a40a3aa95d3411b46b22ca1e2da28f97d98b7cb3a817a17c7c661e",
+      "name": "lighthouse_openclaw.zip.011",
+      "record_id": "recvwZaBC4UITG",
+      "file_token": "B2AKb5DU2oQoa5xgqwfcj2LRnrf"
+    },
+    {
+      "index": 12,
+      "size": 8304756,
+      "sha256": "1a990a3b75d380fdea8030ac4308e02ca54a33b10aa27a3098650b39c9e4089b",
+      "name": "lighthouse_openclaw.zip.012",
+      "record_id": "recvwZaCyezlow",
+      "file_token": "IdpCbHgiNoWvzcxHdBhcBSPhnkg"
+    }
+  ]
+}

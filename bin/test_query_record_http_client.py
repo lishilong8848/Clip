@@ -16,6 +16,7 @@ if str(BIN_DIR) not in sys.path:
 
 from upload_event_module.services import query_record_by_record_id as query_module  # noqa: E402
 from upload_event_module.services.http_client import FeishuHttpClient  # noqa: E402
+from upload_event_module.services import http_client as client_module
 
 
 class _FakeFeishuClient:
@@ -40,6 +41,27 @@ class _FakeFeishuClient:
 
 
 class QueryRecordHttpClientTests(unittest.TestCase):
+    def test_business_and_public_clients_reuse_the_same_verified_ca_policy(self):
+        import ssl
+        from openclaw_service.assistant.lighthouse_public import _verified_tls_context
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        first, second = FeishuHttpClient(), FeishuHttpClient()
+        with patch.dict(os.environ, {}, clear=True), patch.object(client_module, '_tls_contexts', {}), \
+                patch('ssl.create_default_context', return_value=context) as create, patch('httpx.Client') as clients:
+            try:
+                first._client_for_request()
+                first._client_for_request()
+                second._client_for_request()
+                self.assertIs(_verified_tls_context(), context)
+                self.assertEqual(create.call_count, 1)
+                self.assertEqual(clients.call_count, 2)
+                self.assertTrue(all(call.kwargs['verify'] is context for call in clients.call_args_list))
+                self.assertTrue(context.check_hostname)
+                self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            finally:
+                first.close()
+                second.close()
+
     def test_query_logs_do_not_include_record_content_or_tokens(self):
         secret = "private-record-content"
         fake = _FakeFeishuClient()

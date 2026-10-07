@@ -1000,9 +1000,46 @@ class PatchUpdateMixin:
         self.patch_update_finished.emit(False, f"补丁更新失败: {reason}{cleanup}")
 
     def _apply_patch_worker(self, patch_dir: Path):
+        assistant_guard = None
+        applied = False
+        dependencies_ready = True
+
+        def finish_assistant():
+            nonlocal assistant_guard
+            guard, assistant_guard = assistant_guard, None
+            if guard is not None:
+                try:
+                    warning = guard.finish(applied, dependencies_ready=dependencies_ready)
+                    if warning:
+                        log_warning(warning)
+                except Exception as exc:
+                    log_warning(f"助手更新恢复未完成: {type(exc).__name__}")
+
+        def report(success, message):
+            # The UI may restart immediately after this signal. Release the
+            # assistant's update hold before handing control back to Qt.
+            finish_assistant()
+            self.patch_update_finished.emit(success, message)
+
         try:
             root_dir = self._get_app_root_dir()
             patch_meta = self._last_patch_meta if hasattr(self, "_last_patch_meta") else {}
+            patch_files = self._collect_patch_files(patch_dir)
+            expected_hashes = patch_meta.get("file_sha256") if isinstance(patch_meta, dict) else {}
+            if isinstance(expected_hashes, dict) and expected_hashes:
+                for src in patch_files:
+                    rel = src.relative_to(patch_dir).as_posix()
+                    expected = str(expected_hashes.get(rel) or "").lower()
+                    if not expected or self._sha256_file(src).lower() != expected:
+                        self._discard_invalid_patch(patch_dir, f"补丁文件校验失败: {rel}")
+                        return
+            deleted_files = self._parse_deleted_files(patch_dir)
+            for rel in deleted_files:
+                if rel.is_absolute() or ".." in rel.parts or not (root_dir / rel).resolve().is_relative_to(root_dir.resolve()):
+                    raise ValueError("补丁删除清单包含不安全路径")
+            deleted_files = patch_deletions(root_dir, patch_dir, deleted_files)
+            from openclaw_service.update import AssistantUpdateGuard
+            assistant_guard = AssistantUpdateGuard(root_dir, root_dir / "bin/data/lighthouse_openclaw")
             if bool(getattr(config, "auto_install_dependencies", True)):
                 dep_manifest = dict(patch_meta) if isinstance(patch_meta, dict) else {}
                 module_to_package = dict(DEFAULT_MODULE_TO_PACKAGE)
@@ -1016,6 +1053,9 @@ class PatchUpdateMixin:
                         if mod_name and pkg_name:
                             module_to_package[mod_name] = pkg_name
                 dep_manifest["module_to_package"] = module_to_package
+                from ..services.dependency_bootstrap import _verify_modules
+                assistant_guard.pause(patch_dir, patch_files, deleted_files,
+                    dependency_change=bool(_verify_modules(module_to_package)))
                 dep_ok, dep_detail = ensure_runtime_dependencies(
                     dep_manifest,
                     Path(sys.executable),
@@ -1040,6 +1080,7 @@ class PatchUpdateMixin:
                     ),
                 )
                 if not dep_ok:
+                    dependencies_ready = False
                     if self._last_patch_source.startswith("remote"):
                         self._emit_remote_update_phase("远程更新: 依赖安装失败")
                     send_system_alert(
@@ -1048,26 +1089,12 @@ class PatchUpdateMixin:
                         detail=str(dep_detail),
                         dedup_key=f"{self._last_patch_source}:patch_dep_failed",
                     )
-                    self.patch_update_finished.emit(False, f"依赖安装失败: {dep_detail}")
+                    report(False, f"依赖安装失败: {dep_detail}")
                     return
                 if self._last_patch_source.startswith("remote"):
                     self._emit_remote_update_phase("远程更新: 依赖就绪，应用补丁中")
-            patch_files = self._collect_patch_files(patch_dir)
-            expected_hashes = patch_meta.get("file_sha256") if isinstance(patch_meta, dict) else {}
-            if isinstance(expected_hashes, dict) and expected_hashes:
-                for src in patch_files:
-                    rel = src.relative_to(patch_dir).as_posix()
-                    expected = str(expected_hashes.get(rel) or "").lower()
-                    if not expected or self._sha256_file(src).lower() != expected:
-                        self._discard_invalid_patch(
-                            patch_dir, f"补丁文件校验失败: {rel}"
-                        )
-                        return
-            deleted_files = self._parse_deleted_files(patch_dir)
-            for rel in deleted_files:
-                if rel.is_absolute() or ".." in rel.parts or not (root_dir / rel).resolve().is_relative_to(root_dir.resolve()):
-                    raise ValueError("补丁删除清单包含不安全路径")
-            deleted_files = patch_deletions(root_dir, patch_dir, deleted_files)
+            else:
+                assistant_guard.pause(patch_dir, patch_files, deleted_files)
             backup_dir, new_files, deleted_files = self._backup_patch_targets(
                 patch_dir, patch_files, deleted_files, root_dir
             )
@@ -1083,7 +1110,7 @@ class PatchUpdateMixin:
 
             if failed:
                 self._rollback_patch(backup_dir, new_files)
-                self.patch_update_finished.emit(
+                report(
                     False,
                     "补丁更新失败，以下文件处理失败：\n" + "\n".join(failed[:20]),
                 )
@@ -1103,22 +1130,23 @@ class PatchUpdateMixin:
                         py_compile.compile(str(dest), doraise=True)
             except Exception as exc:
                 self._rollback_patch(backup_dir, new_files)
-                self.patch_update_finished.emit(False, f"补丁验证失败，已回退: {exc}")
+                report(False, f"补丁验证失败，已回退: {exc}")
                 return
 
             entry = patch_dir / FRONTEND_INDEX
             if entry.is_file() and not self._copy_with_retry(entry, root_dir / FRONTEND_INDEX):
                 self._rollback_patch(backup_dir, new_files)
-                self.patch_update_finished.emit(False, "前端入口发布失败，已回退")
+                report(False, "前端入口发布失败，已回退")
                 return
             for rel in deleted_files:
                 target = root_dir / rel
                 if target.exists() and not self._delete_with_retry(target):
                     self._rollback_patch(backup_dir, new_files)
-                    self.patch_update_finished.emit(False, f"补丁清理失败，已回退: {rel}")
+                    report(False, f"补丁清理失败，已回退: {rel}")
                     return
 
             self._update_build_meta(root_dir, self._last_patch_meta if hasattr(self, "_last_patch_meta") else {})
+            applied = True
             patch_meta = self._last_patch_meta or {}
             self._last_patch_requires_restart = bool(
                 patch_meta.get("restart_required") or patch_meta.get("force_ui_update")
@@ -1130,13 +1158,16 @@ class PatchUpdateMixin:
                 pass
             cleanup_note = self._delete_patch_dir(patch_dir)
             cleanup_msg = f"，{cleanup_note}" if cleanup_note else "，已删除补丁文件夹"
-            self.patch_update_finished.emit(
+            report(
                 True, f"补丁更新完成: {patch_dir.name}{cleanup_msg}"
             )
         except (ValueError, UnicodeError) as exc:
+            finish_assistant()
             self._discard_invalid_patch(patch_dir, str(exc))
         except Exception as exc:
-            self.patch_update_finished.emit(False, f"补丁更新失败: {exc}")
+            report(False, f"补丁更新失败: {exc}")
+        finally:
+            finish_assistant()
 
     def _on_patch_update_finished(self, success: bool, message: str):
         self.patch_btn.setEnabled(True)

@@ -1,4 +1,5 @@
 <template>
+  <UiTransition name="ui-overlay" appear>
   <section v-if="open" class="admin-shell">
     <div class="admin-card">
       <header>
@@ -136,6 +137,7 @@
       />
     </div>
   </section>
+  </UiTransition>
 </template>
 
 <script setup lang="ts">
@@ -163,6 +165,7 @@ type MopSettingsKey = "mop_app_token" | "mop_table_id" | "mop_view_id" | "mop_ti
 
 const props = defineProps<{
   open: boolean;
+  initialTab?: "status" | "permissions" | "handover";
   scopeOptions: Array<{ value: string; label: string }>;
 }>();
 
@@ -423,13 +426,11 @@ const filteredPermissionUsers = computed(() => {
   });
 });
 
-watch(() => props.open, (open) => {
-  if (open) {
-    selectAdminTab(tab.value);
-  }
-});
-
 const api = requestJson;
+
+watch([() => props.open, () => props.initialTab], ([open]) => {
+  if (open) selectAdminTab(props.initialTab || tab.value);
+}, { immediate: true });
 
 function selectAdminTab(next: AdminTabKey): void {
   if (next === "pressure" && !advancedDiagnosticsVisible.value) {

@@ -50,6 +50,7 @@ from upload_event_module.utils import get_data_file_path
 
 from .state_store import LanPortalStateStore
 from .repair_operations import RepairOperationsMixin, repair_mutation
+from . import repair_ledger
 from .identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
@@ -452,6 +453,7 @@ REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES = (
 REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES.update(
     REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES
 )
+REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES.update(repair_ledger.LINK_FIELDS)
 REPAIR_MANAGEMENT_REPAIR_TABLE_ID = "tblpaHktT0mn0hwg"
 REPAIR_FOLLOWUP_TABLE_ID = "tblkJByibuNWWGJh"
 REPAIR_EQUIPMENT_CATALOG_TABLE_ID = "tblkKnYwajfRmquQ"
@@ -601,7 +603,7 @@ REPAIR_SNAPSHOT_SOURCE_EVENTS = "repair_events"
 REPAIR_SNAPSHOT_SOURCE_NOTICES = "repair_notices"
 REPAIR_SNAPSHOT_SOURCE_CMDB = "repair_cmdb"
 REPAIR_CMDB_SNAPSHOT_VERSION = 2
-REPAIR_PROJECT_CANONICAL_PROJECTION_VERSION = 1
+REPAIR_PROJECT_CANONICAL_PROJECTION_VERSION = 2
 REPAIR_CMDB_SNAPSHOT_MAX_RECORDS = 100_000
 REPAIR_SNAPSHOT_TTL_SECONDS = {
     REPAIR_SNAPSHOT_SOURCE_PROJECTS: 2 * 60,
@@ -5639,41 +5641,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
 
     @classmethod
-    def _repair_management_event_business_identity(
-        cls,
-        event: dict[str, Any],
-    ) -> str:
-        display_fields = (
-            event.get("display_fields")
-            if isinstance(event.get("display_fields"), dict)
-            else {}
-        )
-        building_value: Any = (
-            event.get("building_codes")
-            or event.get("building")
-            or display_fields.get("机楼")
-            or display_fields.get("楼栋")
-            or ""
-        )
-        record = {
-            "display_fields": {
-                "故障维修原因": (
-                    event.get("alarm_desc")
-                    or event.get("title")
-                    or display_fields.get("告警描述")
-                    or ""
-                ),
-                "故障发生时间": (
-                    event.get("occurrence_time")
-                    or display_fields.get("事件发生时间")
-                    or ""
-                ),
-                "所属数据中心/楼栋-使用": building_value,
-            }
-        }
-        return cls._repair_management_business_identity(record)
-
-    @classmethod
     def _repair_management_project_canonical_score(
         cls,
         record: dict[str, Any],
@@ -5734,20 +5701,16 @@ class MaintenancePortalService(RepairOperationsMixin):
         meta_by_name: dict[str, FieldMeta] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         candidates: dict[str, list[dict[str, Any]]] = {}
-        passthrough: list[dict[str, Any]] = []
-        for item in records:
+        # Distinct remote IDs are separate projects, even for the same event.
+        for index, item in enumerate(records):
             if not isinstance(item, dict):
                 continue
             record_id = str(item.get("record_id") or "").strip()
             if record_id and is_local_record_id(record_id):
                 continue
-            identity = cls._repair_management_business_identity(item)
-            if not identity:
-                passthrough.append(item)
-                continue
-            candidates.setdefault(identity, []).append(item)
+            candidates.setdefault(record_id or f"unidentified:{index}", []).append(item)
 
-        selected_ids: set[int] = {id(item) for item in passthrough}
+        selected_records: list[dict[str, Any]] = []
         duplicate_groups: list[dict[str, Any]] = []
         for identity, group in candidates.items():
             selected = max(
@@ -5764,7 +5727,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     meta_by_name=meta_by_name,
                 ),
             )
-            selected_ids.add(id(selected))
+            selected_records.append(selected)
             if len(group) <= 1:
                 continue
             selected_record_id = str(selected.get("record_id") or "").strip()
@@ -5781,10 +5744,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     ],
                 }
             )
-        return (
-            [item for item in records if id(item) in selected_ids],
-            duplicate_groups,
-        )
+        return selected_records, duplicate_groups
 
     @classmethod
     def _repair_management_workflow_text(
@@ -6071,6 +6031,20 @@ class MaintenancePortalService(RepairOperationsMixin):
             if record_id.startswith("rec"):
                 result.append(record_id)
         return list(dict.fromkeys(result))
+
+    @classmethod
+    def _repair_management_event_ids_from_record(cls, record: dict[str, Any]) -> list[str]:
+        buckets = [bucket for name in ("raw_fields", "display_fields")
+                   if isinstance(bucket := record.get(name), dict)]
+        field_name = REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES[0]
+        for bucket in buckets:
+            if f"{field_name}-L" in bucket:
+                return cls._repair_management_record_ids(bucket[f"{field_name}-L"])
+        for bucket in buckets:
+            record_ids = cls._repair_management_record_ids(bucket.get(field_name))
+            if record_ids:
+                return record_ids
+        return []
 
     @classmethod
     def _repair_management_followup_ids_from_record(
@@ -8176,6 +8150,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             if focus_index >= 0:
                 page_offset = (focus_index // max_limit) * max_limit
         page_records = selected[page_offset : page_offset + max_limit]
+        repair_ledger.add_followup_selections(self, summary_id, page_records, scope)
         current_mapping = self._repair_followup_brand_model_options(
             records=records,
             summary_record=summary_record,
@@ -9209,6 +9184,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             meta_by_name,
             excluded_field_names=REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES,
         )
+        prepared.update(repair_ledger.summary_fields(self, summary_record_id, raw_fields))
         if prepared:
             self._patch_record_fields(
                 app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -9295,6 +9271,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         summary_record_id: str,
         fields: dict[str, Any],
         cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
@@ -9306,6 +9283,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 summary_record_id=summary_id,
                 fields=fields,
                 cmdb_record_ids=cmdb_record_ids,
+                ledger_device_ids=ledger_device_ids,
                 operation_id=operation_id,
                 scope=scope,
             )
@@ -9316,11 +9294,13 @@ class MaintenancePortalService(RepairOperationsMixin):
         summary_record_id: str,
         fields: dict[str, Any],
         cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
+        repair_ledger.validate_selection(self, summary_id, ledger_device_ids, scope)
         _metas, _meta_by_name, existing_followups = self._load_repair_followups_for_summary(
             summary_id, limit=1,
         )
@@ -9365,6 +9345,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         record_id = self._created_record_id(result)
         if not record_id:
             raise PortalError("维修跟进记录已提交，但未返回记录 ID。")
+        repair_ledger.remember_selection(self, summary_id, record_id, ledger_device_ids)
         self._upsert_repair_snapshot_fields(
             source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
             record_id=record_id,
@@ -9484,6 +9465,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         summary_record_id: str,
         fields: dict[str, Any],
         cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         expected_version: str = "",
         scope: str = "ALL",
@@ -9497,6 +9479,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 summary_record_id=summary_id,
                 fields=fields,
                 cmdb_record_ids=cmdb_record_ids,
+                ledger_device_ids=ledger_device_ids,
                 expected_version=expected_version,
                 scope=scope,
             )
@@ -9508,6 +9491,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         summary_record_id: str,
         fields: dict[str, Any],
         cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        ledger_device_ids: list[str] | None = None,
         expected_version: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
@@ -9527,6 +9511,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if summary_id not in self._repair_followup_parent_ids(existing):
             raise PortalError("该维修跟进记录不属于当前检修单。")
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
+        repair_ledger.validate_selection(self, summary_id, ledger_device_ids, scope)
         source_fields = dict(fields or {})
         emergency_submitted = (
             REPAIR_FOLLOWUP_EVENT_EMERGENCY_FIELD_NAME in source_fields
@@ -9555,6 +9540,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             record_id=record_id,
             fields=prepared,
         )
+        repair_ledger.remember_selection(self, summary_id, record_id, ledger_device_ids)
         self._upsert_repair_snapshot_fields(
             source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
             record_id=record_id,
@@ -15846,78 +15832,53 @@ class MaintenancePortalService(RepairOperationsMixin):
         event_record_id = str(event_record_id or "").strip()
         if not event_record_id.startswith("rec") or is_local_record_id(event_record_id):
             raise PortalError("事件结束已上传，但缺少有效的事件目标记录 ID，无法创建维修单。")
-        event_record = self._repair_management_event_from_notice_payload(
-            record_id=event_record_id,
-            notice_data=notice_data,
-            remote_fields=remote_fields,
-            scope=scope,
-        )
-        event_identity = self._repair_management_event_business_identity(
-            event_record
-        )
-        lock_identity = event_identity or f"event:{event_record_id}"
-        lock_key = (
-            "repair-business:"
-            + hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()
-        )
-        with self._repair_management_record_lock(lock_key):
-            _metas, project_meta_by_name, projects = (
+        operation_id = f"event-end-transfer:{REPAIR_MANAGEMENT_TABLE_ID}:{event_record_id}"
+        with self._repair_management_record_lock("repair-event:" + event_record_id):
+            operation = self._state_store.get_repair_management_operation(operation_id)
+            if (operation and operation.get("operation_type") == "project_create"
+                    and operation.get("status") in {"completed", "sync_pending"}
+                    and str(operation.get("record_id") or "").startswith("rec")):
+                # Successful auto-creation is final, including an intentional deletion.
+                return {"record_id": operation["record_id"], "created": False,
+                        "idempotent_replay": True, "warnings": []}
+            transfer_value = (remote_fields or {}).get("是否转检修")
+            if transfer_value in (None, "", [], {}):
+                transfer_value = (notice_data or {}).get("transfer_to_overhaul")
+            if not self._truthy_flag(transfer_value):
+                return {"record_id": "", "created": False, "skipped": True,
+                        "reason": "事件未转检修，不自动补建。"}
+            _metas, _project_meta_by_name, projects = (
                 self._load_repair_management_project_records()
             )
             for project in projects:
-                raw_fields = (
-                    project.get("raw_fields")
-                    if isinstance(project.get("raw_fields"), dict)
-                    else {}
-                )
-                display_fields = (
-                    project.get("display_fields")
-                    if isinstance(project.get("display_fields"), dict)
-                    else {}
-                )
-                linked_ids = self._repair_management_record_ids(
-                    raw_fields.get("关联事件单")
-                    or display_fields.get("关联事件单")
-                )
+                linked_ids = self._repair_management_event_ids_from_record(project)
                 if event_record_id not in linked_ids:
                     continue
-                return {
-                    "record_id": str(project.get("record_id") or "").strip(),
-                    "created": False,
-                    "idempotent_replay": True,
-                    "warnings": [],
-                }
-            if event_identity:
-                semantic_matches = [
-                    project
-                    for project in projects
-                    if self._repair_management_business_identity(project)
-                    == event_identity
-                ]
-                if semantic_matches:
-                    selected, _duplicate_groups = (
-                        self._canonical_repair_management_projects(
-                            semantic_matches,
-                            meta_by_name=project_meta_by_name,
-                        )
+                record_id = str(project.get("record_id") or "").strip()
+                result = {"record_id": record_id, "created": False,
+                          "idempotent_replay": True, "warnings": []}
+                saved = operation or self._state_store.begin_repair_management_operation(
+                    operation_id, operation_type="project_create", scope=scope,
+                    summary_record_id=record_id,
+                    payload_hash=self._repair_operation_payload_hash({"event_record_id": event_record_id}),
+                )
+                if saved.get("operation_type") != "project_create":
+                    raise PortalError("转检修操作标识已被其他操作使用，请核对原操作。")
+                if saved.get("record_id") and saved["record_id"] != record_id:
+                    raise PortalError("原转检修操作已有不同的维修单，请核对原记录，未重新创建。")
+                if not self._repair_writer_alive(saved.get("result") or {}, operation_id):
+                    self._state_store.update_repair_management_operation(
+                        operation_id, status="completed", record_id=record_id,
+                        summary_record_id=record_id, result=result, error="",
                     )
-                    existing = selected[0] if selected else semantic_matches[0]
-                    return {
-                        "record_id": str(existing.get("record_id") or "").strip(),
-                        "created": False,
-                        "idempotent_replay": True,
-                        "duplicate_prevented": True,
-                        "warnings": [
-                            "多维表中已存在同一故障、时间和楼栋的维修单，"
-                            "已复用原记录。"
-                        ],
-                    }
+                return result
+            event_record = self._repair_management_event_from_notice_payload(
+                record_id=event_record_id, notice_data=notice_data,
+                remote_fields=remote_fields, scope=scope,
+            )
             response = self.create_repair_management_record(
                 {},
-                operation_id=(
-                    f"event-end-transfer:{REPAIR_MANAGEMENT_TABLE_ID}:"
-                    f"{event_record_id}"
-                ),
+                operation_id=operation_id,
                 source_event_id=event_record_id,
                 source_repair_ids=[],
                 source_month=source_month,
@@ -16055,7 +16016,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         business_identity = self._repair_management_business_identity(
             proposed_record
         )
-        if business_identity:
+        if business_identity and sync_event_transfer_status:
             semantic_matches = [
                 item
                 for item in existing_projects
@@ -16083,13 +16044,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                     == business_identity
                 ]
             if semantic_matches:
-                selected, _duplicate_groups = (
-                    self._canonical_repair_management_projects(
-                        semantic_matches,
-                        meta_by_name=meta_by_name,
-                    )
+                existing = max(
+                    semantic_matches,
+                    key=lambda item: self._repair_management_project_canonical_score(
+                        item, meta_by_name=meta_by_name,
+                    ),
                 )
-                existing = selected[0] if selected else semantic_matches[0]
                 existing_record_id = str(
                     existing.get("record_id") or ""
                 ).strip()
@@ -16142,6 +16102,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "idempotent_replay": True,
                     "duplicate_prevented": True,
                 }
+        prepared.update(repair_ledger.LINK_FIELDS)
         result = self._create_record_fields(
             app_token=REPAIR_SOURCE_APP_TOKEN,
             table_id=REPAIR_MANAGEMENT_TABLE_ID,
@@ -18210,11 +18171,33 @@ class MaintenancePortalService(RepairOperationsMixin):
                 raise
             raise PortalError(warning) from exc
 
+    @classmethod
+    def _event_records_in_month(cls, records, month, date_field=""):
+        if not date_field:
+            return records, 0
+        if date_field not in {"occurrence_time", "end_time"}:
+            raise PortalError("事件月份统计字段无效。")
+        selected, unknown = [], 0
+        for record in records:
+            value = str(record.get(date_field) or "").strip().replace("：", ":")
+            try:
+                stamp = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if stamp.tzinfo:
+                    stamp = stamp.astimezone(dt.timezone(dt.timedelta(hours=8)))
+            except ValueError:
+                stamp = cls._parse_notice_datetime(value)
+            if stamp is None:
+                unknown += int(date_field == "occurrence_time" or bool(value))
+            elif stamp.strftime("%Y-%m") == month:
+                selected.append(record)
+        return selected, unknown
+
     def get_event_monthly_snapshot(
         self,
         *,
         scope: str,
         month: str | None = None,
+        date_field: str = "",
     ) -> dict[str, Any]:
         month = self._normalize_event_month(month)
         snapshot = self._state_store.get_event_month_snapshot(month)
@@ -18223,6 +18206,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             for item in snapshot.get("records", [])
             if isinstance(item, dict) and self._scope_matches_item(scope, item)
         ]
+        records, unknown_time_count = self._event_records_in_month(records, month, date_field)
         stats = self._event_stats_for_records(records)
         config_missing = False
         config_error = ""
@@ -18235,6 +18219,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "scope": self._normalize_scope(scope),
             "month": month,
             "records": records,
+            "date_field": date_field,
+            "unknown_time_count": unknown_time_count,
             "stats": stats,
             "snapshot_exists": bool(snapshot.get("exists")),
             "snapshot_id": snapshot.get("snapshot_id") or "",
@@ -20847,22 +20833,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         linked_event_ids: set[str] = set()
         for project in projects:
-            raw_fields = (
-                project.get("raw_fields")
-                if isinstance(project.get("raw_fields"), dict)
-                else {}
-            )
-            display_fields = (
-                project.get("display_fields")
-                if isinstance(project.get("display_fields"), dict)
-                else {}
-            )
-            linked_event_ids.update(
-                self._repair_management_record_ids(
-                    raw_fields.get("关联事件单")
-                    or display_fields.get("关联事件单")
-                )
-            )
+            linked_event_ids.update(self._repair_management_event_ids_from_record(project))
 
         _event_metas, _event_meta_by_name, events = (
             self._load_repair_management_event_records()
@@ -20870,7 +20841,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         candidates: list[dict[str, Any]] = []
         for event in events:
             event_id = str(event.get("record_id") or "").strip()
-            if not event_id or event_id in linked_event_ids:
+            if not event_id.startswith("rec") or is_local_record_id(event_id) or event_id in linked_event_ids:
                 continue
             raw_fields = (
                 event.get("raw_fields")
@@ -20887,11 +20858,6 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if raw_fields.get("是否转检修") not in (None, "", [], {})
                 else display_fields.get("是否转检修")
             ):
-                continue
-            final_status = self._repair_management_plain_text(
-                display_fields.get("最终状态") or raw_fields.get("最终状态")
-            )
-            if "转检修中" not in final_status:
                 continue
             item = self._repair_management_event_item(event)
             building_codes = list(item.get("building_codes") or [])
@@ -21055,6 +21021,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             for item in snapshot.get("records", [])
             if isinstance(item, dict)
         ]
+        records, unknown_time_count = self._event_records_in_month(records, month, "occurrence_time")
         by_code: dict[str, list[dict[str, Any]]] = {code: [] for code in BUILDING_SCOPE_CODES}
         for item in records:
             codes = item.get("building_codes")
@@ -21085,6 +21052,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         return {
             "scope": "ALL",
             "month": month,
+            "date_field": "occurrence_time",
+            "unknown_time_count": unknown_time_count,
             "stats": self._event_stats_for_records(records),
             "building_stats": building_stats,
             "snapshot_exists": bool(snapshot.get("exists")),
@@ -35559,6 +35528,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         merged_ongoing = self._project_ongoing_items(
             scope, [*canonical_ongoing, *(ongoing_items or [])]
         )
+        include_records = "records" in requested_sections
+        include_record_counts = include_records or "stats" in requested_sections
+        include_ongoing = "ongoing" in requested_sections
+        include_zhihang = "zhihang" in requested_sections or (include_records and requested_work_type == WORK_TYPE_CHANGE)
         try:
             scope_snapshot = self._state_store.get_source_scope_snapshot(scope)
         except Exception as exc:
@@ -35575,14 +35548,14 @@ class MaintenancePortalService(RepairOperationsMixin):
             specialty=specialty,
             scope=scope,
             source_snapshot=scope_snapshot,
-        )
+        ) if include_record_counts else []
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
             month=selected_month,
             scope=scope,
             exclude_record_ids=linked_zhihang_ids,
             source_snapshot=scope_snapshot,
-        )
+        ) if include_zhihang else []
         if building:
             scoped_records = [
                 record
@@ -35607,8 +35580,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             ]
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=merged_ongoing
-        )
-        merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
+        ) if requested_sections & {"stats", "daily", "closed"} else {"stats": {}, "items": []}
+        if requested_sections & {"records", "stats", "daily", "closed"}:
+            merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
         if "closed" in requested_sections or "daily" in requested_sections:
             daily_summary["items"] = self._annotate_undo_items(
                 daily_summary.get("items") or [], scope=scope
@@ -35622,13 +35596,6 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not requested_work_type
             or self._item_work_type(item) == requested_work_type
         ]
-        include_records = "records" in requested_sections
-        include_ongoing = "ongoing" in requested_sections
-        include_zhihang = (
-            "zhihang" in requested_sections
-            or requested_work_type == WORK_TYPE_CHANGE
-            or not requested_work_type
-        )
         def _positive_int(value: Any, default: int = 0) -> int:
             try:
                 return max(0, int(float(value)))
@@ -42181,6 +42148,22 @@ class MaintenancePortalService(RepairOperationsMixin):
         return f"{work_type}:manual-start:{semantic_key}"
 
     @classmethod
+    def _same_failed_manual_start(cls, previous: dict, current: dict) -> bool:
+        if any(str(row.get("action") or "") != "start" or not cls._truthy_flag(row.get("manual")) for row in (previous, current)):
+            return False
+        if previous.get("source_record_id") and current.get("source_record_id") and previous["source_record_id"] != current["source_record_id"]:
+            return False
+        keys = ("work_type", "notice_type", "building", "building_codes", "buildings", "scope", "start_time", "expected_time", "fault_time")
+        identities = []
+        for row in (previous, current):
+            if not any(row.get(key) for key in ("start_time", "fault_time", "expected_time")):
+                return False
+            identity = {key: row[key] for key in keys if key in row}
+            identity["title"] = cls._manual_payload_title_text(row)
+            identities.append(cls._manual_start_target_key(identity))
+        return bool(identities[0] and identities[0] == identities[1])
+
+    @classmethod
     def _manual_notice_type_conflict(
         cls, request_payload: dict[str, Any]
     ) -> dict[str, str] | None:
@@ -42794,6 +42777,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             expanded.pop("source_record_id", None)
         if manual:
             expanded["manual"] = True
+            if manual_id:
+                expanded["manual_id"] = manual_id
             expanded["manual_binding_choice"] = manual_binding_choice
             expanded["manual_binding_required"] = bool(manual_binding_required)
         if action in {"update", "end"} and target_record_id:
@@ -42888,12 +42873,13 @@ class MaintenancePortalService(RepairOperationsMixin):
         ):
             raise PortalError("更新/结束通告缺少主界面条目ID、源记录ID或目标多维record_id。")
         operation_id = str(request_payload.get("operation_id") or "").strip()
-        job = self._base_job(request_payload)
         with self._jobs_lock:
             if operation_id:
                 for existing in self._jobs.values():
                     if str(existing.get("operation_id") or "") != operation_id:
                         continue
+                    if existing.get("superseded_by_job_id"):
+                        raise PortalError("旧任务已被最新提交替代，不可重试；请查看最新提交。")
                     phase = str(existing.get("phase") or "")
                     if phase in {
                         "accepted",
@@ -42931,7 +42917,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                         )
                         self._persist_action_job_locked(existing)
                         return str(existing.get("job_id") or ""), True
-            target_key = str(job.get("target_key") or "")
+            replacements = []
+            target_key = self._action_target_key(request_payload)
+            blocking_job_id = ""
+            blocking_phase = ""
             if target_key:
                 request_target_record_id = canonical_target_record_id(
                     request_payload
@@ -42964,9 +42953,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                         else {}
                     )
                     existing_request = (
-                        existing.get("request")
-                        if isinstance(existing.get("request"), dict)
-                        else {}
+                        existing.get("retry_request") or existing.get("request") or {}
                     )
                     existing_target_record_id = str(
                         existing.get("remote_record_id")
@@ -42990,12 +42977,21 @@ class MaintenancePortalService(RepairOperationsMixin):
                             or request_work_type == existing_work_type
                         )
                     )
+                    same_manual_start = self._same_failed_manual_start(existing_request, request_payload)
+                    if same_manual_start and existing.get("phase") in blocking_phase_order and str(existing.get("target_key") or "") != target_key:
+                        raise PortalError("同一通告仍在上传，请等待原任务完成后再提交修改；本次未新增。")
                     if (
                         str(existing.get("target_key") or "") != target_key
                         and not same_resolved_target
+                        and not (existing.get("phase") == "failed" and same_manual_start)
                     ):
                         continue
                     phase = str(existing.get("phase") or "")
+                    if action == "start" and request_work_type == WORK_TYPE_EVENT and phase == "failed" and existing.get("error_category") == "network_timeout" and not existing.get("remote_written"):
+                        raise PortalError("该通告上次飞书写入结果尚未确认，请核验或重试原任务，不能作为新通告再次新增。")
+                    if phase == "failed" and request_work_type != WORK_TYPE_EVENT and not existing.get("superseded_by_job_id"):
+                        replacements.append(existing)
+                        continue
                     if action == "start" and phase in duplicate_start_phases:
                         return str(existing.get("job_id") or ""), False
                     if phase not in blocking_phase_order:
@@ -43016,11 +43012,31 @@ class MaintenancePortalService(RepairOperationsMixin):
                         blocking_phase = phase
                         blocking_rank = rank
                         blocking_epoch = epoch
-                if blocking_job_id:
-                    job["depends_on_job_id"] = blocking_job_id
-                    job["depends_on_phase"] = blocking_phase
+            if replacements and action == "start" and self._truthy_flag(request_payload.get("manual")):
+                previous = max(replacements, key=lambda item: float(item.get("accepted_at") or 0))
+                original = previous.get("retry_request") or previous.get("request") or {}
+                if original.get("manual_id"):
+                    request_payload["manual_id"] = original["manual_id"]
+            job = self._base_job(request_payload)
+            if blocking_job_id:
+                job["depends_on_job_id"] = blocking_job_id
+                job["depends_on_phase"] = blocking_phase
+            retired = {}
+            if replacements:
+                previous = max(replacements, key=lambda item: float(item.get("accepted_at") or 0))
+                job["supersedes_job_ids"] = [item["job_id"] for item in replacements]
+                previous_target = canonical_target_record_id(previous)
+                if action == "start" and (previous.get("error_category") in {"network_timeout", "network_error", "process_restart", "unknown"} or previous.get("replacement_create_operation_id") or (previous_target and not is_local_record_id(previous_target))):
+                    job["replacement_create_operation_id"] = previous.get("replacement_create_operation_id") or previous.get("remote_operation_id") or f"notice_action:{previous['job_id']}"
+                for item in replacements:
+                    retired[item["job_id"]] = {**copy.deepcopy(item), "superseded_by_job_id": job["job_id"],
+                        "superseded_at": time.time(), "superseded_error": item.get("error", ""),
+                        "error": "旧任务已被最新提交替代，不可重试。", "error_category": "superseded", "error_retryable": False}
+                self._state_store.put_documents(STATE_NS_ACTION_JOB, {**retired, job["job_id"]: job})
+                self._jobs.update(retired)
+            else:
+                self._persist_action_job_locked(job)
             self._jobs[job["job_id"]] = job
-            self._persist_action_job_locked(job)
             self._trim_jobs_locked()
         return job["job_id"], True
 
@@ -43066,6 +43082,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     job = stored
             if not isinstance(job, dict):
                 raise PortalError("任务不存在或已清理。")
+            if job.get("superseded_by_job_id"):
+                raise PortalError("旧任务已被最新提交替代，不可重试；请查看最新提交。")
             if str(job.get("phase") or "") != "failed":
                 raise PortalError("只能重试失败任务。")
             if not bool(job.get("error_retryable")):
@@ -43323,6 +43341,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or ""
             ),
             "prepared": {},
+            "supersedes_job_ids": copy.deepcopy(job.get("supersedes_job_ids") or []),
+            "superseded_by_job_id": str(job.get("superseded_by_job_id") or ""),
+            "replacement_create_operation_id": str(job.get("replacement_create_operation_id") or ""),
+            "remote_operation_id": str(job.get("remote_operation_id") or ""),
+            "remote_written": bool(job.get("remote_written")),
+            "remote_record_id": str(job.get("remote_record_id") or ""),
         }
         self._jobs[job_id] = compacted
         self._persist_action_job_locked(compacted)
@@ -43395,10 +43419,47 @@ class MaintenancePortalService(RepairOperationsMixin):
             ),
             "prepared": {},
         }
-        if retryable:
-            compacted["retry_request"] = copy.deepcopy(job.get("request") or {})
+        for key in ("supersedes_job_ids", "superseded_by_job_id", "superseded_at", "superseded_error", "replacement_create_operation_id", "remote_operation_id", "remote_written", "remote_record_id"):
+            if key in job:
+                compacted[key] = copy.deepcopy(job[key])
+        if retryable or str((job.get("request") or {}).get("work_type") or "") != WORK_TYPE_EVENT:
+            compacted["retry_request"] = copy.deepcopy(job.get("retry_request") or job.get("request") or {})
         self._jobs[job_id] = compacted
         self._persist_action_job_locked(compacted)
+
+    def submitted_notice_draft(self, item: dict, open_id: str) -> dict:
+        """Use the original frozen job fields for its owner's existing notice only."""
+        if not open_id or self._item_work_type(item) == WORK_TYPE_EVENT:
+            return {}
+        target = canonical_target_record_id(item)
+        active = str(item.get("active_item_id") or "")
+        source = canonical_source_record_id(item)
+        kind = self._item_work_type(item)
+        candidates = []
+        with self._jobs_lock:
+            for job in self._jobs.values():
+                request = job.get("request") or job.get("retry_request") or {}
+                if request.get("_auth_open_id") != open_id or request.get("work_type") != kind:
+                    continue
+                prepared = job.get("prepared") or request
+                job_target = canonical_target_record_id(prepared) or canonical_target_record_id(request)
+                if target and job_target and target != job_target:
+                    continue
+                matched = (target and target == job_target) or (active and active in {str(prepared.get("active_item_id") or ""), str(request.get("active_item_id") or ""), str(request.get("manual_id") or "")})
+                if not matched and not target and source:
+                    matched = source == canonical_source_record_id(request)
+                if matched:
+                    candidates.append(job)
+            if not candidates:
+                return {}
+            latest = max(candidates, key=lambda job: float(job.get("accepted_at") or 0))
+            if latest.get("phase") in {"success", "cancelled"}:
+                return {}
+            if latest.get("phase") == "failed" and float(latest.get("accepted_at") or 0) < float(item.get("_local_updated_at") or 0):
+                return {}
+            request = latest.get("request") or latest.get("retry_request") or {}
+            fields = {"title", "building", "building_codes", "specialty", "maintenance_cycle", "execution_party", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "repair_device", "repair_fault", "fault_type", "repair_mode", "discovery", "symptom", "solution", "spare_parts", "device", "cabinet", "quantity", "notice_type"}
+            return {key: copy.deepcopy(request[key]) for key in fields if key in request}
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job_id = str(job_id or "").strip()

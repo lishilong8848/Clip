@@ -81,7 +81,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         async def cabinet_batches(request: Request):
             return {"ok": True, "data": {"total": 2, "items": [{"batch_id": "batch-a", "scope": "A", "status": "pending"}]}}
 
-        @app.post("/api/workbench-actions")
+        @app.post("/api/fixture-submit")
         async def submit_notice(request: Request):
             data = await _read_model_request(request, NoticeInput)
             if request.cookies.get("fixture") != "a" or data.scope != "A":
@@ -130,14 +130,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.writes, [])
 
     async def test_explicit_action_with_missing_fields_returns_form_not_plain_question(self):
-        self.decisions({"action": "answer", "text": "请提供完整原文。"}, {"action": "prepare", "operations": [{"api_id": "POST /api/workbench-actions", "body": {"scope": "A"}}]})
+        self.decisions({"action": "answer", "text": "请提供完整原文。"}, {"action": "prepare", "operations": [{"api_id": "POST /api/fixture-submit", "body": {"scope": "A"}}]})
         result = await self.agent.chat(ACTOR, {**self.payload, "question": "帮我准备一条通告，先不实际发送。"}, self.request)
         self.assertEqual(result["turns"][-1]["plan"]["status"], "needs_input")
         self.assertTrue(result["turns"][-1]["plan"]["fields"])
         self.assertEqual(self.writes, [])
 
     async def test_missing_input_first_confirmation_second_confirmation_and_repeat_click(self):
-        self.decisions({"action": "prepare", "title": "发送A楼通告", "operations": [{"api_id": "POST /api/workbench-actions", "body": {"scope": "A"}}]})
+        self.decisions({"action": "prepare", "title": "发送A楼通告", "operations": [{"api_id": "POST /api/fixture-submit", "body": {"scope": "A"}}]})
         result = await self.agent.chat(ACTOR, self.payload, self.request)
         plan = result["turns"][-1]["plan"]
         self.assertEqual(plan["status"], "needs_input")
@@ -220,11 +220,34 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             _ocr_worker(output.getvalue(), sender)
         sender.send.assert_called_once_with((True, "B17 实际完成09:15"))
 
+    def test_windows_ocr_child_is_bound_and_binding_failure_terminates_only_that_child(self):
+        from openclaw_service.assistant.lighthouse_files import recognize_text
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                child = Mock(pid=12345)
+                child.is_alive.return_value = True
+                receiver, sender = Mock(), Mock()
+                receiver.poll.return_value = True
+                receiver.recv.return_value = (True, 'fixture OCR')
+                context = Mock()
+                context.Pipe.return_value = (receiver, sender)
+                context.Process.return_value = child
+                with patch('openclaw_service.assistant.lighthouse_files.multiprocessing.get_context', return_value=context), \
+                        patch('upload_event_module.services.process_lifetime.register_child_process', return_value=bound) as register:
+                    if bound:
+                        self.assertEqual(recognize_text(b'fixture'), 'fixture OCR')
+                    else:
+                        with self.assertRaises(AssistantError):
+                            recognize_text(b'fixture')
+                register.assert_called_once_with(child.pid)
+                child.terminate.assert_called_once()
+                child.join.assert_called()
+
     async def test_image_stays_on_original_question_when_planning_hints_are_appended(self):
         output = io.BytesIO(); Image.new("RGB", (20, 20), "white").save(output, "PNG")
         with patch("lan_bitable_template_portal.lighthouse_files.recognize_text", return_value="截图字段"):
             file = self.files.upload(ACTOR, "截图.png", output.getvalue())
-        self.decisions({"action": "prepare", "operations": [{"api_id": "POST /api/workbench-actions", "body": {"scope": "A"}}]})
+        self.decisions({"action": "prepare", "operations": [{"api_id": "POST /api/fixture-submit", "body": {"scope": "A"}}]})
         await self.agent.chat(ACTOR, {**self.payload, "question": "帮我准备一条通告", "file_ids": [file["id"]]}, self.request)
         messages = self.model.complete.call_args.args[0]
         multimodal = [m for m in messages if isinstance(m["content"], list)]

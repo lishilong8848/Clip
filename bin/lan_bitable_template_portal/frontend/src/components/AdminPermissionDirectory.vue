@@ -62,7 +62,7 @@
     </div>
 
     <div v-if="error" class="directory-message error">{{ error }}</div>
-    <div v-else-if="loading && !items.length" class="directory-message">正在读取人员表...</div>
+    <div v-else-if="loading && !items.length" class="directory-message"><LoadingIndicator>正在读取人员表...</LoadingIndicator></div>
     <div v-else-if="!filteredItems.length" class="directory-message">没有匹配的人员</div>
 
     <div v-else class="directory-table-wrap">

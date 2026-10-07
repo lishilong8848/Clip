@@ -1,38 +1,40 @@
 <template>
-  <section class="pc-rules">
+  <section ref="rulesElement" class="pc-rules" :class="{ 'draft-only': draftOnly }">
+    <fieldset class="editor-fields" :disabled="disabled">
     <!-- ===== 紧凑工具栏 ===== -->
-    <header class="toolbar">
+    <header v-if="!draftOnly" class="toolbar">
       <span v-if="!isAdmin" class="badge muted">只读</span>
       <span v-else class="badge">管理员</span>
       <span v-if="currentSetMeta" class="muted set-name-inline" :title="currentSetMeta">{{ currentSetMeta }}</span>
       <div class="actions">
-        <button v-if="currentSetId && isAdmin" class="icon-button danger" title="删除当前规则集及其全部条目（不可恢复）" aria-label="删除当前规则集" :disabled="busy || saving" @click="deleteSet"><Trash2 :size="15" /></button>
-        <button v-if="currentSetId" class="command-button" title="查看规则集覆盖设备" :disabled="busy || saving || expanding" @click="previewExpand"><Eye :size="15" />查看覆盖</button>
-        <button v-if="isAdmin && currentSetId" class="primary" :disabled="busy || saving || !dirty" @click="saveSet"><Save :size="15" />保存规则集</button>
+        <button type="button" v-if="currentSetId && isAdmin" class="icon-button danger" title="删除当前规则集及其全部条目（不可恢复）" aria-label="删除当前规则集" :disabled="busy || saving" @click="deleteSet"><Trash2 :size="15" /></button>
+        <button type="button" v-if="currentSetId" class="command-button" title="查看规则集覆盖设备" :disabled="busy || saving || expanding" @click="previewExpand"><Eye :size="15" />查看覆盖</button>
+        <button type="button" v-if="isAdmin && currentSetId" class="primary" :disabled="busy || saving || !dirty" @click="saveSet"><Save :size="15" />保存规则集</button>
+        <button type="button" v-if="currentSetId && !draftOnly" :disabled="busy || saving" @click="reloadSet"><RefreshCw :size="15" />读取最新规则</button>
       </div>
     </header>
 
-    <div v-if="toast.msg" class="toast" :class="toast.type" :role="toast.type === 'error' ? 'alert' : 'status'"><span>{{ toast.msg }}</span><button class="icon-button" aria-label="关闭提示" @click="toast.msg = ''"><X :size="15" /></button></div>
+    <div v-if="toast.msg" class="toast" :class="toast.type" :role="toast.type === 'error' ? 'alert' : 'status'"><span>{{ toast.msg }}</span><button type="button" class="icon-button" aria-label="关闭提示" @click="toast.msg = ''"><X :size="15" /></button></div>
 
     <!-- ===== 工作区（无边框分离列） ===== -->
     <div class="workspace">
       <!-- 左：规则集列表 -->
-      <aside class="set-panel panel">
-        <div class="panel-title"><h3>规则集</h3><button v-if="isAdmin" class="icon-button" title="刷新" aria-label="刷新规则集" :disabled="setsLoading || busy || saving" @click="loadSets"><RefreshCw :size="15" /></button></div>
+      <aside v-if="!draftOnly" class="set-panel panel">
+        <div class="panel-title"><h3>规则集</h3><button type="button" v-if="isAdmin" class="icon-button" title="刷新" aria-label="刷新规则集" :disabled="setsLoading || busy || saving" @click="loadSets"><RefreshCw :size="15" /></button></div>
         <form v-if="isAdmin" class="new-set-form" @submit.prevent="createSet">
           <input v-model="newSetName" placeholder="新规则集名称（如：南区公共部分）" maxlength="60" :disabled="busy || saving || setsLoading" />
-          <button class="primary" title="新建规则集" aria-label="新建规则集" :disabled="busy || saving || setsLoading || !newSetName.trim()"><Plus :size="15" /></button>
+          <button type="submit" class="primary" title="新建规则集" aria-label="新建规则集" :disabled="busy || saving || setsLoading || !newSetName.trim()"><Plus :size="15" /></button>
         </form>
         <p v-if="setsLoading" class="muted empty"><Loader2 :size="16" class="spin" />加载中…</p>
         <p v-else-if="setsError" class="alert error" role="alert"><AlertCircle :size="16" /><span>{{ setsError }}</span></p>
         <p v-else-if="!sets.length" class="muted empty">暂无规则集，{{ isAdmin ? "请在左侧新建。" : "请等待管理员创建。" }}</p>
         <ul v-else class="set-list">
           <li v-for="s in sets" :key="s.id" :class="{ active: currentSetId === s.id }">
-            <button class="set-row" :disabled="busy || saving" @click="selectSet(s.id)">
+            <button type="button" class="set-row" :disabled="busy || saving" @click="selectSet(s.id)">
               <span class="set-name">{{ s.name || "未命名规则集" }}</span>
               <span class="set-meta"><span class="badge">{{ s.item_count ?? 0 }} 项</span><small class="muted">{{ s.remark ? s.remark.slice(0, 18) + (s.remark.length > 18 ? "…" : "") : "无备注" }}</small></span>
             </button>
-            <button v-if="isAdmin" class="icon-button danger" title="删除该规则集及其全部条目（不可恢复）" aria-label="删除该规则集" :disabled="busy || saving" @click.stop="deleteSetById(s.id, s.name || '未命名规则集')"><Trash2 :size="14" /></button>
+            <button type="button" v-if="isAdmin" class="icon-button danger" title="删除该规则集及其全部条目（不可恢复）" aria-label="删除该规则集" :disabled="busy || saving" @click.stop="deleteSetById(s.id, s.name || '未命名规则集')"><Trash2 :size="14" /></button>
           </li>
         </ul>
       </aside>
@@ -42,15 +44,15 @@
         <div class="panel-title">
           <h3>选择屏蔽范围</h3>
           <div class="actions">
-            <button class="primary" :disabled="!isAdmin || busy || saving || !currentSetId" @click="addEntry"><Plus :size="16" />添加屏蔽范围</button>
+            <button type="button" class="primary" :disabled="!isAdmin || busy || saving || !hasCurrentSet" @click="addEntry"><Plus :size="16" />添加屏蔽范围</button>
           </div>
         </div>
 
-        <template v-if="currentSetId">
+        <template v-if="hasCurrentSet">
           <!-- 当前规则集 名称 / 备注 -->
           <div class="set-fields">
             <label>规则集名称
-              <input v-model="name" :disabled="!isAdmin || busy || saving" maxlength="60" placeholder="规则集名称" />
+              <input v-model="name" :disabled="!isAdmin || busy || saving" maxlength="60" placeholder="规则集名称" :required="draftOnly" />
             </label>
             <label>备注
               <textarea v-model="remark" :disabled="!isAdmin || busy || saving" rows="2" maxlength="300" placeholder="备注（可选）"></textarea>
@@ -76,9 +78,9 @@
               </ul>
               <p v-if="objHasMore" class="hint">结果较多，当前仅已加载候选中的部分，请缩小搜索范围</p>
               <div v-if="objPagesCount > 1" class="pagination">
-                <button class="icon-button" :disabled="objPage <= 1 || saving" @click="objPage--"><ChevronLeft :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="objPage <= 1 || saving" @click="objPage--"><ChevronLeft :size="15" /></button>
                 <span>{{ objPage }} / {{ objPagesCount }}</span>
-                <button class="icon-button" :disabled="objPage >= objPagesCount || saving" @click="objPage++"><ChevronRight :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="objPage >= objPagesCount || saving" @click="objPage++"><ChevronRight :size="15" /></button>
               </div>
             </div>
 
@@ -89,13 +91,13 @@
                 <span class="muted count" title="已勾选 / 当前筛选候选（已加载）">{{ roomSelCount }} / {{ roomFiltered.length }}<span v-if="roomHasMore">+</span></span>
               </div>
               <div class="breadcrumb">
-                <button :disabled="saving" @click="crumbTo('root')" :title="drill.zone || drill.building || drill.floor ? '返回区列表' : '当前在区列表'">区</button>
+                <button type="button" :disabled="saving" @click="crumbTo('root')" :title="drill.zone || drill.building || drill.floor ? '返回区列表' : '当前在区列表'">区</button>
                 <template v-if="drill.zone">
                   <span class="sep">›</span>
-                  <button :disabled="saving" @click="crumbTo('zone')" title="返回该区下的楼栋列表" :class="{ 'crumb-cur': !drill.building }">{{ drill.zone }}</button>
+                  <button type="button" :disabled="saving" @click="crumbTo('zone')" title="返回该区下的楼栋列表" :class="{ 'crumb-cur': !drill.building }">{{ drill.zone }}</button>
                   <template v-if="drill.building">
                     <span class="sep">›</span>
-                    <button :disabled="saving" @click="crumbTo('building')" title="返回该楼下的楼层列表" :class="{ 'crumb-cur': !drill.floor }">{{ drill.building }}</button>
+                    <button type="button" :disabled="saving" @click="crumbTo('building')" title="返回该楼下的楼层列表" :class="{ 'crumb-cur': !drill.floor }">{{ drill.building }}</button>
                     <template v-if="drill.floor">
                       <span class="sep">›</span><span class="crumb-cur">{{ drill.floor }}</span>
                     </template>
@@ -109,14 +111,14 @@
               <ul v-else class="cand-list">
                 <li v-for="r in roomPageItems" :key="roomNodeKey(r)">
                   <label class="cand"><input type="checkbox" :checked="r._checked" :disabled="!isAdmin || saving" @change="onRoomCheck(r, $event)" /><span class="cand-name" :title="r.name">{{ r.name }}</span><span class="cand-count">{{ r.devices }}</span></label>
-                  <button v-if="r.level !== 'room'" class="icon-button drill" title="下钻" aria-label="下钻" :disabled="!isAdmin || busy || saving" @click="drillDown(r)"><ChevronRight :size="15" /></button>
+                  <button type="button" v-if="r.level !== 'room'" class="icon-button drill" title="下钻" aria-label="下钻" :disabled="!isAdmin || busy || saving" @click="drillDown(r)"><ChevronRight :size="15" /></button>
                 </li>
               </ul>
               <p v-if="roomHasMore" class="hint">结果较多，当前仅已加载候选中的部分，请缩小搜索范围</p>
               <div v-if="roomPagesCount > 1" class="pagination">
-                <button class="icon-button" :disabled="roomPage <= 1 || saving" @click="roomPage--"><ChevronLeft :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="roomPage <= 1 || saving" @click="roomPage--"><ChevronLeft :size="15" /></button>
                 <span>{{ roomPage }} / {{ roomPagesCount }}</span>
-                <button class="icon-button" :disabled="roomPage >= roomPagesCount || saving" @click="roomPage++"><ChevronRight :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="roomPage >= roomPagesCount || saving" @click="roomPage++"><ChevronRight :size="15" /></button>
               </div>
             </div>
 
@@ -133,14 +135,14 @@
               <p v-else-if="!devFiltered.length" class="muted empty">暂无匹配设备</p>
               <ul v-else class="cand-list">
                 <li v-for="d in devPageItems" :key="d.inst_name + ':' + (d.ins_id || '')">
-                  <label class="cand"><input type="checkbox" :checked="d._checked" :disabled="!isAdmin || saving" @change="onDevCheck(d, $event)" /><span class="cand-name" :title="d.inst_name">{{ d.inst_name }}</span><button class="link-button" title="查看详情" @click.prevent="openDevDetail(d)">详情</button></label>
+                  <label class="cand"><input type="checkbox" :checked="d._checked" :disabled="!isAdmin || saving" @change="onDevCheck(d, $event)" /><span class="cand-name" :title="d.inst_name">{{ d.inst_name }}</span><button type="button" class="link-button" title="查看详情" @click.prevent="openDevDetail(d)">详情</button></label>
                 </li>
               </ul>
               <p v-if="devHasMore" class="hint">结果较多，当前仅已加载候选中的部分，请缩小搜索范围</p>
               <div v-if="devPagesCount > 1" class="pagination">
-                <button class="icon-button" :disabled="devPage <= 1 || saving" @click="devPage--"><ChevronLeft :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="devPage <= 1 || saving" @click="devPage--"><ChevronLeft :size="15" /></button>
                 <span>{{ devPage }} / {{ devPagesCount }}</span>
-                <button class="icon-button" :disabled="devPage >= devPagesCount || saving" @click="devPage++"><ChevronRight :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="devPage >= devPagesCount || saving" @click="devPage++"><ChevronRight :size="15" /></button>
               </div>
             </div>
 
@@ -157,14 +159,14 @@
               <p v-else-if="!ptFiltered.length" class="muted empty">暂无匹配规则</p>
               <ul v-else class="cand-list">
                 <li v-for="p in ptPageItems" :key="p.alarm_config_id || p.alarm_name">
-                  <label class="cand"><input type="checkbox" :checked="p._checked" :disabled="!isAdmin || saving" @change="onPtCheck(p, $event)" /><span class="cand-name" :title="p.alarm_name">{{ p.alarm_name }}</span><span class="cand-count" v-if="p.classify_model">{{ p.classify_model }}</span><button class="link-button" title="查看详情" @click.prevent="openPtDetail(p)">详情</button></label>
+                  <label class="cand"><input type="checkbox" :checked="p._checked" :disabled="!isAdmin || saving" @change="onPtCheck(p, $event)" /><span class="cand-name" :title="p.alarm_name">{{ p.alarm_name }}</span><span class="cand-count" v-if="p.classify_model">{{ p.classify_model }}</span><button type="button" class="link-button" title="查看详情" @click.prevent="openPtDetail(p)">详情</button></label>
                 </li>
               </ul>
               <p v-if="ptHasMore" class="hint">结果较多，当前仅已加载候选中的部分，请缩小搜索范围</p>
               <div v-if="ptPagesCount > 1" class="pagination">
-                <button class="icon-button" :disabled="ptPage <= 1 || saving" @click="ptPage--"><ChevronLeft :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="ptPage <= 1 || saving" @click="ptPage--"><ChevronLeft :size="15" /></button>
                 <span>{{ ptPage }} / {{ ptPagesCount }}</span>
-                <button class="icon-button" :disabled="ptPage >= ptPagesCount || saving" @click="ptPage++"><ChevronRight :size="15" /></button>
+                <button type="button" class="icon-button" :disabled="ptPage >= ptPagesCount || saving" @click="ptPage++"><ChevronRight :size="15" /></button>
               </div>
             </div>
           </div>
@@ -174,31 +176,33 @@
 
       <!-- 右：草稿组 -->
       <aside class="draft-panel panel">
-        <div class="panel-title"><h3>屏蔽条目（{{ drafts.length }}）</h3><div class="actions"><button v-if="isAdmin" class="danger-text command-button text-btn" :disabled="busy || saving || !drafts.length" @click="clearAll"><Trash2 :size="15" />清空</button><button v-if="isAdmin" :disabled="busy || saving || mergeSel.length < 2" @click="mergeSelected"><Merge :size="15" />合并({{ mergeSel.length }})</button></div></div>
+        <div class="panel-title"><h3>屏蔽条目（{{ drafts.length }}）</h3><div class="actions"><button type="button" v-if="isAdmin" class="danger-text command-button text-btn" :disabled="busy || saving || !drafts.length" @click="clearAll"><Trash2 :size="15" />清空</button><button type="button" v-if="isAdmin" :disabled="busy || saving || mergeSel.length < 2" @click="mergeSelected"><Merge :size="15" />合并({{ mergeSel.length }})</button></div></div>
         <p class="muted hint">「公共」条目须全部被包含；此外至少需匹配一个「普通」条目。没有普通条目时，只需满足全部公共条目。</p>
         <p v-if="!drafts.length" class="muted empty">暂无屏蔽条目。</p>
         <ul v-else class="draft-list">
           <li v-for="(d, i) in drafts" :key="i" :class="{ selected: mergeSel.includes(i), common: d.rule_type === 'common' }">
             <div class="draft-head">
-              <button v-if="isAdmin && d.rule_type === 'normal'" class="icon-button merge-check" :class="{ on: mergeSel.includes(i) }" title="选择参与合并" aria-label="选择参与合并" :disabled="busy || saving" @click="toggleMergeSel(i)"><Square :size="14" /></button>
+              <button type="button" v-if="isAdmin && d.rule_type === 'normal'" class="icon-button merge-check" :class="{ on: mergeSel.includes(i) }" title="选择参与合并" aria-label="选择参与合并" :disabled="busy || saving" @click="toggleMergeSel(i)"><Square :size="14" /></button>
               <span class="draft-idx">#{{ i + 1 }}</span>
-              <input v-if="isAdmin" v-model="d.label" class="draft-label" :disabled="busy || saving" />
+              <input v-if="isAdmin" v-model="d.label" class="draft-label" :disabled="busy || saving" :aria-label="'第' + (i + 1) + '组名称'" />
               <span v-else class="draft-label">{{ d.label }}</span>
-              <button :class="['badge', d.rule_type === 'common' ? 'common-badge' : '']" :title="d.rule_type === 'common' ? '公共条目：须全部包含；且（如有）至少匹配一个普通条目' : '普通条目：至少匹配一个（若有公共条目，须先全部匹配）'" :disabled="!isAdmin || busy || saving" @click="toggleCommon(i)">{{ d.rule_type === 'common' ? '公共' : '普通' }}</button>
-              <button class="icon-button" title="查看条目" aria-label="查看条目" :disabled="busy || saving" @click="openGroupDetail(i)"><Eye :size="15" /></button>
-              <button v-if="isAdmin" class="icon-button danger" title="删除条目" aria-label="删除条目" :disabled="busy || saving" @click="removeGroup(i)"><Trash2 :size="15" /></button>
+              <button type="button" :class="['badge', d.rule_type === 'common' ? 'common-badge' : '']" :title="d.rule_type === 'common' ? '公共条目：须全部包含；且（如有）至少匹配一个普通条目' : '普通条目：至少匹配一个（若有公共条目，须先全部匹配）'" :disabled="!isAdmin || busy || saving" @click="toggleCommon(i)">{{ d.rule_type === 'common' ? '公共' : '普通' }}</button>
+              <button type="button" class="icon-button" title="查看条目" aria-label="查看条目" :disabled="busy || saving" @click="openGroupDetail(i)"><Eye :size="15" /></button>
+              <button type="button" v-if="isAdmin" class="icon-button danger" title="删除条目" aria-label="删除条目" :disabled="busy || saving" @click="removeGroup(i)"><Trash2 :size="15" /></button>
             </div>
             <p class="draft-summary">{{ d.items.length }} 项</p>
           </li>
         </ul>
       </aside>
     </div>
+    </fieldset>
 
     <!-- ===== 预览 / 详情 弹窗 ===== -->
     <Teleport to="body">
-      <div v-if="preview.open" class="pc-modal-overlay" @click.self="closePreview">
+      <UiTransition name="ui-overlay" appear>
+      <div v-if="preview.open" class="pc-modal-overlay" :style="draftOnly ? { ...previewTheme, zIndex: 10010 } : undefined" @click.self="closePreview">
         <section ref="modalElement" class="pc-modal" role="dialog" aria-modal="true" tabindex="-1">
-          <header><h2>{{ preview.title }}</h2><button class="icon-button" aria-label="关闭" title="关闭" @click="closePreview"><X :size="18" /></button></header>
+          <header><h2>{{ preview.title }}</h2><button type="button" class="icon-button" aria-label="关闭" title="关闭" @click="closePreview"><X :size="18" /></button></header>
           <div class="pc-modal-scroll">
             <p v-if="previewKindNote" class="muted hint">{{ previewKindNote }}</p>
             <table v-if="preview.kind === 'table' && previewRows.length" class="table-wrap">
@@ -214,20 +218,22 @@
             <template v-if="preview.kind === 'table' && (preview.total ?? 0) > 0">
               <span class="muted">每页 {{ PREVIEW_PAGE }} 条 · 共 {{ preview.total }} 条</span>
               <div class="actions">
-                <button class="icon-button" :disabled="previewPage <= 1" @click="previewPage--"><ChevronLeft :size="17" /></button>
+                <button type="button" class="icon-button" :disabled="previewPage <= 1" @click="previewPage--"><ChevronLeft :size="17" /></button>
                 <span>{{ previewPage }} / {{ previewPages }}</span>
-                <button class="icon-button" :disabled="previewPage >= previewPages" @click="previewPage++"><ChevronRight :size="17" /></button>
+                <button type="button" class="icon-button" :disabled="previewPage >= previewPages" @click="previewPage++"><ChevronRight :size="17" /></button>
               </div>
             </template>
             <span v-else></span>
-            <button class="primary" @click="closePreview">关闭</button>
+            <button type="button" class="primary" @click="closePreview">关闭</button>
           </footer>
         </section>
       </div>
+      </UiTransition>
     </Teleport>
 
     <ConfirmDialog
       :open="confirm.open"
+      :style="draftOnly ? { zIndex: 10020 } : undefined"
       :title="confirm.title"
       :message="confirm.message"
       :tone="confirm.tone"
@@ -250,14 +256,19 @@ import {
 import { requestJson, type Dict } from "../api/client";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { acquireModal } from "../modalState";
+import { inheritedControlTheme } from "../controlTheme";
 import {
   itemKey, itemDesc, entryLabel, scopeTypeLabel, entryKeyInfo,
   allDraftItems, submittedKey, draftsSubmitKey, roomToSelParam, roomNodeKey, restoreDrafts,
   type Draft, type RoomNode, type Drill,
 } from "../planConvergenceRules";
 
-const props = defineProps<{ isAdmin: boolean }>();
+const props = defineProps<{ isAdmin: boolean; modelValue?: Dict; disabled?: boolean }>();
+const emit = defineEmits<{ (e: "update:modelValue", value: Dict): void }>();
 const isAdmin = computed(() => props.isAdmin);
+const draftOnly = computed(() => props.modelValue !== undefined);
+const rulesElement = ref<HTMLElement | null>(null);
+const previewTheme = ref<Record<string, string>>({});
 
 /* 供父级路由守卫/离开保护查询未保存状态。 */
 defineExpose({ hasUnsavedChanges: () => dirty.value });
@@ -307,12 +318,15 @@ async function getJson(path: string): Promise<Dict> {
   return requestJson(path, { cache: "no-store" });
 }
 async function postJson(path: string, body: Dict): Promise<Dict> {
+  if (draftOnly.value) throw new Error("会话草稿只能通过助手确认后保存");
   return requestJson(path, { method: "POST", body: JSON.stringify(body) });
 }
 async function putJson(path: string, body: Dict): Promise<Dict> {
+  if (draftOnly.value) throw new Error("会话草稿只能通过助手确认后保存");
   return requestJson(path, { method: "PUT", body: JSON.stringify(body) });
 }
 async function deleteJson(path: string): Promise<Dict> {
+  if (draftOnly.value) throw new Error("会话草稿只能通过助手确认后保存");
   return requestJson(path, { method: "DELETE" });
 }
 async function fetchCatalog(params: Dict): Promise<{ items: Dict[]; has_more: boolean; limit: number }> {
@@ -331,6 +345,8 @@ const sets = ref<Array<{ id: number; name: string; remark: string; item_count?: 
 const setsLoading = ref(false);
 const setsError = ref("");
 const currentSetId = ref<number | null>(null);
+const loadedVersion = ref('');
+const hasCurrentSet = computed(() => draftOnly.value || Boolean(currentSetId.value));
 const currentSetMeta = computed(() => {
   const s = sets.value.find((x) => x.id === currentSetId.value);
   return s ? `当前：${s.name || "未命名"}` : "";
@@ -352,6 +368,19 @@ const dirty = computed(() => {
     || remark.value !== loadedRemark.value
     || draftsSubmitKey(drafts.value) !== loadedItemsKey.value;
 });
+let applyingDraft = false;
+watch(() => props.modelValue, value => {
+  if (!value) return;
+  if (String(value.name || "") === name.value && String(value.remark || "") === remark.value && submittedKey(value.items || []) === draftsSubmitKey(drafts.value)) return;
+  applyingDraft = true;
+  name.value = String(value.name || ""); remark.value = String(value.remark || "");
+  drafts.value = restoreDrafts(value.items || []);
+  mergeSel.value = [];
+  applyingDraft = false;
+}, { immediate: true });
+watch([name, remark, () => draftsSubmitKey(drafts.value)], () => {
+  if (draftOnly.value && !applyingDraft && !props.disabled) emit("update:modelValue", { ...props.modelValue, name: name.value, remark: remark.value, items: allDraftItems(drafts.value) });
+}, { flush: "sync" });
 
 async function loadSets(): Promise<void> {
   if (disposed) return;
@@ -371,6 +400,7 @@ async function loadSetDetail(id: number): Promise<void> {
     const data = await getJson(`/api/plan-convergence/rulesets/${id}`);
     if (disposed) return;
     drafts.value = restoreDrafts((data.items || []) as Dict[]);
+    loadedVersion.value = String(data.version || '');
     mergeSel.value = [];
     name.value = String(data.name || ""); remark.value = String(data.remark || "");
     loadedName.value = name.value; loadedRemark.value = remark.value;
@@ -393,6 +423,12 @@ async function selectSet(id: number): Promise<void> {
   }
   await loadSetDetail(id);
   await loadSets();
+}
+
+async function reloadSet(): Promise<void> {
+  if (!currentSetId.value || busy.value || saving.value) return;
+  if (dirty.value && !await askConfirm({ tone: 'warning', title: '读取最新规则', message: '当前未保存修改将被替换，请先核对或备份需要保留的内容。是否继续？' })) return;
+  if (!disposed && currentSetId.value) await loadSetDetail(currentSetId.value);
 }
 
 async function createSet(): Promise<void> {
@@ -443,10 +479,11 @@ async function saveSet(): Promise<void> {
 
   saving.value = true;
   try {
-    await putJson(`/api/plan-convergence/rulesets/${currentSetId.value}`, {
-      name: payloadName, remark: payloadRemark, items: payloadItems,
+    const saved = await putJson(`/api/plan-convergence/rulesets/${currentSetId.value}`, {
+      name: payloadName, remark: payloadRemark, items: payloadItems, expected_version: loadedVersion.value,
     });
     if (disposed) return;
+    loadedVersion.value = String(saved.version || '');
     loadedName.value = payloadName; loadedRemark.value = payloadRemark;
     loadedItemsKey.value = submittedKey(payloadItems);
     successMsg(payloadItems.length ? "已保存规则集" : "已保存空规则集");
@@ -529,9 +566,6 @@ watch(ptKw, () => { ptPage.value = 1; scheduleRemoteSearch("pt"); });
 function selObjs(): string[] { return objs.value.filter((o) => o._checked).map((o) => o.obj_name); }
 function selRooms(): RoomNode[] { return rooms.value.filter((r) => r._checked); }
 function selDevInsts(): string[] { return devs.value.filter((d) => d._checked).map((d) => d.inst_name); }
-function selDevObjs(): Array<{ inst_name: string; obj_name: string }> {
-  return devs.value.filter((d) => d._checked).map((d) => ({ inst_name: d.inst_name, obj_name: d.obj_name || "" }));
-}
 function selPts(): PtNode[] { return pts.value.filter((p) => p._checked); }
 const hasObjCtx = computed(() => allObj.value || selObjs().length > 0);
 const hasRoomCtx = computed(() => allRoom.value || selRooms().length > 0);
@@ -550,7 +584,7 @@ function pickerSig(): string {
 }
 
 /* 设备/规则 去重与保留选中合并 */
-function devKey(d: DevNode): string { return d.inst_name || d.ins_id || ""; }
+function devKey(d: DevNode): string { return d.ins_id || [d.inst_name, d.obj_name, d.position].join('|'); }
 function ptKey(p: PtNode): string { return p.alarm_config_id || p.alarm_name || ""; }
 function mergeDevSel(fresh: DevNode[]): void {
   const selByKey = new Map(devSel.value.map((d) => [devKey(d), d]));
@@ -854,16 +888,14 @@ function toggleColAll(which: "obj" | "room" | "dev" | "pt"): void {
 /* ========== 添加屏蔽范围（与 legacy addEntry 语义一致） ========== */
 async function addEntry(): Promise<void> {
   if (saving.value || busy.value) return;
-  if (!currentSetId.value) { errorMsg("请先选择或新建一个规则集"); return; }
+  if (!hasCurrentSet.value) { errorMsg("请先选择或新建一个规则集"); return; }
   if (!isAdmin.value) { errorMsg("仅管理员可修改规则"); return; }
   if (allDev.value) { errorMsg("“全部设备”无法表示为屏蔽条目，请勾选具体设备"); return; }
   if (allPt.value) { errorMsg("“全部规则”无法表示为屏蔽条目，请勾选具体规则"); return; }
   const objs = selObjs();
   const rooms = selRooms();
   const insts = selDevInsts();
-  const devObjs = selDevObjs();
-  const devObjMap: Dict = {};
-  devObjs.forEach((d) => { devObjMap[d.inst_name] = d.obj_name; });
+  const selectedDevices = devs.value.filter(d => d._checked);
   const pts = selPts();
 
   if (!objs.length && !rooms.length && !insts.length && !pts.length) { errorMsg("请先勾选内容"); return; }
@@ -872,8 +904,8 @@ async function addEntry(): Promise<void> {
     let items: Dict[] = [];
     if (insts.length) {
       /* 具体设备 × 规则：逐台生成，规则不挂错设备。 */
-      insts.forEach((n) => pts.forEach((p) => items.push({
-        scope_type: "point", inst_name: n, obj_name: devObjMap[n] || "",
+      selectedDevices.forEach((device) => pts.forEach((p) => items.push({
+        scope_type: "point", inst_name: device.inst_name, ins_id: device.ins_id, obj_name: device.obj_name || "",
         point_name: p.alarm_name || p.alarm_config_id || "", rule_name: p.alarm_name || "",
         alarm_config_id: p.alarm_config_id || "",
       })));
@@ -931,7 +963,7 @@ async function addEntry(): Promise<void> {
   }
 
   if (insts.length) {
-    const items = insts.map((n) => ({ scope_type: "device", inst_name: n, obj_name: devObjMap[n] || "" }));
+    const items = selectedDevices.map((device) => ({ scope_type: "device", inst_name: device.inst_name, ins_id: device.ins_id, obj_name: device.obj_name || "" }));
     pushEntry(items);
     return;
   }
@@ -964,6 +996,7 @@ async function pushEntry(items: Dict[]): Promise<void> {
   const existing = new Set(allDraftItems(drafts.value).map(itemKey));
   const fresh = items.filter((it) => !existing.has(itemKey(it)));
   if (!fresh.length) { errorMsg("该范围已存在，请调整勾选"); return; }
+  if (draftOnly.value && allDraftItems(drafts.value).length + fresh.length > 500) { errorMsg("单个规则集最多支持500项，请缩小选择范围"); return; }
   const label = entryLabel(fresh);
   drafts.value.push({ label, rule_type: "normal", items: fresh });
   await resetPicker();
@@ -1013,14 +1046,14 @@ async function clearAll(): Promise<void> {
   if (!isAdmin.value || saving.value || busy.value) return;
   const ok = await askConfirm({
     tone: "danger", title: "清除全部内容",
-    message: "将清除当前规则集的所有屏蔽条目与当前勾选（需点击保存后生效）。是否继续？",
+    message: draftOnly.value ? "将清空会话草稿中的条目，确认助手操作清单后才会保存。是否继续？" : "将清除当前规则集的所有屏蔽条目与当前勾选（需点击保存后生效）。是否继续？",
     confirmLabel: "清除",
   });
   if (!ok) return;
   if (saving.value || disposed) return;
   drafts.value = []; mergeSel.value = [];
   await resetPicker();
-  successMsg("已清空，点击「保存规则集」后生效");
+  successMsg(draftOnly.value ? "草稿已清空，确认助手操作后生效" : "已清空，点击「保存规则集」后生效");
 }
 
 /* ========== 预览 / 详情 弹窗 ========== */
@@ -1050,6 +1083,7 @@ const modalElement = ref<HTMLElement | null>(null);
 
 function openPreview(state: Omit<PreviewState, "open">): void {
   if (preview.open) return;
+  previewTheme.value = inheritedControlTheme(rulesElement.value);
   previewPage.value = 1;
   Object.assign(preview, { ...state, open: true });
   returnFocus = document.activeElement as HTMLElement;
@@ -1065,7 +1099,7 @@ function closePreview(): void {
   returnFocus?.focus();
 }
 function modalKeydown(event: KeyboardEvent): void {
-  if (!modalOwner?.isTop() || !modalElement.value) return;
+  if (!modalOwner?.isTop(event, modalElement.value) || !modalElement.value) return;
   if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); closePreview(); }
   if (event.key === "Tab") {
     const nodes = Array.from(modalElement.value.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')).filter((n) => n.getClientRects().length);
@@ -1138,7 +1172,7 @@ async function previewExpand(): Promise<void> {
 
 /* ========== 生命周期 ========== */
 onMounted(async () => {
-  await loadSets();
+  if (!draftOnly.value) await loadSets();
   await loadTypes();
   await loadRoomLevel([]);
 });
@@ -1161,6 +1195,7 @@ onBeforeUnmount(() => {
   gap: 12px;
   font-size: 14px;
 }
+.editor-fields { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 /* 紧凑工具栏（不再重复页面大标题） */
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .badge {
@@ -1301,7 +1336,7 @@ button.primary:disabled { opacity: .5; cursor: default; }
   display: flex; align-items: center; justify-content: center; z-index: 1200; padding: 16px;
 }
 .pc-modal {
-  background: var(--cf-surface-1, #fff); border-radius: 12px; width: min(760px, 100%);
+  background: var(--cf-surface-1, #fff); color: var(--lh-charcoal, inherit); border-radius: 12px; width: min(760px, 100%);
   max-height: 82vh; display: flex; flex-direction: column; overflow: hidden;
   box-shadow: 0 18px 50px rgba(0,0,0,.22); outline: none;
 }
@@ -1326,6 +1361,20 @@ button.primary:disabled { opacity: .5; cursor: default; }
 .kv-list { display: grid; grid-template-columns: 120px 1fr; gap: 6px 10px; margin: 6px 0 2px; font-size: 12.8px; }
 .kv-list dt { color: var(--cf-text-2, #68737f); }
 .kv-list dd { margin: 0; word-break: break-word; }
+.draft-only { --cf-surface-1: var(--lh-surface); --cf-surface-2: var(--lh-surface-subtle); --cf-border: var(--lh-input-border); --cf-text-2: var(--lh-muted); --cf-accent: var(--lh-accent); }
+.draft-only .workspace { grid-template-columns: minmax(0, 1fr); }
+.draft-only .picker-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.draft-only .toast { position: static; box-shadow: none; max-width: 100%; }
+.draft-only .cand-list { max-height: 190px; }
+.draft-only .draft-list { max-height: 320px; }
+.draft-only input, .draft-only textarea { color: inherit; }
+.draft-only button.primary, .draft-only .merge-check.on { color: #162519; }
+.draft-only .draft-list li.selected { background: var(--lh-accent-soft); }
+.draft-only .badge.common-badge { background: var(--lh-warn-soft); color: var(--lh-warn); border-color: var(--lh-warn); }
+.draft-only .toast.success { background: var(--lh-accent-soft); color: var(--lh-accent-strong); border-color: var(--lh-accent); }
+.draft-only .toast.error, .draft-only .alert.error { background: var(--lh-danger-soft); color: var(--lh-danger); border-color: var(--lh-danger); }
+.draft-only .icon-button.danger, .draft-only .danger-text { color: var(--lh-danger); }
+.pc-modal-overlay .primary { color: var(--lh-surface, #fff); }
 
 @media (max-width: 1280px) {
   .workspace { grid-template-columns: 240px minmax(0, 1fr); }
@@ -1339,5 +1388,6 @@ button.primary:disabled { opacity: .5; cursor: default; }
 }
 @media (max-width: 640px) {
   .picker-grid { grid-template-columns: minmax(0, 1fr); }
+  .draft-only .picker-grid { grid-template-columns: minmax(0, 1fr); }
 }
 </style>

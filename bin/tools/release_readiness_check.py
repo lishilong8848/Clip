@@ -255,24 +255,13 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     missing = [name for name in sorted(referenced_assets) if not (dist_assets / name).is_file()]
     if missing:
         return False, "Vue dist 缺少入口引用资源: " + ", ".join(missing[:10]), False
-    reachable_assets = set(referenced_assets)
-    pending_assets = list(sorted(referenced_assets))
-    asset_ref_pattern = re.compile(r"(?:^|[\"'`(,])/?assets/([^\"'`),\s]+)")
-    while pending_assets:
-        name = pending_assets.pop()
-        path = dist_assets / name
-        if not path.is_file() or path.suffix.lower() not in {".js", ".css"}:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        for match in asset_ref_pattern.findall(text):
-            asset_name = match.strip()
-            if not asset_name or asset_name in reachable_assets:
-                continue
-            reachable_assets.add(asset_name)
-            pending_assets.append(asset_name)
+    # Use the same graph as packaging, including relative lazy imports.
+    from frontend_assets import FRONTEND_DIST, referenced_assets as collect_assets
+    try:
+        reachable_assets = {path.relative_to(FRONTEND_DIST / "assets").as_posix()
+                            for path in collect_assets(PROJECT_ROOT, strict=False) if path.is_relative_to(FRONTEND_DIST / "assets")}
+    except (OSError, ValueError) as exc:
+        return False, f"Vue dist 资源引用无效: {exc}", False
     missing_reachable = [
         name for name in sorted(reachable_assets)
         if not (dist_assets / name).is_file()

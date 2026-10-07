@@ -4,6 +4,7 @@ const MOP_BOOTSTRAP_CACHE_TTL_MS = 10_000;
 const mopBootstrapCache = new Map<string, { expiresAt: number; data: Dict }>();
 const mopBootstrapInflight = new Map<string, Promise<Dict>>();
 const mopBootstrapGeneration = new Map<string, number>();
+window.addEventListener('clipflow-read-cache-reset', () => invalidateEngineerMopBootstrap());
 
 function clonePayload(payload: Dict): Dict {
   if (typeof structuredClone === "function") {

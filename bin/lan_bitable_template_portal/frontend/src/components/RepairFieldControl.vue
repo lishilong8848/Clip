@@ -20,6 +20,7 @@
       :error="error"
       :disabled="disabled"
       :allow-custom="allowCustomSelect"
+      :menu-z-index="menuZIndex"
       @update:model-value="updateValue"
     />
     <div
@@ -195,6 +196,7 @@ const props = withDefaults(defineProps<{
   percentage?: boolean;
   selectOptions?: string[] | null;
   allowCustomSelect?: boolean;
+  menuZIndex?: number;
   compact?: boolean;
 }>(), {
   modelValue: "",
@@ -532,8 +534,8 @@ textarea {
     to right,
     var(--repair-progress-color) 0,
     var(--repair-progress-color) var(--repair-progress),
-    #dce6f2 var(--repair-progress),
-    #dce6f2 100%
+    var(--repair-progress-track, #dce6f2) var(--repair-progress),
+    var(--repair-progress-track, #dce6f2) 100%
   );
   background-size: 100% 5px;
   background-position: center;
@@ -553,7 +555,7 @@ textarea {
   height: 16px;
   appearance: none;
   -webkit-appearance: none;
-  border: 3px solid #fff;
+  border: 3px solid var(--lh-surface-subtle, #fff);
   border-radius: 50%;
   background: var(--repair-progress-color);
   box-shadow: 0 1px 5px rgba(23, 70, 126, 0.28);
@@ -562,7 +564,7 @@ textarea {
 .percentage-range::-moz-range-thumb {
   width: 11px;
   height: 11px;
-  border: 3px solid #fff;
+  border: 3px solid var(--lh-surface-subtle, #fff);
   border-radius: 50%;
   background: var(--repair-progress-color);
   box-shadow: 0 1px 5px rgba(23, 70, 126, 0.28);

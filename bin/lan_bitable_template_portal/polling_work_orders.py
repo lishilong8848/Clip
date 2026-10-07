@@ -1566,6 +1566,13 @@ class PollingWorkOrderService:
             group_id = str(document.get("key") or "")
             if not group_id:
                 continue
+            snapshot = document.get('payload') or {}
+            reminders = [step.get('delay_reminder') for step in snapshot.get('steps') or [] if isinstance(step, dict)]
+            if snapshot.get('state') in {'cancelled', 'stopped'} or not any(
+                isinstance(reminder, dict) and reminder.get('state') == 'pending'
+                and 0 < float(reminder.get('due_at_ts') or 0) <= now for reminder in reminders
+            ):
+                continue
             with self._lock:
                 try:
                     group = self.get_group(group_id)

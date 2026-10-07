@@ -1,15 +1,17 @@
 <template>
   <section class="submission-status" role="status" aria-live="polite">
     <div class="submission-main">
-      <Clock3 :size="17" aria-hidden="true" />
+      <LoadingIndicator v-if="checking || isLoadingText(text)" />
+      <Clock3 v-else :size="17" aria-hidden="true" />
       <span>{{ text }}</span>
-      <button type="button" :disabled="checking" @click="$emit('check')"><RefreshCw :size="15" />{{ checking ? '确认中' : '刷新状态' }}</button>
+      <button type="button" :disabled="checking" @click="$emit('check')"><LoadingIndicator v-if="checking">确认中</LoadingIndicator><template v-else><RefreshCw :size="15" />刷新状态</template></button>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { Clock3, RefreshCw } from "lucide-vue-next";
+import { isLoadingText } from '../loadingText';
 defineProps<{ text: string; checking: boolean }>();
 defineEmits<{ check: [] }>();
 </script>

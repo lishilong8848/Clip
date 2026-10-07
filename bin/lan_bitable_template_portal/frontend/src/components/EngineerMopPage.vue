@@ -12,7 +12,7 @@
       @refresh="loadPage(true)"
     />
 
-    <div v-if="checking" class="notice-box" role="status" aria-live="polite">正在检查登录状态...</div>
+    <div v-if="checking" class="notice-box" role="status" aria-live="polite"><LoadingIndicator>正在检查登录状态...</LoadingIndicator></div>
     <div v-else-if="!loggedIn" class="notice-box" role="alert">
       请先登录飞书后再使用工程师 MOP 页面。
       <a class="btn blue" :href="loginUrl">飞书登录</a>
@@ -49,11 +49,13 @@
           :maintenance-field-count="activeSheetMaintenanceFields.length"
           :filled-count="mopFilledCount"
         />
+        <UiTransition name="ui-drawer" appear>
         <div
           v-if="signatureManagerOpen"
           class="signature-manager-backdrop"
           @click.self="closeSignatureManager"
         ></div>
+        </UiTransition>
         <section
           v-if="activeSheet && !activeSheet.is_cover"
           ref="signatureManagerRef"
@@ -1871,7 +1873,12 @@ function signatureMoreStyle(rowIndex: number): Record<string, string> {
   };
 }
 
+let signatureManagerCloseAnimation: Animation | undefined;
 async function openSignatureManager(role: "implementer" | "auditor"): Promise<void> {
+  const wasClosing = Boolean(signatureManagerCloseAnimation);
+  signatureManagerCloseAnimation?.cancel();
+  signatureManagerCloseAnimation = undefined;
+  if (signatureManagerRef.value) signatureManagerRef.value.inert = false;
   const wasOpen = signatureManagerOpen.value;
   if (!wasOpen) {
     signatureManagerReturnFocus = document.activeElement instanceof HTMLElement
@@ -1882,13 +1889,29 @@ async function openSignatureManager(role: "implementer" | "auditor"): Promise<vo
   }
   signatureRole.value = role;
   signatureManagerOpen.value = true;
-  if (!wasOpen) {
+  if (!wasOpen || wasClosing) {
     await nextTick();
     signatureManagerRef.value?.focus({ preventScroll: true });
   }
 }
 
 function closeSignatureManager(): void {
+  if (!signatureManagerOpen.value || signatureManagerCloseAnimation) return;
+  const panel = signatureManagerRef.value;
+  if (panel?.animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    panel.inert = true;
+    const animation = panel.animate([{ opacity: 1, translate: '0 0' }, { opacity: 0, translate: '20px 0' }], { duration: 180, easing: 'ease' });
+    signatureManagerCloseAnimation = animation;
+    void animation.finished.then(() => {
+      signatureManagerCloseAnimation = undefined;
+      panel.inert = false;
+      finishClosingSignatureManager();
+    }, () => { if (!signatureManagerCloseAnimation) panel.inert = false; });
+    return;
+  }
+  finishClosingSignatureManager();
+}
+function finishClosingSignatureManager(): void {
   if (!signatureManagerOpen.value) return;
   signatureManagerOpen.value = false;
   document.body.style.overflow = signatureManagerBodyOverflow;
@@ -2689,6 +2712,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  signatureManagerCloseAnimation?.cancel();
+  signatureManagerCloseAnimation = undefined;
   temporarySignatureRequestSeq += 1;
   formalSignatureRefreshSeq += 1;
   if (signatureSearchTimer) {
@@ -2950,6 +2975,7 @@ watch(() => props.scopeOptions, (items) => {
 }
 
 .mop-preview-page .mop-sign-panel.manager-open {
+  animation: mop-drawer-enter 180ms ease;
   position: fixed;
   z-index: var(--cf-z-modal, 840);
   top: 18px;
@@ -2989,6 +3015,7 @@ watch(() => props.scopeOptions, (items) => {
     #ffffff;
   backdrop-filter: blur(10px);
 }
+@keyframes mop-drawer-enter { from { opacity: 0; translate: 20px 0; } to { opacity: 1; translate: 0 0; } }
 
 .mop-preview-page .mop-sign-panel:not(.manager-open) .sign-workspace,
 .mop-preview-page .mop-sign-panel:not(.manager-open) .other-signature-panel,

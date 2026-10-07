@@ -6,11 +6,8 @@ import { chromium } from 'playwright';
 
 // 有限验收脚本：只针对 19003 上的隔离 preview（fixture_user cookie / synthetic model）。
 // 覆盖本次有界修复目标：拖启动器 → 打开面板 → 收起 → 再拖的“闪跳到上一个/下一个位置”根因。
-// 根因保护点（组件侧）：
-//  - openAssistant 在 delayed conversation GET 返回后的尾部 ensureInBounds('panel') 必须带
-//    open/epoch 守卫；close 的 nextTick(applyShapePosition('launcher')) 同样带守卫，避免陈旧回写。
-//  - 手势绑定 beginDrag 时的形状（dragShape），move/end 只在 dragShape === activeShape() 时写坐标；
-//    切换形状前先 stopGesture，避免把旧形状坐标写进当前元素。
+// 图标使用 Bloub 原生拖动；面板独立拖动。这里关闭回弹，验证保留位置模式。
+// 延迟会话响应仍不得污染图标位置，也不能重新打开已经收起的面板。
 //
 // 规则（沿用 check-assistant-stream-browser.mjs）：
 //  - 服务不接触真实多维；任何写入前先验证 /api/health.instance_id === 'isolated-lighthouse-stream'。
@@ -28,7 +25,7 @@ const PAGE_ERRORS = [];
 const PANEL_TARGETS = [
   { x: 200, y: 160 },
   { x: 320, y: 240 },
-  { x: 150, y: 300 },
+  { x: 150, y: 260 },
 ];
 const LAUNCHER_TARGETS = [
   { x: 420, y: 320 },
@@ -62,14 +59,15 @@ async function resetConversation(context) {
 }
 
 async function openBox(page) {
-  await page.locator('.lighthouse').first().waitFor();
-  const b = await page.locator('.lighthouse').boundingBox();
-  assert(b, '.lighthouse bounding box required');
+  const selector = (await page.locator('.assistant-panel').count()) ? '.assistant-panel' : '.assistant-launcher';
+  await page.locator(selector).waitFor();
+  const b = await page.locator(selector).boundingBox();
+  assert(b, 'assistant bounding box required');
   return b;
 }
 
 async function openAssistant(page) {
-  await page.locator('.lighthouse').first().waitFor();
+  await page.locator('.assistant-launcher').waitFor();
   if ((await page.locator('.assistant-panel').count()) === 0) {
     await page.getByRole('button', { name: '打开灯塔助手', exact: true }).click();
   }
@@ -87,7 +85,7 @@ async function closeAssistant(page) {
 
 async function expectAt(page, target, label) {
   await page.waitForFunction(({ x, y }) => {
-    const el = document.querySelector('.lighthouse');
+    const el = document.querySelector('.assistant-panel') || document.querySelector('.assistant-launcher');
     if (!el) return false;
     const r = el.getBoundingClientRect();
     return Math.abs(r.x - x) <= 5 && Math.abs(r.y - y) <= 5;
@@ -149,13 +147,15 @@ async function scenarioDelayedGetEarlyClose(page) {
   await page.getByRole('button', { name: '收起助手', exact: true }).click();
   await page.locator('.assistant-panel').waitFor({ state: 'detached', timeout: 5000 }).catch(() => {});
   // 跨过 delayed GET 返回窗口持续采样 launcher，绝不能出现闪跳到面板位置的瞬间。
-  const samples = [];
-  const deadline = Date.now() + 1400;
-  while (Date.now() < deadline) {
-    const b = await openBox(page);
-    samples.push({ x: b.x, y: b.y });
-    await page.waitForTimeout(60);
-  }
+  const samples = await page.evaluate(async () => {
+    const points = [], deadline = performance.now() + 1400;
+    do {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const rect = document.querySelector('.assistant-launcher').getBoundingClientRect();
+      points.push({ x: rect.x, y: rect.y });
+    } while (performance.now() < deadline);
+    return points;
+  });
   assert(samples.length >= 10, 'must sample launcher across the delayed GET window');
   for (const s of samples) {
     assert(Math.abs(s.x - L0.x) <= 4 && Math.abs(s.y - L0.y) <= 4,
@@ -242,6 +242,8 @@ try {
   const context = await browser.newContext({ viewport: { width: VW, height: VH } });
   await assertIsolated(context);
   await context.addCookies([{ name: 'fixture_user', value: 'A', url: base }]);
+  const appearance = await context.request.put(base + '/api/assistant/appearance', { data: { snap_back: false }, headers: { origin: base } });
+  assert.equal(appearance.ok(), true, 'retained-position setting must be saved before drag regression');
   await resetConversation(context);
   context.on('page', p => p.on('pageerror', e => PAGE_ERRORS.push(`[${p.url()}] ${e.message}`)));
 

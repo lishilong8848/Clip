@@ -12,17 +12,20 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from typing import List
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
-from clipflow_backend.api_models import RepairFollowupRecordRequest
+from pydantic import BaseModel
+from clipflow_backend.api_models import RepairFollowupRecordRequest, RepairManagementRecordRequest, PollingSopRequest, CriticalGuardResponseRequest, CriticalGuardTaskRequest, CriticalGuardScopeTemplateRequest, OngoingDeleteRequest, NoticeUndoApplyRequest
 
 from lan_bitable_template_portal.lighthouse_agent import (
     PLAN_NAMESPACE,
     PortalAgent,
+    _result_refs,
 )
 from lan_bitable_template_portal.lighthouse_ai import AssistantError, LighthouseAssistant
 from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog
@@ -72,12 +75,36 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.batch_writes = []
         self.job_phase = {"job-1": "processing"}
         self.notice_writes = []
+        self.notice_deletes, self.notice_undos = [], []
+        self.ongoing = [{"scope": "A", "building_codes": ["A"], "work_type": "maintenance", "notice_type": "维保通告",
+                         "title": "A楼测试维护", "status": "开始", "active_item_id": "active-original",
+                         "target_record_id": "rec-original", "record_id": "rec-original"}]
+        self.ongoing_query_ok = True
         self.records = [
             {"record_id": "plan-1", "title": "A楼调整", "status": "未开始"},
             {"record_id": "plan-2", "title": "B楼调整", "status": "未开始"},
         ]
 
         app = FastAPI()
+
+        @app.get("/api/workbench")
+        async def workbench(request: Request):
+            scope = request.query_params.get("scope")
+            work_type = request.query_params.get("work_type")
+            sections = request.query_params.get("sections")
+            search = request.query_params.get("search")
+            ongoing_page_size = request.query_params.get("ongoing_page_size")
+            return {"ok": self.ongoing_query_ok, "data": {"scope": scope, "ongoing": copy.deepcopy(self.ongoing)}, "error": "fixture unavailable" if not self.ongoing_query_ok else ""}
+
+        @app.post("/api/ongoing-items/delete")
+        async def delete_notice(body: OngoingDeleteRequest):
+            self.notice_deletes.append(body.model_dump())
+            return {"ok": True, "data": {"deleted": True, "remote_deleted": True, "qt_deleted": True}}
+
+        @app.post("/api/notice-undo/{undo_id}/apply")
+        async def undo_notice(undo_id: str, body: NoticeUndoApplyRequest):
+            self.notice_undos.append(undo_id)
+            return {"ok": True, "data": {"restored": True}}
 
         @app.delete("/api/drills/{drill_id}")
         async def delete_drill(drill_id: str, request: Request):
@@ -91,13 +118,14 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.upload_writes.append((filename, raw))
             return {"ok": True, "data": {"upload_id": "up-1", "file_token": "private-file-token"}}
 
-        @app.post("/api/records/attach-files")
-        async def attach_files(request: Request, file_token: str = Form(""), person: str = Form(""), attachment: UploadFile = File(...)):
+        @app.post("/api/cabinet-power/batches/{batch_id}/images")
+        async def attach_files(batch_id: str, request: Request, file_token: str = Form(""), person: str = Form(""), files: List[UploadFile] = File(...)):
             self.attach_writes.append({
                 "file_token": file_token,
                 "person": person,
-                "attachment_name": attachment.filename,
-                "attachment_content": await attachment.read(),
+                "batch_id": batch_id,
+                "attachment_name": files[0].filename if files else None,
+                "attachment_content": await files[0].read() if files else b"",
             })
             return {"ok": True, "data": {"saved": True}}
 
@@ -184,6 +212,93 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         finished = self.agent.get_plan(ACTOR, plan["id"])
         self.assertEqual(finished["status"], "completed")
 
+    async def test_delete_notice_calls_web_delete_not_undo_and_keeps_target_id(self):
+        decision = {"title": "删除维保通告", "operations": [{"api_id": "POST /api/ongoing-items/delete", "body": {
+            "scope": "A", "work_type": "maintenance", "notice_type": "维保通告",
+            "active_item_id": "active-original", "target_record_id": "rec-original"}}]}
+        plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], queries={"q": {"ongoing": self.ongoing}})
+        self.assertEqual(plan["risk"], "high")
+        self.assertEqual(self.notice_deletes, [])
+        plan = await self.agent.confirm(ACTOR, plan["id"], {"version": plan["version"], "stage": "review"}, self.request)
+        self.assertEqual(plan["status"], "awaiting_second_confirmation")
+        await self.agent.confirm(ACTOR, plan["id"], {"version": plan["version"], "stage": "execute"}, self.request)
+        await gather_tasks(self.agent)
+        completed = self.agent.get_plan(ACTOR, plan["id"])
+        self.assertEqual(completed["status"], "completed", completed.get("error"))
+        self.assertEqual(len(self.notice_deletes), 1)
+        self.assertEqual(self.notice_deletes[0]["target_record_id"], "rec-original")
+        self.assertEqual(self.notice_deletes[0]["active_item_id"], "active-original")
+        self.assertEqual(self.notice_undos, [])
+        self.assertEqual(self.notice_writes, [])
+
+    async def test_delete_notice_rejects_unqueried_historical_id(self):
+        decision = {"operations": [{"api_id": "POST /api/ongoing-items/delete", "body": {
+            "scope": "A", "work_type": "maintenance", "active_item_id": "rec-old", "target_record_id": "rec-old",
+            "title": self.ongoing[0]["title"]}}]}
+        for queries in ({}, {"q": {"ongoing": self.ongoing}}):
+            with self.subTest(queries=bool(queries)), self.assertRaisesRegex(AssistantError, "重新查询"):
+                self.agent.prepare(ACTOR, decision, self.operation_id, [], queries=queries)
+        self.assertFalse(self.notice_deletes)
+
+    async def test_delete_notice_rechecks_before_write_without_retargeting(self):
+        original = copy.deepcopy(self.ongoing)
+        for mode in ('removed', 'replaced', 'renamed', 'rebound', 'unavailable'):
+            with self.subTest(mode=mode):
+                self.ongoing, self.ongoing_query_ok = copy.deepcopy(original), True
+                decision = {"operations": [{"api_id": "POST /api/ongoing-items/delete", "body": {
+                    "scope": "A", "work_type": "maintenance", "active_item_id": "active-original", "target_record_id": "rec-original"}}]}
+                plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], queries={"q": {"ongoing": self.ongoing}})
+                if mode == 'removed':
+                    self.ongoing = []
+                elif mode == 'replaced':
+                    self.ongoing[0].update(active_item_id='new-active', target_record_id='new-rec', record_id='new-rec')
+                elif mode == 'renamed':
+                    self.ongoing[0]['title'] = '另一条通告'
+                elif mode == 'rebound':
+                    self.ongoing[0].update(target_record_id='new-rec', record_id='new-rec')
+                else:
+                    self.ongoing_query_ok = False
+                await self.agent._execute(ACTOR, plan, self.request)
+                self.assertEqual(plan['status'], 'failed')
+                self.assertFalse(self.notice_deletes)
+                self.assertFalse(self.notice_undos)
+
+    async def test_delete_notice_old_plan_cannot_execute_without_anchor(self):
+        decision = {"operations": [{"api_id": "POST /api/ongoing-items/delete", "body": {
+            "scope": "A", "work_type": "maintenance", "target_record_id": "rec-original"}}]}
+        plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], queries={"q": {"ongoing": self.ongoing}})
+        plan.pop('_notice_delete_targets')
+        self.store.put_document(PLAN_NAMESPACE, plan['id'], plan)
+        with self.assertRaisesRegex(AssistantError, '重新查询'):
+            await self.agent.confirm(ACTOR, plan['id'], {'version': plan['version'], 'stage': 'review'}, self.request)
+        await self.agent._execute(ACTOR, plan, self.request)
+        self.assertEqual(plan['status'], 'failed')
+        self.assertFalse(self.notice_deletes)
+
+    async def test_delete_notice_intent_rejects_undo_even_with_model_rewritten_title(self):
+        decision = {"title": "撤销开始", "operations": [{"api_id": "POST /api/notice-undo/{undo_id}/apply",
+            "path_params": {"undo_id": "undo-original"}, "body": {"scope": "A"}}]}
+        with self.assertRaisesRegex(AssistantError, "不能代替删除"):
+            self.agent.prepare(ACTOR, decision, self.operation_id, [], question="删除刚刚发送的维保通告")
+        self.assertEqual(self.notice_undos, [])
+        self.ongoing[0].update(undo_id='undo-original', undo_action_type='update')
+        plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], question="撤销这次维保通告的更新", queries={'q': {'ongoing': self.ongoing}})
+        self.assertEqual(plan["operations"][0]["api_id"], "POST /api/notice-undo/{undo_id}/apply")
+
+    async def test_undo_only_handles_current_ongoing_notice(self):
+        decision = {'operations': [{'api_id': 'POST /api/notice-undo/{undo_id}/apply',
+                                   'path_params': {'undo_id': 'undo-current'}, 'body': {'scope': 'A'}}]}
+        for action in ('end', 'delete'):
+            self.ongoing[0].update(undo_id='undo-current', undo_action_type=action)
+            with self.assertRaises(AssistantError):
+                self.agent.prepare(ACTOR, decision, self.operation_id, [], queries={'q': {'ongoing': self.ongoing}})
+        self.ongoing[0].update(undo_action_type='update')
+        plan = self.agent.prepare(ACTOR, decision, self.operation_id, [], queries={'q': {'ongoing': self.ongoing}})
+        self.ongoing = []
+        await self.agent._execute(ACTOR, plan, self.request)
+        self.assertEqual(plan['status'], 'failed')
+        self.assertEqual(self.notice_undos, [])
+
     async def test_five_building_exports_generate_native_stable_batch_ids(self):
         app, writes = FastAPI(), []
         @app.post("/api/cabinet-power/export-batches")
@@ -233,12 +348,13 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             "operations": [
                 {"api_id": "POST /api/engineer/mop/upload-local", "files": {"file": [file_a["id"]]}},
                 {
-                    "api_id": "POST /api/records/attach-files",
+                    "api_id": "POST /api/cabinet-power/batches/{batch_id}/images",
+                    "path_params": {"batch_id": "batch-attach-1"},
                     "body": {
                         "file_token": {"$result": {"step": 0, "path": "file_token"}},
                         "person": "ou_plain",
                     },
-                    "files": {"attachment": [file_b["id"]]},
+                    "files": {"files": [file_b["id"]]},
                 },
             ],
         }
@@ -260,9 +376,10 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         file_a = self.files.upload(ACTOR, "person.txt", ("人员附件\n" * 10).encode())
         decision = {
             "operations": [{
-                "api_id": "POST /api/records/attach-files",
+                "api_id": "POST /api/cabinet-power/batches/{batch_id}/images",
+                "path_params": {"batch_id": "batch-attach-1"},
                 "body": {"person": {"$reference": "person_zzz"}},
-                "files": {"attachment": [file_a["id"]]},
+                "files": {"files": [file_a["id"]]},
             }],
         }
         plan = self.agent.prepare(
@@ -324,6 +441,487 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         clear = agent.amend(ACTOR, clear["id"], {"version": clear["version"], "values": {"clear_devices": []}})
         self.assertEqual(agent.get_plan(ACTOR, clear["id"])["operations"][0]["body"]["cmdb_record_ids"], [])
 
+    async def test_repair_native_fields_keep_baseline_version_and_replace_only_selected_relation(self):
+        from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_TABLE_ID
+        app, writes = FastAPI(), []
+        @app.put("/api/repair-management/records/{record_id}")
+        async def update(record_id: str, body: RepairManagementRecordRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        metas = [{"field_name": name, "field_type": kind, "editable": editable, "options": options} for name, kind, editable, options in (
+            ("故障发生时间", 5, True, []), ("故障维修原因", 1, True, []), ("所属专业", 3, True, ["电气", "暖通"]),
+            ("证据.说明", 17, False, []), ("汇总公式", 20, False, []))]
+        original = {"故障发生时间": 1790821800000, "故障维修原因": [{"text": "原原因"}], "所属专业": "电气",
+                    "证据.说明": {"content": "原证明", "file_token": "private-proof"}, "汇总公式": "不编辑"}
+        record = {"record_id": "rec-project", "record_version": "v-original", "building_codes": ["A"], "raw_fields": original,
+                  "source_event_id": "rec-event", "source_repair_ids": ["rec-repair"]}
+        queries = {"query_" + "a" * 32: {"table_id": REPAIR_MANAGEMENT_TABLE_ID, "records": [record], "fields": metas}}
+        operation = {"api_id": "PUT /api/repair-management/records/{record_id}", "path_params": {"record_id": "rec-project"}, "body": {"scope": "A"}}
+        plan = agent.prepare(ACTOR, {"operations": [operation], "fields": [{"name": "clear_relation", "path": "source_repair_ids", "type": "multiselect", "required": False}]}, self.operation_id, [], queries=queries)
+        control = next(field for field in plan["fields"] if field["path"] == "fields")
+        children = {child["path"]: child for child in control["children"]}
+        self.assertEqual(set(children), {"故障发生时间", "故障维修原因", "所属专业"})
+        self.assertEqual(children["故障发生时间"]["type"], "datetime-local")
+        self.assertEqual(children["所属专业"]["options"], [{"value": "电气", "label": "电气"}, {"value": "暖通", "label": "暖通"}])
+        public_value = agent.public_plan(plan)["fields"][0]["value"]
+        self.assertNotIn("private-proof", json.dumps(public_value))
+        self.assertEqual(_result_refs(public_value, [], queries=plan["_queries"]), original)
+        for invalid in ({"所属专业": "编造专业"}, {"故障发生时间": "2026-02-30T10:00"}, {"汇总公式": "覆盖公式"}):
+            with self.assertRaises(AssistantError):
+                agent.amend(ACTOR, plan["id"], {"version": 1, "values": {control["name"]: {**public_value, **invalid}}})
+        self.assertEqual(writes, [])
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {control["name"]: {**public_value, "故障维修原因": "已更正"}, "clear_relation": []}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual(writes[0]["expected_version"], "v-original")
+        self.assertTrue(writes[0]["replace_source_relations"])
+        self.assertEqual(writes[0]["source_event_id"], "rec-event")
+        self.assertEqual(writes[0]["source_repair_ids"], [])
+        self.assertEqual(writes[0]["fields"], {"故障维修原因": "已更正"})
+        self.assertEqual({**original, **writes[0]["fields"]}, {**original, "故障维修原因": "已更正"})
+        queries[next(iter(queries))]["records"][0]["building_codes"] = ["B"]
+        with self.assertRaisesRegex(AssistantError, "无权"):
+            agent.prepare(ACTOR, {"operations": [operation]}, self.operation_id, [], queries=queries)
+
+    async def test_repair_search_retains_only_selected_candidates_and_validates_scope(self):
+        from urllib.parse import urlencode
+        app, calls = FastAPI(), []
+        @app.get("/api/repair-management/cmdb-candidates")
+        async def devices(scope: str, q: str = "", limit: int = 80):
+            calls.append(q)
+            return {"ok": True, "data": {"records": [{"record_id": "rec-" + q, "name": q, "building_codes": [scope]}]}}
+        @app.post("/api/repair-management/followups")
+        async def create(body: RepairFollowupRecordRequest):
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        actor = {**ACTOR, "scopes": ["A", "B"]}
+        plan = agent.prepare(actor, {"operations": [{"api_id": "POST /api/repair-management/followups", "body": {"scope": "A", "summary_record_id": "rec-parent", "fields": {}}}]}, self.operation_id, [])
+        field = next(f for f in plan["fields"] if f["path"] == "cmdb_record_ids")
+        async def search(q, selected, scope="A"):
+            return await agent.field_options(actor, plan["id"], field["name"], Request({**self.request.scope,
+                "query_string": urlencode({"q": q, "scope": scope, "selected": json.dumps(selected)}).encode()}))
+        await search("one", [])
+        loaded = await search("two", ["rec-one"])
+        options = next(f for f in loaded["fields"] if f["path"] == "cmdb_record_ids")["options"]
+        self.assertEqual([option["value"] for option in options], ["rec-one", "rec-two"])
+        for selected in (["forged"], "rec-one", [None], ["rec-one"] * 501):
+            with self.assertRaises(AssistantError):
+                await search("bad", selected)
+        with self.assertRaisesRegex(AssistantError, "楼栋范围已改变"):
+            await search("wrong-scope", ["rec-one"], "B")
+        with self.assertRaisesRegex(AssistantError, "无权"):
+            await search("forbidden", [], "E")
+        self.assertEqual(calls, ["one", "two"])
+        loaded = await search("three", ["rec-one"])
+        options = next(f for f in loaded["fields"] if f["path"] == "cmdb_record_ids")["options"]
+        self.assertEqual([option["value"] for option in options], ["rec-one", "rec-three"])
+        amended = agent.amend(actor, plan["id"], {"version": loaded["version"], "values": {field["name"]: ["rec-one", "rec-three"]}})
+        self.assertEqual(amended["operations"][0]["body"]["cmdb_record_ids"], ["rec-one", "rec-three"])
+
+    async def test_followup_form_uses_only_matching_parent_metadata_and_keeps_other_fields(self):
+        app, writes = FastAPI(), []
+        @app.put("/api/repair-management/followups/{record_id}")
+        async def update(record_id: str, body: RepairFollowupRecordRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        raw = {"维修进度": 0.58, "设备品牌": "双登", "故障维修总费用": 12, "设备型号": "保持原型号", "维修进展描述": [{"text": "原进展"}]}
+        metas = [{"field_name": name, "field_type": kind, "editable": True, "options": options} for name, kind, options in (
+            ("维修进度", 2, []), ("设备品牌", 3, ["双登"]), ("故障维修总费用", 2, []), ("设备型号", 1, []), ("维修进展描述", 1, []))]
+        matching = {"summary_record_id": "rec-parent", "relation_mode": "record_id", "fields": metas,
+                    "records": [{"record_id": "rec-followup", "record_version": "followup-v1", "raw_fields": raw}]}
+        queries = {"query_" + "b" * 32: matching, "query_" + "c" * 32: {**matching, "summary_record_id": "rec-other", "fields": [{**metas[1], "options": ["其它项目品牌"]}]}}
+        op = {"api_id": "PUT /api/repair-management/followups/{record_id}", "path_params": {"record_id": "rec-followup"}, "body": {"scope": "A", "summary_record_id": "rec-parent", "cmdb_record_ids": []}}
+        plan = agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries=queries)
+        field = next(field for field in plan["fields"] if field["path"] == "fields")
+        self.assertEqual(next(child for child in field["children"] if child["path"] == "设备品牌")["options"], [{"value": "双登", "label": "双登"}])
+        value = {**agent.public_plan(plan)["fields"][0]["value"], "维修进度": "0.75", "维修进展描述": "已处理"}
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: value}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual(writes[0]["expected_version"], "followup-v1")
+        self.assertEqual(writes[0]["fields"], {"维修进度": "0.75", "维修进展描述": "已处理"})
+        self.assertEqual({**raw, **writes[0]["fields"]}, {**raw, "维修进度": "0.75", "维修进展描述": "已处理"})
+        with self.assertRaisesRegex(AssistantError, "字段定义"):
+            agent.prepare(ACTOR, {"operations": [op], "fields": [{"path": "fields", "type": "object"}]}, self.operation_id, [], queries={})
+
+    async def test_repair_query_references_open_original_form_instead_of_losing_controls(self):
+        app = FastAPI()
+        @app.put("/api/repair-management/followups/{record_id}")
+        async def update(record_id: str, body: RepairFollowupRecordRequest):
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        ref = "query_" + "a" * 32
+        snapshot = {"summary_record_id": "rec-parent", "relation_mode": "record_id", "fields": [
+            {"field_name": "设备名称", "field_type": 1, "editable": True}], "records": [
+                {"record_id": "rec-followup", "record_version": "v1", "raw_fields": {"设备名称": "原设备"}, "cmdb_record_ids": ["rec-device"]}]}
+        operation = {"api_id": "PUT /api/repair-management/followups/{record_id}",
+            "path_params": {"record_id": {"$query": {"ref": ref, "path": "records.0.record_id"}}},
+            "body": {"scope": "A", "summary_record_id": {"$query": {"ref": ref, "path": "summary_record_id"}}}}
+        plan = agent.prepare(ACTOR, {"operations": [operation]}, self.operation_id, [], queries={ref: snapshot})
+        form = next(field for field in plan["fields"] if field.get("native_repair"))
+        self.assertEqual(form["value"]["设备名称"], "原设备")
+        self.assertEqual(plan["operations"][0]["path_params"]["record_id"], "rec-followup")
+        self.assertEqual(next(field for field in plan["fields"] if field["path"] == "cmdb_record_ids")["value"], ["rec-device"])
+
+    async def test_repair_single_select_uses_resolved_display_label_without_unrequested_write(self):
+        app, writes = FastAPI(), []
+        @app.put("/api/repair-management/followups/{record_id}")
+        async def update(record_id: str, body: RepairFollowupRecordRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        original = {"record_id": "rec-followup", "record_version": "v1", "raw_fields": {"设备品牌": "optLegacy", "维修进度": 0.5},
+                    "display_fields": {"设备品牌": "品牌A"}}
+        snapshot = {"summary_record_id": "rec-parent", "relation_mode": "record_id", "records": [original], "fields": [
+            {"field_name": "设备品牌", "field_type": 3, "editable": True, "options": ["品牌A", "品牌B"]},
+            {"field_name": "维修进度", "field_type": 2, "editable": True}]}
+        op = {"api_id": "PUT /api/repair-management/followups/{record_id}", "path_params": {"record_id": "rec-followup"},
+              "body": {"scope": "A", "summary_record_id": "rec-parent"}}
+        plan = agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries={"snapshot": snapshot})
+        field = next(f for f in plan["fields"] if f.get("native_repair"))
+        self.assertEqual(field["value"]["设备品牌"], "品牌A")
+        value = {**field["value"], "维修进度": 0.7}
+        amended = agent.amend(ACTOR, plan["id"], {"version": plan["version"], "values": {field["name"]: value}})
+        self.assertEqual(amended["operations"][0]["body"]["fields"], {"维修进度": 0.7})
+        self.assertEqual(original["raw_fields"]["设备品牌"], "optLegacy")
+        original["raw_fields"]["设备品牌"] = "品牌B"
+        plan = agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries={"snapshot": snapshot})
+        self.assertEqual(next(f for f in plan["fields"] if f.get("native_repair"))["value"]["设备品牌"], "品牌B")
+
+    async def test_changed_event_requires_fresh_selection_even_for_same_repair_record(self):
+        from urllib.parse import urlencode
+        from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_TABLE_ID
+        app = FastAPI()
+        @app.put("/api/repair-management/records/{record_id}")
+        async def update(record_id: str, body: RepairManagementRecordRequest):
+            return {"ok": True}
+        @app.get("/api/repair-management/repair-candidates")
+        async def candidates(scope: str, event_record_id: str, q: str = "", limit: int = 80):
+            self.assertEqual(event_record_id, "rec-new-event")
+            return {"ok": True, "data": {"records": [{"record_id": "rec-repair", "title": "可重新绑定的检修"}]}}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        record = {"record_id": "rec-project", "building_codes": ["A"], "record_version": "v1", "raw_fields": {},
+                  "source_event_id": "rec-old-event", "source_repair_ids": ["rec-repair"]}
+        decision = {"operations": [{"api_id": "PUT /api/repair-management/records/{record_id}",
+            "path_params": {"record_id": "rec-project"}, "body": {"scope": "A", "source_event_id": "rec-new-event"}}]}
+        queries = {"snapshot": {"table_id": REPAIR_MANAGEMENT_TABLE_ID, "records": [record], "fields": []}}
+        plan = agent.prepare(ACTOR, decision, self.operation_id, [], queries=queries)
+        amended = agent.amend(ACTOR, plan["id"], {"version": plan["version"], "values": {}})
+        self.assertEqual(amended["operations"][0]["body"]["source_repair_ids"], [])
+        plan = agent.prepare(ACTOR, decision, self.operation_id, [], queries=queries)
+        field = next(field for field in plan["fields"] if field["path"] == "source_repair_ids")
+        loaded = await agent.field_options(ACTOR, plan["id"], field["name"], Request({**self.request.scope,
+            "query_string": urlencode({"source_event_id": "rec-new-event", "selected": "[]"}).encode()}))
+        amended = agent.amend(ACTOR, plan["id"], {"version": loaded["version"], "values": {field["name"]: ["rec-repair"]}})
+        self.assertEqual(amended["operations"][0]["body"]["source_repair_ids"], ["rec-repair"])
+
+    async def test_guard_form_keeps_other_checks_signers_and_version_until_confirmed(self):
+        from lan_bitable_template_portal.critical_guard import default_response_cells, normalize_response_cells
+        app, writes = FastAPI(), []
+        @app.put("/api/critical-guard/responses/{response_id}")
+        async def save(response_id: str, body: CriticalGuardResponseRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        original = default_response_cells("灾害专项", "A", today="2026-10-01", template_items=[
+            {"key": "check.1", "category": "供配电", "content": "现场检查1"},
+            {"key": "check.2", "category": "空调", "content": "现场检查2"}], template_revision=7, template_customized=True)
+        original["checks"]["check.2"] = {"status": "abnormal", "note": "原异常备注"}
+        original["weather"] = {"level1": "台风", "level2": "暴雨", "current": "大雨"}
+        signers = [{"source": "staff", "record_id": "rec-inspector", "role": "inspector", "name": "检查人"}]
+        response = {"response_id": "guard-a", "scope": "A", "version": 4, "sheet_type": "灾害专项", "cells": original, "signatures": signers}
+        query = {"query_" + "d" * 32: {"task_id": "guard-task", "responses": [response], "template_outdated": False}}
+        op = {"api_id": "PUT /api/critical-guard/responses/{response_id}", "path_params": {"response_id": "guard-a"},
+              "body": {"cells": {"checks": {"check.1": {"note": "本次备注"}}, "weather": {"current": "小雨"}}}}
+        plan = agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries=query)
+        self.assertEqual(writes, [])
+        field = next(field for field in plan["fields"] if field["path"] == "cells")
+        self.assertTrue(field["native_guard"])
+        value = agent.public_plan(plan)["fields"][0]["value"]
+        filled = _result_refs(value, [], queries=plan["_queries"])
+        self.assertEqual(filled["checks"]["check.2"], original["checks"]["check.2"])
+        self.assertEqual(filled["weather"], {**original["weather"], "current": "小雨"})
+        for invalid in ({"machine_room": "其它楼"}, {"template_revision": 999}, {"check_date": "2026-02-30"}, {"checks": {**value["checks"], "check.1": {"status": "编造状态"}}}):
+            with self.assertRaises(AssistantError):
+                agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: {**value, **invalid}}})
+        value["checks"]["check.1"].update(status="abnormal", note="")
+        with self.assertRaisesRegex(AssistantError, "异常项必须填写备注"):
+            agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: value, "step0.generate_image": True}})
+        self.assertEqual(writes, [])
+        draft = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: value, "step0.generate_image": False}})
+        raw = agent.get_plan(ACTOR, draft["id"])
+        self.assertEqual(raw["operations"][0]["body"]["expected_version"], 4)
+        self.assertEqual(raw["operations"][0]["body"]["signatures"], signers)
+        normalized = normalize_response_cells("灾害专项", "A", raw["operations"][0]["body"]["cells"])
+        self.assertEqual(normalized["template_revision"], 7)
+        self.assertEqual(normalized["checks"]["check.2"], original["checks"]["check.2"])
+        confirmed = await agent.confirm(ACTOR, plan["id"], {"version": draft["version"], "stage": "review"}, self.request)
+        if confirmed["status"] == "awaiting_second_confirmation":
+            await agent.confirm(ACTOR, plan["id"], {"version": confirmed["version"], "stage": "execute"}, self.request)
+        await gather_tasks(agent)
+        self.assertEqual(len(writes), 1)
+        self.assertFalse(writes[0]["generate_image"])
+        self.assertEqual(writes[0]["cells"]["checks"]["check.1"], {"status": "abnormal", "note": ""})
+        with self.assertRaisesRegex(AssistantError, "原重保任务"):
+            agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries={})
+        query[next(iter(query))]["template_outdated"] = True
+        with self.assertRaisesRegex(AssistantError, "模板已变化"):
+            agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries=query)
+        query[next(iter(query))]["template_outdated"] = False
+        response["scope"] = "B"
+        with self.assertRaisesRegex(AssistantError, "无权"):
+            agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries=query)
+
+    async def test_guard_signer_picker_binds_only_native_people_and_retains_other_selections(self):
+        from lan_bitable_template_portal.critical_guard import default_response_cells
+        app, calls, writes = FastAPI(), [], []
+        @app.get("/api/signatures/people")
+        async def people(scope: str, notice_key: str, q: str = "", limit: int = 100):
+            calls.append((scope, notice_key, q))
+            return {"ok": True, "data": {"people": [{"source": "staff", "record_id": "rec-person", "name": "检查人甲", "has_signature": True,
+                "usage_confirmed": False, "open_id": "private-open-id", "image_base64": "private-signature-image"}], "count": 102}}
+        @app.get("/api/signatures/temporary/people")
+        async def external(scope: str, notice_key: str, q: str = "", limit: int = 100):
+            return {"ok": True, "data": {"people": [{"source": "external", "record_id": "rec-external", "name": "检查人乙", "has_signature": False}], "count": 1}}
+        @app.put("/api/critical-guard/responses/{response_id}")
+        async def save(response_id: str, body: CriticalGuardResponseRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        response = {"response_id": "guard-signers", "task_id": "native-task", "scope": "A", "version": 3, "sheet_type": "设备安全",
+                    "cells": default_response_cells("设备安全", "A", today="2026-10-01", template_items=[{"key": "check.1", "content": "检查"}]),
+                    "signatures": [{"source": "staff", "record_id": "rec-original", "role": "inspector", "name": "原检查人"}]}
+        op = {"api_id": "PUT /api/critical-guard/responses/{response_id}", "path_params": {"response_id": response["response_id"]}, "body": {"scope": "A"}}
+        plan = agent.prepare(ACTOR, {"operations": [op], "fields": [{"path": "signatures", "type": "array"}]}, self.operation_id, [], queries={"original": response})
+        signer = next(field for field in plan["fields"] if field["path"] == "signatures")
+        original_ref = signer["value"][0]
+        self.assertEqual(signer["type"], "multiselect")
+        await agent.field_options(ACTOR, plan["id"], signer["name"], self.request)
+        raw = agent.get_plan(ACTOR, plan["id"])
+        signer = next(field for field in raw["fields"] if field["path"] == "signatures")
+        self.assertTrue(signer["options_has_more"])
+        self.assertIn(original_ref, [option["value"] for option in signer["options"]])
+        self.assertTrue(any("待本人确认" in option["label"] for option in signer["options"]))
+        self.assertTrue(any("未签名" in option["label"] for option in signer["options"]))
+        self.assertEqual(calls, [("A", "critical_guard:native-task:A", "")])
+        self.assertNotIn("private-", json.dumps(agent.public_plan(raw)))
+        field = next(field for field in raw["fields"] if field["path"] == "cells")
+        value = agent.public_plan(raw)["fields"][0]["value"]
+        with self.assertRaises(AssistantError):
+            agent.amend(ACTOR, plan["id"], {"version": raw["version"], "values": {field["name"]: value, signer["name"]: ["forged-person"]}})
+        choices = [option["value"] for option in signer["options"]]
+        amended = agent.amend(ACTOR, plan["id"], {"version": raw["version"], "values": {field["name"]: value, signer["name"]: choices}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual([person["record_id"] for person in writes[0]["signatures"]], ["rec-original", "rec-person", "rec-external"])
+        self.assertEqual({key for person in writes[0]["signatures"] for key in person}, {"source", "record_id", "role", "name"})
+        fresh = agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries={"original": response})
+        signer = next(field for field in fresh["fields"] if field["path"] == "signatures")
+        wrong = Request({**self.request.scope, "query_string": b"scope=B"})
+        with self.assertRaisesRegex(AssistantError, "无权"):
+            await agent.field_options(ACTOR, fresh["id"], signer["name"], wrong)
+        self.assertEqual(len(calls), 1)
+
+    def test_guard_file_form_retains_existing_source_file_without_manual_rows(self):
+        from lan_bitable_template_portal.critical_guard import default_response_cells
+        app = FastAPI()
+        @app.put("/api/critical-guard/responses/{response_id}")
+        async def save(response_id: str, body: CriticalGuardResponseRequest):
+            raise AssertionError("must not write during preparation")
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        original = default_response_cells("物资检查清单", "A", today="2026-10-01")
+        original.update(source_file_id="guard-file", source_file_name="物资.xlsx", source_file_sha256="original-sha")
+        response = {"response_id": "file-response", "scope": "A", "version": 2, "sheet_type": "物资检查清单", "cells": original}
+        op = {"api_id": "PUT /api/critical-guard/responses/{response_id}", "path_params": {"response_id": "file-response"}}
+        plan = agent.prepare(ACTOR, {"operations": [op]}, self.operation_id, [], queries={"snapshot": response})
+        field = next(field for field in plan["fields"] if field["path"] == "cells")
+        self.assertEqual([child["path"] for child in field["children"]], ["check_date"])
+        value = agent.public_plan(plan)["fields"][0]["value"]
+        self.assertEqual(_result_refs(value, [], queries=plan["_queries"])["source_file_id"], "guard-file")
+        with self.assertRaisesRegex(AssistantError, "只读字段"):
+            agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: {**value, "source_file_id": "forged-file"}}})
+
+    async def test_guard_upload_then_generate_uses_new_file_and_version_with_user_date(self):
+        from lan_bitable_template_portal.critical_guard import default_response_cells
+        app, calls = FastAPI(), []
+        original = default_response_cells("物资检查清单", "A", today="2026-10-01")
+        original.update(source_file_id="old-source", source_file_name="旧物资.xlsx", source_file_sha256="old-hash")
+        response = {"response_id": "file-generate", "task_id": "guard-task", "scope": "A", "version": 2, "sheet_type": "物资检查清单", "cells": original}
+        @app.post("/api/critical-guard/source-files")
+        async def upload(file: UploadFile = File(...), scope: str = Form(""), response_id: str = Form(""), expected_version: str = Form("")):
+            calls.append(("upload", response_id, scope, expected_version, await file.read()))
+            return {"ok": True, "data": {**response, "version": 3, "cells": {**original, "source_file_id": "new-source", "source_file_name": "新物资.xlsx", "source_file_sha256": "new-hash"}}}
+        @app.put("/api/critical-guard/responses/{response_id}")
+        async def generate(response_id: str, body: CriticalGuardResponseRequest):
+            calls.append(("generate", body.model_dump()))
+            return {"ok": True, "data": {"generated": True}}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        file = self.files.upload(ACTOR, "新物资.xlsx", b"fake-xlsx-test-content", extract=False)
+        operations = [{"api_id": "POST /api/critical-guard/source-files", "body": {"scope": "A", "response_id": response["response_id"], "expected_version": "2"}, "files": {"file": [file["id"]]}},
+                      {"api_id": "PUT /api/critical-guard/responses/{response_id}", "path_params": {"response_id": response["response_id"]},
+                       "body": {"scope": "A", "generate_image": True, "cells": {"$result": {"step": 0, "path": "cells"}}}}]
+        plan = agent.prepare(ACTOR, {"operations": operations}, self.operation_id, [file["id"]], queries={"original": response})
+        self.assertEqual(calls, [])
+        field = next(field for field in plan["fields"] if field["path"] == "cells")
+        value = {**agent.public_plan(plan)["fields"][0]["value"], "check_date": "2026-10-07"}
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: value}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual(calls[0], ("upload", "file-generate", "A", "2", b"fake-xlsx-test-content"))
+        self.assertEqual(calls[1][1]["expected_version"], 3)
+        self.assertEqual(calls[1][1]["cells"]["source_file_id"], "new-source")
+        self.assertEqual(calls[1][1]["cells"]["source_file_sha256"], "new-hash")
+        self.assertEqual(calls[1][1]["cells"]["check_date"], "2026-10-07")
+        forged = copy.deepcopy(operations)
+        forged[0]["body"]["response_id"] = "another-response"
+        with self.assertRaisesRegex(AssistantError, "同一填报记录"):
+            agent.prepare(ACTOR, {"operations": forged}, self.operation_id, [file["id"]], queries={"original": response})
+
+    def test_guard_task_uses_native_sheet_and_building_options_not_text_arrays(self):
+        from lan_bitable_template_portal.critical_guard import CRITICAL_GUARD_SHEET_NAMES, CRITICAL_GUARD_SCOPE_CODES
+        app = FastAPI()
+        @app.post("/api/critical-guard/tasks")
+        async def create(body: CriticalGuardTaskRequest):
+            raise AssertionError("cannot write during prepare")
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        actor = {**ACTOR, "scopes": list("ABCDE"), "is_admin": True}
+        plan = agent.prepare(actor, {"operations": [{"api_id": "POST /api/critical-guard/tasks", "body": {"name": "重保任务"}}],
+            "fields": [{"path": "sheet_types", "type": "array"}, {"path": "target_scopes", "type": "array"}]}, self.operation_id, [])
+        fields = {field["path"]: field for field in plan["fields"]}
+        self.assertEqual(fields["sheet_types"]["type"], "multiselect")
+        self.assertEqual([option["value"] for option in fields["sheet_types"]["options"]], list(CRITICAL_GUARD_SHEET_NAMES))
+        self.assertEqual([option["value"] for option in fields["target_scopes"]["options"]], list(CRITICAL_GUARD_SCOPE_CODES))
+        self.assertEqual(fields["target_scopes"]["options"][0]["label"], "A楼")
+        with self.assertRaises(AssistantError):
+            agent.amend(actor, plan["id"], {"version": 1, "values": {fields["sheet_types"]["name"]: ["不存在的表"], fields["target_scopes"]["name"]: ["A"]}})
+        narrow = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/critical-guard/tasks"}], "fields": [{"path": "target_scopes", "type": "array"}]}, self.operation_id, [])
+        self.assertEqual(next(field for field in narrow["fields"] if field["path"] == "target_scopes")["options"], [{"value": "A", "label": "A楼"}])
+        with self.assertRaises(AssistantError):
+            agent.amend(actor, plan["id"], {"version": 1, "values": {fields["sheet_types"]["name"]: ["设备安全"], fields["target_scopes"]["name"]: []}})
+
+    async def test_guard_template_editor_uses_native_atomic_save_reset_and_conflicts(self):
+        from lan_bitable_template_portal.critical_guard import critical_guard_catalog, default_response_cells
+        from lan_bitable_template_portal.portal_service import MaintenancePortalService, PortalConflictError
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+        state = LanPortalStateStore(Path(self.tmp.name) / "guard.sqlite3")
+        cells = default_response_cells("设备安全", "A", today="2026-10-02")
+        first, second = [item["key"] for item in cells["template_items"][:2]]
+        cells["checks"][first] = {"status": "abnormal", "note": "原异常"}
+        cells["checks"][second] = {"status": "abnormal", "note": "保留异常"}
+        cells["suggestions"] = "原整改建议"
+        state.create_critical_guard_task(task_id="guard-template-task", operation_id="create-guard-fixture", task_name="模板测试", memory_key="模板测试",
+            sheet_types=["设备安全"], target_scopes=["A"], template_version=critical_guard_catalog()["template_version"],
+            created_by_open_id="fixture-user", created_by_name="测试人",
+            responses=[{"response_id": "guard-template-response", "scope": "A", "sheet_type": "设备安全", "cells": cells}])
+        service = MaintenancePortalService.__new__(MaintenancePortalService)
+        service._state_store = state
+        app, writes = FastAPI(), []
+
+        def save(body, reset):
+            writes.append(body.model_dump())
+            try:
+                result = service.update_critical_guard_scope_template(scope=body.scope, sheet_type=body.sheet_type, items=body.items,
+                    reset_to_default=reset, expected_revision=body.expected_revision, response_id=body.response_id,
+                    response_cells=body.cells, expected_response_version=body.expected_response_version,
+                    operation_id=body.operation_id, operator_open_id="fixture-user", operator_name="测试人")
+                return {"ok": True, "data": result}
+            except PortalConflictError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+
+        @app.put("/api/critical-guard/scope-template")
+        async def update(body: CriticalGuardScopeTemplateRequest):
+            return save(body, False)
+        @app.post("/api/critical-guard/scope-template/reset")
+        async def reset(body: CriticalGuardScopeTemplateRequest):
+            return save(body, True)
+
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        def prepare(api_id="PUT /api/critical-guard/scope-template", **body):
+            response = state.get_critical_guard_response("guard-template-response")
+            template = service.get_critical_guard_scope_template(scope="A", sheet_type="设备安全")
+            return agent.prepare(ACTOR, {"operations": [{"api_id": api_id, "body": {"scope": "A", "sheet_type": "设备安全", "response_id": response["response_id"], **body}}]},
+                self.operation_id, [], queries={"template": template, "task": {"responses": [response]}})
+
+        plan = prepare(expected_revision=999, expected_response_version=999)
+        self.assertEqual(writes, [])
+        self.assertEqual(plan["operations"][0]["body"]["expected_revision"], 0)
+        field = plan["fields"][0]
+        public_items = copy.deepcopy(agent.public_plan(plan)["fields"][0]["value"])
+        self.assertEqual(field["path"], "items")
+        public_items[0]["content"] = "新的检查内容"
+        public_items.append({"key": "new-stable-key", "category": "楼内", "content": "新增检查"})
+        with self.assertRaises(AssistantError):
+            agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: []}})
+        forged = copy.deepcopy(public_items)
+        forged[1]["private_field"] = "forged"
+        with self.assertRaises(AssistantError):
+            agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: forged}})
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: public_items}})
+        reviewed = await agent.confirm(ACTOR, plan["id"], {"version": amended["version"], "stage": "review"}, self.request)
+        self.assertEqual(reviewed["status"], "awaiting_second_confirmation")
+        await agent.confirm(ACTOR, plan["id"], {"version": reviewed["version"], "stage": "execute"}, self.request)
+        await gather_tasks(agent)
+        done = agent.get_plan(ACTOR, plan["id"])
+        self.assertEqual(done["status"], "completed", done.get("error"))
+        await agent.confirm(ACTOR, plan["id"], {"version": done["version"], "stage": "execute"}, self.request)
+        self.assertEqual(len(writes), 1)
+        saved = state.get_critical_guard_response("guard-template-response")
+        self.assertEqual(saved["cells"]["checks"][first], {"status": "normal", "note": ""})
+        self.assertEqual(saved["cells"]["checks"][second], cells["checks"][second])
+        self.assertEqual(saved["cells"]["suggestions"], cells["suggestions"])
+        self.assertEqual(saved["cells"]["template_items"][-1]["key"], "new-stable-key")
+        self.assertFalse(service.get_critical_guard_scope_template(scope="B", sheet_type="设备安全")["customized"])
+
+        restored_plan = prepare("POST /api/critical-guard/scope-template/reset")
+        self.assertEqual(restored_plan["fields"], [])
+        await agent._execute(ACTOR, restored_plan, self.request)
+        restored = state.get_critical_guard_response("guard-template-response")
+        self.assertEqual(restored["cells"]["template_items"], cells["template_items"])
+        self.assertEqual(restored["cells"]["checks"][second], cells["checks"][second])
+        stale = prepare()
+        update = writes[0]
+        concurrent = service.update_critical_guard_scope_template(scope="A", sheet_type="设备安全", items=update["items"],
+            reset_to_default=False, expected_revision=2, response_id=restored["response_id"], response_cells=restored["cells"],
+            expected_response_version=restored["version"], operator_open_id="fixture-user", operator_name="测试人", operation_id="concurrent-template-fixture")
+        await agent._execute(ACTOR, stale, self.request)
+        self.assertEqual(agent.get_plan(ACTOR, stale["id"])["status"], "failed")
+        self.assertEqual(state.get_critical_guard_response(restored["response_id"])["version"], concurrent["response"]["version"])
+        self.assertEqual(service.get_critical_guard_scope_template(scope="A", sheet_type="设备安全")["items"], update["items"])
+
+    def test_guard_template_requires_original_scope_sheet_and_response(self):
+        app = FastAPI()
+        @app.put("/api/critical-guard/scope-template")
+        async def save(body: CriticalGuardScopeTemplateRequest):
+            raise AssertionError("preparation cannot write")
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        body = {"scope": "A", "sheet_type": "设备安全"}
+        template = {**body, "revision": 0, "items": [{"key": "a.1", "content": "检查", "category": "设备"}]}
+        for changed, queries, message in (({"scope": "B"}, {"template": template}, "无权"), ({}, {}, "先读取"),
+            ({"response_id": "missing-response"}, {"template": template}, "先读取原重保任务")):
+            with self.subTest(changed=changed), self.assertRaisesRegex(AssistantError, message):
+                agent.prepare(ACTOR, {"operations": [{"api_id": "PUT /api/critical-guard/scope-template", "body": {**body, **changed}}]}, self.operation_id, [], queries=queries)
+
+    def test_generated_plan_and_form_ids_with_phone_like_digits_round_trip(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        app = FastAPI()
+        @app.put("/api/critical-guard/scope-template")
+        async def save(body: CriticalGuardScopeTemplateRequest):
+            raise AssertionError("review cannot write")
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        body = {"scope": "A", "sheet_type": "设备安全"}
+        identifier = "a289617ab13940249922e985f84575f8"
+        original = [{"key": identifier, "content": "设备检查", "category": "设备"}]
+        with patch("lan_bitable_template_portal.lighthouse_agent.uuid.uuid4", return_value=SimpleNamespace(hex=identifier)):
+            plan = agent.prepare(ACTOR, {"operations": [{"api_id": "PUT /api/critical-guard/scope-template", "body": body}]}, self.operation_id, [],
+                queries={"template": {**body, "revision": 0, "items": original}})
+        public = agent.public_plan(plan)
+        self.assertEqual(public["id"], identifier)
+        field = public["fields"][0]
+        self.assertEqual(field["value"][0]["$query"]["ref"], "query_form_" + identifier)
+        self.assertEqual(field["value"][0]["key"], identifier)
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: field["value"]}})
+        self.assertEqual(amended["status"], "awaiting_confirmation")
+        self.assertEqual(agent.get_plan(ACTOR, plan["id"])["operations"][0]["body"]["items"], original)
+
     def test_calendar_inputs_reject_invalid_dates_without_business_write(self):
         fields = [{"name": key, "path": key, "section": "body", "type": kind, "required": True} for key, kind in (("date", "date"), ("time", "time"), ("month", "month"))]
         plan = self.agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/step-two"}], "fields": fields}, self.operation_id, [])
@@ -332,6 +930,201 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sequential_writes, [])
         amended = self.agent.amend(ACTOR, plan["id"], {"version": plan["version"], "values": {"date": "2026-10-01", "time": "10:00", "month": "2026-10"}})
         self.assertEqual(amended["status"], "awaiting_confirmation")
+
+    async def test_nested_required_fields_and_timestamp_calendar_fill_native_body(self):
+        class NestedFields(BaseModel):
+            actual: str
+        class NestedRequest(BaseModel):
+            fields: NestedFields
+        app, writes = FastAPI(), []
+        @app.post("/api/nested-form")
+        async def nested(body: NestedRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        plan = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/nested-form"}]}, self.operation_id, [])
+        field = plan["fields"][0]
+        self.assertEqual((field["section"], field["path"]), ("body", "fields.actual"))
+        plan = agent.amend(ACTOR, plan["id"], {"version": plan["version"], "values": {field["name"]: "2026-10-01T10:30:00"}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, plan["id"]), self.request)
+        self.assertEqual(writes, [{"fields": {"actual": "2026-10-01T10:30:00"}}])
+        timestamp = self.agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/step-two"}], "fields": [
+            {"name": "actual", "path": "actual", "label": "实际完成时间", "type": "datetime-local", "value_format": "timestamp_ms", "required": True}
+        ]}, self.operation_id, [])
+        result = self.agent.amend(ACTOR, timestamp["id"], {"version": timestamp["version"], "values": {"actual": "2026-10-01T10:30:00"}})
+        self.assertEqual(self.agent.get_plan(ACTOR, result["id"])["operations"][0]["body"]["actual"], 1790821800000)
+
+    async def test_repair_candidates_reject_other_scope_but_allow_shared_blank_scope(self):
+        app, calls = FastAPI(), []
+        rows = [{"record_id": "rec-b", "scope": "B", "name": "B楼设备"}]
+        @app.get("/api/repair-management/cmdb-candidates")
+        async def devices(scope: str, q: str = "", limit: int = 80):
+            calls.append(scope)
+            return {"ok": True, "data": {"records": copy.deepcopy(rows)}}
+        @app.post("/api/repair-management/followups")
+        async def followup(body: RepairFollowupRecordRequest):
+            raise AssertionError("candidate search must never write")
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        plan = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/repair-management/followups", "body": {
+            "scope": "A", "summary_record_id": "rec-a", "fields": {}
+        }}]}, self.operation_id, [])
+        field = next(f for f in plan["fields"] if f["path"] == "cmdb_record_ids")
+        with self.assertRaises(AssistantError) as error:
+            await agent.field_options(ACTOR, plan["id"], field["name"], self.request)
+        self.assertEqual(error.exception.status, 403)
+        self.assertEqual(agent.get_plan(ACTOR, plan["id"])["version"], 1)
+        rows[:] = [{"record_id": "rec-shared", "scope": "", "name": "共用设备"}]
+        refreshed = await agent.field_options(ACTOR, plan["id"], field["name"], self.request)
+        raw = agent.get_plan(ACTOR, refreshed["id"])
+        self.assertEqual(next(f for f in raw["fields"] if f["path"] == "cmdb_record_ids")["options"][0]["value"], "rec-shared")
+        forbidden = Request({**self.request.scope, "query_string": b"scope=B"})
+        with self.assertRaises(AssistantError):
+            await agent.field_options(ACTOR, plan["id"], field["name"], forbidden)
+        self.assertEqual(calls, ["A", "A"])
+
+    def test_structured_inputs_use_native_schema_and_preserve_unedited_values(self):
+        class Row(BaseModel):
+            content: str
+            enabled: bool
+            actual: str
+            weight: int = 3
+        class Rows(BaseModel):
+            rows: list[Row]
+        app = FastAPI()
+        @app.post("/api/structured-form")
+        async def submit(body: Rows):
+            raise AssertionError("form review must never write")
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        original = {"content": "原步骤", "enabled": False, "actual": "2026-10-01T10:30:00", "weight": 3}
+        plan = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/structured-form", "body": {"rows": [original]}}], "fields": [
+            {"name": "rows", "path": "rows", "label": "操作列表", "type": "array", "required": True, "item": {"type": "text"}}
+        ]}, self.operation_id, [])
+        field = plan["fields"][0]
+        self.assertEqual(field["item"]["type"], "object")
+        self.assertEqual({f["path"] for f in field["item"]["children"]}, {"content", "enabled", "actual", "weight"})
+        self.assertEqual(_result_refs(field["value"], [], queries=plan["_queries"]), [original])
+        public = agent.public_plan(plan)
+        self.assertEqual(public["fields"][0]["item"], field["item"])
+        with self.assertRaises(AssistantError):
+            agent.amend(ACTOR, plan["id"], {"version": 1, "values": {"rows": "not-a-list"}})
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {"rows": [{**original, "content": "已更正"}]}})
+        self.assertEqual(agent.get_plan(ACTOR, amended["id"])["operations"][0]["body"]["rows"], [{**original, "content": "已更正"}])
+        clear = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/structured-form", "body": {"rows": [original]}}], "fields": [
+            {"name": "rows", "path": "rows", "label": "操作列表", "type": "array", "required": True}
+        ]}, self.operation_id, [])
+        clear = agent.amend(ACTOR, clear["id"], {"version": 1, "values": {"rows": []}})
+        self.assertEqual(agent.get_plan(ACTOR, clear["id"])["operations"][0]["body"]["rows"], [])
+        with self.assertRaisesRegex(AssistantError, "实际字段"):
+            agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/structured-form", "body": {"rows": [original]}}], "fields": [
+                {"name": "forged", "path": "forged", "type": "object", "children": [{"path": "secret"}]}
+            ]}, self.operation_id, [])
+
+    async def test_unedited_form_projection_never_overwrites_original_text_or_private_content(self):
+        class Row(BaseModel):
+            content: str
+            note: str
+        class Body(BaseModel):
+            rows: list[Row]
+        app, writes = FastAPI(), []
+        @app.post("/api/raw-form")
+        async def save(body: Body):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        original = {"content": "Ａ侧设备（待检查）", "note": "原备注\n身份证：11010519491231002X"}
+        plan = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/raw-form", "body": {"rows": [original]}}],
+            "fields": [{"path": "rows", "type": "array"}]}, self.operation_id, [])
+        field = plan["fields"][0]
+        value = agent.public_plan(plan)["fields"][0]["value"]
+        self.assertNotIn("11010519491231002X", json.dumps(value))
+        self.assertNotEqual(value[0]["content"], original["content"])
+        self.assertEqual(_result_refs(value, [], queries=plan["_queries"]), [original])
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: value}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual(writes, [{"rows": [original]}])
+        plan = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/raw-form", "body": {"rows": [original]}}],
+            "fields": [{"path": "rows", "type": "array"}]}, self.operation_id, [])
+        field = plan["fields"][0]
+        value = agent.public_plan(plan)["fields"][0]["value"]
+        value[0]["content"] = "明确更正内容"
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {field["name"]: value}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual(writes[-1], {"rows": [{**original, "content": "明确更正内容"}]})
+
+    async def test_long_editable_rows_preserve_hidden_proof_when_reordered_or_deleted(self):
+        class ProofRow(BaseModel):
+            content: str
+            file_token: str
+        class ProofRows(BaseModel):
+            rows: list[ProofRow]
+        app, writes = FastAPI(), []
+        @app.post("/api/proof-rows")
+        async def submit(body: ProofRows):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        original = [{"content": f"记录{i}", "file_token": f"private-proof-{i}"} for i in range(61)]
+        plan = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/proof-rows", "body": {"rows": original}}], "fields": [
+            {"name": "rows", "path": "rows", "label": "明细", "type": "array", "required": True}
+        ]}, self.operation_id, [])
+        values = agent.public_plan(plan)["fields"][0]["value"]
+        self.assertEqual(len(values), 61)
+        self.assertNotIn("private-proof", json.dumps(values))
+        self.assertNotIn("file_token", {child["path"] for child in plan["fields"][0]["item"]["children"]})
+        forged = copy.deepcopy(values)
+        forged[0]["$query"]["ref"] = "query_" + "f" * 32
+        with self.assertRaises(AssistantError):
+            agent.amend(ACTOR, plan["id"], {"version": 1, "values": {"rows": forged}})
+        self.assertEqual(writes, [])
+        values = [{**values[-1], "content": "已更正最后一条"}, *values[:-2]]
+        amended = agent.amend(ACTOR, plan["id"], {"version": 1, "values": {"rows": values}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, amended["id"]), self.request)
+        self.assertEqual(writes, [{"rows": [{**original[-1], "content": "已更正最后一条"}, *original[:-2]]}])
+        self.assertEqual(len(writes[0]["rows"]), 60)
+
+    async def test_sop_editor_uses_original_steps_version_and_native_loop_expansion(self):
+        from lan_bitable_template_portal.polling_work_orders import PollingWorkOrderService
+        app, writes = FastAPI(), []
+        @app.post("/api/polling-sops")
+        async def create(body: PollingSopRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        @app.put("/api/polling-sops/{sop_id}")
+        async def update(sop_id: str, body: PollingSopRequest):
+            writes.append(body.model_dump())
+            return {"ok": True}
+        agent = PortalAgent(self.assistant, PortalAPICatalog(app), self.files)
+        draft = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/polling-sops", "body": {"name": "水质循环", "scope": "A", "work_type": "maintenance"}}]}, self.operation_id, [])
+        form = next(field for field in draft["fields"] if field["path"] == "steps")
+        self.assertEqual((form["type"], form["maxItems"], form["context_source"]), ("array", 30, "sop_steps"))
+        children = {child["path"]: child for child in form["item"]["children"]}
+        self.assertTrue(children["step_id"]["hidden"])
+        self.assertEqual(children["step_id"]["generate"], "uuid")
+        self.assertTrue(children["operator_required"]["initial"])
+        self.assertTrue(children["delay_reminder_minutes"]["toggle_zero"])
+        steps = [{"step_id": f"s{i}", "content": f"步骤{i}", "operator_required": True, "reviewer_required": True, "photo_required": True} for i in range(1, 15)]
+        steps[5]["repeat_rules"] = [{"from_step_id": "s1", "to_step_id": "s6", "count": 4}]
+        steps[13]["repeat_rules"] = [{"from_step_id": "s11", "to_step_id": "s14", "count": 4}]
+        draft = agent.amend(ACTOR, draft["id"], {"version": 1, "values": {form["name"]: steps}})
+        await agent._execute(ACTOR, agent.get_plan(ACTOR, draft["id"]), self.request)
+        expanded = PollingWorkOrderService._expanded_steps(writes[0]["steps"])
+        self.assertEqual(len(expanded), 54)
+        self.assertEqual([step["step_id"] for step in expanded[38:]], [f"s{i}" for i in range(11, 15)] * 4)
+        queries = {"query_" + "a" * 32: {"items": [{"sop_id": "sop-original", "version": 7, "scope": "A", "work_type": "maintenance", "name": "原名称", "steps": steps}]}}
+        edited = agent.prepare(ACTOR, {"operations": [{"api_id": "PUT /api/polling-sops/{sop_id}", "path_params": {"sop_id": "sop-original"}, "body": {"name": "仅更名"}}]}, self.operation_id, [], queries=queries)
+        await agent._execute(ACTOR, edited, self.request)
+        self.assertEqual(writes[-1]["expected_version"], 7)
+        self.assertEqual([step["step_id"] for step in writes[-1]["steps"]], [step["step_id"] for step in steps])
+        self.assertEqual(writes[-1]["work_type"], "maintenance")
+        with self.assertRaisesRegex(AssistantError, "读取原SOP"):
+            agent.prepare(ACTOR, {"operations": [{"api_id": "PUT /api/polling-sops/{sop_id}", "path_params": {"sop_id": "unknown"}, "body": {"name": "仅更名"}}]}, self.operation_id, [])
+        invalid = copy.deepcopy(steps)
+        invalid[5]["repeat_rules"][0]["to_step_id"] = "s14"
+        with self.assertRaisesRegex(AssistantError, "连续步骤区间"):
+            agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/polling-sops", "body": {"name": "无效循环", "scope": "A", "steps": invalid}}]}, self.operation_id, [])
+        missing_scope = agent.prepare(ACTOR, {"operations": [{"api_id": "POST /api/polling-sops", "body": {"name": "仅A楼", "steps": steps}}]}, self.operation_id, [])
+        choices = next(field for field in missing_scope["fields"] if field["path"] == "scope")["options"]
+        self.assertEqual([option["value"] for option in choices], ["A"])
 
     async def test_async_job_resume_continues_without_resubmitting(self):
         decision = {
@@ -375,6 +1168,14 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             "progress": "已完成60%",
             "start_time": "2026-09-30 09:00",
             "end_time": "2026-09-30 11:00",
+            "location": "A楼机房",
+            "content": "调整机组参数",
+            "reason": "设备更新",
+            "impact": "短时停机",
+            "specialty": "电气",
+            "maintenance_cycle": "每月",
+            "execution_party": "厂维",
+            "building_codes": ["A"],
         }
         decision = {
             "operations": [{
@@ -385,6 +1186,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     "work_type": "maintenance",
                     "action": "start",
                     "manual": True,
+                    "polling_work_order_exempt": True,
                     "patch": {"$query": {"ref": qref, "path": "draft"}},
                 },
             }],
@@ -438,6 +1240,34 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(patch["progress"], "已完成60%")
         self.assertEqual(patch["start_time"], "2026-09-30 09:00")
         self.assertEqual(patch["end_time"], "2026-09-30 11:00")
+
+    async def test_notice_binding_search_preserves_selected_record_until_cleared(self):
+        from urllib.parse import urlencode
+        plan = await self._prepare_notice_plan()
+        await self.agent.field_options(ACTOR, plan["id"], "step0.source_record_id", self.request)
+        self.records = [{"record_id": "plan-new", "title": "新计划", "status": "未开始"}]
+        request = Request({**self.request.scope, "query_string": urlencode({"q": "新计划", "selected": json.dumps(["plan-1"])}).encode()})
+        loaded = await self.agent.field_options(ACTOR, plan["id"], "step0.source_record_id", request)
+        field = next(f for f in loaded["fields"] if f["path"] == "source_record_id")
+        self.assertEqual([option["value"] for option in field["options"]], ["plan-1", "plan-new"])
+        loaded = await self.agent.field_options(ACTOR, plan["id"], "step0.source_record_id", self.request)
+        field = next(f for f in loaded["fields"] if f["path"] == "source_record_id")
+        self.assertEqual([option["value"] for option in field["options"]], ["plan-new"])
+
+    async def test_notice_source_options_keep_requested_month_and_report_limit(self):
+        plan = await self._prepare_notice_plan()
+        plan["operations"][0]["body"]["source_month"] = "9月"
+        self.agent._save_plan(ACTOR, plan)
+        rows = [{"source_record_id": f"plan-{index}", "title": f"九月计划{index}", "progress": "延期未开始"} for index in range(200)]
+        with patch.object(self.agent, "_invoke", new=AsyncMock(return_value={"ok": True, "data": {"items": rows}})) as invoke:
+            loaded = await self.agent.field_options(ACTOR, plan["id"], "step0.source_record_id", self.request)
+        self.assertEqual(invoke.call_args.args[1]["params"]["month"], "9月")
+        field = next(item for item in loaded["fields"] if item["path"] == "source_record_id")
+        self.assertTrue(field["options_has_more"])
+        self.assertIn("延期未开始", field["options"][0]["label"])
+        with patch.object(self.agent, "_invoke", new=AsyncMock(return_value={"ok": True, "data": {"items": None}})), self.assertRaises(AssistantError):
+            await self.agent.field_options(ACTOR, plan["id"], "step0.source_record_id", self.request)
+        self.assertEqual(self.notice_writes, [])
 
     async def test_concurrent_refresh_resumes_remaining_write_exactly_once(self):
         # Two concurrent refresh() calls race on the same submitted, 2-step plan.
@@ -564,9 +1394,10 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         file_a = self.files.upload(ACTOR, "person-ref.txt", ("人员附件\r\n" * 10).encode())
         decision = {
             "operations": [{
-                "api_id": "POST /api/records/attach-files",
+                "api_id": "POST /api/cabinet-power/batches/{batch_id}/images",
+                "path_params": {"batch_id": "batch-attach-1"},
                 "body": {"file_token": "ignored-token"},
-                "files": {"attachment": [file_a["id"]]},
+                "files": {"files": [file_a["id"]]},
             }],
             "fields": [{
                 "operation_index": 0,
@@ -719,7 +1550,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     self.store.put_document = original_put
 
                 # Actor must never enter (or stay stuck in) the executing set.
-                self.assertNotIn(ACTOR["id"], self.agent.executing)
+                self.assertFalse(any(owner == ACTOR["id"] for owner, _plan_id in self.agent.executing))
                 self.assertEqual(self.delete_writes, [])
 
                 # The rollback must restore the original version/status in the

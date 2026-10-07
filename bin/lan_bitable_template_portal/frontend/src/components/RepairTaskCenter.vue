@@ -1,5 +1,6 @@
 <template>
   <Teleport to="body">
+    <UiTransition name="ui-overlay" appear>
     <div
       v-if="open"
       class="repair-task-overlay"
@@ -28,7 +29,7 @@
         </div>
         <MessageBanner v-if="message" :tone="messageTone" :text="message" />
         <div class="repair-task-list" :aria-busy="loading">
-          <div v-if="loading" class="empty-state">正在读取任务...</div>
+          <div v-if="loading" class="empty-state"><LoadingIndicator>正在读取任务...</LoadingIndicator></div>
           <div v-else-if="!items.length" class="empty-state">当前没有失败或处理中任务</div>
           <article
             v-for="(item, index) in items"
@@ -78,6 +79,7 @@
         </footer>
       </section>
     </div>
+    </UiTransition>
   </Teleport>
 </template>
 

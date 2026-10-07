@@ -1,13 +1,14 @@
 <template>
-  <Teleport to="body">
-    <div class="text-fill-backdrop" @click.self="close">
-      <section ref="dialog" class="text-fill" role="dialog" aria-modal="true" aria-labelledby="text-fill-title" tabindex="-1">
-        <header><h2 id="text-fill-title">粘贴文本识别</h2><button class="icon" aria-label="关闭文本识别" :disabled="busy" @click="close"><X :size="20" /></button></header>
+  <Teleport to="body" :disabled="embedded">
+    <UiTransition :css="!embedded" @after-leave="emit('closed')">
+    <div v-if="embedded || open !== false" class="text-fill-backdrop" :class="{ embedded }" @click.self="!embedded && close()">
+      <section ref="dialog" class="text-fill" :role="embedded ? 'group' : 'dialog'" :aria-modal="embedded ? undefined : true" :aria-labelledby="embedded ? undefined : 'text-fill-title'" :aria-label="embedded ? '本批次文本识别' : undefined" tabindex="-1">
+        <header v-if="!embedded"><h2 id="text-fill-title">粘贴文本识别</h2><button type="button" class="icon" aria-label="关闭文本识别" :disabled="busy" @click="close"><X :size="20" /></button></header>
         <div class="paste-area">
-          <label for="text-fill-input">机柜上下电记录</label>
-          <div class="paste-input"><textarea id="text-fill-input" ref="input" v-model="text" rows="2" :disabled="busy" placeholder="EA118-E2-2  A11  测试电转正式电  2026-09-16 16:02:59  2026-09-14 16:03:16" @paste="paste" /><button :disabled="busy || !text.trim()" @click="append"><ScanText :size="16" />识别</button></div>
+          <label :for="inputId">机柜上下电记录</label>
+          <div class="paste-input"><textarea :id="inputId" ref="input" v-model="text" rows="2" :disabled="busy || disabled" placeholder="EA118-E2-2  A11  测试电转正式电  2026-09-16 16:02:59  2026-09-14 16:03:16" @paste="paste" /><button type="button" :disabled="busy || disabled || !text.trim()" @click="append"><ScanText :size="16" />识别</button></div>
           <div v-if="busy" class="feedback" role="status"><Loader2 :size="16" class="spin" />{{ applying ? '正在保存…' : '正在匹配本批次机柜…' }}</div>
-          <div v-if="error" class="feedback error" role="alert">{{ error }}<button v-if="stale" :disabled="busy" @click="refresh">重新核对</button></div>
+          <div v-if="error" class="feedback error" role="alert">{{ error }}<button type="button" v-if="stale" :disabled="busy || disabled" @click="refresh">重新核对</button></div>
         </div>
         <div class="preview">
           <div v-if="rows.length" class="summary">识别 {{ rows.length }} 条 · 可填入 {{ fillable.length }} 条</div>
@@ -16,14 +17,15 @@
               <td><strong>{{ row.room }} / {{ row.rack }}</strong><small>{{ row.scope }}楼</small></td>
               <td v-for="field in fields" :key="field.key" :class="{ changed: row.row_id && row[field.key] !== targetOf(row)?.[field.key] }"><small v-if="targetOf(row)?.[field.key] && row[field.key] !== targetOf(row)?.[field.key]">原：{{ targetOf(row)?.[field.key] }}</small><span>{{ row[field.key] }}</span></td>
               <td class="match-label" :class="{ warning: row.issue || conflicts.has(row.row_id) }">{{ row.issue || (conflicts.has(row.row_id) ? '内容冲突，请移除错误记录' : repeats.has(keyOf(row)) ? '重复，跳过' : !changes(row) ? '内容一致，跳过' : '可填入') }}</td>
-              <td><button class="icon" :disabled="busy" :aria-label="'移除识别记录 ' + row.rack" title="移除识别记录" @click="removeRow(row)"><X :size="15" /></button></td>
+              <td><button type="button" class="icon" :disabled="busy || disabled" :aria-label="'移除识别记录 ' + row.rack" title="移除识别记录" @click="removeRow(row)"><X :size="15" /></button></td>
             </tr></tbody></table></div>
           <p v-else class="empty">暂无粘贴记录</p>
-          <div v-if="pages > 1" class="pagination"><span>每页 25 条</span><button class="icon" :disabled="page <= 1" aria-label="上一页" @click="page--"><ChevronLeft :size="16" /></button><span>{{ page }} / {{ pages }}</span><button class="icon" :disabled="page >= pages" aria-label="下一页" @click="page++"><ChevronRight :size="16" /></button></div>
+          <div v-if="pages > 1" class="pagination"><span>每页 25 条</span><button type="button" class="icon" :disabled="page <= 1" aria-label="上一页" @click="page--"><ChevronLeft :size="16" /></button><span>{{ page }} / {{ pages }}</span><button type="button" class="icon" :disabled="page >= pages" aria-label="下一页" @click="page++"><ChevronRight :size="16" /></button></div>
         </div>
-        <footer><span>仅补填当前待办，不新增机柜</span><button :disabled="busy" @click="close">取消</button><button class="primary" :disabled="busy || stale || !fillable.length" @click="apply"><Check :size="16" />填入本批次（{{ fillable.length }}）</button></footer>
+        <footer v-if="!embedded"><span>仅补填当前待办，不新增机柜</span><button type="button" :disabled="busy" @click="close">取消</button><button type="button" class="primary" :disabled="busy || stale || !fillable.length" @click="apply"><Check :size="16" />填入本批次（{{ fillable.length }}）</button></footer>
       </section>
     </div>
+    </UiTransition>
     <ConfirmDialog :open="discard" title="放弃本次文本回填？" message="尚未填入的识别内容将被清除，当前批次记录不受影响。" confirm-label="放弃回填" cancel-label="继续核对" @resolve="resolveDiscard" />
   </Teleport>
 </template>
@@ -36,8 +38,9 @@ import { randomHexId } from '../browserStorage';
 import { acquireModal } from '../modalState';
 import ConfirmDialog from './ConfirmDialog.vue';
 
-const props = defineProps<{ batchId: string }>();
-const emit = defineEmits<{ close: []; applied: [batch: Dict, count: number] }>();
+const props = defineProps<{ batchId: string; open?: boolean; embedded?: boolean; modelValue?: Dict; disabled?: boolean; planId?: string; planVersion?: number; fieldName?: string }>();
+const emit = defineEmits<{ close: []; closed: []; applied: [batch: Dict, count: number]; 'update:modelValue': [value: Dict] }>();
+const inputId = computed(() => props.embedded ? `text-fill-${props.planId}-${props.fieldName}` : 'text-fill-input');
 const fields = [{key:'action',label:'操作类型'},{key:'expected',label:'期望完成时间'},{key:'actual',label:'实际完成时间'}];
 const dialog = ref<HTMLElement>(), input = ref<HTMLTextAreaElement>();
 const sources = ref<{id:string;text:string}[]>([]), rows = ref<Dict[]>([]), text = ref(''), error = ref('');
@@ -61,11 +64,17 @@ const repeats = computed(()=>overlaps.value.repeats), conflicts = computed(()=>o
 const fillable = computed(()=>rows.value.filter(row=>row.row_id && !row.issue && changes(row) && !repeats.value.has(keyOf(row)) && !conflicts.value.has(row.row_id)));
 const pages = computed(()=>Math.max(1,Math.ceil(rows.value.length/25)));
 const pageRows = computed(()=>rows.value.slice((page.value-1)*25,page.value*25));
+watch([sources, version, fillable, busy, stale], () => {
+  if (props.embedded) emit('update:modelValue', {sources:sources.value, version:version.value, omitted:[...hidden],
+    rows:busy.value || stale.value ? [] : fillable.value.map(row=>({text_id:row.text_id,text_row:row.text_row,row_id:row.row_id}))});
+});
 watch(pages,()=>{page.value=Math.min(page.value,pages.value);});
 const request = (action:string,body:Dict) => requestJson(`/api/cabinet-power/batches/${props.batchId}/text-${action}`,{method:'POST',body:JSON.stringify(body),timeoutMs:90000});
 
 async function preview(nextSources: typeof sources.value):Promise<void> {
-  const result = await request('preview',{sources:nextSources});
+  const result = props.embedded
+    ? await requestJson(`/api/assistant/plans/${props.planId}/cabinet-text-preview`, {method:'POST',body:JSON.stringify({version:props.planVersion,field:props.fieldName,sources:nextSources}),timeoutMs:90000})
+    : await request('preview',{sources:nextSources});
   rows.value = result.rows.filter((row:Dict)=>!hidden.has(keyOf(row))).map((row:Dict)=>({
     ...row,row_id:targetOf(row)?.editable ? targetOf(row)?.row_id : '',
     issue:row.issue || (row.targets.length>1 ? '同柜多条，请在待办中核对' : ''),
@@ -73,12 +82,12 @@ async function preview(nextSources: typeof sources.value):Promise<void> {
   sources.value=nextSources;version.value=result.version;stale.value=false;
 }
 function paste(event:ClipboardEvent):void {
-  if(busy.value)return;
+  if(busy.value || props.disabled)return;
   const value=event.clipboardData?.getData('text/plain');
   if(value?.trim()){event.preventDefault();text.value=value;void append();}
 }
 async function append():Promise<void> {
-  if(busy.value || !text.value.trim())return;
+  if(busy.value || props.disabled || !text.value.trim())return;
   busy.value=true;error.value='';
   try {await preview([...sources.value,{id:'fill_'+randomHexId(),text:text.value}]);text.value='';page.value=pages.value;}
   catch(exc:any){error.value=exc.message||'文本识别失败，请重新粘贴';}
@@ -92,7 +101,7 @@ async function refresh():Promise<void> {
 }
 function removeRow(row:Dict):void {hidden.add(keyOf(row));rows.value=rows.value.filter(item=>item!==row);}
 async function apply():Promise<void> {
-  if(busy.value || stale.value || !fillable.value.length)return;
+  if(props.embedded || busy.value || stale.value || !fillable.value.length)return;
   busy.value=true;applying.value=true;error.value='';
   const count=fillable.value.length;
   try {
@@ -114,8 +123,21 @@ function resolveDiscard(value:boolean):void {discard.value=false;const proceed=p
 defineExpose({requestLeave});
 let modal:ReturnType<typeof acquireModal>|undefined;
 let returnFocus:HTMLElement|null=null;
+function releaseDialog():void {
+  modal?.release();modal=undefined;window.removeEventListener('keydown',keydown,true);
+  if(returnFocus?.isConnected)returnFocus.focus();
+}
+async function acquireDialog():Promise<void> {
+  if(props.embedded || props.open===false || modal)return;
+  returnFocus=document.activeElement as HTMLElement;modal=acquireModal();window.addEventListener('keydown',keydown,true);
+  await nextTick();if(modal)input.value?.focus();
+}
+watch(()=>props.open,(open)=>{
+  if(open===false){releaseDialog();sources.value=[];rows.value=[];text.value='';error.value='';hidden.clear();stale.value=false;page.value=1;}
+  else void acquireDialog();
+});
 function keydown(event:KeyboardEvent):void {
-  if(!modal?.isTop() || !dialog.value)return;
+  if(!modal?.isTop(event, dialog.value) || !dialog.value)return;
   if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();close();}
   if(event.key==='Tab'){
     const nodes=Array.from(dialog.value.querySelectorAll<HTMLElement>('button:not(:disabled),textarea:not(:disabled)')).filter(node=>node.getClientRects().length);
@@ -123,8 +145,20 @@ function keydown(event:KeyboardEvent):void {
     if(!dialog.value.contains(document.activeElement)||(event.shiftKey?document.activeElement===first:document.activeElement===last)){event.preventDefault();(event.shiftKey?last:first)?.focus();}
   }
 }
-onMounted(async()=>{returnFocus=document.activeElement as HTMLElement;modal=acquireModal();window.addEventListener('keydown',keydown,true);await nextTick();input.value?.focus();});
-onBeforeUnmount(()=>{modal?.release();window.removeEventListener('keydown',keydown,true);if(returnFocus?.isConnected)returnFocus.focus();});
+onMounted(async()=>{
+  if(props.embedded){
+    for(const key of props.modelValue?.omitted || [])hidden.add(key);
+    const initial=Array.isArray(props.modelValue?.sources) ? props.modelValue.sources : [];
+    if(initial.length){
+      sources.value=initial;busy.value=true;
+      try{await preview(initial);}catch(exc:any){error.value=exc.message||'文本识别失败，请重新粘贴';}
+      finally{busy.value=false;}
+    }
+    return;
+  }
+  await acquireDialog();
+});
+onBeforeUnmount(releaseDialog);
 </script>
 
 <style scoped>
@@ -140,4 +174,6 @@ onBeforeUnmount(()=>{modal?.release();window.removeEventListener('keydown',keydo
 .pagination{display:flex;gap:10px;align-items:center;justify-content:flex-end;padding:8px 20px;font-size:12px;border-top:1px solid #e7edf2}.pagination>span:first-child{margin-right:auto}.empty{text-align:center;padding:30px;color:#7b8998}
 .text-fill footer{border-top:1px solid #dce5ee}.text-fill footer>span{flex:1}.text-fill button.primary{background:#126da8;color:white;border-color:#126da8}.spin{animation:text-fill-spin 1s linear infinite}@keyframes text-fill-spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.text-fill-backdrop{padding:10px}.text-fill{max-height:calc(100dvh - 20px)}.text-fill header,.text-fill footer,.paste-area{padding:12px}.text-fill footer{flex-wrap:wrap}.text-fill footer>span{flex-basis:100%}}
+.embedded{position:static;display:block;background:none;padding:0;min-width:0}.embedded .text-fill{width:100%;max-height:none;border:0;border-radius:0;background:transparent;color:inherit;box-shadow:none;font:inherit}.embedded .paste-area{padding:0 0 10px;background:none}.embedded .summary{padding:8px 0;color:var(--lh-muted)}.embedded .table-scroll{max-height:360px;border-color:var(--lh-input-border)}.embedded table{min-width:760px;font-size:12px}.embedded th,.embedded td{padding:8px;border-color:var(--lh-input-border)}.embedded th{background:var(--lh-surface-subtle)}.embedded small,.embedded .pagination{color:var(--lh-muted)}.embedded .changed span{color:var(--lh-accent-strong)}.embedded .match-label{color:var(--lh-accent)}.embedded .match-label.warning,.embedded .feedback.error{color:var(--lh-warn)}.embedded button,.embedded textarea{background:var(--lh-surface);border-color:var(--lh-input-border)}.embedded button:hover{background:var(--lh-surface-hover)}.embedded .pagination{padding:8px 0;border-color:var(--lh-input-border)}
+.embedded th:first-child,.embedded td:first-child{position:sticky;left:0;z-index:1;background:var(--lh-surface-subtle)}.embedded th:first-child{z-index:2}
 </style>

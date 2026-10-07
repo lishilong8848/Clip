@@ -3,9 +3,10 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 echo ========================================
-echo           ClipFlow starting...
+echo           ClipFlow + OpenClaw starting...
 echo ========================================
 echo.
+echo OpenClaw starts in the background; no separate launcher is needed.
 
 set "PYTHON=%~dp0bin\.venv\Scripts\python.exe"
 set "MAIN_EXE=%~dp0bin\ClipFlow.exe"

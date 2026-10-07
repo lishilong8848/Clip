@@ -126,7 +126,7 @@
           </thead>
           <tbody>
             <tr v-if="recordsLoading && !records.length">
-              <td colspan="9" class="table-state">正在读取水耗记录</td>
+              <td colspan="9" class="table-state"><LoadingIndicator>正在读取水耗记录</LoadingIndicator></td>
             </tr>
             <tr v-else-if="!records.length">
               <td colspan="9" class="table-state">当前条件下暂无水耗记录</td>
@@ -164,7 +164,7 @@
             </tr>
           </tbody>
         </table>
-        <div v-if="recordsLoading && records.length" class="table-loading-overlay">正在更新</div>
+        <div v-if="recordsLoading && records.length" class="table-loading-overlay"><LoadingIndicator>正在更新</LoadingIndicator></div>
       </div>
 
       <footer class="pagination">
@@ -182,6 +182,7 @@
       </footer>
     </section>
 
+    <UiTransition name="ui-drawer" appear>
     <div v-if="drawerOpen" class="drawer-backdrop" @click.self="requestCloseDrawer">
       <aside class="record-drawer" role="dialog" aria-modal="true" aria-labelledby="water-drawer-title">
         <header>
@@ -194,7 +195,7 @@
           </button>
         </header>
 
-        <div v-if="drawerLoading" class="drawer-state">正在读取记录详情</div>
+        <div v-if="drawerLoading" class="drawer-state"><LoadingIndicator>正在读取记录详情</LoadingIndicator></div>
         <div
           v-else-if="editingRecordId && !detail.record_id"
           class="drawer-state drawer-state--error"
@@ -400,7 +401,7 @@
                   @keydown.enter.prevent="openLightbox(stagedPhotos, index)"
                   @keydown.space.prevent="openLightbox(stagedPhotos, index)"
                 />
-                <span>{{ photo.uploading ? "上传中" : displayPhotoName(photo, index) }}</span>
+                <span><LoadingIndicator v-if="photo.uploading">上传中</LoadingIndicator><template v-else>{{ displayPhotoName(photo, index) }}</template></span>
                 <button
                   type="button"
                   aria-label="移除照片"
@@ -425,14 +426,17 @@
                 :disabled="saving || photoUploading || recordEditingLocked"
               >
                 <Save :size="17" />
-                {{ saving ? "保存中" : editingRecordId ? "保存修改" : "新增记录" }}
+                <LoadingIndicator v-if="saving">保存中</LoadingIndicator>
+                <template v-else>{{ editingRecordId ? "保存修改" : "新增记录" }}</template>
               </button>
             </div>
           </footer>
         </form>
       </aside>
     </div>
+    </UiTransition>
 
+    <UiTransition name="ui-overlay" appear>
     <div v-if="lightboxPhotos.length" class="lightbox" role="dialog" aria-modal="true" @click.self="closeLightbox">
       <button type="button" class="lightbox-close" aria-label="关闭图片预览" @click="closeLightbox">
         <X :size="24" />
@@ -466,7 +470,9 @@
         <ChevronRight :size="30" />
       </button>
     </div>
+    </UiTransition>
 
+    <UiTransition name="ui-overlay" appear>
     <div
       v-if="abnormalNoteDialog.open"
       class="abnormal-note-backdrop"
@@ -512,11 +518,12 @@
             取消
           </button>
           <button type="button" class="btn primary" :disabled="saving" @click="submitAbnormalNote">
-            {{ saving ? "保存中" : "确认并保存" }}
+            <LoadingIndicator v-if="saving">保存中</LoadingIndicator><template v-else>确认并保存</template>
           </button>
         </footer>
       </section>
     </div>
+    </UiTransition>
 
     <ConfirmDialog
       :open="confirmState.open"
@@ -532,6 +539,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { isAssistantEvent } from '../modalState';
 import {
   AlertTriangle,
   Camera,
@@ -549,6 +557,7 @@ import {
   X,
 } from "lucide-vue-next";
 import { requestBinaryJson, requestJson } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import ConfirmDialog from "./ConfirmDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
@@ -858,6 +867,7 @@ async function loadRecords(): Promise<void> {
     if (generation === recordsGeneration) recordsLoading.value = false;
   }
 }
+usePageReadRefresh(url => ['/api/capacity/water/records','/api/capacity/water/bootstrap'].includes(url.pathname) && url.searchParams.get('scope') === scopeCode.value, async () => { await loadBootstrap(); await loadRecords(); }, () => !recordsLoading.value && !bootstrapLoading.value && !drawerDirty.value && !saving.value);
 
 function scheduleSnapshotPoll(): void {
   clearSnapshotPoll();
@@ -1389,6 +1399,7 @@ function moveLightbox(step: number): void {
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {
+  if (isAssistantEvent(event)) return;
   if (event.key !== "Escape") return;
   if (lightboxPhotos.value.length) {
     closeLightbox();

@@ -4,11 +4,13 @@ import json
 import logging
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote, urlencode, urlsplit
 
-import requests
+import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
+from .plan_convergence_rules import RuleConflictError
 
 ROUTES = {
     'bootstrap': ['GET'], 'blocks': ['GET'], 'blocks/{id}': ['GET'],
@@ -25,6 +27,39 @@ ROUTES = {
 def install_plan_convergence_routes(app, controller, runtime):
     service = None
     service_lock = threading.Lock()
+    from upload_event_module.services.process_lifetime import lower_current_thread_priority
+    workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix='PlanReview', initializer=lower_current_thread_priority)
+    pending, pending_lock = {}, threading.RLock()
+
+    def discard(key, future):
+        with pending_lock:
+            if pending.get(key) is future:
+                pending.pop(key, None)
+
+    async def run_query(action, method, query, payload, admin):
+        # Share concurrent identical reads, without caching a completed audit.
+        key = json.dumps([action, method, query, payload, admin], sort_keys=True, ensure_ascii=False)
+        with pending_lock:
+            future = pending.get(key)
+            if future is None:
+                if len(pending) >= 2:
+                    raise TimeoutError('计划收敛核对繁忙，请稍后重试；其他功能不受影响。')
+                future = workers.submit(dispatch, action, method, query, payload, admin)
+                pending[key] = future
+                future.add_done_callback(lambda done: discard(key, done))
+        wrapped = asyncio.wrap_future(future)
+        wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        try:
+            return await asyncio.wait_for(asyncio.shield(wrapped), 65)
+        except asyncio.TimeoutError:
+            raise TimeoutError('核对读取超时，本次未产生核对结论，请检查 VPN 后重试。') from None
+
+    def close():
+        workers.shutdown(wait=False, cancel_futures=True)
+        if service is not None:
+            service.close()
+
+    app.add_event_handler('shutdown', close)
 
     def get_service():
         nonlocal service
@@ -63,7 +98,10 @@ def install_plan_convergence_routes(app, controller, runtime):
         if action == 'compare':
             return current.compare(payload)
         if action == 'rulesets':
-            return rules.list_sets() if method == 'GET' else {'id': rules.create_set(payload.get('name'), payload.get('remark', ''))}
+            if method == 'GET':
+                return rules.list_sets()
+            created = rules.create_set(payload.get('name'), payload.get('remark', ''))
+            return {'id': created, 'version': rules.get_set(created)['version']}
         if action.startswith('rulesets/{id}'):
             set_id = int(ident)
             saved = rules.get_set(set_id)
@@ -80,8 +118,9 @@ def install_plan_convergence_routes(app, controller, runtime):
                 return {'deleted': True}
             if 'items' not in payload:
                 raise ValueError('保存内容缺少规则项，已保留原规则集')
-            rules.save_set(set_id, payload.get('name', saved['name']), payload.get('remark', saved['remark']), payload['items'])
-            return rules.get_set(set_id)
+            if not isinstance(payload.get('expected_version'), str) or not payload['expected_version']:
+                raise rules.RuleConflictError('请重新读取规则集后保存，当前填写已保留。')
+            return rules.save_set(set_id, payload.get('name', saved['name']), payload.get('remark', saved['remark']), payload['items'], expected_version=payload['expected_version'])
         if action == 'maintenance/records':
             return current.maintenance_records()
         if action == 'maintenance/check':
@@ -135,14 +174,27 @@ def install_plan_convergence_routes(app, controller, runtime):
                 payload = json.loads(await body(request, 2 * 1024 * 1024) or b'{}')
                 if not isinstance(payload, dict):
                     raise ValueError('提交内容须为对象')
-            data = await asyncio.to_thread(dispatch, action, request.method, query, payload, admin)
+            remote_read = (action == 'blocks' and query.get('refresh') == '1') or action in {'blocks/{id}', 'snapshots', 'rule-view', 'compare', 'maintenance/check', 'rulesets/{id}/expand'} or action.endswith('/match')
+            if remote_read:
+                data = await run_query(action, request.method, query, payload, admin)
+            else:
+                data = await asyncio.to_thread(dispatch, action, request.method, query, payload, admin)
             return await asyncio.to_thread(controller._json_response, request, session, {'ok': True, 'data': data})
         except FileNotFoundError as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=404)
+        except RuleConflictError as exc:
+            return JSONResponse({'ok': False, 'code': 'rule_version_conflict', 'error': str(exc)}, status_code=409)
+        except TimeoutError as exc:
+            return JSONResponse({'ok': False, 'error': str(exc)}, status_code=504)
         except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=400)
-        except requests.RequestException:
-            return JSONResponse({'ok': False, 'error': '智航连接失败，请检查内网或 VPN 连接后重试'}, status_code=502)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403}:
+                return JSONResponse({'ok': False, 'error': '智航认证已失效，请在计划收敛设置中重新登录'}, status_code=400)
+            return JSONResponse({'ok': False, 'error': '智航服务暂不可用，请稍后重试；其他功能不受影响'}, status_code=502)
+        except httpx.HTTPError:
+            return JSONResponse({'ok': False, 'code': 'zh_connection_unavailable',
+                                 'error': '无法连接智航，请在运行灯塔的电脑上连接 VPN 后重试。其他功能和本地规则配置不受影响'}, status_code=502)
         except Exception:
             logging.getLogger(__name__).exception('Plan-convergence request failed')
             return JSONResponse({'ok': False, 'error': '核对请求失败，请查看程序日志后重试'}, status_code=500)

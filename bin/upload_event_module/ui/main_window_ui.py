@@ -1183,6 +1183,11 @@ class MainWindowUiMixin:
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = None
+            window = self.windowHandle()
+            if window is not None and window.startSystemMove():
+                e.accept()
+                return
             self.drag_position = (
                 e.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
@@ -1191,6 +1196,11 @@ class MainWindowUiMixin:
     def mouseMoveEvent(self, e):
         if e.buttons() == Qt.MouseButton.LeftButton and self.drag_position:
             self.move(e.globalPosition().toPoint() - self.drag_position)
+            e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = None
             e.accept()
 
     def show_message(self, text):

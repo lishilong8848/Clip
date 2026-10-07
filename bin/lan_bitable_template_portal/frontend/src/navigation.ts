@@ -6,6 +6,15 @@ export type NavigateOptions = {
 
 let navigationGuard: ((target: string, proceed: () => void) => boolean) | null = null;
 let stableUrl = typeof window === 'undefined' ? '' : window.location.href;
+
+// A superseded native page transition rejects ready even though navigation
+// succeeds. Consume that animation-only outcome without masking page errors.
+if (typeof window !== 'undefined') {
+  for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, (event) => {
+    const transition = (event as Event & { viewTransition?: { ready: Promise<void> } }).viewTransition;
+    void transition?.ready.catch(() => undefined);
+  });
+}
 export function registerNavigationGuard(guard: (target: string, proceed: () => void) => boolean): () => void {
   navigationGuard = guard; stableUrl = window.location.href;
   return () => { if (navigationGuard === guard) navigationGuard = null; };

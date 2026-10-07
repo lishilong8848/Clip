@@ -152,7 +152,7 @@
           @input="emit('update:noticeDiagnosticQuery', ($event.target as HTMLInputElement).value)"
         />
         <button type="button" class="btn blue" :disabled="busy || noticeDiagnosticLoading">
-          {{ noticeDiagnosticLoading ? "检查中" : "检查链路" }}
+          <LoadingIndicator v-if="noticeDiagnosticLoading">检查中</LoadingIndicator><template v-else>检查链路</template>
         </button>
       </form>
       <div v-if="noticeDiagnosticItems.length" class="consistency-list notice-diagnostic-list">

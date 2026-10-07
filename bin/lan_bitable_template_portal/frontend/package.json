@@ -8,6 +8,7 @@
     "check:navigation": "node scripts/check-navigation-back.mjs",
     "check:drill": "node scripts/check-drill-management.mjs",
     "check:reliability": "node scripts/check-request-reliability.mjs",
+    "check:read-cache": "node scripts/check-page-read-cache.mjs",
     "check:repair-submission": "node scripts/check-repair-submission.mjs",
     "check:cabinet-reliability": "node scripts/check-cabinet-reliability.mjs",
     "check:plan-convergence": "node --experimental-strip-types scripts/check-plan-convergence.ts",

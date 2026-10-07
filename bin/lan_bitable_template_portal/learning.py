@@ -231,7 +231,12 @@ class LearningService:
         own = conn is None
         conn = conn or self._connect()
         try:
-            return [self._get(kind, row[0], conn) for row in conn.execute("SELECT key FROM documents WHERE kind=? ORDER BY key", (kind,)).fetchall()]
+            values = []
+            for row in conn.execute("SELECT payload,revision,dirty FROM documents WHERE kind=? ORDER BY key", (kind,)).fetchall():
+                value = json.loads(row["payload"])
+                value.update(_revision=row["revision"], _dirty=bool(row["dirty"]))
+                values.append(value)
+            return values
         finally:
             if own:
                 conn.close()
@@ -292,6 +297,8 @@ class LearningService:
             self._thread.join(timeout=2)
 
     def _run(self):
+        from upload_event_module.services.process_lifetime import lower_current_thread_priority
+        lower_current_thread_priority()
         while not self._stop.is_set():
             self._wake.wait(30)
             self._wake.clear()
@@ -597,11 +604,11 @@ class LearningService:
                     if paper["date"] == date and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and not self._completed(paper, record) and not self._get("notification", key, conn):
                         self._put("notification", key, {"id": key, "kind": "reminder", "paper_id": paper["id"], "scope": paper["scope"], "date": date, "status": "pending"}, conn)
         for notification in self._all("notification"):
+            if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
+                continue
             current_settings = self.settings()
             if not current_settings["enabled"]:
                 break
-            if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
-                continue
             paper = self._get("paper", notification.get("paper_id", ""))
             if paper and paper.get("deleted_at"):
                 notification["status"] = "cancelled"

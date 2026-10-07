@@ -1,5 +1,6 @@
 <template>
   <Teleport to="body">
+    <UiTransition name="ui-overlay" appear>
     <div
       v-if="open"
       class="record-picker-backdrop"
@@ -9,6 +10,7 @@
       <section
         ref="dialogRef"
         class="record-picker-dialog"
+        :class="{ 'has-filters': Boolean($slots.filters) }"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -57,6 +59,8 @@
           </div>
         </form>
 
+        <div v-if="$slots.filters" class="record-picker-filters"><slot name="filters" /></div>
+
         <div
           class="record-picker-status"
           :class="[`is-${statusTone}`, { 'is-empty': !statusMessage }]"
@@ -87,7 +91,7 @@
             </thead>
             <tbody>
               <tr v-if="loading && !records.length">
-                <td :colspan="columns.length + 1" class="picker-empty">正在读取多维记录...</td>
+                <td :colspan="columns.length + 1" class="picker-empty"><LoadingIndicator>正在读取多维记录...</LoadingIndicator></td>
               </tr>
               <tr v-else-if="!records.length">
                 <td :colspan="columns.length + 1" class="picker-empty">没有找到可选择的记录</td>
@@ -146,13 +150,13 @@
               :disabled="loading"
               @click="emit('load-more')"
             >
-              {{ loading ? "加载中" : "加载更多" }}
+              <LoadingIndicator v-if="loading">加载中</LoadingIndicator><template v-else>加载更多</template>
             </button>
           </div>
-          <nav v-if="pageCount > 1" class="picker-pager" aria-label="候选记录分页">
-            <button type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
-            <span>{{ page }} / {{ pageCount }}</span>
-            <button type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+          <nav v-if="effectivePageCount > 1" class="picker-pager" aria-label="候选记录分页">
+            <button type="button" :disabled="loading || effectivePage <= 1" @click="changePage(-1)">上一页</button>
+            <span>{{ effectivePage }} / {{ effectivePageCount }}</span>
+            <button type="button" :disabled="loading || effectivePage >= effectivePageCount" @click="changePage(1)">下一页</button>
           </nav>
           <div>
             <button type="button" class="picker-cancel" @click="emit('close')">取消</button>
@@ -168,6 +172,7 @@
         </footer>
       </section>
     </div>
+    </UiTransition>
   </Teleport>
 </template>
 
@@ -201,6 +206,8 @@ const props = withDefaults(defineProps<{
   statusTone?: "info" | "success" | "warning" | "error";
   query?: string;
   searchPlaceholder?: string;
+  serverPage?: number;
+  serverPageCount?: number;
 }>(), {
   kicker: "多维记录选择",
   selectedIds: () => [],
@@ -221,6 +228,7 @@ const emit = defineEmits<{
   search: [];
   "load-more": [];
   "update:query": [value: string];
+  "change-page": [page: number];
 }>();
 
 const titleId = `record-picker-${Math.random().toString(36).slice(2, 9)}`;
@@ -238,11 +246,18 @@ const queryModel = computed({
   set: (value: string) => emit("update:query", value),
 });
 const pageCount = computed(() => Math.max(1, Math.ceil(props.records.length / PAGE_SIZE)));
+const effectivePage = computed(() => props.serverPage ?? page.value);
+const effectivePageCount = computed(() => props.serverPageCount ?? pageCount.value);
+function changePage(delta: number): void {
+  if (props.serverPage !== undefined) emit('change-page', props.serverPage + delta);
+  else page.value += delta;
+}
 const selectedIdsKey = computed(() => props.selectedIds
   .map((item) => String(item || "").trim())
   .filter(Boolean)
   .join("\u001f"));
 const pagedRecords = computed(() => {
+  if (props.serverPage !== undefined) return props.records;
   const start = (page.value - 1) * PAGE_SIZE;
   return props.records.slice(start, start + PAGE_SIZE);
 });
@@ -290,7 +305,7 @@ function runSearchNow(): void {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
-  if (!props.open || !modal?.isTop() || event.defaultPrevented) return;
+  if (!props.open || !modal?.isTop(event, dialogRef.value) || event.defaultPrevented) return;
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -400,6 +415,9 @@ onBeforeUnmount(() => {
   background: #fff;
   box-shadow: 0 30px 90px rgba(5, 33, 78, 0.28);
 }
+
+.record-picker-dialog.has-filters { grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; }
+.record-picker-filters { padding: 10px 20px; border-bottom: 1px solid #e4ecf6; }
 
 .record-picker-head,
 .record-picker-toolbar,

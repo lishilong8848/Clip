@@ -16,10 +16,12 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "urllib3": "urllib3",
     "httpx": "httpx",
     "websocket": "websocket-client",
+    "websockets": "websockets==16.0",
     "cryptography": "cryptography",
     "PIL": "Pillow",
     "openpyxl": "openpyxl",
     "pypdf": "pypdf",
+    "yaml": "PyYAML",
     "anyio": "anyio",
     "pydantic": "pydantic",
     "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
@@ -94,7 +96,7 @@ def _has_module(module_name: str) -> bool:
     try:
         if importlib.util.find_spec(module_name) is None:
             return False
-        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1")}
+        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1"), "websockets": ("websockets", "16.0")}
         if module_name in pinned:
             distribution, version = pinned[module_name]
             return importlib.metadata.version(distribution) == version

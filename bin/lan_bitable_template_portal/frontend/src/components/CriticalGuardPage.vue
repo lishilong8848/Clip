@@ -550,13 +550,16 @@
     </template>
 
     <Teleport to="body">
+      <UiTransition name="ui-overlay" appear>
       <div v-if="imageViewerUrl" class="image-viewer" @click.self="closeImage">
         <header><strong>{{ imageViewerTitle }}</strong><button type="button" aria-label="关闭" @click="closeImage"><X :size="22" /></button></header>
         <div><img :src="imageViewerUrl" :alt="imageViewerTitle" /></div>
       </div>
+      </UiTransition>
     </Teleport>
 
     <Teleport to="body">
+      <UiTransition name="ui-overlay" appear>
       <div v-if="templateEditorOpen" class="template-editor-overlay" @click.self="requestCloseTemplateEditor">
         <section class="template-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="guard-template-editor-title">
           <header>
@@ -592,6 +595,7 @@
           </footer>
         </section>
       </div>
+      </UiTransition>
     </Teleport>
 
     <ConfirmDialog
@@ -692,6 +696,7 @@ import {
   ZoomIn,
 } from "lucide-vue-next";
 import { requestJson, type Dict } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { navigate, navigateBack } from "../navigation";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import CriticalGuardSignatureDrawer from "./CriticalGuardSignatureDrawer.vue";
@@ -1112,6 +1117,7 @@ function scheduleWeatherStatus(delay = 30_000): void {
   if (componentUnmounted || viewMode.value !== "admin") return;
   weatherPollTimer = window.setTimeout(() => void loadWeatherStatus(true), delay);
 }
+usePageReadRefresh(url => url.pathname === '/api/critical-guard/tasks' && (url.searchParams.get('scope') || '') === (viewMode.value === 'admin' ? '' : activeScope.value), loadTasks, () => !componentUnmounted && !dirty.value && !loading.value);
 
 async function loadWeatherStatus(silent = false): Promise<void> {
   if (viewMode.value !== "admin" || weatherStatusLoading) return;

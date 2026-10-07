@@ -90,6 +90,26 @@ class _FakePollingSopCloud:
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_idle_reminder_scan_does_not_reread_inactive_or_not_due_groups(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / 'state.sqlite3')
+            service = PollingWorkOrderService(store)
+            now = time.time()
+            groups = [{'key': str(n), 'payload': {'state': 'completed', 'steps': []}} for n in range(100)]
+            groups.extend([
+                {'key': 'cancelled', 'payload': {'state': 'cancelled', 'steps': [
+                    {'delay_reminder': {'state': 'pending', 'due_at_ts': now - 1}}]}},
+                {'key': 'future', 'payload': {'steps': [
+                    {'delay_reminder': {'state': 'pending', 'due_at_ts': now + 60}}]}},
+                {'key': 'sent', 'payload': {'steps': [
+                    {'delay_reminder': {'state': 'sent', 'due_at_ts': now - 1}}]}},
+            ])
+            with patch.object(store, 'list_documents', return_value=groups), \
+                    patch.object(service, 'get_group', side_effect=AssertionError('Idle historical group was reread')):
+                result = service.process_due_reminders(started_at=now - 60, now=now,
+                    send_text=MagicMock(side_effect=AssertionError('Idle scan sent a reminder')))
+            self.assertEqual(result, {'sent': 0, 'failed': 0, 'skipped': 0})
+
     def test_delay_reminder_starts_after_all_confirmations_and_skips_offline(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = LanPortalStateStore(Path(temp) / "state.sqlite3")

@@ -474,6 +474,67 @@ class TransportSafetyTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
             self.assertTrue((assets / "stale.js").exists())
 
+    def test_assistant_html_entry_and_assets_are_bundled_and_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, patch_dir = Path(tmp) / "source", Path(tmp) / "patch"
+            assets = root / FRONTEND_DIST / "assets"
+            assets.mkdir(parents=True)
+            widget = root / FRONTEND_DIST / "assistant.html"
+            (root / FRONTEND_INDEX).write_text(
+                '<script type="module" src="/assets/index-main.js"></script>', encoding="utf-8"
+            )
+            (assets / "index-main.js").write_text('import "./index-shared.js"', encoding="utf-8")
+            (assets / "index-shared.js").write_text("// index shared", encoding="utf-8")
+            widget.write_text(
+                '<script type="module" src="/assets/widget-main.js"></script>'
+                '<link rel="stylesheet" href="/assets/widget.css">',
+                encoding="utf-8",
+            )
+            (assets / "widget-main.js").write_text(
+                'import "./widget-dep.js"; const logo = "/assets/widget-logo.png"', encoding="utf-8"
+            )
+            (assets / "widget-dep.js").write_text("// widget dep", encoding="utf-8")
+            (assets / "widget.css").write_text("/* widget */", encoding="utf-8")
+            (assets / "widget-logo.png").write_bytes(b"png")
+
+            expected = {
+                FRONTEND_DIST / "assistant.html",
+                FRONTEND_DIST / "assets/index-main.js",
+                FRONTEND_DIST / "assets/index-shared.js",
+                FRONTEND_DIST / "assets/widget-main.js",
+                FRONTEND_DIST / "assets/widget-dep.js",
+                FRONTEND_DIST / "assets/widget.css",
+                FRONTEND_DIST / "assets/widget-logo.png",
+            }
+            self.assertEqual(referenced_assets(root), expected)
+
+            node = shutil.which("node")
+            if node:
+                script = root / FRONTEND_DIST.parent / "scripts/prune-dist-assets.mjs"
+                script.parent.mkdir(parents=True)
+                shutil.copy2(BIN / "lan_bitable_template_portal/frontend/scripts/prune-dist-assets.mjs", script)
+                (assets / "stale.js").write_text("// stale", encoding="utf-8")
+                subprocess.run([node, str(script)], check=True, capture_output=True, timeout=15)
+                self.assertFalse((assets / "stale.js").exists())
+                for rel in expected:
+                    self.assertTrue((root / rel).is_file(), rel)
+
+            (patch_dir / FRONTEND_INDEX).parent.mkdir(parents=True)
+            shutil.copy2(root / FRONTEND_INDEX, patch_dir / FRONTEND_INDEX)
+            self.assertEqual(portable_packaging._include_frontend_generation(root, patch_dir), len(expected))
+            for rel in expected:
+                self.assertTrue((patch_dir / rel).is_file(), rel)
+            self.assertEqual(referenced_assets(patch_dir), referenced_assets(root))
+
+            (assets / "widget-dep.js").unlink()
+            (assets / "stale.js").write_text("// keep until validated", encoding="utf-8")
+            with patch.object(portable_packaging, "PROJECT_ROOT", root), self.assertRaisesRegex(ValueError, "Missing frontend asset"):
+                portable_packaging._cleanup_vue_dist_assets()
+            if node:
+                result = subprocess.run([node, str(script)], capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((assets / "stale.js").exists())
+
     def test_distribution_filter_keeps_only_runtime_material(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

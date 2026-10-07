@@ -153,6 +153,7 @@ class RepairFollowupRecordRequest(APIModel):
     scope: str = "ALL"
     summary_record_id: str
     cmdb_record_ids: list[str] | None = None
+    ledger_device_ids: list[str] | None = Field(default=None, max_length=500)
     fields: dict[str, Any] = Field(default_factory=dict)
 
 

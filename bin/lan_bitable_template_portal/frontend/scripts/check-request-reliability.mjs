@@ -4,7 +4,12 @@ import { createServer } from "node:http";
 import ts from "typescript";
 
 async function loadSource(name) {
-  const source = await readFile(new URL(`../src/${name}`, import.meta.url), "utf8");
+  let source = await readFile(new URL(`../src/${name}`, import.meta.url), "utf8");
+  if (name === 'api/client.ts') {
+    const cache = await readFile(new URL('../src/api/readCache.ts', import.meta.url), 'utf8');
+    const compiled = ts.transpileModule(cache, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
+    source = source.replace("from './readCache'", `from 'data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}'`);
+  }
   const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } });
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 }
@@ -49,6 +54,50 @@ const next = acquireModal();
 child.release();
 assert.equal(document.body.style.overflow, "hidden");
 next.release();
+
+const { useGuardedPolling } = await loadSource('useGuardedPolling.ts');
+const originalSetInterval = globalThis.setInterval, originalClearInterval = globalThis.clearInterval;
+const intervals = new Set(), visibilityListeners = new Set(), finishes = [];
+let started = 0, active = 0, maximum = 0;
+document.hidden = false;
+document.addEventListener = (_name, listener) => visibilityListeners.add(listener);
+document.removeEventListener = (_name, listener) => visibilityListeners.delete(listener);
+globalThis.setInterval = callback => { intervals.add(callback); return callback; };
+globalThis.clearInterval = callback => intervals.delete(callback);
+const polling = useGuardedPolling(() => new Promise(resolve => {
+  started++; active++; maximum = Math.max(maximum, active);
+  finishes.push(() => { active--; resolve(); });
+}), 1000);
+try {
+  polling.update(true);
+  await new Promise(setImmediate);
+  assert.equal(started, 1);
+  polling.stop(); polling.update(true);
+  for (const callback of intervals) callback();
+  await new Promise(setImmediate);
+  assert.equal(started, 1, 'reopening must wait for the old request');
+  finishes.shift()();
+  await new Promise(setImmediate);
+  assert.equal(started, 2, 'reopening must refresh after the old request finishes');
+  assert.equal(maximum, 1);
+  polling.stop(); finishes.shift()();
+  await new Promise(setImmediate);
+  assert.equal(started, 2, 'a stopped poller must not restart');
+  document.hidden = true; polling.update(true);
+  await new Promise(setImmediate);
+  assert.equal(started, 2);
+  document.hidden = false;
+  for (const callback of visibilityListeners) callback();
+  await new Promise(setImmediate);
+  assert.equal(started, 3);
+  polling.stop(); finishes.shift()();
+  await new Promise(setImmediate);
+  assert.equal(intervals.size, 0);
+  assert.equal(visibilityListeners.size, 0);
+} finally {
+  polling.stop();
+  globalThis.setInterval = originalSetInterval; globalThis.clearInterval = originalClearInterval;
+}
 
 const server = createServer((req, res) => {
   res.setHeader("Content-Type", "application/json");

@@ -263,7 +263,7 @@
               </button>
               <span class="action-spacer"></span>
               <button type="button" class="secondary-button" :disabled="configurationLocked || busy" @click="saveConfiguration">
-                {{ saving ? "保存中" : "保存配置" }}
+                <LoadingIndicator v-if="saving">保存中</LoadingIndicator><template v-else>保存配置</template>
               </button>
               <button type="button" class="primary-button" :disabled="configurationLocked || busy || selectedDrill.status === 'published'" @click="publishSelected">
                 <Send :size="16" /> 发布至 {{ assignedScopeLabel(selectedDrill) }}
@@ -490,7 +490,7 @@
                 {{ dirty ? "有未保存修改" : lastSavedAt ? `已保存 ${lastSavedAt}` : "尚未保存" }}
               </span>
               <button type="button" class="secondary-button" :disabled="busy || !dirty" @click="saveDraft()">
-                <Save :size="16" /> {{ saving ? "保存中" : "保存草稿" }}
+                <Save :size="16" /> <LoadingIndicator v-if="saving">保存中</LoadingIndicator><template v-else>保存草稿</template>
               </button>
               <button v-if="execution.status === 'sync_pending' || (execution.last_error && execution.generated)" type="button" class="secondary-button" :disabled="busy" @click="retrySync">
                 <RefreshCw :size="16" /> 重试同步
@@ -499,7 +499,7 @@
                 <Download :size="16" /> 下载文件
               </button>
               <button type="button" class="primary-button" :disabled="busy || !canGenerate" :title="generateDisabledReason" @click="generateWorkbook">
-                <FileCheck2 :size="16" /> {{ generating ? "正在生成" : canUseGeneratedFile ? "重新生成" : "生成并归档" }}
+                <FileCheck2 :size="16" /> <LoadingIndicator v-if="generating">正在生成</LoadingIndicator><template v-else>{{ canUseGeneratedFile ? "重新生成" : "生成并归档" }}</template>
               </button>
             </footer>
           </section>
@@ -572,7 +572,8 @@ import {
   UploadCloud,
   Users,
 } from "lucide-vue-next";
-import { ApiError, requestJson, type Dict } from "../api/client";
+import { ApiError, invalidateReadCache, requestJson, type Dict } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { navigate, navigateBack } from "../navigation";
 import { refreshSignatureDirectory } from "../mopSignatureApi";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -959,6 +960,7 @@ async function refreshList(): Promise<void> {
   if (disposed) return;
   drills.value = arrayFrom(data.items || data.drills);
 }
+usePageReadRefresh(url => ['/api/drills', '/api/drills/bootstrap'].includes(url.pathname) && (url.searchParams.get('scope') || '') === activeScope.value, refreshList, () => !disposed && !busy.value && !hasUnsavedChanges.value);
 
 function reloadCurrent(): void {
   if (busy.value) return;
@@ -970,6 +972,7 @@ function reloadCurrent(): void {
 }
 
 async function reloadCurrentConfirmed(): Promise<void> {
+  invalidateReadCache();
   loading.value = true;
   error.value = "";
   try {

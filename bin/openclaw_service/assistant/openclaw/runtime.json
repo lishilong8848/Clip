@@ -1,0 +1,8 @@
+{
+  "openclaw_version": "2026.8.1",
+  "openclaw_integrity": "sha512-bSaFeaDFnQH/bU1vgKMac6eHkHHPHG0C/uwduXGI3eIS3lyiYSwmDU5ehhBUUhlPeV85tL5/KVwmoH48nX1tWw==",
+  "node_version": "24.16.0",
+  "node_executable_sha256": "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290aa3",
+  "node_archive": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
+  "node_sha256": "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
+}

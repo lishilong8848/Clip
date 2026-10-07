@@ -1,5 +1,6 @@
 <template>
   <Teleport to="body">
+    <UiTransition name="ui-drawer" appear>
     <div v-if="open" class="guard-signature-backdrop" @click.self="requestClose">
       <aside class="guard-signature-drawer" role="dialog" aria-modal="true" aria-label="选择检查人签名">
         <header class="drawer-header">
@@ -84,11 +85,13 @@
       </aside>
 
     </div>
+    </UiTransition>
   </Teleport>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { isAssistantEvent } from '../modalState';
 import { UsersRound, X } from "lucide-vue-next";
 import type { Dict } from "../api/client";
 import {
@@ -586,6 +589,7 @@ function requestClose(): void {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
+  if (isAssistantEvent(event)) return;
   if (props.open && event.key === "Escape") requestClose();
 }
 

@@ -84,6 +84,7 @@
       </tr>
     </tbody>
   </table>
+  <UiTransition name="ui-popover" appear>
   <MopCellPopover
     v-if="!signatureManagerOpen && activeMopCellPosition"
     :date-time="dateTime"
@@ -104,6 +105,7 @@
     @restore="emit('restore')"
     @cancel="emit('cancel')"
   />
+  </UiTransition>
   <div v-if="!activeSheet" class="empty-box">该附件没有可显示的 Sheet。</div>
 </template>
 

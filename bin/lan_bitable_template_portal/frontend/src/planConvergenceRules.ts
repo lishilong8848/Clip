@@ -34,6 +34,7 @@ export function itemKey(it: Dict): string {
     it.floor || "",
     it.room || "",
     it.inst_name || "",
+    it.ins_id || "",
     it.point_name || "",
     it.rule_name || "",
     it.alarm_config_id || "",

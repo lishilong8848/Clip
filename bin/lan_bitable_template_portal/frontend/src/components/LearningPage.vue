@@ -115,6 +115,7 @@
     </template>
 
     <Teleport to="body">
+      <UiTransition name="ui-overlay" appear>
       <div v-if="modalKind" class="learning-overlay" @click.self="closeModal">
         <section ref="modalElement" class="learning-modal" :class="{ 'preview-modal': modalKind === 'attachment' }" role="dialog" aria-modal="true" aria-labelledby="learning-modal-title" tabindex="-1" @paste="['question', 'issue'].includes(modalKind) && pasteFiles($event)">
           <header><h2 id="learning-modal-title">{{ modalKind === 'question' ? (editor.id ? '编辑题目' : '新增题目') : modalKind === 'issue' ? (issue.id ? '质疑处理记录' : '题目有疑问') : modalKind === 'import' ? '导入题库' : preview.name }}</h2><button class="icon-button" aria-label="关闭窗口" title="关闭窗口" :disabled="busy" @click="closeModal"><X :size="20" /></button></header>
@@ -155,6 +156,7 @@
           <footer><span v-if="busy" class="muted actions"><Loader2 :size="16" class="spin" />正在保存…</span><span v-else-if="modalDirty" class="muted">有未保存内容</span><div class="actions"><button :disabled="busy" @click="closeModal">关闭</button><button v-if="modalKind === 'question'" class="primary" type="submit" form="learning-question-form" :disabled="busy || editor.status === 'deleted'"><Save :size="16" />保存题目</button><button v-else-if="modalKind === 'issue'" class="primary" :disabled="busy" @click="submitIssue"><Send :size="16" />{{ issue.id ? '提交补充与处理' : '提交质疑' }}</button><button v-else-if="modalKind === 'import'" class="primary" :disabled="busy || !importRows.length || !!importErrors" @click="commitImport"><Upload :size="16" />确认导入 {{ importRows.length || '' }}</button><a v-else :href="attachmentUrl(preview)" target="_blank" rel="noopener" download><Download :size="16" />下载附件</a></div></footer>
         </section>
       </div>
+      </UiTransition>
     </Teleport>
     <ConfirmDialog :open="confirm.open" :title="confirm.title" :message="confirm.message" :tone="confirm.tone" @resolve="confirmed" />
   </section>
@@ -351,6 +353,7 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Star, Trash2, Upload, X, ChartNoAxesCombined } from "lucide-vue-next";
 import { ApiError, downloadFile, requestJson } from "../api/client";
+import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { requestLearning, type LearningApiOptions } from "../api/learning";
 import { registerNavigationGuard } from "../navigation";
 import { acquireModal } from "../modalState";
@@ -694,6 +697,7 @@ async function checkToday(): Promise<void> {
     if (changed) void loadView();
   } catch { return; }
 }
+usePageReadRefresh(url => url.pathname === '/api/learning/papers', checkToday, () => !disposed && tab.value === 'today' && !loading.value && !busy.value);
 async function runJob(kind: "refresh" | "publish"): Promise<void> {
   if (kind === "publish" && !boot.value.silent_manual_publish) { error.value = "请重启主程序后使用静默发布，当前后端仍为旧版本。"; return; }
   if (kind === "publish" && !await ask("手动发布今日题单", `${boot.value.today}，为六楼生成今日题单，不发送飞书消息；已发布题单保持不变。`)) return;
@@ -892,7 +896,7 @@ async function commitImport(): Promise<void> {
   });
 }
 function modalKeydown(event: KeyboardEvent): void {
-  if (!modalOwner?.isTop() || !modalElement.value || confirm.open) return;
+  if (!modalOwner?.isTop(event, modalElement.value) || !modalElement.value || confirm.open) return;
   if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); void closeModal(); }
   if (event.key === "Tab") {
     const nodes = Array.from(modalElement.value.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')).filter(n => n.getClientRects().length);

@@ -1090,6 +1090,8 @@ class PollingWorkOrderRelayConnector:
     ) -> dict[str, Any]:
         document = self._group_document(target_record_id)
         public_id = str(document.get("public_group_id") or "")
+        if str(document.get("registration_state") or "") == "cancelled" and not force:
+            return document
         if not public_id:
             return self._put_group_document(
                 target_record_id,
@@ -1101,8 +1103,6 @@ class PollingWorkOrderRelayConnector:
                     "last_error": "",
                 },
             )
-        if str(document.get("registration_state") or "") == "cancelled" and not force:
-            return document
         if not force and float(document.get("next_retry_at") or 0) > self.clock():
             return document
         attempts = int(document.get("cancel_attempts") or 0) + 1
@@ -1172,6 +1172,9 @@ class PollingWorkOrderRelayConnector:
                 continue
             target_record_id = str(document.get("target_record_id") or "")
             if not target_record_id or target_record_id in open_groups:
+                continue
+            if str(document.get("registration_state") or "") == "cancelled":
+                cancelled += 1
                 continue
             try:
                 group = self.work_orders.get_group(target_record_id)

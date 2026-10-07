@@ -1,4 +1,5 @@
 import copy
+import asyncio
 import base64
 import io
 import json
@@ -8,6 +9,8 @@ import threading
 import time
 import tempfile
 import unittest
+
+import httpx
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -43,6 +46,25 @@ def fixture_token(owner='test-user', expiry=None):
     meta = {'UserName': owner, 'jti': 'test-session', 'exp': expiry if expiry is not None else int(time.time()) + 3600}
     encoded = base64.urlsafe_b64encode(json.dumps(meta).encode()).decode().rstrip('=')
     return 'eyJ0eXAiOiJKV1QifQ.' + encoded + '.test-only'
+
+
+class _FakeHttpxResponse:
+    """Minimal stand-in for httpx.Response used by mocked httpx entry points."""
+
+    def __init__(self, status_code=200, payload=None, raise_status=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {'code': 200, 'success': True, 'data': {}}
+        self._raise_status = raise_status
+
+    def raise_for_status(self):
+        if self._raise_status is not None:
+            raise self._raise_status
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError('HTTP ' + str(self.status_code), request=None, response=self)
+        return None
+
+    def json(self):
+        return self._payload
 
 
 class FakeController:
@@ -118,6 +140,7 @@ class PlanConvergenceTests(unittest.TestCase):
         self.runtime = FakeRuntime()
         auth.bind_store(self.runtime.state_store)
         app = FastAPI()
+        self.app = app
         self.controller = FakeController()
         routes.install_plan_convergence_routes(app, self.controller, self.runtime)
         self.client = TestClient(app)
@@ -165,6 +188,62 @@ class PlanConvergenceTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertTrue(result.json()['data']['passed'])
         self.assertEqual(self.client.get('/plan-convergence/legacy/ruleset', follow_redirects=False).headers['location'], '/plan-convergence?tab=rules')
+
+    def test_opening_and_local_rules_do_not_require_vpn(self):
+        with patch.object(auth, 'request', side_effect=AssertionError('must not access intranet on opening')), \
+                patch.object(auth, 'request', side_effect=AssertionError('must not test VPN on opening')), \
+                patch.object(browser_login.BrowserLogin, 'start', side_effect=AssertionError('must not auto-login')), \
+                patch.object(rule_sets, 'RULE_DB', Path(self.temp.name) / 'rule_sets.sqlite3'), \
+                patch('lan_bitable_template_portal.plan_convergence.points.CATALOG_PATH', Path(self.temp.name) / 'catalog.sqlite3'):
+            self.assertEqual(self.client.get('/api/plan-convergence/bootstrap').status_code, 200)
+            self.assertEqual(self.client.get('/api/plan-convergence/blocks').json()['data']['items'], [])
+            created = self.client.post('/api/plan-convergence/rulesets', json={'name': '离线规则'})
+            self.assertEqual(created.status_code, 200)
+            self.assertEqual(self.client.get('/api/plan-convergence/rulesets').json()['data'][0]['name'], '离线规则')
+
+    def test_vpn_failure_preserves_cache_and_does_not_block_other_requests(self):
+        cached = {'items': [{'blockId': '1', 'blockName': '已有缓存'}], 'loaded_at': 123}
+        self.runtime.state_store.put_document('plan_convergence', 'blocks', cached)
+        auth.save_config({'token': fixture_token()})
+        entered, release = threading.Event(), threading.Event()
+
+        def unavailable(*args, **kwargs):
+            entered.set()
+            release.wait(10)
+            raise httpx.ConnectTimeout('VPN offline')
+
+        @self.app.get('/fixture/other-module')
+        async def other_module():
+            return {'ok': True}
+
+        async def exercise():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url='http://testserver') as api:
+                pending = asyncio.create_task(api.get('/api/plan-convergence/blocks?refresh=1'))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 4))
+                    self.assertEqual((await asyncio.wait_for(api.get('/fixture/other-module'), 2)).status_code, 200)
+                    local = await asyncio.wait_for(api.get('/api/plan-convergence/blocks'), 2)
+                    self.assertEqual(local.json()['data'], cached)
+                finally:
+                    release.set()
+                    response = await asyncio.wait_for(pending, 4)
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json()['code'], 'zh_connection_unavailable')
+                self.assertIn('VPN', response.json()['error'])
+                self.assertNotIn('auth_required', response.json())
+
+        with patch.object(auth, 'request', side_effect=unavailable):
+            asyncio.run(exercise())
+        self.assertEqual(self.runtime.state_store.get_document('plan_convergence', 'blocks'), cached)
+        self.assertTrue(auth.settings_view()['has_token'])
+
+    def test_remote_auth_failure_is_not_reported_as_portal_login_or_vpn_failure(self):
+        with patch.object(auth, 'build_auth', return_value=({}, {})), patch.object(auth, 'request', return_value=_FakeHttpxResponse(status_code=401)):
+            response = self.client.get('/api/plan-convergence/blocks/123')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('智航认证', response.json()['error'])
+        self.assertNotIn('auth_required', response.json())
+        self.assertNotIn('VPN', response.json()['error'])
 
     def test_large_rule_set_expands_in_batches(self):
         ids = [str(index) for index in range(901)]
@@ -316,7 +395,7 @@ class PlanConvergenceTests(unittest.TestCase):
     def test_expired_token_never_attempts_password_login(self):
         auth.save_config({'token': fixture_token(expiry=int(time.time()) - 1)})
         self.assertTrue(auth.settings_view()['expired'])
-        with patch('requests.post', side_effect=AssertionError('must not probe guessed password endpoints')):
+        with patch.object(auth, 'request', side_effect=AssertionError('must not probe guessed password endpoints')):
             with self.assertRaisesRegex(ValueError, '已过期'):
                 auth.build_auth()
 
@@ -327,14 +406,34 @@ class PlanConvergenceTests(unittest.TestCase):
         except ValueError:
             self.skipTest('Edge/Chrome is not installed')
         token = fixture_token()
+        import websocket
+        open_connection = websocket.create_connection
+
+        class EarlyRequestConnection:
+            def __init__(self, connection):
+                self.connection, self.pending = connection, []
+
+            def send(self, packet):
+                if json.loads(packet).get('method') == 'Page.navigate':
+                    self.pending.append(json.dumps({'method': 'Network.requestWillBeSent', 'params': {
+                        'requestId': 'early-request', 'request': {'url': origin + '/api/test',
+                            'headers': {'Authorization': 'Bearer ' + token}}}}))
+                return self.connection.send(packet)
+
+            def recv(self):
+                return self.pending.pop(0) if self.pending else self.connection.recv()
+
+            def close(self):
+                self.connection.close()
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path == '/api/test':
                     body = b'{"code":200,"success":true}'
                 else:
-                    body = ('<html><body>Isolated authentication fixture<script>fetch("/api/test",'
-                            '{headers:{Authorization:"Bearer ' + token + '"}})</script></body></html>').encode()
+                    # The only captured token is injected before Page.navigate's
+                    # acknowledgement, deterministically reproducing the race.
+                    body = b'<html><body>Isolated authentication fixture</body></html>'
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -344,7 +443,8 @@ class PlanConvergenceTests(unittest.TestCase):
                 pass
 
             def do_POST(self):
-                if self.headers.get('Authorization') == 'Bearer ' + token:
+                payload = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
+                if self.headers.get('Authorization') == 'Bearer ' + token and payload == {'page': 1, 'size': 1}:
                     body = b'{"code":200,"success":true}'
                 else:
                     body = b'{"code":401,"success":false}'
@@ -364,10 +464,10 @@ class PlanConvergenceTests(unittest.TestCase):
         try:
             with patch.object(auth, 'ZH_BASE', origin), patch.object(browser_login, 'browser_command', return_value=args), patch.object(
                 browser_login, 'get_data_file_path', return_value=str(profile),
-            ):
+            ), patch.object(websocket, 'create_connection', side_effect=lambda *a, **kw: EarlyRequestConnection(open_connection(*a, **kw))):
                 job = login.start()
                 try:
-                    login._thread.join(25)
+                    login._thread.join(40)
                     self.assertFalse(login._thread.is_alive())
                     self.assertEqual(login.status()['status'], 'success', login.status())
                     self.assertEqual(auth.load_config()['token'], token)
@@ -407,7 +507,7 @@ class PlanConvergenceTests(unittest.TestCase):
             {'active_item_id': 'qt-end-draft', 'work_type': 'repair', 'status': '结束',
              '_has_unuploaded_changes': True, 'title': '未发送的结束草稿'},
         ])
-        with patch('requests.request', side_effect=AssertionError('must not query remote data')), patch(
+        with patch.object(auth, 'request', side_effect=AssertionError('must not query remote data')), patch(
             'upload_event_module.services.feishu_token_manager.token_manager.get_tenant_token',
             side_effect=AssertionError('must not request Feishu token'),
         ):
@@ -473,7 +573,7 @@ class PlanConvergenceTests(unittest.TestCase):
         self.controller._get_ongoing = FastAPIPortalController._get_ongoing
         with patch.object(PortalRuntime, 'state_store', store), patch.object(
             PortalRuntime, 'service', object.__new__(MaintenancePortalService),
-        ), patch('requests.request', side_effect=AssertionError('unexpected remote request')):
+        ), patch.object(auth, 'request', side_effect=AssertionError('unexpected remote request')):
             result = self.client.get('/api/plan-convergence/maintenance/records')
         self.assertEqual(result.status_code, 200)
         records = result.json()['data']
@@ -488,6 +588,114 @@ class PlanConvergenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '明细不完整'):
                 service.maintenance_check()
             read.assert_called_once_with(None)
+
+    def test_remote_uses_httpx_and_sends_headers_cookies_json(self):
+        service = PlanConvergenceService(self.runtime.state_store)
+        headers = {'Authorization': 'Bearer tok', 'Accept': 'application/json'}
+        cookies = {'access_token': 'tok', 'token': 'tok'}
+        payload = {'page': 1, 'size': 100, 'searchAfter': None}
+        captured = {}
+
+        def fake_request(method, url, **kwargs):
+            captured.update({'method': method, 'url': url, 'headers': kwargs.get('headers'),
+                             'cookies': kwargs.get('cookies'), 'json': kwargs.get('json'),
+                             'timeout': kwargs.get('timeout'),
+                             'follow_redirects': kwargs.get('follow_redirects'), 'trust_env': kwargs.get('trust_env')})
+            return _FakeHttpxResponse(payload={'code': 200, 'success': True, 'data': {'content': [{'blockId': '1'}], 'hasNext': False}})
+
+        with patch.object(auth, 'request', side_effect=fake_request):
+            data = service.remote('POST', '/getAlarmBlock', payload, (headers, cookies))
+        self.assertEqual(data['content'][0]['blockId'], '1')
+        self.assertEqual(captured['method'], 'POST')
+        self.assertTrue(captured['url'].endswith('/api/alarm/alarmBlock/getAlarmBlock'))
+        self.assertEqual(captured['headers'], headers)
+        self.assertEqual(captured['cookies'], cookies)
+        self.assertEqual(captured['json'], payload)
+        self.assertEqual(captured['timeout'], httpx.Timeout(connect=5, read=25, write=25, pool=5))
+        self.assertIs(captured['follow_redirects'], False)
+
+    def test_auth_test_connection_uses_httpx_and_15s_read_timeout(self):
+        token = fixture_token()
+        headers, cookies = auth.token_auth(token)
+        captured = {}
+
+        def fake_post(method, url, headers=None, cookies=None, json=None, timeout=None, follow_redirects=None, trust_env=None):
+            captured.update({'url': url, 'headers': headers, 'cookies': cookies, 'json': json,
+                             'timeout': timeout, 'follow_redirects': follow_redirects, 'trust_env': trust_env})
+            return _FakeHttpxResponse(payload={'code': 200, 'success': True, 'data': {}})
+
+        with patch.object(auth, 'request', side_effect=fake_post):
+            result = auth.test_connection(token)
+        self.assertTrue(result['connected'])
+        self.assertTrue(captured['url'].endswith('/api/alarm/alarmBlock/getAlarmBlock'))
+        self.assertEqual(captured['headers'], headers)
+        self.assertEqual(captured['cookies'], cookies)
+        self.assertEqual(captured['json'], {'page': 1, 'size': 1})
+        self.assertEqual(captured['timeout'], httpx.Timeout(connect=5, read=15, write=15, pool=5))
+        self.assertIs(captured['follow_redirects'], False)
+
+    def test_connection_401_403_returns_auth_invalid(self):
+        token = fixture_token()
+        with patch.object(auth, 'request', return_value=_FakeHttpxResponse(status_code=401)):
+            with self.assertRaisesRegex(ValueError, '认证无效'):
+                auth.test_connection(token)
+        with patch.object(auth, 'request', return_value=_FakeHttpxResponse(status_code=403)):
+            with self.assertRaisesRegex(ValueError, '认证无效'):
+                auth.test_connection(token)
+
+    def test_route_settings_test_timeout_returns_502(self):
+        with patch.object(auth, 'build_auth', return_value=({}, {})), \
+                patch.object(auth, 'request', side_effect=httpx.ConnectTimeout('connect timed out')):
+            response = self.client.post('/api/plan-convergence/settings/test', json={})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('VPN', response.json()['error'])
+
+    def test_route_settings_test_http_error_returns_502(self):
+        with patch.object(auth, 'build_auth', return_value=({}, {})), \
+                patch.object(auth, 'request', side_effect=httpx.HTTPStatusError('HTTP 500', request=httpx.Request('POST', 'http://x'), response=httpx.Response(500))):
+            response = self.client.post('/api/plan-convergence/settings/test', json={})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('智航服务暂不可用', response.json()['error'])
+
+    def test_remote_loopback_sends_headers_cookies_json(self):
+        from lan_bitable_template_portal import plan_convergence as pc
+        seen = {}
+        token = fixture_token()
+        headers, cookies = auth.token_auth(token)
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', 0))
+                seen['body'] = json.loads(self.rfile.read(length) or b'{}')
+                seen['authorization'] = self.headers.get('Authorization', '')
+                seen['cookie'] = self.headers.get('Cookie', '')
+                body = json.dumps({'code': 200, 'success': True, 'data': {'content': [{'blockId': 'loop-1'}], 'hasNext': False}}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f'http://127.0.0.1:{server.server_port}/api/alarm/alarmBlock'
+            with patch.object(pc, 'BASE', base):
+                service = PlanConvergenceService(self.runtime.state_store)
+                data = service.remote('POST', '/getAlarmBlock', {'page': 1, 'size': 100}, (headers, cookies))
+            self.assertEqual(data['content'][0]['blockId'], 'loop-1')
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+        self.assertEqual(seen['body'], {'page': 1, 'size': 100})
+        self.assertEqual(seen['authorization'], 'Bearer ' + token)
+        self.assertIn('access_token=' + token, seen['cookie'])
+        self.assertIn('token=' + token, seen['cookie'])
 
 
 if __name__ == '__main__':

@@ -1,5 +1,7 @@
 import { createApp } from "vue";
 import App from "./App.vue";
+import LoadingIndicator from "./components/LoadingIndicator.vue";
+import UiTransition from "./components/UiTransition.vue";
 import "./global.css";
 
 function resetLocalRuntimeStateIfRequested(): void {
@@ -32,4 +34,4 @@ document.addEventListener("click", (event) => {
   }
 });
 
-createApp(App).mount("#app");
+createApp(App).component("LoadingIndicator", LoadingIndicator).component("UiTransition", UiTransition).mount("#app");

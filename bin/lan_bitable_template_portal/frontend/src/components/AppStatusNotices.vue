@@ -14,12 +14,13 @@
       </button>
     </div>
     <div v-if="pageStatusText" class="page-status">
-      <span :title="pageStatusText" role="status" aria-live="polite">{{ pageStatusText }}</span>
+      <span :title="pageStatusText" role="status" aria-live="polite"><LoadingIndicator v-if="isLoadingText(pageStatusText)" />{{ pageStatusText }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { isLoadingText } from '../loadingText';
 defineProps<{
   connectionNotice: {
     tone?: "info" | "warning" | "failed" | string;
@@ -35,6 +36,7 @@ function connectionLabel(tone?: string): string {
   if (tone === "warning") return "需要注意";
   return "实时同步";
 }
+
 </script>
 
 <style scoped>
@@ -167,7 +169,7 @@ function connectionLabel(tone?: string): string {
   box-shadow: 0 0 0 5px rgba(225, 29, 72, 0.1);
 }
 
-.page-status span {
+.page-status > span {
   min-width: 0;
   display: inline-flex;
   align-items: center;
@@ -178,7 +180,7 @@ function connectionLabel(tone?: string): string {
   white-space: nowrap;
 }
 
-.page-status span::before {
+.page-status > span::before {
   content: "";
   flex: 0 0 auto;
   width: 7px;
@@ -187,6 +189,7 @@ function connectionLabel(tone?: string): string {
   background: #3b82f6;
   box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
 }
+.page-status > span:has(.loading-indicator)::before { display: none; }
 
 .page-status {
   display: flex;

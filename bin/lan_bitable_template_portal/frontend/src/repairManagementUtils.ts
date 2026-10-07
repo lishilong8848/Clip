@@ -1,5 +1,19 @@
 import type { LooseDict, ScopeOption } from "./types";
 
+export const REPAIR_SUPPLIER_FIELDS = new Set(["供应商名称", "供应商维修人员"]);
+export const REPAIR_SPARE_PART_FIELDS = new Set(["更换备件名称", "更换备件数量"]);
+
+export function repairFollowupFieldDisabled(name: string, draft: LooseDict): boolean {
+  return name === "设备型号" && !repairFieldValueToText(draft["设备品牌"]).trim()
+    || REPAIR_SUPPLIER_FIELDS.has(name) && repairFieldValueToText(draft["维修方"]).trim() === "我方";
+}
+
+export function repairFollowupFieldPlaceholder(name: string, draft: LooseDict): string {
+  if (REPAIR_SUPPLIER_FIELDS.has(name) && repairFollowupFieldDisabled(name, draft)) return "维修方为我方，无需填写";
+  if (name !== "设备型号") return "";
+  return repairFollowupFieldDisabled(name, draft) ? "请先选择设备品牌" : "选择或输入设备型号";
+}
+
 export function createRepairOperationId(prefix: string): string {
   const normalizedPrefix = String(prefix || "repair").replace(/[^a-z0-9_-]/gi, "").slice(0, 24) || "repair";
   const cryptoApi = typeof globalThis !== "undefined" ? globalThis.crypto : undefined;
@@ -281,4 +295,89 @@ export function repairRecordHeaderTitle(record: LooseDict): string {
     alarmDescription,
   ].filter(Boolean);
   return parts.length >= 2 ? parts.join("—") : fallbackTitle;
+}
+
+export function splitDeviceNames(value: unknown): string[] {
+  return Array.from(new Set(
+    String(value || "")
+      .split(/[、,，;；\r\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ));
+}
+
+export function normalizedCatalogKey(value: unknown): string {
+  return String(value || "").replace(/\s+/g, "").toLocaleLowerCase();
+}
+
+export function resolveRepairDeviceCatalog(
+  value: unknown,
+  catalog: Record<string, Record<string, string[]>>,
+): {
+  matched: boolean;
+  brandModels: Record<string, string[]>;
+} {
+  const deviceNames = splitDeviceNames(value);
+  if (!deviceNames.length) return { matched: false, brandModels: {} };
+  const catalogEntries = Object.entries(catalog);
+  const merged: Record<string, string[]> = {};
+  let matched = false;
+  for (const deviceName of deviceNames) {
+    const direct = catalog[deviceName];
+    const brandModels = direct || catalogEntries.find(
+      ([catalogName]) => normalizedCatalogKey(catalogName) === normalizedCatalogKey(deviceName),
+    )?.[1];
+    if (!brandModels || typeof brandModels !== "object") continue;
+    matched = true;
+    for (const [brand, models] of Object.entries(brandModels)) {
+      if (!Array.isArray(models)) continue;
+      const mergedModels = merged[brand] || [];
+      for (const model of models) {
+        const normalizedModel = String(model || "").trim();
+        if (normalizedModel && !mergedModels.includes(normalizedModel)) {
+          mergedModels.push(normalizedModel);
+        }
+      }
+      if (mergedModels.length) merged[brand] = mergedModels;
+    }
+  }
+  return { matched, brandModels: merged };
+}
+
+export function repairModelsForBrand(
+  brand: unknown,
+  deviceValue: unknown,
+  deviceCatalog: Record<string, Record<string, string[]>>,
+  brandCatalog: Record<string, string[]>,
+): string[] {
+  const normalizedBrand = String(brand || "").trim();
+  if (!normalizedBrand) return [];
+  const resolved = resolveRepairDeviceCatalog(deviceValue, deviceCatalog);
+  const source = resolved.matched
+    ? resolved.brandModels
+    : brandCatalog;
+  const models = source[normalizedBrand];
+  return Array.isArray(models) ? models : [];
+}
+
+export function repairDeviceDependentPatch(
+  draft: LooseDict,
+  changedField: string,
+  deviceCatalog: Record<string, Record<string, string[]>>,
+  brandCatalog: Record<string, string[]>,
+): LooseDict {
+  const patch: LooseDict = {};
+  const device = repairFieldValueToText(draft["设备名称"]).trim();
+  const brand = repairFieldValueToText(draft["设备品牌"]).trim();
+  const model = repairFieldValueToText(draft["设备型号"]).trim();
+  if (changedField === "设备名称") {
+    if (!repairFieldValueToText(draft["设备编号"]).trim()) patch["设备编号"] = device;
+    const resolved = resolveRepairDeviceCatalog(device, deviceCatalog);
+    if (!resolved.matched) return patch;
+    if (brand && !Object.prototype.hasOwnProperty.call(resolved.brandModels, brand)) {
+      return { ...patch, "设备品牌": "", "设备型号": "" };
+    }
+  } else if (changedField !== "设备品牌") return patch;
+  if (model && !repairModelsForBrand(brand, device, deviceCatalog, brandCatalog).includes(model)) patch["设备型号"] = "";
+  return patch;
 }

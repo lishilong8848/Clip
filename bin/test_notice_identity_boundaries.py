@@ -33,6 +33,24 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = object.__new__(MaintenancePortalService)
 
+    def test_delete_never_replaces_explicit_target_after_identity_rebind(self):
+        for work in ('maintenance', 'change', 'repair', 'power', 'polling', 'adjust'):
+            with self.subTest(work=work):
+                store = mock.Mock()
+                store.resolve_notice_identity.return_value = {
+                    'work_type': work, 'active_item_id': 'same-active', 'target_record_id': 'rec-new', 'payload': {}}
+                with mock.patch.object(PortalRuntime, 'state_store', store), \
+                        mock.patch('lan_bitable_template_portal.server.delete_bitable_record') as delete, \
+                        mock.patch('lan_bitable_template_portal.server.query_record_by_id') as query:
+                    result = PortalRuntime.execute_local_delete_active_item({'work_type': work,
+                        'active_item_id': 'same-active', 'target_record_id': 'rec-confirmed', 'record_id': 'rec-confirmed'})
+                self.assertFalse(result['ok'])
+                self.assertTrue(result['conflict'])
+                self.assertFalse(result['remote_deleted'])
+                self.assertEqual(result['record_id'], 'rec-confirmed')
+                delete.assert_not_called()
+                query.assert_not_called()
+
     def test_bitable_data_not_ready_retries_idempotent_request(self) -> None:
         class FakeResponse:
             def __init__(self, code: int) -> None:

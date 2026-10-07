@@ -12840,6 +12840,9 @@ class LanPortalStateStore:
         try:
             with closing(sqlite3.connect(str(self.db_path), timeout=10.0)) as source:
                 source.execute("PRAGMA busy_timeout = 10000")
+                # Pin one WAL snapshot so concurrent commits cannot restart the copy.
+                source.execute("BEGIN")
+                source.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
                 with closing(sqlite3.connect(str(temporary_path), timeout=10.0)) as target:
                     source.backup(target, pages=2048, sleep=0.01)
                     target.commit()
@@ -12933,7 +12936,8 @@ class LanPortalStateStore:
         return int(row["id"] or 0) if row else 0
 
     def enqueue_outbox_event(
-        self, channel: str, payload: dict[str, Any] | None
+        self, channel: str, payload: dict[str, Any] | None, *,
+        documents: dict[tuple[str, str], dict[str, Any]] | None = None,
     ) -> int:
         channel = self._text(channel) or "default"
         normalized = dict(payload or {})
@@ -12947,6 +12951,15 @@ class LanPortalStateStore:
                     payload=normalized,
                     now=now,
                 )
+                for (namespace, key), document in (documents or {}).items():
+                    table = self._document_table_for_namespace(namespace)
+                    if table:
+                        self._put_table_document_locked(conn, table, key, dict(document))
+                    else:
+                        conn.execute(
+                            'INSERT OR REPLACE INTO json_documents(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)',
+                            (namespace, key, self._json(dict(document)), now),
+                        )
                 conn.commit()
                 return event_id
 
@@ -13034,14 +13047,20 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                conn.execute(
-                    """
-                    UPDATE event_outbox
-                    SET status = 'pending', updated_at = ?
-                    WHERE channel = ? AND status = 'leased' AND updated_at < ?
-                    """,
-                    (now, channel, stale_before),
-                )
+                expired = conn.execute(
+                    "SELECT 1 FROM event_outbox WHERE channel = ? "
+                    "AND status = 'leased' AND updated_at < ? LIMIT 1",
+                    (channel, stale_before),
+                ).fetchone()
+                if expired is not None:
+                    conn.execute(
+                        """
+                        UPDATE event_outbox
+                        SET status = 'pending', updated_at = ?
+                        WHERE channel = ? AND status = 'leased' AND updated_at < ?
+                        """,
+                        (now, channel, stale_before),
+                    )
                 rows = conn.execute(
                     """
                     SELECT status, COUNT(*) AS count
@@ -13057,6 +13076,15 @@ class LanPortalStateStore:
             for row in rows
             if str(row["status"] or "")
         }
+
+    def release_outbox_leases(self, channel: str) -> None:
+        """Recover this worker's leases once, after the exclusive backend starts."""
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                with conn:
+                    conn.execute("UPDATE event_outbox SET status='pending', updated_at=? WHERE channel=? AND status='leased'",
+                                 (time.time(), self._text(channel)))
 
     def lease_outbox_events(
         self,
@@ -13075,6 +13103,14 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                # Idle SSE polls must not acquire a write lock for an empty outbox.
+                due = conn.execute(
+                    "SELECT 1 FROM event_outbox WHERE channel = ? AND "
+                    "(status = 'pending' OR (status = 'leased' AND updated_at < ?)) LIMIT 1",
+                    (channel, stale_before),
+                ).fetchone()
+                if due is None:
+                    return []
                 conn.execute(
                     """
                     UPDATE event_outbox
@@ -13608,6 +13644,7 @@ class LanPortalStateStore:
                         SELECT operation_id
                         FROM repair_management_operations
                         WHERE status = 'completed' AND updated_at < ?
+                          AND operation_id NOT LIKE 'event-end-transfer:%'
                         ORDER BY updated_at ASC
                         LIMIT ?
                     )

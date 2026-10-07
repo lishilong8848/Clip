@@ -1,3 +1,10 @@
+import { cachedRead, invalidateReadCache as clearCachedReads, READ_CACHE_UPDATED, readCacheGeneration, readCacheKey, saveRead, setReadCacheIdentity as identifyCachedReads } from './readCache';
+export { READ_CACHE_UPDATED };
+export function invalidateReadCache(): void { clearCachedReads(); window.dispatchEvent(new Event('clipflow-read-cache-reset')); }
+export function setReadCacheIdentity(identity: string): void {
+  const before = readCacheGeneration(); identifyCachedReads(identity);
+  if (before !== readCacheGeneration()) window.dispatchEvent(new Event('clipflow-read-cache-reset'));
+}
 export type Dict = Record<string, any>;
 
 export type ApiClientHooks = {
@@ -5,10 +12,12 @@ export type ApiClientHooks = {
   onOffline?: (message: string, error: unknown) => void;
   onAuthExpired?: (message: string, response: Response, payload: Dict) => void;
   onServerError?: (message: string, response: Response, payload: Dict) => void;
+  onRevalidated?: (payload: Dict) => void;
 };
 
 export type ApiRequestOptions = RequestInit & {
   timeoutMs?: number;
+  fresh?: boolean;
 };
 
 export const AUTH_EXPIRED_EVENT = "clipflow-auth-expired";
@@ -113,8 +122,52 @@ export async function requestJson(
   options: ApiRequestOptions = {},
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
-  return requestResponseJson(path, options, hooks, buildHeaders(options));
+  const { fresh, ...request } = options;
+  const method = String(request.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && (!path.startsWith('/api/assistant/') || /\/plans\/[^/]+\/confirm/.test(path))) invalidateReadCache();
+  const key = method === 'GET' && request.credentials !== 'omit' && !new Headers(request.headers).has('Authorization')
+    ? readCacheKey(path, window.location.origin) : '';
+  // Explicit refresh also invalidates older in-flight reads before they return.
+  if (key && (fresh || request.cache === 'reload')) invalidateReadCache();
+  const stamp = readCacheGeneration();
+  const flightKey = key + ':' + stamp;
+  const load = () => requestResponseJson(path, request, hooks, buildHeaders(request));
+  if (!key || fresh || request.cache === 'reload') {
+    const data = await load(); saveRead(key, data, stamp); return data;
+  }
+  const hit = cachedRead(key);
+  if (hit) {
+    if (!request.signal?.aborted && Date.now() - hit.at > 3000) {
+      let task = readRevalidations.get(flightKey);
+      if (!task) {
+        task = requestResponseJson(path, { ...request, signal: undefined }, {}, buildHeaders(request))
+          .then(data => { saveRead(key, data, stamp); return data; })
+          .finally(() => { if (readRevalidations.get(flightKey) === task) readRevalidations.delete(flightKey); });
+        readRevalidations.set(flightKey, task);
+      }
+      void task.then(data => {
+        if (stamp !== readCacheGeneration() || request.signal?.aborted) return;
+        hooks.onRevalidated?.(structuredClone(data));
+        window.dispatchEvent(new CustomEvent(READ_CACHE_UPDATED, { detail: { path } }));
+      }).catch(() => undefined);
+    }
+    if (request.signal?.aborted) throw new ApiError('请求已取消。');
+    return hit.data;
+  }
+  // A caller-owned cancellation must not cancel another page's request.
+  if (request.signal) { const data = await load(); saveRead(key, data, stamp); return data; }
+  let task = readRevalidations.get(flightKey);
+  if (!task) {
+    task = load().then(data => { saveRead(key, data, stamp); return data; })
+      .finally(() => { if (readRevalidations.get(flightKey) === task) readRevalidations.delete(flightKey); });
+    readRevalidations.set(flightKey, task);
+  }
+  return structuredClone(await task);
 }
+
+const readRevalidations = new Map<string, Promise<Dict>>();
+window.addEventListener(AUTH_EXPIRED_EVENT, () => { setReadCacheIdentity(''); readRevalidations.clear(); });
+window.addEventListener('clipflow-business-changed', () => { invalidateReadCache(); readRevalidations.clear(); });
 
 async function requestResponseJson(
   path: string,

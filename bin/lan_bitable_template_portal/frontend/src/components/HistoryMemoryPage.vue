@@ -9,7 +9,7 @@
       </div>
     </header>
 
-    <div v-if="checking" class="notice-box">正在校验管理员身份...</div>
+    <div v-if="checking" class="notice-box" role="status"><LoadingIndicator>正在校验管理员身份...</LoadingIndicator></div>
     <div v-else-if="!loggedIn" class="notice-box">
       请先登录飞书后再使用历史记忆导入。
       <a class="btn blue" :href="loginUrl">飞书登录</a>
@@ -132,6 +132,7 @@
         </aside>
 
         <Teleport to="body">
+          <UiTransition name="ui-drawer" appear>
           <div
             v-if="reviewOpen && activeSource"
             class="history-review-backdrop"
@@ -250,6 +251,7 @@
               </div>
             </section>
           </div>
+          </UiTransition>
         </Teleport>
       </section>
 
@@ -287,6 +289,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { isAssistantEvent } from '../modalState';
 import { X } from "lucide-vue-next";
 import { requestJson, type Dict } from "../api/client";
 import {
@@ -594,6 +597,7 @@ function closeReview(): void {
 }
 
 function handleReviewKeydown(event: KeyboardEvent): void {
+  if (isAssistantEvent(event)) return;
   if (event.key === "Escape" && reviewOpen.value) closeReview();
 }
 

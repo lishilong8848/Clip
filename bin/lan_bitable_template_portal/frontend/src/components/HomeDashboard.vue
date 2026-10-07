@@ -10,6 +10,7 @@
       <div class="dashboard-title">
         <h2 id="home-module-heading">业务模块</h2>
         <span>{{ enabledModuleCount }} 个可用</span>
+        <Loader2 v-if="refreshing" :size="14" class="overview-refreshing" aria-label="正在刷新统计" />
       </div>
       <button
         v-if="canRequestMoreScopes"
@@ -95,6 +96,7 @@ import {
   ClipboardList,
   Droplets,
   KeyRound,
+  Loader2,
   RefreshCw,
   Settings2,
   ShieldCheck,
@@ -115,6 +117,7 @@ defineProps<{
   broadcastItems: ScopeHomeBroadcastItem[];
   broadcastSummary: string;
   moduleMetrics: Record<string, ScopeHomeModuleMetric>;
+  refreshing?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -145,6 +148,8 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 </script>
 
 <style scoped>
+.overview-refreshing { color: #57718b; animation: overview-spin 1s linear infinite; }
+@keyframes overview-spin { to { transform: rotate(360deg); } }
 .home-dashboard {
   width: min(100%, 1680px);
   margin: 0 auto;

@@ -7,13 +7,21 @@
 """
 import re
 import sqlite3
-from contextlib import closing
+import hashlib
+import json
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from upload_event_module.utils import get_data_file_path
 
 DATA_DIR = Path(get_data_file_path('plan_convergence'))
 RULE_DB = DATA_DIR / 'rule_sets.sqlite3'
 CATALOG_DB = DATA_DIR / 'catalog.sqlite3'
+_lookups = ContextVar('plan_convergence_lookups', default=None)
+
+
+class RuleConflictError(ValueError):
+    pass
 
 # 实例名 / 规则名可能用逗号、顿号、分号、换行分隔多个值
 _SEP = re.compile(r'[,，、;；\r\n]+')
@@ -51,12 +59,26 @@ def _conn():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     ''')
+    if 'ins_id' not in {row[1] for row in conn.execute('PRAGMA table_info(rule_set_item)')}:
+        try:
+            conn.execute('ALTER TABLE rule_set_item ADD COLUMN ins_id TEXT')
+        except sqlite3.OperationalError:
+            if 'ins_id' not in {row[1] for row in conn.execute('PRAGMA table_info(rule_set_item)')}:
+                conn.close()
+                raise
     if CATALOG_DB.is_file():
         conn.execute('ATTACH DATABASE ? AS catalog', (CATALOG_DB.resolve().as_uri() + '?mode=ro',))
     return conn
 
 
 def _exec(sql, args=None, fetch=True):
+    lookup = _lookups.get()
+    if lookup is not None and fetch:
+        conn, cache = lookup
+        key = (sql, tuple(args or ()))
+        if key not in cache:
+            cache[key] = [dict(row) for row in conn.execute(sql.replace('%s', '?'), args or ())]
+        return cache[key]
     conn = _conn()
     try:
         cursor = conn.execute(sql.replace('%s', '?'), args or ())
@@ -66,6 +88,42 @@ def _exec(sql, args=None, fetch=True):
         return cursor.lastrowid
     finally:
         conn.close()
+
+
+@contextmanager
+def _lookup_session():
+    if _lookups.get() is not None:
+        yield
+        return
+    with closing(_conn()) as conn:
+        conn.execute('BEGIN')
+        token = _lookups.set((conn, {}))
+        try:
+            yield
+        finally:
+            _lookups.reset(token)
+
+
+def _version(name, remark, items):
+    keys = ('scope_type', 'obj_name', 'zone', 'building', 'floor', 'room', 'inst_name',
+            'point_name', 'rule_name', 'alarm_config_id', 'rule_group_no', 'rule_type', 'rule_label', 'ins_id')
+    defaults = {'scope_type': 'device', 'rule_group_no': 1, 'rule_type': 'normal'}
+    ordered = sorted(items, key=lambda item: str(item.get('rule_group_no', 1)))
+    content = (name, remark, [tuple(item.get(key, defaults.get(key)) for key in keys) for item in ordered])
+    return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _read_set(conn, set_id):
+    row = conn.execute('SELECT * FROM rule_set WHERE id=?', (set_id,)).fetchone()
+    if not row:
+        return None
+    value = dict(row)
+    value['items'] = [dict(item) for item in conn.execute(
+        'SELECT id,scope_type,obj_name,zone,building,floor,room,inst_name,point_name,rule_name,'
+        'alarm_config_id,rule_group_no,rule_type,rule_label,ins_id FROM rule_set_item '
+        'WHERE set_id=? ORDER BY rule_group_no,id', (set_id,))]
+    value['version'] = _version(value['name'], value['remark'], value['items'])
+    return value
 
 # ==================== 规则集 CRUD ====================
 
@@ -82,17 +140,9 @@ def list_sets():
 
 def get_set(set_id):
     """获取规则集详情（含所有项）。"""
-    sets = _exec("SELECT id, name, remark, created_at, updated_at FROM rule_set WHERE id=%s", (set_id,))
-    if not sets:
-        return None
-    s = sets[0]
-    s['items'] = _exec("""
-        SELECT id, scope_type, obj_name, zone, building, floor, room,
-               inst_name, point_name, rule_name, alarm_config_id,
-               rule_group_no, rule_type, rule_label
-        FROM rule_set_item WHERE set_id=%s ORDER BY rule_group_no, id
-    """, (set_id,))
-    return s
+    with closing(_conn()) as conn:
+        conn.execute('BEGIN')
+        return _read_set(conn, set_id)
 
 
 def create_set(name, remark=''):
@@ -143,6 +193,10 @@ def _item_rows(set_id, items):
         raise ValueError('规则条目必须为不超过 500 项的对象列表')
     rows = []
     for it in items:
+        for key in ('scope_type', 'obj_name', 'zone', 'building', 'floor', 'room', 'inst_name',
+                    'point_name', 'rule_name', 'alarm_config_id', 'rule_type', 'rule_label', 'ins_id'):
+            if it.get(key) is not None and not isinstance(it[key], str):
+                raise ValueError('规则项字段须为文本：' + key)
         if it.get('scope_type', 'device') not in {
             'all', 'zone', 'building', 'floor', 'room', 'objtype', 'objtype_room',
             'device', 'point', 'exclude_device', 'exclude_point',
@@ -157,7 +211,7 @@ def _item_rows(set_id, items):
             raise ValueError('规则项内容过长')
         rows.append((
             set_id,
-            it.get('scope_type', 'point'),
+            it.get('scope_type', 'device'),
             it.get('obj_name'),
             it.get('zone'),
             it.get('building'), it.get('floor'), it.get('room'),
@@ -166,6 +220,7 @@ def _item_rows(set_id, items):
             it.get('rule_group_no', 1),          # 规则组号（同组=同一次添加的组合）
             it.get('rule_type', 'normal'),        # common=公共规则 / normal=普通规则
             it.get('rule_label'),                 # 组/规则显示名（前端 draft.label）
+            it.get('ins_id'),
         ))
     return rows
 
@@ -175,8 +230,8 @@ def _insert_items(conn, rows):
         """INSERT INTO rule_set_item
            (set_id, scope_type, obj_name, zone, building, floor, room,
             inst_name, point_name, rule_name, alarm_config_id,
-            rule_group_no, rule_type, rule_label)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+            rule_group_no, rule_type, rule_label, ins_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
 
 
 def clear_items(set_id):
@@ -192,7 +247,7 @@ def replace_items(set_id, items):
     return len(rows)
 
 
-def save_set(set_id, name, remark, items):
+def save_set(set_id, name, remark, items, *, expected_version=None):
     """Update metadata and items in one transaction."""
     if not isinstance(name, str):
         raise ValueError('规则集名称无效')
@@ -203,14 +258,19 @@ def save_set(set_id, name, remark, items):
         raise ValueError('规则集备注过长')
     rows = _item_rows(set_id, items)
     with closing(_conn()) as conn, conn:
-        exists = conn.execute('SELECT id FROM rule_set WHERE id=?', (set_id,)).fetchone()
-        if not exists:
+        conn.execute('BEGIN IMMEDIATE')
+        current = _read_set(conn, set_id)
+        if not current:
             raise ValueError('规则集不存在')
+        if expected_version is not None and expected_version != current['version']:
+            if current['version'] == _version(name, remark, items):
+                return current
+            raise RuleConflictError('规则集已被其他人修改，当前填写已保留，请重新读取后核对再保存。')
         conn.execute('UPDATE rule_set SET name=?, remark=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
                      (name, remark, set_id))
         conn.execute('DELETE FROM rule_set_item WHERE set_id=?', (set_id,))
         _insert_items(conn, rows)
-    return len(rows)
+        return _read_set(conn, set_id)
 
 
 # ==================== 匹配逻辑（新底表：设备实例级） ====================
@@ -249,21 +309,34 @@ def _pos_like(zone='', building='', floor='', room=''):
     return "(`position` LIKE %s OR `position` LIKE %s)", (f'%/{chain}', f'%/{chain}/%')
 
 
-def _device_by_name(inst_name):
-    """按实例名查 zh_device，返回 ins_id + 基本信息（精确优先，模糊兜底）。"""
+def _device_by_name(inst_name, ins_id=None):
+    """Prefer stable identity; a name must resolve to one device."""
+    if ins_id:
+        rows = _exec('SELECT inst_name,ins_id,ins_standard_id,obj_name,position FROM zh_device WHERE ins_id=%s LIMIT 1', (ins_id,))
+        return rows[0] if rows else None
     rows = _exec("""
         SELECT inst_name, ins_id, ins_standard_id, obj_name, `position`
-        FROM zh_device WHERE inst_name = %s LIMIT 1
+        FROM zh_device WHERE inst_name = %s LIMIT 2
     """, (inst_name,))
     if not rows:
         rows = _exec("""
             SELECT inst_name, ins_id, ins_standard_id, obj_name, `position`
-            FROM zh_device WHERE inst_name LIKE %s LIMIT 1
-        """, (f'%{inst_name}%',))
+            FROM zh_device WHERE inst_name LIKE %s ESCAPE '\\' LIMIT 2
+        """, ('%' + str(inst_name).replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%',))
+    if len(rows) > 1:
+        raise ValueError(f'设备「{inst_name}」匹配到多条目录记录，请重新选择具体设备。')
     return rows[0] if rows else None
 
 
 def _expand_item(it):
+    included, excludes = _expand_item_devices(it)
+    if not included and not excludes:
+        label = it.get('inst_name') or it.get('room') or it.get('building') or it.get('obj_name') or it.get('scope_type')
+        raise ValueError(f'规则条目「{label}」未找到设备，请核对目录和配置后重新核对。')
+    return included, excludes
+
+
+def _expand_item_devices(it):
     """
     把一条规则集项展开为设备实例集合。
     scope_type 分支与 expand_set_items 原文案一致：
@@ -274,10 +347,14 @@ def _expand_item(it):
     """
     included, excludes = set(), set()
     st = it['scope_type']
+    required = {'zone': 'zone', 'building': 'building', 'floor': 'floor', 'room': 'room', 'objtype': 'obj_name', 'objtype_room': 'obj_name'}.get(st)
+    if required and not str(it.get(required) or '').strip():
+        raise ValueError('规则范围缺少必要条件：' + required)
+    if st == 'objtype_room' and not any(it.get(key) for key in ('zone', 'building', 'floor', 'room')):
+        raise ValueError('设备类型与空间规则缺少空间条件')
     if st == 'exclude_device' or st == 'exclude_point':
-        # 排除单台设备（找不到则忽略）
-        if it['inst_name']:
-            d = _device_by_name(it['inst_name'])
+        if it.get('inst_name') or it.get('ins_id'):
+            d = _device_by_name(it.get('inst_name'), it.get('ins_id'))
             if d and d['ins_id']:
                 excludes.add(d['ins_id'])
         return included, excludes
@@ -326,8 +403,8 @@ def _expand_item(it):
         included.update(r['ins_id'] for r in rows)
         return included, excludes
     if st in ('device', 'point'):
-        if it['inst_name']:
-            d = _device_by_name(it['inst_name'])
+        if it.get('inst_name') or it.get('ins_id'):
+            d = _device_by_name(it.get('inst_name'), it.get('ins_id'))
             if d and d['ins_id']:
                 included.add(d['ins_id'])
             return included, excludes
@@ -349,6 +426,11 @@ def _expand_item(it):
 
 
 def expand_set_items(set_id):
+    with _lookup_session():
+        return _expand_set_items(set_id)
+
+
+def _expand_set_items(set_id):
     """
     把规则集项展开为「设备实例集合」（新底表，按 ins_id 去重）。
     每项 scope_type：
@@ -426,6 +508,8 @@ def expand_record(details):
             obj_name = (d.get('classifyModel') or '').strip()
             obj_name = '' if obj_name in ('全部', 'all') else obj_name
             found = _expand_space_devices(space_name, obj_name) if space_name else set()
+            if not found:
+                not_found.add(space_name or inst_text or id_text)
             result.update(found)
             structured.append({
                 'device': f'{space_name or "全部"}（全部设备）' if found else (inst_text or id_text),
@@ -438,19 +522,20 @@ def expand_record(details):
             })
             continue
         # 实例名与实例ID合并解析
-        names = [s for s in _SEP.split(inst_text) if s.strip()]
-        ids = [s for s in _SEP.split(id_text) if s.strip() and s.lower() != 'all']
+        names = [s.strip() for s in _SEP.split(inst_text) if s.strip()]
+        ids = [s.strip() for s in _SEP.split(id_text) if s.strip() and s.strip().lower() != 'all']
         found = set()
         for iid in ids:
             # ID 可能带 INSTANCE- 前缀，也可能纯数字（兼容）
-            iid_clean = iid.replace('INSTANCE-', '').replace('INSTANCE-6-', '')
+            iid_clean = iid.removeprefix('INSTANCE-6-').removeprefix('INSTANCE-')
             rows = _exec("SELECT ins_id FROM zh_device WHERE ins_id=%s LIMIT 1", (iid,))
             if not rows and iid_clean != iid:
-                rows = _exec("SELECT ins_id FROM zh_device WHERE ins_id LIKE %s LIMIT 1",
-                             (f'%{iid_clean}%',))
+                rows = _exec("SELECT ins_id FROM zh_device WHERE ins_id=%s LIMIT 1", (iid_clean,))
             if rows:
                 found.add(rows[0]['ins_id'])
-        for inst in names:
+            else:
+                not_found.add(iid)
+        for inst in names if not ids else []:
             d_dev = _device_by_name(inst)
             if d_dev and d_dev['ins_id']:
                 found.add(d_dev['ins_id'])
@@ -463,7 +548,7 @@ def expand_record(details):
             'device_count': len(found),
             'found_in_db': bool(found),
             'devices_found': sorted(found)[:20],
-            'devices_not_found': [i for i in names if _device_by_name(i) is None],
+            'devices_not_found': [i for i in (ids or names) if i in not_found],
         })
     return result, structured, sorted(not_found)
 
@@ -486,6 +571,11 @@ def _dev_info(ins_ids):
 
 
 def match_record_to_set(set_id, details):
+    with _lookup_session():
+        return _match_record_to_set(set_id, details)
+
+
+def _match_record_to_set(set_id, details):
     """
     匹配：规则集(配置)是否覆盖智航记录（设备实例级）。
     分组语义（公共规则 + 多条规则）：
@@ -528,7 +618,8 @@ def match_record_to_set(set_id, details):
         return {
             'label': g['label'] or f'规则组{g["group_no"]}',
             'group_no': g['group_no'],
-            'matched': not missing,
+            'matched': bool(g['devices']) and not missing,
+            'device_count': len(g['devices']),
             'missing_count': len(missing),
             'missing': _dev_info(missing),
         }

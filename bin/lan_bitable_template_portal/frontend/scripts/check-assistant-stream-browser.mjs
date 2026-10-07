@@ -69,7 +69,7 @@ function trackMessagesPosts(page) {
 }
 
 async function openAssistant(page) {
-  await page.locator('.lighthouse').first().waitFor();
+  await page.locator('.lighthouse').first().waitFor({ state: 'attached' });
   if ((await page.locator('.assistant-panel').count()) === 0) {
     const btn = page.getByRole('button', { name: '打开灯塔助手', exact: true });
     await btn.waitFor();
@@ -236,6 +236,14 @@ try {
   await launcherAtEdge.press('Alt+ArrowRight');
   const edge = await launcherAtEdge.boundingBox();
   await openAssistant(dPage);
+  const initialBox = await dPage.locator('.assistant-panel').boundingBox();
+  assert(initialBox && Math.abs(initialBox.width - 620) < 2 && Math.abs(initialBox.height - 700) < 2,
+    `PC default panel should be 620x700, got ${JSON.stringify(initialBox)}`);
+  await dPage.getByRole('button', { name: '展开会话', exact: true }).click();
+  await dPage.waitForFunction(() => document.querySelector('.assistant-panel')?.getBoundingClientRect().width >= 759);
+  await dPage.getByRole('button', { name: '还原会话', exact: true }).click();
+  await dPage.waitForFunction(() => Math.abs(document.querySelector('.assistant-panel')?.getBoundingClientRect().width - 620) < 2);
+  await dPage.screenshot({ path: path.join(output, 'pc-default.png') });
   await dPage.reload({ waitUntil: 'load' });
   await dPage.locator('.assistant-panel').waitFor();
   await closeAssistant(dPage);

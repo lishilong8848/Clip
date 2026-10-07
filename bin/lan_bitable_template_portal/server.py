@@ -48,6 +48,7 @@ from .portal_service import (
     PortalNotFoundError,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
+    STATE_NS_ACTION_JOB,
     WORK_TYPE_CHANGE,
     WORK_TYPE_EVENT,
     WORK_TYPE_MAINTENANCE,
@@ -1264,6 +1265,8 @@ class PortalRuntime:
                 notice_type=NOTICE_TYPE_CHANGE,
                 target_record=record,
             )
+            if not lifecycle.get('active') or lifecycle.get('finished'):
+                continue
             existing = cls.state_store.get_document(
                 CHANGE_CONFIRMATION_NAMESPACE,
                 target_record_id,
@@ -4526,6 +4529,7 @@ class PortalRuntime:
                 data = PortalRuntime.service.get_event_monthly_snapshot(
                     scope=scope,
                     month=month,
+                    date_field=(qs.get("date_field") or [""])[0],
                 )
                 return self._send_json(
                     200,
@@ -5140,6 +5144,7 @@ class PortalRuntime:
                         "data": {
                             "job_id": job_id,
                             "accepted_at": job.get("accepted_at") or 0,
+                            "supersedes_job_ids": job.get("supersedes_job_ids") or [],
                             "initial_phase": job.get("phase") or "accepted",
                         },
                     },
@@ -6171,6 +6176,7 @@ class PortalRuntime:
                     cls.event_repair_queue_channel,
                     "event_record_id",
                     str(item.get("event_record_id") or "").strip(),
+                    statuses=("pending", "leased", "done", "failed"),
                 )
             ),
             None,
@@ -6230,6 +6236,10 @@ class PortalRuntime:
                 source_month=str(payload.get("source_month") or ""),
             )
             repair_record_id = str(result.get("record_id") or "").strip()
+            if result.get("skipped"):
+                cls.state_store.mark_outbox_event(event_id, "done")
+                return {"processed": True, "status": "skipped", "event_id": event_id,
+                        "event_record_id": event_record_id, "reason": result.get("reason", "")}
             if not repair_record_id:
                 raise PortalError("维修单创建未返回记录 ID。")
             cls.clear_payload_cache()
@@ -6397,6 +6407,26 @@ class PortalRuntime:
                 worker.join(timeout=2)
         with cls.cabinet_notice_queue_lock:
             cls.cabinet_notice_worker_thread = None
+
+    @classmethod
+    def enqueue_notice_alert_tags(cls, notice, *, operation_id, target_record_id, request=None):
+        # This post-upload handoff never waits for a model or changes notice success.
+        try:
+            tagging = getattr(cls, 'notice_alert_tags', None)
+            if tagging is not None and not external_real_write_guard()['mock_external']:
+                tagging.enqueue(notice, operation_id=operation_id, target_record_id=target_record_id, request=request)
+                paired = notice.get('paired_maintenance_upload')
+                if notice.get('paired_upload_status') == 'success' and isinstance(paired, dict):
+                    tagging.enqueue(paired, operation_id=operation_id + ':paired-maintenance',
+                        target_record_id=notice.get('paired_maintenance_target_record_id') or paired.get('target_record_id'), request=request)
+        except Exception as exc:
+            log_warning(f'通告已成功，推荐标签后台投递失败: {type(exc).__name__}')
+
+    @classmethod
+    def _enqueue_qt_notice_followups(cls, data, request, operation_id, target_record_id, action):
+        cls.enqueue_notice_alert_tags({**data, 'action': action}, operation_id=operation_id,
+                                      target_record_id=target_record_id, request=request)
+        cls._enqueue_qt_power_notice(data, request, operation_id, target_record_id, action)
 
     @classmethod
     def _enqueue_qt_power_notice(
@@ -7139,12 +7169,14 @@ class PortalRuntime:
         pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="NoticeUpload")
         try:
             running = {}
+            wait_seconds = 5.0
             while generation == cls.action_worker_generation and not cls.action_worker_stop:
                 for job_id, future in list(running.items()):
                     if future.done():
                         del running[job_id]
-                cls.action_queue_event.wait(timeout=5.0)
+                cls.action_queue_event.wait(timeout=wait_seconds)
                 cls.action_queue_event.clear()
+                wait_seconds = 5.0
                 if (
                     generation != cls.action_worker_generation
                     or cls.action_worker_stop
@@ -7156,6 +7188,12 @@ class PortalRuntime:
                     excluded = tuple(set(running) | cls.action_running_job_ids)
                 job_id = cls._dequeue_runtime_job("qt_action", exclude_job_ids=excluded)
                 if not job_id:
+                    try:
+                        deferred = cls.state_store.list_runtime_queue_items("qt_action", statuses=("queued",), due_only=False, limit=1)
+                        if deferred:
+                            wait_seconds = max(0.5, min(5.0, float(deferred[0]["available_at"]) - time.time()))
+                    except Exception:
+                        pass
                     continue
                 with cls.action_queue_lock:
                     if generation != cls.action_worker_generation or cls.action_worker_stop:
@@ -7181,6 +7219,7 @@ class PortalRuntime:
                         )
                         with cls.action_queue_lock:
                             cls.action_running_job_ids.discard(job_id)
+                        cls.action_queue_event.set()
                         continue
                     service.mark_job(
                         job_id,
@@ -8649,6 +8688,13 @@ class PortalRuntime:
             try:
                 operation = cls._get_notice_remote_operation(operation_id) or {}
                 previous = operation.get("result") or {}
+                if previous.get("robot_notice_type") != "事件通告" and operation_id.startswith("notice_action:"):
+                    job = cls.state_store.get_document(STATE_NS_ACTION_JOB, operation_id.removeprefix("notice_action:")) or {}
+                    if job.get("superseded_by_job_id"):
+                        cls._mark_notice_remote_operation(operation_id, status="superseded",
+                            result={"robot_delivery_state": "superseded"})
+                        cls.state_store.mark_outbox_event(task["id"], "done")
+                        continue
                 if previous.get("robot_delivery_state") in {"sent", "skipped", "superseded"}:
                     cls.state_store.mark_outbox_event(task["id"], "done")
                     continue
@@ -11058,6 +11104,44 @@ class PortalRuntime:
         )
 
     @classmethod
+    def _replacement_start_target(cls, prepared: dict, notice_type: str, original_id: str) -> str:
+        from upload_event_module.services.feishu_service import (
+            create_bitable_record_fields, _notice_create_client_token, _filter_missing_optional_fields,
+        )
+        operation = cls._get_notice_remote_operation(original_id) or {}
+        saved = operation.get("result") or {}
+        target = str(saved.get("created_record_id") or operation.get("target_record_id") or "")
+        fields, token = saved.get("create_fields"), saved.get("create_client_token")
+        if not target or is_local_record_id(target):
+            if not isinstance(fields, dict) or not fields:
+                original_payload = saved.get("robot_payload")
+                if not isinstance(original_payload, dict) or not original_payload.get("text"):
+                    raise PortalError("原创建内容缺失，无法安全核验；请绑定已存在的目标记录后提交最新版。")
+                original_payload = NoticePayload(**original_payload)
+                handler = get_notice_handler(notice_type)
+                fields = _filter_missing_optional_fields(notice_type, handler.build_create_fields(original_payload))
+                original_payload.operation_id = original_id
+                token = _notice_create_client_token(original_payload, notice_type, handler.get_table_id(config))
+            if not token:
+                raise PortalError("原创建标识缺失，未重复创建通告。")
+            # Reuse the exact original create, then write the latest fields by ID.
+            # A lost create response must never mint a second client_token.
+            cls._mark_notice_remote_operation(original_id, status=operation.get("status") or "failed",
+                result={"create_fields": fields, "create_client_token": token})
+            ok, result = create_bitable_record_fields(notice_type, fields, client_token=token)
+            if not ok:
+                raise PortalError(str(result or "原创建结果尚未取得。"))
+            target = str(result or "")
+        if not target or is_local_record_id(target):
+            raise PortalError("未取得有效的通告记录 ID。")
+        cls._mark_notice_remote_operation(original_id, status="superseded", target_record_id=target,
+            result={"created_record_id": target, "robot_delivery_state": "superseded",
+                    "superseded_by_operation_id": prepared.get("_remote_operation_id", "")})
+        cls._mark_notice_remote_operation(str(prepared.get("_remote_operation_id") or ""), status="executing",
+            target_record_id=target, result={"created_record_id": target})
+        return target
+
+    @classmethod
     def _execute_backend_prepared_upload(
         cls, prepared: dict
     ) -> tuple[bool, str, str]:
@@ -11090,7 +11174,8 @@ class PortalRuntime:
         work_order_fields = cls._work_order_field_config(prepared)
         work_order_label = cls._work_order_label(prepared)
         if action == "start":
-            existing_target = cls._existing_target_for_prepared_start(prepared, notice_type)
+            replacement = str(prepared.get("replacement_create_operation_id") or "")
+            existing_target = "" if replacement else cls._existing_target_for_prepared_start(prepared, notice_type)
             if existing_target:
                 if cls._has_extra_images_payload(prepared):
                     ok_existing_images, existing_image_record = query_record_by_id(
@@ -11405,7 +11490,14 @@ class PortalRuntime:
             )
             remote_operation_id = str(prepared.get("_remote_operation_id") or "")
             cls._stage_notice_robot_delivery(remote_operation_id, notice_type, payload)
-            ok, result = create_bitable_record_by_payload(notice_type, payload)
+            if remote_operation_id:
+                payload._clipflow_create_checkpoint = lambda fields, token: cls._mark_notice_remote_operation(
+                    remote_operation_id, status="executing", result={"create_fields": fields, "create_client_token": token})
+            if replacement:
+                target = cls._replacement_start_target(prepared, notice_type, replacement)
+                ok, result = create_bitable_record_by_payload(notice_type, payload, target_record_id=target)
+            else:
+                ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
             if ok and record_id and remote_operation_id:
                 cls._mark_notice_remote_operation(remote_operation_id, status="remote_written",
@@ -12978,7 +13070,7 @@ class PortalRuntime:
                         message=str(message or target),
                         robot_result=robot_result,
                     )
-                    cls._enqueue_qt_power_notice(data, payload, operation_id, target, "start")
+                    cls._enqueue_qt_notice_followups(data, payload, operation_id, target, "start")
                     return {
                         "ok": True,
                         "name": "上传",
@@ -13116,7 +13208,7 @@ class PortalRuntime:
                         result={"record_id": real_record_id, "message": str(result or ""),
                                 "local_projection_completed": True},
                     )
-                    cls._enqueue_qt_power_notice(data, payload, operation_id, real_record_id, "start")
+                    cls._enqueue_qt_notice_followups(data, payload, operation_id, real_record_id, "start")
                 else:
                     cls._mark_notice_remote_operation(
                         operation_id,
@@ -14028,7 +14120,7 @@ class PortalRuntime:
             robot_result=robot_result,
         )
         if success:
-            cls._enqueue_qt_power_notice(data, payload, operation_id, target_record_id, action_type)
+            cls._enqueue_qt_notice_followups(data, payload, operation_id, target_record_id, action_type)
         return {
             "ok": bool(success),
             "name": action_name,
@@ -14215,6 +14307,14 @@ class PortalRuntime:
                 if current in (None, "", [], {}):
                     payload[key] = copy.deepcopy(value)
             resolved_target = str(identity.get("target_record_id") or "").strip()
+            if ((work_type or identity.get("work_type")) in {"maintenance", "change", "repair", "power", "polling", "adjust"}
+                    and target_record_id and not is_local_record_id(target_record_id)
+                    and resolved_target and resolved_target != target_record_id):
+                return {
+                    "ok": False, "conflict": True, "remote_deleted": False,
+                    "record_id": target_record_id, "active_item_id": active_item_id,
+                    "message": "通告目标关联已变化，请重新打开当前未结束通告后删除，未执行删除。",
+                }
             identity_finished = any(
                 MaintenancePortalService._target_status_is_finished(value)
                 for value in (
@@ -14850,6 +14950,9 @@ class PortalRuntime:
         remote_operation_id = f"notice_action:{job_id}"
         try:
             current_job = cls.service.get_job(job_id) or {}
+            if current_job.get("superseded_by_job_id"):
+                cls.state_store.mark_runtime_queue_item("qt_action", job_id, "failed", error="旧任务已被最新提交替代。")
+                return
             remote_record_id = str(
                 current_job.get("remote_record_id")
                 or current_job.get("target_record_id")
@@ -14938,6 +15041,13 @@ class PortalRuntime:
                     previous_prepared=stored_prepared,
                 )
                 prepared = cls.service._synchronize_prepared_notice_text(prepared)
+                for key in ("supersedes_job_ids", "replacement_create_operation_id"):
+                    if current_job.get(key):
+                        prepared[key] = copy.deepcopy(current_job[key])
+                previous_operation = cls._get_notice_remote_operation(remote_operation_id) or {}
+                frozen_time = (previous_operation.get("request") or {}).get("response_time")
+                if frozen_time:
+                    prepared["response_time"] = frozen_time
                 message_signature = cls.service._action_message_signature(prepared)
                 prepared["message_signature"] = message_signature
                 prepared["message_sent"] = bool(current_job.get("message_sent")) and (
@@ -15773,6 +15883,8 @@ class PortalRuntime:
                         prepared.pop(
                             "preserve_ongoing_source_after_target_end", None
                         )
+                cls.enqueue_notice_alert_tags(prepared, operation_id=job_id,
+                    target_record_id=resolved_remote_record_id, request=current_job.get('request') or {})
                 cls.service.mark_action_upload_result(
                     job_id,
                     success=True,
