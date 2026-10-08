@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.notice_alert_tags import NoticeAlertTags, NS, CHANNEL, install_notice_alert_tag_routes
-from openclaw_service.assistant.lighthouse_alert_tagging import recommend, rules, LABELS
+from openclaw_service.assistant.lighthouse_alert_tagging import fallback_text, recommend, rules
 from openclaw_service.assistant import lighthouse_skills
 
 
@@ -103,7 +103,7 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 5)
         self.assertEqual(peak, 2)
 
-    async def test_model_failure_sends_full_rule_fallback_to_floor_and_li(self):
+    async def test_model_failure_sends_short_type_specific_fallback_to_floor_and_li(self):
         attempts = []
         async def fail(*args):
             attempts.append(args)
@@ -114,11 +114,54 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual({call.args[1][0] for call in self.sender.call_args_list}, {'ou_E', 'ou_li'})
         for call in self.sender.call_args_list:
-            self.assertIn('推荐标签获取失败', call.args[0])
-            self.assertIn('易错点速查', call.args[0])
-            self.assertIn('示例', call.args[0])
-            self.assertTrue(all(label in call.args[0] for label in LABELS))
-        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['status'], 'failed')
+            body = call.args[0]
+            self.assertEqual(body.count('推荐标签获取失败'), 1)
+            self.assertIn(fallback_text('维保通告'), body)
+            self.assertNotIn('易错点速查', body)
+            self.assertNotIn('name: alert-tagging', body)
+            self.assertNotIn('【检修】', body)
+            self.assertEqual(len(body.split('\n\n')[1].splitlines()), 4)
+        visible = self.tags.latest('recE', 'maintenance', ['E'])
+        self.assertEqual(visible['status'], 'failed')
+        self.assertEqual(visible['error'], fallback_text('维保通告'))
+
+    def test_fallback_is_three_lines_for_each_notice_type_without_reading_skill(self):
+        expected = {'维保通告': '【维护】', '变更通告': '【变更】', '设备检修': '【检修】',
+                    '设备轮巡': '【设备轮巡】', '设备调整': '【设备调整】',
+                    '上电通告': '【上下电】', '下电通告': '【上下电】',
+                    '事件通告': '按实际根因', '未识别类型': '通告类型未识别'}
+        with patch('openclaw_service.assistant.lighthouse_alert_tagging.rules', side_effect=AssertionError('no full skill in fallback')):
+            for kind, text in expected.items():
+                with self.subTest(kind=kind):
+                    body = fallback_text(kind)
+                    self.assertIn(text, body)
+                    self.assertEqual(len(body.splitlines()), 3)
+                    self.assertLess(len(body), 200)
+
+    def test_mixed_failed_batch_uses_each_notice_type_and_preserves_ready_tags(self):
+        self.enqueue('maintenance', scopes=['E'])
+        self.tags.enqueue({'notice_type': '事件通告', 'title': 'event', 'text': '事件原文',
+                           'building_codes': ['A'], 'action': 'update'}, operation_id='event',
+                          target_record_id='recEvent', request={'_auth_open_id': 'ou_owner'})
+        self.enqueue('ready', target='recReady', scopes=['E'])
+        jobs = [row['payload'] for row in self.store.list_documents(NS, key_prefix='job:')]
+        for job in jobs:
+            job.update(status='ready' if job['title'] == 'ready' else 'failed',
+                       tags=tags('已生成的正常标签') if job['title'] == 'ready' else [],
+                       error='旧的失败提示：' + rules())
+            self.store.put_document(NS, 'job:' + job['id'], job)
+        batch = self.tags.batch(jobs)
+        self.tags.notify(batch, jobs)
+        sent = {call.args[1][0]: call.args[0] for call in self.sender.call_args_list}
+        self.assertIn(fallback_text('事件通告'), sent['ou_A'])
+        self.assertNotIn('【维护】', sent['ou_A'])
+        self.assertIn(fallback_text('维保通告'), sent['ou_E'])
+        self.assertNotIn('事件通告需按实际根因', sent['ou_E'])
+        self.assertIn('已生成的正常标签', sent['ou_E'])
+        self.assertEqual(sent['ou_li'].count('推荐标签获取失败'), 2)
+        self.assertNotIn('现场告警打标规则（完整参考）', sent['ou_li'])
+        self.assertEqual(self.tags.latest('recEvent', 'event', ['A'])['error'], fallback_text('事件通告'))
+        self.assertFalse(self.calls)
 
     async def test_notification_retry_does_not_regenerate_or_resend_success(self):
         self.sender.side_effect = [(True, 'ok', []), TimeoutError(), (True, 'ok', [])]

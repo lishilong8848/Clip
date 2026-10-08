@@ -68,8 +68,11 @@ class NoticeAlertTags:
         if not items:
             return None
         job = max(items, key=lambda row: row['created_at'])
-        return {key: job.get(key) for key in ('id', 'status', 'action', 'scopes', 'notice_type', 'target_record_id',
-                                            'created_at', 'finished_at', 'tags', 'error', 'message_warning')}
+        result = {key: job.get(key) for key in ('id', 'status', 'action', 'scopes', 'notice_type', 'target_record_id',
+                                              'created_at', 'finished_at', 'tags', 'error', 'message_warning')}
+        if job['status'] == 'failed':
+            result['error'] = fallback_text(job['notice_type'])
+        return result
 
     def batch(self, jobs):
         batch_id = identity(jobs[0]['group'], sorted(job['id'] for job in jobs))
@@ -101,7 +104,7 @@ class NoticeAlertTags:
                             await asyncio.sleep(3)
                 for job in jobs:
                     job.update(status='ready' if result else 'failed', tags=result.get(job['id'], []) if result else [],
-                               error='' if result else '推荐标签获取失败，通告业务不受影响；分类规则将通过个人消息发送。',
+                               error='' if result else fallback_text(job['notice_type']),
                                finished_at=self.clock())
                 batch['generated'] = True
                 await asyncio.to_thread(self.store.put_documents, NS, {
@@ -124,9 +127,7 @@ class NoticeAlertTags:
             chunks = ['通告推荐标签（仅供现场核对，不代表已给告警打标）']
             for job in selected:
                 chunks.append(job['title'] + ' · ' + ('开始' if job['action'] == 'start' else '更新') + '\n' + (
-                    tag_text(job['tags']) if job['status'] == 'ready' else '推荐标签获取失败'))
-            if any(job['status'] == 'failed' for job in selected):
-                chunks.append(fallback_text())
+                    tag_text(job['tags']) if job['status'] == 'ready' else fallback_text(job['notice_type'])))
             receipt.setdefault('attempted_at', self.clock())
             self.store.put_document(NS, 'batch:' + batch['id'], batch)
             try:
@@ -174,7 +175,7 @@ class NoticeAlertTags:
                         job = await asyncio.to_thread(self.store.get_document, NS, key)
                         job['message_warning'] = '标签后台任务多次未完成，已停止自动重试；通告业务不受影响。'
                         if job['status'] == 'pending':
-                            job.update(status='failed', error='推荐标签获取失败，通告业务不受影响。')
+                            job.update(status='failed', error=fallback_text(job['notice_type']))
                         await asyncio.to_thread(self.store.put_document, NS, key, job)
         await asyncio.gather(*(process(batch) for batch in batches.values()))
 
