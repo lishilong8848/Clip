@@ -1000,6 +1000,7 @@ HISTORY_MEMORY_DRAFT_FIELDS = (
     "impact",
     "progress",
     "maintenance_cycle",
+    "execution_party",
     "specialty",
     "level",
     "repair_device",
@@ -1441,9 +1442,27 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
     if converted_to:
         draft["converted_to_work_type"] = converted_to
     submitted = record.get("submitted_draft")
+    if work == "maintenance" and not manual and not record.get("active_item_id") and (record.get("record_id") or record.get("source_record_id")):
+        start, end = _planned_maintenance_times()
+        draft.update(start_time=start, end_time=end)
+        if not isinstance(submitted, dict) or not (submitted.get("start_time") or submitted.get("end_time")):
+            draft["_auto_plan_times"] = "1"
     if work != "event" and isinstance(submitted, dict):
         draft.update({key: value for key, value in submitted.items() if key in draft})
     return draft
+
+
+def _planned_maintenance_times(current=None):
+    current = current or dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+    start = current.replace(second=0, microsecond=0)
+    minutes = (-start.minute) % 30
+    if not minutes and (current.second or current.microsecond):
+        minutes = 30
+    start += dt.timedelta(minutes=minutes)
+    end = start.replace(hour=18, minute=30)
+    if end <= start:
+        end += dt.timedelta(days=1)
+    return start.strftime("%Y-%m-%dT%H:%M"), end.strftime("%Y-%m-%dT%H:%M")
 
 
 def _input(
@@ -4822,6 +4841,7 @@ def render_workbench_lite(
     const liteDraftCache = window.__clipflowLiteDraftCache || (window.__clipflowLiteDraftCache = new Map());
     const liteDraftCacheMaxEntries = 240;
     const liteDraftDomKeys = [
+      '_auto_plan_times',
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'repair_management_record_id',
       'manual_id', 'scope', 'source_month', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
@@ -7461,6 +7481,13 @@ def render_workbench_lite(
       const draft = draftFromRow(link);
       const linkedOngoing = isOngoing || link.getAttribute('data-linked-ongoing') === '1';
       const action = linkedOngoing && link.getAttribute('data-target-record-id') ? 'update' : (link.getAttribute('data-action') || 'start');
+      if (workType === 'maintenance' && !linkedOngoing && action === 'start' && draft._auto_plan_times === '1') {{
+        const start = new Date(Math.ceil(Date.now() / 1800000) * 1800000 + 8 * 3600000);
+        const end = new Date(start); end.setUTCHours(18, 30, 0, 0);
+        if (end <= start) end.setUTCDate(end.getUTCDate() + 1);
+        draft.start_time = start.toISOString().slice(0, 16);
+        draft.end_time = end.toISOString().slice(0, 16);
+      }}
       const title = link.getAttribute('data-title') || draft.title || '选择左侧事项';
       form.dataset.action = action;
       form.dataset.detailMode = linkedOngoing ? 'ongoing' : 'source';

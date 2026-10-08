@@ -28,6 +28,8 @@ class FakeFeishu:
         for bank, table in cloud.BANK_TABLES.items():
             spec = {"题目": 1, "答案": 1}
             spec.update({"题型": 3, "选项": 1, "年份": 1, "备注": 1, "附件": 1} if bank == "written" else {"年度": 3, "答案图片": 17})
+            if bank == 'supplemental':
+                spec = {"题目": 1, "答案": 1, "选项": 1, "专业": 3, "答案附件": 17}
             self.fields[table] = [{"field_name": n, "type": t} for n, t in spec.items()]
             self.records[table] = []
         self.calls = []
@@ -127,6 +129,7 @@ class LearningCloudTests(unittest.TestCase):
             "written": "tbldEn2ODX9CbZ1n",
             "duty": "tblpM9nCRs4UJ8io",
             "professional": "tblnyQverizwaQcT",
+            "supplemental": "tbl1x3DulQ3nFluq",
         })
 
     def setUp(self):
@@ -195,17 +198,18 @@ class LearningCloudTests(unittest.TestCase):
                 "题目": [{"type": "text", "text": bank}], cloud.META_FIELD: "{not decoded}", "unknown": i,
             }} for i in range(5)]
         result = self.new_remote(enabled=False).fetch_questions()
-        self.assertEqual(len(result), 15)
+        self.assertEqual(len(result), 20)
         self.assertEqual([r["bank"] for r in result], [b for b in cloud.BANK_TABLES for _ in range(5)])
         self.assertEqual(result[-1]["fields"][cloud.META_FIELD], "{not decoded}")
-        self.assertEqual(len(self.fake.calls), 9)
+        self.assertEqual(len(self.fake.calls), 12)
+        self.assertTrue(all(c[2].get('view_id') == 'vew6IeZZgN' for c in self.fake.calls if cloud.BANK_TABLES['supplemental'] in c[1]))
         self.assertFalse(self.fake.mutations())
 
     def test_schema_is_idempotent_including_a_new_adapter_instance(self):
         before = copy.deepcopy(self.fake.fields)
         self.remote.ensure_schema()
         mutations = self.fake.mutations()
-        self.assertEqual(len(mutations), 7)
+        self.assertEqual(len(mutations), 9)
         self.assertEqual([c[1] for c in mutations].count("tables"), 1)
         for table in cloud.BANK_TABLES.values():
             self.assertEqual(self.fake.fields[table][:-2], before[table])
@@ -213,7 +217,7 @@ class LearningCloudTests(unittest.TestCase):
         self.assertEqual({f["field_name"]: f["type"] for f in self.fake.fields["tblEntities"]}, cloud.ENTITY_FIELDS)
         self.remote.ensure_schema()
         self.new_remote().ensure_schema()
-        self.assertEqual(len(self.fake.mutations()), 7)
+        self.assertEqual(len(self.fake.mutations()), 9)
 
     def test_wrong_source_and_extension_field_types_fail_before_any_mutation(self):
         for bank, field in (("written", "附件"), ("written", "题型"), ("duty", "答案图片"), ("professional", "答案图片")):
@@ -235,7 +239,7 @@ class LearningCloudTests(unittest.TestCase):
         self.fake.fields["tblExisting"] = [{"field_name": "业务键", "type": 1}]
         self.fake.records["tblExisting"] = []
         self.remote.ensure_schema()
-        self.assertEqual(len(self.fake.mutations()), 9)
+        self.assertEqual(len(self.fake.mutations()), 11)
         self.assertFalse(any(c[1] == "tables" for c in self.fake.mutations()))
         self.fake.fields["tblExisting"][0]["type"] = 3
         with self.assertRaisesRegex(cloud.LearningCloudError, "类型错误"):
@@ -255,6 +259,11 @@ class LearningCloudTests(unittest.TestCase):
             if bank == "written":
                 self.assertEqual(fields["题型"], "多选题")
                 self.assertEqual(fields["选项"], "A. 第二项\nB. 第一项")
+            elif bank == 'supplemental':
+                self.assertNotIn('题型', fields)
+                self.assertNotIn('年度', fields)
+                self.assertEqual(fields['选项'], 'A. 第二项\nB. 第一项')
+                self.assertEqual(fields['专业'], '电气')
             else:
                 self.assertNotIn("题型", fields)
                 self.assertNotIn("选项", fields)

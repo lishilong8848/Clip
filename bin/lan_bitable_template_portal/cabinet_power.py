@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
-from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, baseline_matches_inventory, calculate, derive_records, dates, digest, export_workbook, inventory_state_baseline, operation_key, system_name, text_value, project_layout,completed_state_event
+from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, baseline_matches_inventory, calculate, derive_records, dates, digest, export_workbook, inventory_state_baseline, operation_key, system_name, text_value, project_layout,completed_state_event,room_summary,confirmed_c_summary,confirmed_c_state
 from .cabinet_power_data import from_feishu, to_fields, group_events, source_sheet, table_columns, normalized_actions
 from .cabinet_power_store import CabinetStore
 
@@ -45,7 +45,7 @@ def layout_identity(config):
                  for rack in config.get("inventory",[]))
     return digest([rooms,racks])
 
-EXPORT_FORMAT_VERSION = 4
+EXPORT_FORMAT_VERSION = 5
 
 
 def export_snapshot(config,operations):
@@ -166,13 +166,14 @@ class CabinetFeishu:
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
-        for attempt in range(3):
+        for attempt in range(5):
             data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if read_request else 0)
             # 1254608 explicitly rejects the duplicate request. Preserve its
             # body/client_token; unknown write outcomes are never replayed here.
             retryable=data.get("code")==1254608 or read_request and data.get("code") in (1255002,1254290,1254291,1254607)
-            if not retryable or attempt==2: break
-            time.sleep(0.5*(2**attempt))
+            limit=4 if data.get("code")==1254608 else 2
+            if not retryable or attempt>=limit: break
+            time.sleep((1 if data.get("code")==1254608 else 0.5)*(2**attempt))
         if data.get("code"):
             if data["code"]==1254608: raise CabinetError("飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。")
             if data["code"] in (99991663,99991664,99991665): self._expires=0
@@ -476,6 +477,18 @@ class CabinetPowerService:
             for record in saved["records"]:
                 op=from_feishu(record); op["ordinal"]=record["ordinal"]; ops.append(op)
             config["power_baseline"]=self._frozen_power_baseline(scope,config,ops)
+            if scope == 'C':
+                confirmed = confirmed_c_summary()
+                if not self.local.document(scope, 'baseline_revision:' + confirmed['revision']):
+                    if digest(sorted(r['room']+'/'+r['rack'] for r in config['inventory'])) != confirmed['inventory_signature']:
+                        raise CabinetError('C楼机柜目录与已确认基线不一致，请核对包间和柜号')
+                    revised = copy.deepcopy(config['power_baseline'])
+                    for key, value in revised.items():
+                        room, rack = key.split('/')
+                        value['state'] = confirmed_c_state(confirmed['rooms'][room], rack)
+                        value['color'] = COLORS[value['state']]
+                    if self.local.install_confirmed_baseline(scope, FROZEN_BASELINE_KEY, confirmed['revision'], revised, confirmed['source_sha256']):
+                        return self._snapshot(scope)
             ordinal=max((op["ordinal"] for op in ops),default=0)
             for correction in baseline_correction_operations(config,ops):
                 ordinal+=1; correction["ordinal"]=ordinal; ops.append(correction)
@@ -647,10 +660,15 @@ class CabinetPowerService:
             rr=[r for r in derived["racks"] if r["room"]==room["id"]]
             counts={s:sum(r["state"]==s for r in rr) for s in COLORS}
             gap=derived["unlocated"][room["id"]]; counts["unknown"]+=gap["unknown"]; counts["off"]+=gap["off"]
-            types={t:sum(r["rack_type"]==t for r in rr) for t in RACK_TYPES}
             carrier=scope=="B" and room["id"] in ("216","247")
-            if carrier: types["网络机柜"]+=gap["total"]
-            rooms.append({**room,"counts":counts,"types":types,"carrier":carrier,"unlocated":gap["total"],"unlocated_counts":gap})
+            type_counts={t:{s:sum(r["rack_type"]==t and r["state"]==s for r in rr) for s in COLORS} for t in RACK_TYPES}
+            if carrier:
+                type_counts["网络机柜"]["off"]+=gap["off"]
+                type_counts["网络机柜"]["unknown"]+=gap["unknown"]
+            metrics,type_warnings=room_summary(config,room,derived)
+            types={kind:metrics[3 + i * 3] for i,kind in enumerate(RACK_TYPES)}
+            type_summary={kind:{'total':metrics[3 + i * 3], 'powered':metrics[4 + i * 3], 'off':metrics[5 + i * 3]} for i,kind in enumerate(RACK_TYPES)}
+            rooms.append({**room,"total":metrics[0],"counts":counts,"types":types,"type_counts":type_counts,"type_summary":type_summary,"type_warnings":type_warnings,"carrier":carrier,"unlocated":gap["total"],"unlocated_counts":gap})
         formats=[]
         for original in config.get("template_data",{}).get("formats",[]):
             f=copy.deepcopy(original); selected=[o for o in business_ops if o["display_sheet"]==f["sheet"]]
@@ -1681,6 +1699,7 @@ class CabinetPowerService:
             self._save_batch_record(batch)
         year,month=batch["year"],batch["month"]
         self.ensure_export_archive_fields(year)
+        record=None
         if batch.get("phase") not in ("linking","verifying"):
             batch["phase"]="uploading"; self._save_batch_record(batch)
             for scope in TOTALS:
@@ -1709,16 +1728,18 @@ class CabinetPowerService:
                         cloud=found[0]
                 batch["cloud_record_id"]=str(cloud.get("record_id") or "")
                 if not batch["cloud_record_id"]: raise CabinetError("月度归档未返回记录ID")
-                self._verify_archive_batch(self.export_remote.get(batch["cloud_record_id"]),batch)
+                record=self.export_remote.get(batch["cloud_record_id"])
+                self._verify_archive_batch(record,batch)
                 batch["phase"]="linking"; self._save_batch_record(batch)
-        record=self.export_remote.get(batch["cloud_record_id"])
+        record=record or self.export_remote.get(batch["cloud_record_id"])
         self._verify_archive_batch(record,batch)
         link=batch.get("archive_url") or self.export_remote.record_share_link(batch["cloud_record_id"])
         if text_value((record.get("fields") or {}).get("链接"))!=link:
             self.export_remote.update(batch["cloud_record_id"],{"链接":link})
         batch["archive_url"]=link; batch["phase"]="verifying"; self._save_batch_record(batch)
-        self._verify_archive_batch(self.export_remote.get(batch["cloud_record_id"]),batch)
-        if text_value((self.export_remote.get(batch["cloud_record_id"]).get("fields") or {}).get("链接"))!=link:
+        verified=self.export_remote.get(batch["cloud_record_id"])
+        self._verify_archive_batch(verified,batch)
+        if text_value((verified.get("fields") or {}).get("链接"))!=link:
             raise CabinetError("月度归档链接回读核验失败")
         for scope in TOTALS:
             eid=batch["items"][scope]["result"]["export_id"]

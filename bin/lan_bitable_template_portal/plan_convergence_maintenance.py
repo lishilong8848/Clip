@@ -2,6 +2,7 @@
 """当前程序未结束检修通告与智航屏蔽中记录核对，不读取飞书。"""
 import re
 import time
+from difflib import SequenceMatcher
 from upload_event_module.core.parser import is_notice_confirmed_ended
 
 # 房间号: A-120 / C-241 / A178 / B-077 等。
@@ -82,7 +83,8 @@ def ongoing_records(items):
 
 def _device_keywords(text):
     """从设备描述提取英文词段(HUM-01/EA118/ADD-001),大写归一。"""
-    return sorted(set(w.upper() for w in DEV_WORD_RE.findall(text or "")))
+    return sorted({w.upper() for w in DEV_WORD_RE.findall(text or "")
+                   if w.upper() not in {'EA118', 'EA118_C01', 'C01', 'BMS', 'I1', 'I2', 'I3', 'I4'}})
 
 
 def _longest_common_substring(a, b, min_len=6):
@@ -90,17 +92,10 @@ def _longest_common_substring(a, b, min_len=6):
     min_len=6 可滤掉「EA118」「A楼A-1」这类巧合片段。"""
     if not a or not b:
         return ""
-    prev = [0] * (len(b) + 1)
-    best, best_end = 0, 0
-    for i in range(1, len(a) + 1):
-        cur = [0] * (len(b) + 1)
-        for j in range(1, len(b) + 1):
-            if a[i - 1] == b[j - 1]:
-                cur[j] = prev[j - 1] + 1
-                if cur[j] > best:
-                    best, best_end = cur[j], i
-        prev = cur
-    return a[best_end - best:best_end] if best >= min_len else ""
+    prefix = r'^(?:南通)?(?:EA118(?:[_-]C01)?|C01)?(?:数据中心|机房|园区)?[ABCDEH]楼'
+    a, b = (re.sub(prefix, '', value, flags=re.I) for value in (a, b))
+    match = SequenceMatcher(None, a, b, autojunk=False).find_longest_match()
+    return a[match.a:match.a + match.size] if match.size >= min_len else ""
 
 
 def _block_time(b):
@@ -267,4 +262,3 @@ def match_records(records, blocks, detail_of):
 
     orphans = [bid for bid in block_info if bid not in hit_ids]
     return results, orphans
-

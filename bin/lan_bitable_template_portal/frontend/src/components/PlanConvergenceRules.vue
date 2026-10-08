@@ -258,7 +258,7 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import { acquireModal } from "../modalState";
 import { inheritedControlTheme } from "../controlTheme";
 import {
-  itemKey, itemDesc, entryLabel, scopeTypeLabel, entryKeyInfo,
+  itemKey, itemDesc, entryLabel, scopeTypeLabel, entryKeyInfo, selectionItemCount,
   allDraftItems, submittedKey, draftsSubmitKey, roomToSelParam, roomNodeKey, restoreDrafts,
   type Draft, type RoomNode, type Drill,
 } from "../planConvergenceRules";
@@ -899,6 +899,11 @@ async function addEntry(): Promise<void> {
   const pts = selPts();
 
   if (!objs.length && !rooms.length && !insts.length && !pts.length) { errorMsg("请先勾选内容"); return; }
+  const count = selectionItemCount(objs.length, rooms.length, selectedDevices.length, pts.length);
+  if (count > 500) {
+    errorMsg(`当前选择将展开为 ${count.toLocaleString()} 项，单个规则集最多500项。请缩小设备或告警规则范围；当前选择和已有草稿已保留。`);
+    return;
+  }
 
   if (pts.length) {
     let items: Dict[] = [];
@@ -958,13 +963,13 @@ async function addEntry(): Promise<void> {
       }));
     }
     if (!items.length) return;
-    pushEntry(items);
+    await pushEntry(items);
     return;
   }
 
   if (insts.length) {
     const items = selectedDevices.map((device) => ({ scope_type: "device", inst_name: device.inst_name, ins_id: device.ins_id, obj_name: device.obj_name || "" }));
-    pushEntry(items);
+    await pushEntry(items);
     return;
   }
 
@@ -978,13 +983,13 @@ async function addEntry(): Promise<void> {
       const st: string = r.level === "zone" ? "zone" : r.level === "building" ? "building" : r.level === "floor" ? "floor" : "room";
       return [{ scope_type: st, zone: p0.zone, building: p0.building, floor: p0.floor, room: p0.room }];
     });
-    pushEntry(items as Dict[]);
+    await pushEntry(items as Dict[]);
     return;
   }
 
   if (objs.length) {
     const items = objs.map((n) => ({ scope_type: "objtype", obj_name: n }));
-    pushEntry(items as Dict[]);
+    await pushEntry(items as Dict[]);
     return;
   }
 
@@ -994,9 +999,9 @@ async function addEntry(): Promise<void> {
 async function pushEntry(items: Dict[]): Promise<void> {
   if (saving.value || busy.value) return;
   const existing = new Set(allDraftItems(drafts.value).map(itemKey));
-  const fresh = items.filter((it) => !existing.has(itemKey(it)));
+  const fresh = items.filter((it) => { const key = itemKey(it); if (existing.has(key)) return false; existing.add(key); return true; });
   if (!fresh.length) { errorMsg("该范围已存在，请调整勾选"); return; }
-  if (draftOnly.value && allDraftItems(drafts.value).length + fresh.length > 500) { errorMsg("单个规则集最多支持500项，请缩小选择范围"); return; }
+  if (allDraftItems(drafts.value).length + fresh.length > 500) { errorMsg("单个规则集最多支持500项，请缩小选择范围；当前选择和已有草稿已保留"); return; }
   const label = entryLabel(fresh);
   drafts.value.push({ label, rule_type: "normal", items: fresh });
   await resetPicker();

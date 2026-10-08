@@ -18,6 +18,8 @@ import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+from functools import lru_cache
+from pathlib import Path
 
 from .drill_management import _cell_style_catalog, _shared_strings
 
@@ -576,6 +578,72 @@ def baseline_correction_operations(config,operations):
     return result
 
 
+@lru_cache(maxsize=1)
+def confirmed_c_summary():
+    return json.loads((Path(__file__).parent/'templates/cabinet_power/C.summary-baseline.json').read_text(encoding='utf-8'))
+
+
+def confirmed_c_state(room, rack):
+    return 'off' if rack in room['off'] else 'test' if rack in room['test'] else 'formal'
+
+
+def room_capacity(config, room):
+    """Frozen physical capacity only; never import template powered/off counts."""
+    if config['scope'] == 'C':
+        baseline = confirmed_c_summary()['rooms'][room['id']]['summary']
+        return dict(zip(('total', *RACK_TYPES), (baseline[0], baseline[3], baseline[6])))
+    row = int(room.get('summary_row') or 0)
+    for cells in config.get('template_data', {}).get('summary_cells', {}).values():
+        if row and re.search(r'(?<!\d)' + re.escape(room['id']) + r'(?!\d)', text_value(cells.get(f'A{row}'))):
+            values = [cells.get(f'{column}{row}') for column in ('B', 'E', 'H')]
+            if values[2] == '/' and values[0] == values[1]:
+                values[2] = 0
+            if all(isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 and int(v) == v for v in values):
+                total, network, server = map(int, values)
+                if network + server == total:
+                    return {'total': total, RACK_TYPES[0]: network, RACK_TYPES[1]: server}
+    members = [r for r in config['inventory'] if r['room'] == room['id']]
+    counts = Counter(r['rack_type'] for r in members)
+    if config['scope'] == 'B' and room['id'] in ('216', '247'):
+        counts[RACK_TYPES[0]] += max(0, room['total'] - len(members))
+    return {'total': room['total'], **{kind: counts[kind] for kind in RACK_TYPES}}
+
+
+def room_summary(config, room, derived):
+    members = [r for r in derived['racks'] if r['room'] == room['id']]
+    capacity = room_capacity(config, room)
+    powered = lambda items: sum(r['state'] in ('formal', 'test') for r in items)
+    off = lambda items: sum(r['state'] == 'off' for r in items)
+    metrics = [capacity['total'], powered(members), off(members) + derived['unlocated'][room['id']]['off']]
+    warnings = {}
+    baseline = confirmed_c_summary()['rooms'][room['id']] if config['scope'] == 'C' else None
+    for index, kind in enumerate(RACK_TYPES):
+        known = [r for r in members if r['rack_type'] == kind]
+        on, down = powered(known), off(known)
+        warning = len(known) != capacity[kind]
+        if baseline:
+            # Confirmed aggregate counts are not reconstructed from incomplete old rack types.
+            on, down = baseline['summary'][4 + index * 3:6 + index * 3]
+            warning = False
+            for rack in members:
+                frozen_kind = '' if rack['rack'] in baseline['unclassified'] else RACK_TYPES[0] if rack['rack'] in baseline['network'] else RACK_TYPES[1]
+                rack_kind = frozen_kind or rack['rack_type']
+                state = confirmed_c_state(baseline, rack['rack'])
+                if not rack_kind and state != rack['state']:
+                    warning = True
+                if rack_kind == kind:
+                    on += int(rack['state'] in ('formal', 'test')) - int(state in ('formal', 'test'))
+                    down += int(rack['state'] == 'off') - int(state == 'off')
+            if not 0 <= on <= capacity[kind] or not 0 <= down <= capacity[kind]:
+                raise CabinetError(room['id']+'包间分类上下电数量超出固定基数，请核对机柜类型')
+        elif config['scope'] == 'B' and room['id'] in ('216','247') and index == 0:
+            down += derived['unlocated'][room['id']]['off']
+            warning = len(known) + derived['unlocated'][room['id']]['total'] != capacity[kind]
+        metrics.extend((capacity[kind], on, down))
+        warnings[kind] = warning
+    return metrics, warnings
+
+
 def derive_records(config,operations):
     events=[]; issues=[]; known={(r["room"],r["rack"]) for r in config["inventory"]}
     for op in operations:
@@ -1098,31 +1166,33 @@ def export_workbook(content, config, operations):
     for name,values in template.get("summary_cells",{}).items():
         if name not in roots: continue
         for ref,value in values.items(): write(name,ref,value,preserve_formula=True)
-        metrics_rows=[]; total_rows=[]
+        metrics_rows=[]; total_rows=[]; type_warnings=[]; written_rooms=set()
         for rn,row in list(book.rows(name)):
             if rn>max((r.get("summary_row",0) for r in config["rooms"]),default=9)+1: continue
             label=text_value(row.get(1)); match=re.search(r"(?<!\d)([1-4]\d{2})(?!\d)",label)
             if label in ("总计","合计"): total_rows.append(rn)
             if not match or match[1] not in by_room: continue
             rr=by_room[match[1]]; room=next(r for r in config["rooms"] if r["id"]==match[1])
-            net=[r for r in rr if r["rack_type"]==RACK_TYPES[0]]; servers=[r for r in rr if r["rack_type"]==RACK_TYPES[1]]
-            powered=lambda items:sum(r["state"] in ("formal","test") for r in items)
-            off=lambda items:sum(r["state"]=="off" for r in items)
-            metrics=[room["total"],powered(rr),off(rr),len(net),powered(net),off(net),len(servers),powered(servers),off(servers)]
-            gap=derived["unlocated"][room["id"]]
-            metrics[2]+=gap["off"]
-            if config["scope"]=="B" and room["id"] in ("216","247"):
-                metrics[3]+=gap["total"]; metrics[5]+=gap["off"]
+            written_rooms.add(room['id'])
+            metrics,warnings=room_summary(config,room,derived)
+            if any(warnings.values()):
+                type_warnings.append(room['id'])
             metrics_rows.append(metrics)
-            for col,value in enumerate(metrics,2): write(name,f"{col_name(col)}{rn}",value,preserve_formula=True)
+            for col,value in enumerate(metrics,2): write(name,f"{col_name(col)}{rn}",value)
         for rn in total_rows:
-            for col,value in enumerate(map(sum,zip(*metrics_rows)),2): write(name,f"{col_name(col)}{rn}",value,preserve_formula=True)
+            for col,value in enumerate(map(sum,zip(*metrics_rows)),2): write(name,f"{col_name(col)}{rn}",value)
+        missing_rooms=set(by_room)-written_rooms
+        if missing_rooms:
+            raise CabinetError("机柜汇总表缺少包间行，请同步模板："+"、".join(sorted(missing_rooms)))
         # Notes stay alongside the original summary instead of adding/replacing sheets.
         column=max(coord(ref)[0] for ref in values)+2
         write(name,f"{col_name(column)}1","未确认状态机柜")
         write(name,f"{col_name(column+1)}1",derived["counts"]["unknown"])
         write(name,f"{col_name(column)}2","数据更新")
         write(name,f"{col_name(column+1)}2",dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if type_warnings:
+            write(name,f"{col_name(column)}3","机柜类型目录待核对")
+            write(name,f"{col_name(column+1)}3","、".join(type_warnings)+"：总数按模板固定，分类上下电数仅统计已识别类型，不自动改柜型。")
     # Update cached colour counts on the existing drawings without executing VBA.
     for room in config["rooms"]:
         name=room.get("sheet")

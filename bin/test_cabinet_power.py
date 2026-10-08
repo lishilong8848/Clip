@@ -318,6 +318,86 @@ class CabinetPowerTests(unittest.TestCase):
     def tearDown(self):
         self.service.shutdown(); self.tmp.cleanup()
 
+    def test_room_type_subtotals_and_building_totals_share_inventory_basis(self):
+        for scope in 'ABCDE':
+            overview = self.service.overview(scope)
+            self.assertEqual(sum(room['total'] for room in overview['rooms']), overview['counts']['total'])
+            for state in ('formal', 'test', 'off', 'unknown'):
+                self.assertEqual(sum(room['counts'][state] for room in overview['rooms']), overview['counts'][state])
+            for room in overview['rooms']:
+                for kind in ('网络机柜', '服务器机柜'):
+                    if scope != 'C':
+                        self.assertEqual(room['type_warnings'][kind], sum(room['type_counts'][kind].values()) != room['types'][kind])
+        c = {room['id']: room for room in self.service.overview('C')['rooms']}
+        self.assertEqual({key: (row['total'], row['types']['网络机柜'], row['types']['服务器机柜']) for key, row in c.items()},
+                         {'202': (170,10,160), '201': (180,10,170), '302': (154,58,96), '301': (154,58,96), '402': (170,10,160), '401': (170,10,160)})
+
+    def test_c_confirmed_summary_baseline_replays_operations_without_resetting_on_restart(self):
+        from .lan_bitable_template_portal.cabinet_power_excel import confirmed_c_summary, room_summary
+        overview = self.service.overview('C')
+        self.assertEqual((overview['counts']['formal'], overview['counts']['test'], overview['counts']['off']), (939,31,28))
+        for room in overview['rooms']:
+            net, server = (room['type_summary'][kind] for kind in ('网络机柜','服务器机柜'))
+            self.assertEqual([room['total'],room['counts']['formal']+room['counts']['test'],room['counts']['off'],
+                net['total'],net['powered'],net['off'],server['total'],server['powered'],server['off']],
+                confirmed_c_summary()['rooms'][room['id']]['summary'])
+        snapshot = self.service._snapshot('C')
+        baseline = copy.deepcopy(snapshot['config']['power_baseline'])
+        record = {'record_id':'recCNewOperation', 'fields': {'楼栋':'C楼','包间系统名称':'EA118-C2-1',
+            '机架':'A01','操作类型':'下正式电','结果':'成功','实际完成时间':'2026-10-09 12:00:00'}}
+        self.service.local.commit_operation('C', {'operation_id':'test-baseline','status':'completed'}, record=record)
+        current = self.service.overview('C')
+        room = next(r for r in current['rooms'] if r['id']=='201')
+        self.assertEqual(room['type_summary']['网络机柜'], {'total':10,'powered':9,'off':1})
+        self.assertEqual((current['counts']['total'],current['counts']['off']), (998,29))
+        self.service._cache.clear()
+        self.assertEqual(self.service.overview('C')['counts'], current['counts'])
+        self.assertEqual(self.service.config('C')['power_baseline'], baseline)
+        self.assertIsNotNone(self.service.local.document('C', 'power_baseline:frozen_v1:before:'+confirmed_c_summary()['revision']))
+        config = self.service.config('C')
+        derived = derive_records(config,self.service._snapshot('C')['operations'])
+        self.assertEqual(room_summary(config,next(r for r in config['rooms'] if r['id']=='201'),derived)[0], [180,177,3,10,9,1,170,168,2])
+
+    def test_five_summary_sheets_include_every_room_and_keep_fixed_capacities(self):
+        from .lan_bitable_template_portal.cabinet_power_excel import room_capacity
+        expected = {'A': (1072, 240, 832), 'B': (1076, 244, 832), 'C': (998, 156, 842),
+                    'D': (988, 156, 832), 'E': (1272, 180, 1092)}
+        for scope in 'ABCDE':
+            snap = self.service._snapshot(scope)
+            config, ops = snap['config'], snap['operations']
+            before = derive_records(config, ops)
+            rack = next(r for r in before['racks'] if r['state'] == 'formal')
+            extra = from_feishu({'record_id': 'recCapacityTest', 'fields': {
+                '楼栋': scope + '楼', '包间系统名称': system_name(scope, rack['room']), '机架': rack['rack'],
+                '操作类型': '下正式电', '实际完成时间': '2026-10-09 12:00:00', '结果': '成功'}})
+            changed = [*ops, extra]
+            after = derive_records(config, changed)
+            self.assertEqual(after['counts']['off'], before['counts']['off'] + 1)
+            book = Workbook(export_workbook((TEMPLATES / (scope + '.xlsm')).read_bytes(), config, changed))
+            cells = book.cells('机柜上电汇总表')
+            capacities = []
+            for room in config['rooms']:
+                row = room['summary_row']
+                self.assertIn(room['id'], book.value(cells[f'A{row}']))
+                capacity = room_capacity(config, room)
+                actual = tuple(book.value(cells[f'{col}{row}']) for col in ('B', 'E', 'H'))
+                self.assertEqual(actual, (capacity['total'], capacity['网络机柜'], capacity['服务器机柜']))
+                for col in ('B', 'E', 'H'):
+                    self.assertIsNone(cells[f'{col}{row}'].find(T('f')))
+                members = [r for r in after['racks'] if r['room'] == room['id']]
+                self.assertEqual(book.value(cells[f'C{row}']), sum(r['state'] in ('formal','test') for r in members))
+                self.assertEqual(book.value(cells[f'D{row}']), sum(r['state'] == 'off' for r in members) + after['unlocated'][room['id']]['off'])
+                capacities.append(actual)
+            self.assertEqual(tuple(map(sum, zip(*capacities))), expected[scope])
+            total_rows = [row for _, row in book.rows('机柜上电汇总表') if row.get(1) in ('总计','合计')]
+            self.assertEqual(tuple(total_rows[0][col] for col in (2,5,8)), expected[scope])
+            if scope == 'A':
+                self.assertTrue({'203','303','403'} <= {r['id'] for r in config['rooms']})
+            if scope == 'B':
+                self.assertTrue({'203','403','216','247'} <= {r['id'] for r in config['rooms']})
+            for name in book.sheets:
+                self.assertFalse(any(c.get('t') == 'e' for c in book.cells(name).values()))
+
     def test_rack_power_corrects_only_selected_cabinet_and_exports_all_its_records(self):
         def profile(): return next(r for r in self.service.racks('B')['items'] if (r['room'],r['rack'])==('302','B04'))
         rows=[op for op in self.service._snapshot('B')['operations'] if (op['room'],op['rack'])==('302','B04') and not op.get('meta',{}).get('baseline_correction')]
@@ -871,8 +951,9 @@ class CabinetPowerTests(unittest.TestCase):
             summary=dict(exported.rows("机柜上电汇总表"))
             self.assertEqual(summary[13][2],1072)
             for row in (10,11,12):
-                self.assertEqual(summary[row][5],27 if row==10 else 28)
-                self.assertEqual(summary[row][8],1 if row==10 else 0)
+                self.assertEqual(summary[row][5],28)
+                self.assertEqual(summary[row][8],0)
+            self.assertTrue(next(r for r in fresh.overview('A')['rooms'] if r['id']=='203')['type_warnings']['网络机柜'])
             self.assertEqual(exported.archive.read("xl/vbaProject.bin"),Workbook(content).archive.read("xl/vbaProject.bin"))
             self.assertEqual({key:value for key,value in fresh.local.document("A","power_baseline:frozen_v1")["racks"].items() if key in baseline},baseline)
         finally: fresh.shutdown()

@@ -66,14 +66,15 @@
         <span>{{ overview.record_count }} 条台账</span>
       </nav>
       <section v-if="tab === 'overview'" class="table-wrap mobile-card-table">
-        <table><thead><tr><th>包间</th><th>总数</th><th>已上电</th><th>正式电</th><th>测试电</th><th>未上电/已下电</th><th>待核实</th><th>网络机柜</th><th>服务器机柜</th><th>平面图</th></tr></thead><tbody>
+        <p v-if="typeWarningRooms.length" class="summary-type-warning">{{ typeWarningRooms.join('、') }} 包间的机柜类型目录待核对；总数按模板固定，分类上下电数仅统计已识别类型。</p>
+        <table><thead><tr><th>包间</th><th>总数</th><th>已上电</th><th>正式电</th><th>测试电</th><th>未上电/已下电</th><th>待核实</th><th>网络机柜总数</th><th>网络已上电</th><th>网络未上电</th><th>服务器机柜总数</th><th>服务器已上电</th><th>服务器未上电</th><th>平面图</th></tr></thead><tbody>
           <tr v-for="room in overview.rooms" :key="room.id">
             <td data-label="包间"><button class="link" @click="showRoomRecords(room.id)">{{ room.carrier ? 'B-' + room.id + '运营商机房' : room.name }}<small>{{ room.id }} 包间</small></button></td><td data-label="总数"><button class="link" @click="showStateRacks('total',room.id)">{{ room.total }}</button></td>
             <td data-label="已上电"><button class="link" :aria-label="room.id + '包间已上电'" @click="showStateRacks('powered',room.id)">{{ room.counts.formal + room.counts.test }}</button></td>
             <td v-for="state in ['formal','test','off','unknown']" :key="state" :data-label="stateLabels[state]"><button class="link" :class="state + '-text'" :aria-label="room.id + '包间' + stateLabels[state]" @click="showStateRacks(state,room.id)">{{ room.counts[state] }}</button></td>
-            <td data-label="网络机柜">{{ room.types['网络机柜'] }}</td><td data-label="服务器机柜">{{ room.types['服务器机柜'] }}</td><td data-label="平面图"><button v-if="room.carrier && !room.sheet" class="link" @click="tab = 'carrier'; rackRoom = room.id; rackState = ''">运营商机房</button><button v-else class="link" @click="tab = 'layout'; selectRoom(room.id)">{{ room.sheet ? '查看平面图' : '查看目录' }}</button></td>
+            <template v-for="type in ['网络机柜','服务器机柜']" :key="type"><td :data-label="type + '总数'">{{ room.types[type] }}</td><td :data-label="type + '已上电'">{{ room.type_summary?.[type]?.powered ?? ((room.type_counts?.[type]?.formal || 0) + (room.type_counts?.[type]?.test || 0)) }}</td><td :data-label="type + '未上电'">{{ room.type_summary?.[type]?.off ?? room.type_counts?.[type]?.off ?? '—' }}</td></template><td data-label="平面图"><button v-if="room.carrier && !room.sheet" class="link" @click="tab = 'carrier'; rackRoom = room.id; rackState = ''">运营商机房</button><button v-else class="link" @click="tab = 'layout'; selectRoom(room.id)">{{ room.sheet ? '查看平面图' : '查看目录' }}</button></td>
           </tr>
-        </tbody></table>
+        </tbody><tfoot><tr class="room-totals"><th scope="row">总计</th><td>{{ roomTotals.total }}</td><td>{{ roomTotals.counts.formal + roomTotals.counts.test }}</td><td v-for="state in ['formal','test','off','unknown']" :key="state">{{ roomTotals.counts[state] }}</td><template v-for="type in ['网络机柜','服务器机柜']" :key="type"><td>{{ roomTotals.types[type] }}</td><td>{{ roomTotals.type_summary[type].powered }}</td><td>{{ roomTotals.type_summary[type].off }}</td></template><td></td></tr></tfoot></table>
       </section>
       <section v-else-if="tab === 'racks' || tab === 'carrier'">
         <div class="filter-bar"><select v-model="rackState" aria-label="筛选机柜状态"><option value="">全部状态</option><option value="powered">已上电</option><option v-for="(label, state) in stateLabels" :key="state" :value="state">{{ label }}</option></select><select v-model="rackRoom" aria-label="筛选机柜包间"><option value="">全部包间</option><option v-for="room in rackRooms" :key="room.id" :value="room.id">{{ room.carrier ? 'B-' + room.id + '运营商机房' : room.name }}</option></select><label class="search"><Search :size="16" /><input v-model="rackSearch" placeholder="机柜号" aria-label="筛选机柜号" /></label></div>
@@ -283,6 +284,22 @@ const bootstrapMessage = computed(() => {
   return bootstrapTargetReady.value ? `当前楼栋已可用；${failures.join('；')}` : failures.join('；') || '本地资料初始化失败';
 });
 const bootstrapStatusLabel = (status: string) => ({ succeeded:'完成', running:'拉取中', pending:'等待', failed:'失败', idle:'等待' }[status] || '等待');
+const roomTotals = computed(() => {
+  const total: Dict = { total: 0, counts: { formal: 0, test: 0, off: 0, unknown: 0 }, types: {}, type_counts: {}, type_summary: {} };
+  for (const type of ['网络机柜', '服务器机柜']) { total.types[type] = 0; total.type_summary[type] = { powered: 0, off: 0 }; total.type_counts[type] = { formal: 0, test: 0, off: 0, unknown: 0 }; }
+  for (const room of overview.value.rooms || []) {
+    total.total += Number(room.total || 0);
+    for (const state of Object.keys(total.counts)) total.counts[state] += Number(room.counts?.[state] || 0);
+    for (const type of Object.keys(total.types)) {
+      total.types[type] += Number(room.types?.[type] || 0);
+      total.type_summary[type].powered += Number(room.type_summary?.[type]?.powered ?? ((room.type_counts?.[type]?.formal || 0) + (room.type_counts?.[type]?.test || 0)));
+      total.type_summary[type].off += Number(room.type_summary?.[type]?.off ?? room.type_counts?.[type]?.off ?? 0);
+      for (const state of Object.keys(total.counts)) total.type_counts[type][state] += Number(room.type_counts?.[type]?.[state] || 0);
+    }
+  }
+  return total;
+});
+const typeWarningRooms = computed(() => (overview.value.rooms || []).filter((room: Dict) => Object.values(room.type_warnings || {}).some(Boolean)).map((room: Dict) => room.id));
 const tab = ref('overview'), tabs = computed(() => [{ key: 'overview', label: '包间汇总' }, { key: 'layout', label: '原始平面图' }, { key: 'records', label: '机柜台账' }, { key: 'racks', label: '机柜状态' }, ...(props.scope === 'B' ? [{ key: 'carrier', label: '运营商机房' }] : [])]);
 const rackState = ref(''), rackRoom = ref(''), rackSearch = ref(''), rackPage = ref(1);
 const racksLoading = ref(false);
@@ -732,6 +749,8 @@ onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); map
 </script>
 
 <style scoped>
+.summary-type-warning { margin: 0; padding: 12px 16px; color: #865211; background: #fff8e8; font-size: 13px; }
+.room-totals { font-weight: 650; background: #edf3fb; border-top: 2px solid #c7d7eb; }
 .cabinet-page { width: 100%; box-sizing: border-box; }
 @media(min-width:1000px){.cabinet-page .buildings{grid-template-columns:repeat(5,minmax(0,1fr))}.cabinet-page .building{padding:18px 14px}.cabinet-page .building-stats{flex-wrap:wrap}.building-stats>span{min-width:0}.building p{overflow-wrap:anywhere}}
 .table-wrap:has(>table[aria-label="机柜状态明细"]){max-height:60vh}.table-wrap table[aria-label="机柜状态明细"] th{position:sticky;top:0;z-index:1}.carrier-summary>div{flex-wrap:wrap}

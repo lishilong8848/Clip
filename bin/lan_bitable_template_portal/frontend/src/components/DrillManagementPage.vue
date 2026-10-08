@@ -639,8 +639,8 @@ const SheetTable = defineComponent({
   },
 });
 
-const currentDate = new Date();
-const currentMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}`;
+const currentDateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit' }).formatToParts(new Date()).map(({ type, value }) => [type, value]));
+const currentMonth = `${currentDateParts.year}-${currentDateParts.month}`;
 const routeParams = new URLSearchParams(window.location.search);
 const selectedMonth = ref(normalizeMonth(routeParams.get("month") || currentMonth));
 const loadedMonth = ref(selectedMonth.value);
@@ -679,7 +679,7 @@ const peopleScopeLoaded = ref("");
 const configBaseline = ref("{}");
 const activeSheet = ref<SheetKind>(routeParams.get("sheet") === "assessment" ? "assessment" : "record");
 const uploadForm = reactive({
-  year: String(currentDate.getFullYear()),
+  year: currentMonth.slice(0, 4),
   month: currentMonth,
   name: "",
   assigned_scopes: ["A", "B", "C", "D", "E"],
@@ -849,7 +849,7 @@ function normalizeBuilding(value: unknown): string {
 }
 
 function normalizeMonth(value: string): string {
-  const match = String(value || "").match(/(20\d{2})[-年/]?(0?[1-9]|1[0-2])/);
+  const match = String(value || "").trim().match(/^(20\d{2})[-年/]?(0?[1-9]|1[0-2])月?$/);
   return match ? `${match[1]}-${String(match[2]).padStart(2, "0")}` : currentMonth;
 }
 

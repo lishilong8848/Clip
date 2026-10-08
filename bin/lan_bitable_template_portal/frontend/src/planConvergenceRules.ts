@@ -2,6 +2,11 @@ import type { Dict } from "./api/client";
 
 export type ScopeItem = Dict;
 
+// Check before expanding a Cartesian product; the save API accepts at most 500 items.
+export function selectionItemCount(objects: number, rooms: number, devices: number, rules: number): number {
+  return rules ? rules * (devices || rooms || 1) : devices || (rooms ? rooms * (objects || 1) : objects);
+}
+
 export type Draft = {
   label: string;
   rule_type: "normal" | "common";

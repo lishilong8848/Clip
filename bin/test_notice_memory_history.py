@@ -362,5 +362,22 @@ class NoticeMemoryHistoryTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["record_id"], "chg_target_1")
 
 
+class PlannedMaintenanceDefaultsTests(unittest.TestCase):
+    def test_planned_times_round_up_and_preserve_active_manual_and_saved_drafts(self):
+        from unittest.mock import patch
+        from lan_bitable_template_portal import workbench_lite as lite
+        self.assertEqual(lite._planned_maintenance_times(dt.datetime(2026, 10, 8, 15, 28)), ('2026-10-08T15:30', '2026-10-08T18:30'))
+        self.assertEqual(lite._planned_maintenance_times(dt.datetime(2026, 10, 8, 18, 31)), ('2026-10-08T19:00', '2026-10-09T18:30'))
+        record = {'record_id': 'recPlan', 'work_type': 'maintenance', 'start_time': '2020-01-01T08:00', 'end_time': '2020-01-01T17:00', 'memory': {'execution_party': '厂维', 'content': '历史维保内容'}}
+        with patch.object(lite, '_planned_maintenance_times', return_value=('2026-10-08T15:30', '2026-10-08T18:30')):
+            result = lite._draft_from_record(record)
+            self.assertEqual(result['start_time'], '2026-10-08T15:30')
+            self.assertEqual(result['execution_party'], '厂维')
+            self.assertEqual(result['content'], '历史维保内容')
+            self.assertNotEqual(lite._draft_from_record({**record, 'active_item_id': 'recActive'})['start_time'], result['start_time'])
+            self.assertNotEqual(lite._draft_from_record(record, manual=True)['start_time'], result['start_time'])
+            self.assertEqual(lite._draft_from_record({**record, 'submitted_draft': {'start_time': '2026-10-08T16:00'}})['start_time'], '2026-10-08T16:00')
+
+
 if __name__ == "__main__":
     unittest.main()

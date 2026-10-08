@@ -25,7 +25,7 @@ class CabinetTransportTests(unittest.TestCase):
         ]
         self.assertEqual(self.remote.list_all(), [])
         self.assertEqual(self.remote._http.request_json.call_count, 3)
-        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [.5, 1])
+        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [1, 2])
         self.remote.require_write.assert_not_called()
 
     def test_rejected_create_retains_original_body_and_idempotency_token(self):
@@ -43,7 +43,8 @@ class CabinetTransportTests(unittest.TestCase):
         self.remote._http.request_json.return_value = {'code': 1254608}
         with self.assertRaisesRegex(CabinetError, '1254608'):
             self.remote.update('recFixture', {'结果': '成功'})
-        self.assertEqual(self.remote._http.request_json.call_count, 3)
+        self.assertEqual(self.remote._http.request_json.call_count, 5)
+        self.assertEqual(sum(call.args[0] for call in self.sleep.call_args_list), 15)
 
     def test_ambiguous_network_and_invalid_field_writes_are_not_retried(self):
         self.remote._http.request_json.side_effect = FeishuHTTPError('fixture response lost')

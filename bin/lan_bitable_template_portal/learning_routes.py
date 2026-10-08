@@ -30,6 +30,8 @@ MAX_FILES = 10
 ROUTES = {
     "bootstrap": {"GET": "bootstrap"},
     "papers": {"GET": "papers.list"},
+    "people": {"GET": "people"},
+    "papers/claim": {"POST": "paper.claim"},
     "papers/{id}": {"GET": "paper.get", "DELETE": "paper.delete"},
     "papers/{id}/answer": {"POST": "paper.answer"},
     "papers/{id}/reveal": {"POST": "paper.reveal"},
@@ -74,6 +76,7 @@ def install_learning_routes(app, controller, runtime):
         with service_lock:
             if service is None:
                 service = LearningService(send_message=send_message,
+                                          get_people=lambda: runtime.service.signature_management.directory(refresh=True),
                                           get_portal_url=lambda: runtime.service._critical_guard_public_base_url())
                 controller._learning = service
                 runtime.learning_service = service
@@ -121,8 +124,6 @@ def install_learning_routes(app, controller, runtime):
             return
         if not isinstance(scope, str) or scope not in SCOPES:
             raise LearningError("楼栋须为 A、B、C、D、E 或 H。", 400)
-        if not actor["is_admin"] and scope != actor["scope"]:
-            raise LearningError("无权访问其他楼栋的学练数据。", 403)
 
     def check_origin(request):
         # The portal uses HttpOnly/SameSite=Lax cookies, without CSRF tokens.

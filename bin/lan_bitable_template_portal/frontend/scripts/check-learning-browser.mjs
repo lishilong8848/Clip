@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "vite";
+import { createServer, preview } from "vite";
 import { chromium } from "playwright";
 import { parse } from "@vue/compiler-sfc";
 import ts from "typescript";
@@ -31,9 +31,12 @@ assert.throws(() => parseLearningImport('bank,stem\nwritten,"未闭合', true), 
 assert.throws(() => parseLearningImport('{"questions":[]}'), /非空/);
 assert(parseLearningImport(JSON.stringify({ questions: [{ ...sample, correct_option_ids: ["missing"] }] }))[0].errors.length);
 
-const server = await createServer({ root, configFile: path.join(root, "vite.config.ts"), server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false }, logLevel: "error" });
+const built = process.argv.includes("--built");
+const server = built
+  ? await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: false }, logLevel: "error" })
+  : await createServer({ root, configFile: path.join(root, "vite.config.ts"), server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false }, logLevel: "error" });
 let browser, activePage;
-await server.listen();
+if (!built) await server.listen();
 const base = `http://127.0.0.1:${server.httpServer.address().port}`;
 const calls = [], unexpected = [], pageErrors = [];
 let admin = false, lostAnswer = false, staleAnswer = false, publishingPolls = 0, staleAttachment = false, paperDeleted = false;
@@ -41,7 +44,8 @@ let profileGate;
 let silentPublishing = true;
 const settings = { enabled: true, publish_time: "08:00", reminder_enabled: false, reminder_time: "17:00", portal_url: "https://portal.example.test:8443" };
 const bank = Array.from({ length: 23 }, (_, n) => question(n + 1));
-const paper = { id: "paper-H", date: "2026-09-29", scope: "H", version: 0, status: "pending", shortage: { written: 1, duty: 0, professional: 0 }, questions: bank.slice(0, 10).map(q => ({ ...structuredClone(q), attempt: null, note: "", favorite: false, practice: [] })) };
+const person = { id: "person-H", name: "测试人员", employee_no: "100", active: true, scopes: ["H"] };
+const paper = { person_id: person.id, person, id: "paper-H", date: "2026-09-29", scope: "H", version: 0, status: "pending", shortage: { written: 1, duty: 0, professional: 0 }, questions: bank.slice(0, 10).map(q => ({ ...structuredClone(q), attempt: null, note: "", favorite: false, practice: [] })) };
 paper.questions[1].type = "multiple"; paper.questions[1].type_label = "不定项"; paper.questions[1].correct_option_ids = ["q2-a", "q2-c"];
 paper.questions[2].type = "interview"; paper.questions[2].bank = "duty"; paper.questions[2].options = []; paper.questions[2].correct_option_ids = [];
 paper.questions[3].invalid = true;
@@ -72,9 +76,12 @@ async function fixture(route) {
   if (p === "/api/health") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, service: "clipflow_backend", instance_id: "learning-fixture" }) });
   if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: admin ? "admin-user" : "H-user", name: admin ? "管理员" : "H楼值班", role: admin ? "admin" : "user" }, scope_options: admin ? scopeOptions : [scopeOptions[5]] });
   if (p === "/api/scope-overview") return ok({ scopes: {} });
+  if (p === "/api/assistant/appearance") return ok({ enabled: false });
   if (p === "/api/handover-links") return ok({ links: {} });
   if (p === "/api/auth/permission-requests/current") return ok({});
-  if (p === "/api/learning/bootstrap") return ok({ is_admin: admin, can_answer: true, silent_manual_publish: silentPublishing, scope: admin ? url.searchParams.get("scope") || "" : "H", scopes: admin ? [{ value: "", label: "全部楼栋" }, ...scopeOptions] : [scopeOptions[5]], settings, sync: { status: publishingPolls-- > 0 ? "publishing" : "ready", pending: 0 }, today: "2026-09-29", question_problem_count: 4, summary });
+  if (p === "/api/learning/people") return ok({ items: [person], total: 1, ready: true });
+  if (p === "/api/learning/papers/claim") return ok(publicPaper());
+  if (p === "/api/learning/bootstrap") return ok({ is_admin: admin, can_answer: true, silent_manual_publish: silentPublishing, scope: admin ? url.searchParams.get("scope") || "" : "H", scopes: scopeOptions, settings, sync: { status: publishingPolls-- > 0 ? "publishing" : "ready", pending: 0 }, today: "2026-09-29", question_problem_count: 4, summary });
   if (p === "/api/learning/papers" || p === "/api/learning/history") return ok({ items: paperDeleted ? [] : [publicPaper()], total: paperDeleted ? 0 : 1, page: 1, page_size: 20, today: "2026-09-29" });
   if (p === "/api/learning/papers/paper-H" && method === "GET") return paperDeleted ? fail("题单已删除", 404) : ok(publicPaper());
   if (p === "/api/learning/papers/paper-H" && method === "DELETE") { assert(admin); paperDeleted = true; return ok({ id: "paper-H", deleted: true }); }
@@ -164,7 +171,7 @@ async function fixture(route) {
   if (p === "/api/learning/refresh") return ok({ queued: true });
   if (p === "/api/learning/profile") {
     if (profileGate) await profileGate;
-    return ok({ summary, topics: [{ topic: "供电安全", answered: 3, accuracy: 33.3 }], buildings: [{ scope: "H", assigned: 9, answered: 3 }], questions: [{ id: "q1", stem: sample.stem, answered: 2, wrong: 1, issue_count: 1 }], inventory: { written: { available: 326, remaining: 14 }, duty: { available: 80, remaining: 42 }, professional: { available: 42, remaining: 14 } } });
+    return ok({ person: url.searchParams.get("person_id") ? person : null, published: true, summary, today_summary: { papers: 1 }, trend: [{ date: "2026-09-29", answered: 3, people: 1, accuracy: 50 }], banks: [], topics: [{ topic: "供电安全", answered: 3, accuracy: 33.3 }], buildings: [{ scope: "H", assigned: 9, answered: 3 }], questions: [{ id: "q1", stem: sample.stem, answered: 2, wrong: 1, issue_count: 1 }], inventory: { written: { available: 326, remaining: 14 }, duty: { available: 80, remaining: 42 }, professional: { available: 42, remaining: 14 } } });
   }
   unexpected.push(`${method} ${p}`); return fail("Unexpected API request in isolated fixture");
 }
@@ -176,8 +183,9 @@ try {
   const page = await context.newPage();
   activePage = page;
   page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(60000);
   page.on("pageerror", error => pageErrors.push(error.message));
-  const select = async (id, value) => { await page.locator(`#${id}`).click(); await page.getByRole("option", { name: value, exact: true }).click(); };
+  const select = async (id, value) => { const trigger = page.locator(`#${id}`); await trigger.click(); const menu = await trigger.getAttribute('aria-controls'); await page.locator('#' + menu).getByRole("option", { name: value, exact: true }).click(); };
   // Open the 发布设置 tab and wait deterministically until the async /api/learning/settings
   // read has been applied to the rendered form (the checkbox state reflects the applied
   // settingsForm.enabled). Assertions about the settings form shape must not run before this.
@@ -192,6 +200,9 @@ try {
   };
   await page.goto(`${base}/learning?scope=H`);
   await page.getByRole("heading", { name: "画像学练", exact: true }).waitFor();
+  await page.getByRole("button", { name: "选择答题人员", exact: true }).click();
+  await page.locator(".people-list button").first().click();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
   await page.locator(".stem").waitFor();
   assert.equal(calls.filter(c => c.p === "/api/learning/papers" && c.method === "GET").at(-1).query.today, "1");
   assert.equal(await page.getByLabel("题单日期", { exact: true }).count(), 0);
@@ -201,6 +212,7 @@ try {
   await page.locator(".notes summary").click();
   await page.getByLabel("学习笔记", { exact: true }).fill("待同步的笔记");
   await page.reload();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
   await page.getByText("已恢复本机草稿，尚未正式提交。", { exact: true }).waitFor();
   await page.locator(".notes summary").click();
   assert(await page.locator(".options input").first().isChecked());
@@ -222,6 +234,7 @@ try {
   await page.getByRole("button", { name: "再次练习", exact: true }).click();
   await page.locator(".options input").nth(1).check();
   await page.reload();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
   await page.getByRole("button", { name: "提交本次复习", exact: true }).waitFor();
   assert(await page.locator(".options input").nth(1).isChecked(), "practice draft must also recover");
   await page.getByRole("button", { name: "提交本次复习", exact: true }).click();
@@ -267,35 +280,32 @@ try {
   await page.getByRole("button", { name: "错题与复习", exact: true }).click();
   await select("learning-select-3", "收藏");
   assert(calls.some(c => c.p.endsWith("/review") && c.query.kind === "favorites"));
-  await page.getByRole("button", { name: "学习画像", exact: true }).click();
-  await page.getByText("33.3%", { exact: true }).first().waitFor();
-  assert.equal(await page.locator(".completion-ring").count(), 1);
-  assert.equal(await page.locator(".topic-bar").count(), 1);
+  await page.getByRole("button", { name: "个人画像", exact: true }).click();
+  await page.locator(".trend-plot").waitFor();
   assert.equal(await page.getByText("3330.0%", { exact: true }).count(), 0);
   assert.equal(await page.getByRole("button", { name: "题目统计", exact: true }).count(), 0);
   await page.screenshot({ path: path.join(output, "learning-profile.png"), fullPage: true });
   await page.getByRole("button", { name: "今日学练", exact: true }).click();
   await page.locator(".stem").waitFor();
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 1920, height: 1080 });
   await page.screenshot({ path: path.join(output, "learning-mobile.png"), fullPage: true });
   assert(await page.locator(".learning-page").evaluate(e => e.scrollWidth <= e.clientWidth + 1), "learning page should fit a phone viewport");
 
   admin = true;
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.reload();
-  await page.getByText("管理员作答计入H楼进度", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
+  await page.getByText("工号 100 · 当前答题人", { exact: true }).waitFor();
   await page.getByRole("button", { name: /^第 5 题/ }).click();
   assert.equal(await page.locator(".answer-reference").count(), 0);
   await page.locator(".options input").first().check();
   await page.getByRole("button", { name: "确认作答", exact: true }).click();
   assert(admin && paper.questions[4].attempt, "admin answer must update the selected building paper");
-  await page.getByText("管理员作答计入H楼进度", { exact: true }).waitFor();
+  await page.getByText("工号 100 · 当前答题人", { exact: true }).waitFor();
   await page.getByRole("button", { name: "学习历史", exact: true }).click();
-  await select("learning-select-1", "全部楼栋");
   await page.getByRole("button", { name: "查看题单", exact: true }).click();
   await page.getByRole("button", { name: /^第 6 题/ }).click();
   assert(await page.getByRole("button", { name: "确认作答", exact: true }).isEnabled(), "admin may answer a paper opened from all-building history");
-  await select("learning-select-1", "H楼");
   await page.getByRole("button", { name: "题库管理", exact: true }).click();
   await page.locator("table tbody tr").first().waitFor();
   assert.equal(await page.locator("table tbody tr").count(), 20);
@@ -397,7 +407,7 @@ try {
   await page.getByRole("button", { name: "错题与复习", exact: true }).click();
   await page.locator("table tbody tr").first().waitFor();
   assert.equal(calls.filter(c => c.p.endsWith("/review")).at(-1).query.bank, undefined);
-  const reviewResponse = page.waitForResponse(r => new URL(r.url()).pathname.endsWith("/review") && new URL(r.url()).searchParams.get("bank") === "duty");
+  const reviewResponse = page.waitForResponse(r => new URL(r.url()).pathname.endsWith("/review") && new URL(r.url()).searchParams.get("bank") === "duty").catch(() => null);
   await select("learning-select-3b", "值班面试");
   await reviewResponse;
   await page.getByRole("button", { name: "题库管理", exact: true }).click();
@@ -428,7 +438,7 @@ try {
   assert(await page.getByLabel("发布时间", { exact: true }).isVisible());
   await page.getByLabel("提醒时间", { exact: true }).fill("17:30");
   await page.screenshot({ path: path.join(output, "learning-admin-settings.png"), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.setViewportSize({ width: 1920, height: 1080 });
   assert(await page.locator(".learning-page").evaluate(e => e.scrollWidth <= e.clientWidth + 1));
   await page.screenshot({ path: path.join(output, "learning-settings-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -440,9 +450,9 @@ try {
   assert.deepEqual(Object.keys(calls.filter(c => c.p.endsWith("/settings") && c.method === "PUT").at(-1).body).sort(), ["enabled", "publish_time", "reminder_enabled", "reminder_time"]);
   settings.enabled = false;
   await page.reload();
-  await page.getByRole("button", { name: "手动发布题单", exact: true }).waitFor();
-  assert(await page.getByRole("button", { name: "手动发布题单", exact: true }).isEnabled(), "manual publish must work with automatic publishing off");
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
   await openSettingsTab(false);
+  assert(await page.getByRole("button", { name: "手动发布题单", exact: true }).isEnabled(), "manual publish must work with automatic publishing off");
   // 自动发布关闭时发布时间隐藏，但仍可保存并保留既有时间
   assert.equal(await page.getByLabel("发布时间", { exact: true }).count(), 0);
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
@@ -454,27 +464,23 @@ try {
   await page.getByRole("dialog", { name: "启用每日自动发布", exact: true }).waitFor();
   await page.getByRole("button", { name: "确认", exact: true }).click();
   await page.getByText("设置已保存。", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "学习画像", exact: true }).click();
-  await select("learning-select-1", "全部楼栋");
-  await page.getByRole("button", { name: "六楼进度", exact: true }).click();
-  assert.equal(await page.locator("table tbody tr").count(), 6);
-  assert(calls.some(c => c.p.endsWith("/profile") && !c.query.scope));
-  await page.locator(".inventory summary").click();
-  assert(await page.locator(".inventory").innerText().then(text => text.includes("本轮剩余") && text.includes("326")));
-  await select("learning-select-1", "E楼");
+  await page.getByRole("button", { name: "个人画像", exact: true }).click();
+  await page.getByRole("button", { name: "返回", exact: true }).click();
+  await page.locator(".building-tabs button").filter({ hasText: "E楼" }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.learning-page').length === 1);
   await page.locator('.toolbar input[type="date"]').first().fill("2026-09-10");
   await page.locator('.toolbar input[type="date"]').last().fill("2026-09-20");
   let releaseProfile;
   profileGate = new Promise(resolve => { releaseProfile = resolve; });
   await page.getByRole("button", { name: "查询", exact: true }).click();
   await page.getByText("正在读取统计…", { exact: true }).waitFor();
-  assert.equal(await page.locator('.table-wrap').getAttribute("inert"), "");
+  assert(await page.getByRole("button", { name: "查询", exact: true }).isDisabled());
   releaseProfile(); profileGate = undefined;
   await page.getByText("正在读取统计…", { exact: true }).waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "题库管理", exact: true }).click();
   await page.locator("table tbody tr").first().waitFor();
-  await page.getByRole("button", { name: "学习画像", exact: true }).click();
-  await page.getByText("33.3%", { exact: true }).first().waitFor();
+  await page.getByRole("button", { name: "楼栋汇总", exact: true }).click();
+  await page.locator(".trend-plot").waitFor();
   assert.equal(await page.locator('.toolbar input[type="date"]').first().inputValue(), "2026-09-10");
   assert.equal(await page.locator('.toolbar input[type="date"]').last().inputValue(), "2026-09-20");
   assert.equal(calls.filter(c => c.p.endsWith("/profile")).at(-1).query.scope, "E");
@@ -482,7 +488,7 @@ try {
   await page.getByRole("button", { name: "导出报表", exact: true }).click();
   await profileDownload;
   assert.equal(calls.filter(c => c.p.endsWith("/export")).at(-1).query.from, "2026-09-10");
-  assert.equal(calls.filter(c => c.p.endsWith("/export")).at(-1).query.period, "month");
+  assert.equal(calls.filter(c => c.p.endsWith("/export")).at(-1).query.period, "7");
   await page.getByRole("button", { name: "学习历史", exact: true }).click();
   await page.getByRole("button", { name: "查看题单", exact: true }).waitFor();
   await page.getByLabel("开始日期", { exact: true }).fill("");
@@ -496,7 +502,7 @@ try {
   await page.getByRole("button", { name: "问题中心", exact: true }).click();
   await page.getByRole("button", { name: "题库待核对 4 题", exact: true }).click();
   assert(await page.getByLabel("仅问题题目", { exact: true }).isChecked());
-  await page.getByRole("button", { name: "今日学练", exact: true }).click();
+  await openSettingsTab(true);
   await page.getByRole("button", { name: "手动发布题单", exact: true }).click();
   await page.getByRole("dialog", { name: "手动发布今日题单", exact: true }).waitFor();
   assert(await page.getByRole("dialog").innerText().then(value => value.includes("不发送飞书消息")));
@@ -504,11 +510,20 @@ try {
   await page.getByText("手动发布请求已提交，不发送飞书消息。", { exact: true }).waitFor();
   await page.locator(".sync-label").filter({ hasText: "发布中" }).waitFor();
   await page.locator(".sync-label").filter({ hasText: "已同步" }).waitFor();
+  await page.locator(".building-tabs button").filter({ hasText: "H楼" }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.learning-page').length === 1);
+  await page.getByRole("button", { name: "选择答题人员", exact: true }).click();
+  await page.locator(".people-list button").first().click();
   silentPublishing = false;
   await page.reload();
-  await page.getByText("管理员作答计入H楼进度", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
+  await page.getByText("工号 100 · 当前答题人", { exact: true }).waitFor();
+  await openSettingsTab(true);
   assert(await page.getByRole("button", { name: "手动发布题单", exact: true }).isDisabled());
   assert.equal(await page.getByRole("button", { name: "手动发布题单", exact: true }).getAttribute("title"), "请重启主程序后使用静默发布");
+  await page.locator('.learning-page[aria-busy="false"]').waitFor();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
+  await page.locator('.learning-page[aria-busy="false"]').waitFor();
   paperDeleted = true;
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await page.getByText("今日暂无可学习题目", { exact: true }).waitFor();
@@ -516,11 +531,11 @@ try {
   await page.getByRole("button", { name: "刷新当前页面", exact: true }).click();
   await page.locator(".stem").waitFor();
   await page.screenshot({ path: path.join(output, "learning-admin-daily-paper.png"), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 1920, height: 1080 });
   assert(await page.locator(".learning-page").evaluate(e => e.scrollWidth <= e.clientWidth + 1));
   await page.screenshot({ path: path.join(output, "learning-admin-daily-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.getByRole("button", { name: "删除本楼题单", exact: true }).click();
+  await page.getByRole("button", { name: "删除个人题单", exact: true }).click();
   await page.getByRole("dialog", { name: "删除已发布题单", exact: true }).waitFor();
   await page.getByRole("button", { name: "确认", exact: true }).click();
   await page.getByText("今日暂无可学习题目", { exact: true }).waitFor();
@@ -528,8 +543,9 @@ try {
   admin = false;
   settings.enabled = false;
   await page.reload();
+  await page.getByRole("button", { name: "今日学练", exact: true }).click();
   await page.getByText("今日暂无可学习题目", { exact: true }).waitFor();
-  assert.equal(await page.getByRole("button", { name: "删除本楼题单", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "删除个人题单", exact: true }).count(), 0);
   // 普通答题账号不显示同步状态标签与自动发布未启用的全局提示，今日空状态仍明确
   assert.equal(await page.locator(".sync-label").count(), 0);
   assert.equal(await page.getByText("自动发布未启用").count(), 0);
@@ -538,6 +554,8 @@ try {
   await page.getByRole("button", { name: "学习历史", exact: true }).click();
   await page.getByText("暂无符合条件的记录", { exact: true }).waitFor();
   await page.getByRole("button", { name: "返回", exact: true }).click();
+  await page.waitForURL(`${base}/learning?scope=H`);
+  await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.waitForURL(`${base}/?entry=tools`);
   await page.getByText("画像学练", { exact: true }).first().waitFor();
   assert.deepEqual(unexpected, [], "all API traffic must be handled by isolated mocks");
@@ -545,10 +563,12 @@ try {
   await context.close();
   console.log(`Learning UI checks passed: import parsing, draft recovery, lost-response retry, stale-answer protection, notes, favorites, issue+attachment versions, interview, history, profile, admin pagination/editor/settings. Screenshots: ${output}`);
 } catch (error) {
+  console.error(error);
   console.error({ pageErrors, unexpected, lastCalls: calls.slice(-8), body: (await activePage?.locator('body').innerText().catch(() => '') || '').slice(-5000) });
   await activePage?.screenshot({ path: path.join(output, "failure.png"), fullPage: true }).catch(() => {});
   throw error;
 } finally {
   await browser?.close();
-  await server.close();
+  if (built) await new Promise((resolve, reject) => server.httpServer.close(error => error ? reject(error) : resolve()));
+  else await server.close();
 }

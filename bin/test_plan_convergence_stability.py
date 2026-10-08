@@ -8,7 +8,8 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import httpx
 from fastapi import FastAPI
@@ -148,6 +149,43 @@ class PlanStabilityTests(unittest.TestCase):
         self.assertIn('token=second', seen[1])
         self.assertNotIn('first', seen[1])
         self.assertNotIn('stale', seen[1])
+
+
+class NoticeCheckTests(unittest.TestCase):
+    def test_post_send_check_is_once_and_delivery_retries_without_rechecking(self):
+        from lan_bitable_template_portal.plan_convergence_notifications import NoticePlanChecks, CHANNEL
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+        with tempfile.TemporaryDirectory() as folder:
+            store = LanPortalStateStore(Path(folder) / 'state.sqlite3')
+            service = SimpleNamespace(_recipients_for_building_codes=lambda scopes, **_: ('E', ['E-duty', 'Li'], ''))
+            check = Mock(return_value={'records': [{'hits': []}]})
+            send = Mock(side_effect=[(True, '', []), (False, '', []), (True, '', [])])
+            worker = NoticePlanChecks(service, store, check, send)
+            notice = {'notice_type': '设备检修', 'action': 'start', 'name': 'E楼设备检修', 'building_codes': ['E']}
+            for _ in range(2): worker.enqueue(notice, operation_id='one', target_record_id='recE')
+            row = store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300)[0]
+            worker.process(row)
+            worker.process(row)
+            self.assertEqual(check.call_count, 1)
+            self.assertEqual(send.call_count, 3)
+            self.assertEqual(send.call_args_list[1].kwargs, send.call_args_list[2].kwargs)
+            self.assertIn('E楼设备检修', send.call_args_list[0].args[0])
+            self.assertNotIn('核对通过', send.call_args_list[0].args[0])
+            check.side_effect = TimeoutError('VPN offline')
+            worker.enqueue({**notice, 'action': 'update'}, operation_id='two', target_record_id='recE')
+            send.side_effect = None; send.return_value = (True, '', [])
+            row = store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300)[0]
+            worker.process(row)
+            self.assertIn('通告已正常发送', send.call_args.args[0])
+            self.assertEqual(check.call_count, 2)
+            worker.enqueue({**notice, 'action': 'end'}, operation_id='end', target_record_id='recE')
+            worker.enqueue({**notice, 'notice_type': '维保通告'}, operation_id='maintenance', target_record_id='recM')
+            self.assertEqual(store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300), [])
+
+    def test_common_site_identifier_is_not_a_device_match(self):
+        from lan_bitable_template_portal.plan_convergence_maintenance import _device_keywords, _longest_common_substring
+        self.assertEqual(_device_keywords('EA118 C01 BMS I3 E-201-UPS-01'), ['E-201-UPS-01'])
+        self.assertEqual(_longest_common_substring('EA118_C01机房E楼水泵检修', 'EA118_C01机房E楼烟感故障'), '')
 
 
 if __name__ == '__main__':

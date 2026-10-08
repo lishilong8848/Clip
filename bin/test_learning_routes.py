@@ -121,11 +121,11 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["data"]["scope"], scope)
             self.assertEqual(response.json()["data"]["actor"]["scope"], scope)
-        for scope, status in (("A", 403), ("110", 400), ("ALL", 400), ("CAMPUS", 400), ("a", 400)):
+        for scope, status in (("A", 200), ("110", 400), ("ALL", 400), ("CAMPUS", 400), ("a", 400)):
             response = self.client.get("/api/learning/papers", params={"scope": scope})
             self.assertEqual(response.status_code, status, response.text)
-        self.assertEqual(self.client.get("/api/learning/papers?scope=A&scope=H").status_code, 403)
-        self.assertEqual(self.client.post("/api/learning/issues", json={"scope": "A"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/learning/papers?scope=A&scope=H").status_code, 200)
+        self.assertEqual(self.client.post("/api/learning/issues", json={"scope": "A"}).status_code, 200)
         self.session = {"open_id": "administrator", "role": "admin", "name": "Admin"}
         for scope in "ABCDEH":
             response = self.client.get("/api/learning/bootstrap", params={"scope": scope})
@@ -157,12 +157,12 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(response.json()["data"]["query"]["scope"], expected)
             self.assertEqual(self.client.get("/learning?scope=").text, "portal")
         self.session = {"user": {"open_id": "building-H"}}
-        self.assertEqual(self.client.get("/api/learning/papers?scope=A&scope=").status_code, 403)
+        self.assertEqual(self.client.get("/api/learning/papers?scope=A&scope=").status_code, 200)
         self.assertEqual(self.client.post("/api/learning/issues", json={"scope": None}).status_code, 400)
 
     def test_dispatch_contract_and_path_ids_override_client_ids(self):
         cases = [
-            ("GET", "papers", "papers.list"), ("GET", "papers/p", "paper.get"),
+            ("GET", "people", "people"), ("POST", "papers/claim", "paper.claim"), ("GET", "papers", "papers.list"), ("GET", "papers/p", "paper.get"),
             ("DELETE", "papers/p", "paper.delete"),
             ("POST", "papers/p/answer", "paper.answer"), ("POST", "papers/p/reveal", "paper.reveal"),
             ("POST", "papers/p/notes", "paper.notes"), ("GET", "history", "history"),
@@ -235,7 +235,7 @@ class LearningRouteTests(unittest.TestCase):
         self.assertTrue(all(upload.file_object.closed for upload in closed))
         self.assertEqual(self.client.post("/api/learning/attachments", json={}).status_code, 400)
         cross_scope = self.client.post("/api/learning/attachments", files={"files": ("x", b"x")}, data={"scope": "A"})
-        self.assertEqual(cross_scope.status_code, 403)
+        self.assertEqual(cross_scope.status_code, 200)
         repeated_kinds = self.client.post("/api/learning/attachments", files=[
             part for n in range(10) for part in (("files", (str(n), b"x")), ("kind", (None, "answer")))
         ])
@@ -348,7 +348,7 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(target, "/learning?scope=H")
             self.session = {"user": {"open_id": "building-H"}}
             self.assertEqual(client.get("/learning/").text, "portal")
-            self.assertEqual(client.get("/learning?scope=A").status_code, 403)
+            self.assertEqual(client.get("/learning?scope=A").status_code, 200)
         self.assertEqual(self.events[-1][0], "stop")
 
 
@@ -387,19 +387,20 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("import", {"questions": [payload]})
             with service.transaction() as connection:
                 for scope in ("A", "H"):
-                    paper = {"id": "paper-" + scope, "scope": scope, "date": "2026-09-29", "created_at": "2026-09-29T08:00:00+08:00",
+                    service._put("person", "person-" + scope, {"id": "person-" + scope, "name": scope, "employee_no": scope, "active": True, "scopes": [scope]}, connection)
+                    paper = {"id": "paper-" + scope, "person_id": "person-" + scope, "person": {"id": "person-" + scope, "name": scope}, "scope": scope, "date": "2026-09-29", "created_at": "2026-09-29T08:00:00+08:00",
                              "shortage": {"written": 7, "duty": 1, "professional": 1}, "questions": [question]}
                     service._put("paper", paper["id"], paper, connection)
             self.assertEqual(dispatch("papers.list", query={"scope": ""})["total"], 2)
             self.assertEqual(dispatch("papers.list", who=actor, query={"scope": ""})["total"], 1)
             dispatch("history", query={"scope": ""})
             dispatch("paper.get", {"id": "paper-H"}, actor)
-            paper = dispatch("paper.reveal", {"id": "paper-H", "question_id": question["id"], "kind": "hint"}, actor)
-            paper = dispatch("paper.notes", {"id": "paper-H", "question_id": question["id"], "note": "Note", "favorite": True}, actor)
-            dispatch("paper.answer", {"id": "paper-H", "question_id": question["id"], "version": paper["version"], "operation_id": "contract-answer", "option_ids": ["o2"]}, actor)
-            dispatch("review", who=actor, query={"scope": ""})
+            paper = dispatch("paper.reveal", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "kind": "hint"}, actor)
+            paper = dispatch("paper.notes", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "note": "Note", "favorite": True, "version": paper["version"]}, actor)
+            dispatch("paper.answer", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "version": paper["version"], "operation_id": "contract-answer", "option_ids": ["o2"]}, actor)
+            dispatch("review", who=actor, query={"scope": "", "person_id": "person-H"})
             dispatch("profile", query={"scope": ""})
-            issue = dispatch("issue.create", {"paper_id": "paper-H", "question_id": question["id"], "description": "Check this question"}, actor)
+            issue = dispatch("issue.create", {"paper_id": "paper-H", "person_id": "person-H", "question_id": question["id"], "description": "Check this question"}, actor)
             issue = dispatch("issue.update", {"id": issue["id"], "version": issue["version"], "remark": "More detail"}, actor)
             dispatch("issues.list", who=actor, query={"scope": ""})
             added = service.add_attachments([("evidence.txt", b"evidence")], {"issue_id": issue["id"], "kind": "material", "version": issue["version"]}, actor)
@@ -412,6 +413,10 @@ class LearningSourceContractTests(unittest.TestCase):
                 result = service.export(kind, {"scope": ""}, admin)
                 self.assertIsInstance(result[0], bytes)
                 self.assertTrue(all(isinstance(value, str) for value in result[1:]))
+            dispatch("people")
+            service._restored = True
+            service.publish()
+            dispatch("paper.claim", {"person_id": "person-H", "scope": "H"})
             dispatch("refresh")
             dispatch("publish")
             dispatch("paper.delete", {"id": "paper-H"})
@@ -473,7 +478,11 @@ class LearningWireTests(unittest.TestCase):
                         "correct_option_ids": ["a"], "hint": "Read the question carefully",
                     })
                     service._put("question", question["id"], question, connection, False)
+            with service.transaction() as connection:
+                service._put("person", "learner-A", {"id": "learner-A", "name": "人员A", "scopes": ["A"], "active": True}, connection, False)
+            service._restored = True
             service.publish(DAY)
+            service.dispatch("paper.claim", {"scope": "A", "person_id": "learner-A"}, {"id": "a", "scope": "A"}, {})
             with patch.object(core, "LearningService", return_value=service) as factory, \
                     patch.dict(sys.modules, {"lan_bitable_template_portal.portal_service": constants}):
                 app = FastAPI()
@@ -496,17 +505,17 @@ class LearningWireTests(unittest.TestCase):
                     question = paper["questions"][0]
                     self.assertNotIn("answer", question)
                     question_id = question["id"]
-                    paper = request("POST", paper_path + "/reveal", json={"question_id": question_id, "kind": "hint"})
+                    paper = request("POST", paper_path + "/reveal", json={"person_id": "learner-A", "question_id": question_id, "kind": "hint"})
                     self.assertEqual(paper["questions"][0]["answer"], {"hint": "Read the question carefully"})
                     answered = request("POST", paper_path + "/answer", json={
-                        "question_id": question_id, "version": paper["version"],
+                        "person_id": "learner-A", "question_id": question_id, "version": paper["version"],
                         "operation_id": "wire-first-answer", "option_ids": ["b"],
                     })
                     attempt = answered["questions"][0]["attempt"]
                     self.assertIs(attempt["correct"], False)
                     self.assertIs(attempt["assisted"], True)
                     issue = request("POST", "issues", json={
-                        "paper_id": paper["id"], "question_id": question_id,
+                        "paper_id": paper["id"], "person_id": "learner-A", "question_id": question_id,
                         "category": "答案", "description": "Please verify the reference answer",
                     })
                     self.assertEqual((issue["scope"], issue["paper_id"], issue["question_id"]), ("A", paper["id"], question_id))

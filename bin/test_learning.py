@@ -146,7 +146,14 @@ class LearningTests(unittest.TestCase):
             self.service._put("settings", "main", settings, conn, False)
 
     def dispatch(self, action, payload=None, actor=None, query=None):
-        return self.service.dispatch(action, payload or {}, ACTOR if actor is None else actor, query or {})
+        payload, query = dict(payload or {}), dict(query or {})
+        paper = self.service._get("paper", payload.get("id") or payload.get("paper_id") or "")
+        if paper and action in {"paper.answer", "paper.notes", "paper.reveal", "issue.create"}:
+            payload.setdefault("person_id", paper.get("person_id"))
+            payload.setdefault("version", (self.service._get("record", paper["id"]) or {}).get("version", 0))
+        if action == "review":
+            query.setdefault("person_id", "person_A")
+        return self.service.dispatch(action, payload, ACTOR if actor is None else actor, query)
 
     def question(self, number, bank="written", kind=None, **changes):
         kind = kind or ("single" if bank == "written" else "interview")
@@ -174,9 +181,22 @@ class LearningTests(unittest.TestCase):
                     self.service._put("attachment", attachment["id"],
                                       {**attachment, "question_id": q["id"]}, conn, False)
 
-    def seed_pool(self, written=0, duty=0, professional=0):
+    def seed_pool(self, written=0, duty=0, professional=0, supplemental=0):
         self.seed(self.question(i, bank) for bank, size in
-                  (("written", written), ("duty", duty), ("professional", professional)) for i in range(size))
+                  (("written", written), ("duty", duty), ("professional", professional), ("supplemental", supplemental)) for i in range(size))
+
+    def publish_people(self, day=DAY):
+        with self.service.transaction() as conn:
+            for scope in learning.SCOPES:
+                identity = "person_" + scope
+                self.service._put("person", identity, {"id": identity, "person_id": identity, "name": scope + "测试人员",
+                    "employee_no": scope, "scopes": [scope], "active": True}, conn, False)
+        self.service._restored = True
+        publication = self.service.publish(day)
+        with patch.object(learning, "now", return_value=dt.datetime.combine(day, dt.time(9), learning.TZ)):
+            for scope in learning.SCOPES:
+                self.dispatch("paper.claim", {"person_id": "person_" + scope, "scope": scope})
+        return publication
 
     def fixture(self, kind="single", bank="written", per_scope=1, attachments=False):
         questions = [self.question(i, bank, kind) for i in range(6 * per_scope)]
@@ -189,15 +209,20 @@ class LearningTests(unittest.TestCase):
             for category in ("question", "material", "answer"):
                 self.cloud.files["TOKEN-SECRET-" + category] = b"test content"
         self.seed(questions)
-        self.service.publish(DAY)
-        paper = self.service._get("paper", f"{DAY}_A")
+        self.publish_people(DAY)
+        with self.service.transaction() as conn:
+            for n, scope in enumerate(learning.SCOPES):
+                p = self.service._get("paper", f"personal:{DAY}:person_{scope}", conn)
+                p["questions"] = questions[n * per_scope:(n + 1) * per_scope]
+                self.service._put("paper", p["id"], p, conn)
+        paper = self.service._get("paper", f"personal:{DAY}:person_A")
         self.assertTrue(paper["questions"])
         return paper, paper["questions"][0]
 
     def answer_payload(self, paper, question, **changes):
         record = self.service._get("record", paper["id"]) or {}
         version = record.get("version", 0)
-        payload = {"id": paper["id"], "question_id": question["id"], "version": version,
+        payload = {"id": paper["id"], "person_id": paper.get("person_id"), "question_id": question["id"], "version": version,
                    "operation_id": f"op-{question['id']}-{version}", "option_ids": question["correct_option_ids"]}
         payload.update(changes)
         return payload
@@ -225,58 +250,35 @@ class LearningTests(unittest.TestCase):
             for secret in ("TOKEN-SECRET", "PRIVATE-LOCAL", str(self.root)):
                 self.assertNotIn(secret, value)
 
-    def test_seven_day_global_family_dedup_across_six_buildings_and_restarts(self):
-        self.seed_pool(written=336, duty=42, professional=42)
-        duplicate = self.question(999, stem="written question 0")
-        self.seed([duplicate, self.question(1000, status="draft"),
-                   self.question(1001, problems=["invalid answer"])])
-        self.seed([self.question(1002)], dirty=True)
-        start = dt.date(2026, 8, 28)
-        by_day = []
+    def test_seven_day_personal_family_dedup_across_restarts(self):
+        self.seed_pool(written=56, duty=7, professional=7, supplemental=35)
+        history = {scope: [] for scope in learning.SCOPES}
         for offset in range(8):
-            date = start + dt.timedelta(days=offset)
-            if offset in (3, 4, 7):
-                self.restart()
-            publication = self.service.publish(date)
-            self.assertEqual(len(publication["paper_ids"]), 6)
-            families = []
+            day = DAY + dt.timedelta(days=offset)
+            if offset in {3, 7}: self.restart()
+            self.publish_people(day)
             for scope in learning.SCOPES:
-                paper = self.service._get("paper", f"{date}_{scope}")
-                self.assertEqual(paper["shortage"], {"written": 0, "duty": 0, "professional": 0})
-                self.assertEqual([sum(q["bank"] == bank for q in paper["questions"])
-                                  for bank in learning.BANKS], [8, 1, 1])
-                families.extend(q["family_id"] for q in paper["questions"])
-                self.assertFalse({"written:1000", "written:1001", "written:1002"}.intersection(
-                    q["id"] for q in paper["questions"]))
-            self.assertEqual(len(families), len(set(families)))
-            for recent in by_day[-6:]:
-                self.assertTrue(set(families).isdisjoint(recent))
-            by_day.append(set(families))
+                p = self.service._get("paper", f"personal:{day}:person_{scope}")
+                families = {q["family_id"] for q in p["questions"]}
+                self.assertEqual(len(families), 15)
+                for previous in history[scope][-6:]:
+                    self.assertTrue(families.isdisjoint(previous))
+                history[scope].append(families)
             before = self.service._all("paper")
-            self.service.publish(date)
+            self.publish_people(day)
             self.assertEqual(before, self.service._all("paper"))
-        self.assertEqual(by_day[0], by_day[7])
         self.assertEqual(len(self.service._all("paper")), 48)
-        self.assertEqual(len(self.service._all("publication")), 8)
-        self.assertEqual(self.cloud.calls, [])
-        self.assertEqual(self.sender.calls, [])
+        self.assertFalse(self.sender.calls)
 
-    def test_all_available_questions_rotate_before_reuse(self):
-        sizes = {"written": 400, "duty": 50, "professional": 50}
-        daily = {"written": 48, "duty": 6, "professional": 6}
-        self.seed_pool(**sizes)
-        seen = {bank: set() for bank in sizes}
+    def test_reserves_prefer_long_unassigned_questions(self):
+        self.seed_pool(written=400, duty=50, professional=50, supplemental=250)
+        seen = set()
         for offset in range(9):
-            day = dt.date(2026, 8, 28) + dt.timedelta(days=offset)
-            self.service.publish(day)
-            assigned = [q for scope in learning.SCOPES
-                        for q in self.service._get("paper", f"{day}_{scope}")["questions"]]
-            for bank, size in sizes.items():
-                ids = {q["id"] for q in assigned if q["bank"] == bank}
-                self.assertEqual(len(ids), daily[bank])
-                self.assertEqual(len(ids - seen[bank]), daily[bank] if offset < 8 else size - 8 * daily[bank])
-                seen[bank].update(ids)
-        self.assertEqual({bank: len(ids) for bank, ids in seen.items()}, sizes)
+            day = DAY + dt.timedelta(days=offset)
+            self.publish_people(day)
+            assigned = {q["family_id"] for p in self.service._documents("paper", start=day.isoformat(), end=day.isoformat()) for q in p["questions"]}
+            self.assertTrue(assigned - seen)
+            seen.update(assigned)
 
     def test_admin_delete_paper_hides_it_without_erasing_answers_or_reusing_questions(self):
         paper, question = self.fixture()
@@ -292,7 +294,7 @@ class LearningTests(unittest.TestCase):
         self.assert_status(404, self.dispatch, "paper.answer", self.answer_payload(paper, question))
         self.assertEqual(self.service._get("record", paper["id"]), record)
         self.assertEqual(self.service.profile(ACTOR, {})["summary"]["assigned"], 0)
-        self.assertEqual(self.service._get("notification", "publish:" + paper["id"])["status"], "cancelled")
+        self.assertTrue(self.service._get("paper", paper["id"])["deleted_at"])
         self.service.publish(DAY)
         self.assertTrue(self.service._get("paper", paper["id"])["deleted_at"])
         self.service.sync_pending(limit=40, force=True)
@@ -303,14 +305,14 @@ class LearningTests(unittest.TestCase):
             self.assertEqual(restored._get("record", paper["id"])["entries"], record["entries"])
         self.restart()
         self.assertEqual(self.dispatch("history", actor=ACTOR)["total"], 0)
-        self.service.publish(DAY + dt.timedelta(days=1))
-        self.assertFalse(self.service._get("paper", f"{DAY + dt.timedelta(days=1)}_A")["questions"])
+        self.publish_people(DAY + dt.timedelta(days=1))
+        self.assertFalse(self.service._get("paper", f"personal:{DAY + dt.timedelta(days=1)}:person_A")["questions"])
 
     def test_today_query_switches_to_new_publication_and_keeps_history_separate(self):
         self.seed_pool(written=96, duty=12, professional=12)
-        self.service.publish(DAY)
+        self.publish_people(DAY)
         following = DAY + dt.timedelta(days=1)
-        self.service.publish(following)
+        self.publish_people(following)
         with patch("lan_bitable_template_portal.learning.now", return_value=CURRENT + dt.timedelta(days=1)):
             with patch.object(self.service, "_all", side_effect=AssertionError("today must not scan every historical paper")):
                 current = self.dispatch("papers.list", actor=ACTOR, query={"today": "1", "date": DAY.isoformat()})
@@ -318,34 +320,20 @@ class LearningTests(unittest.TestCase):
         self.assertEqual([item["date"] for item in current["items"]], [following.isoformat()])
         self.assertEqual(self.dispatch("history", actor=ACTOR)["total"], 2)
 
-    def test_shortage_is_balanced_and_daily_start_building_rotates(self):
-        start = dt.date(2026, 8, 28)
-        extra = {scope: 0 for scope in learning.SCOPES}
-        for offset in range(6):
-            self.seed(self.question(offset * 20 + i, bank) for bank, size in
-                      (("written", 8), ("duty", 2), ("professional", 2)) for i in range(size))
-            day = start + dt.timedelta(days=offset)
-            self.service.publish(day)
-            papers = [self.service._get("paper", f"{day}_{scope}") for scope in learning.SCOPES]
-            for bank, wanted in (("written", 8), ("duty", 1), ("professional", 1)):
-                counts = [sum(q["bank"] == bank for q in p["questions"]) for p in papers]
-                self.assertLessEqual(max(counts) - min(counts), 1)
-                self.assertEqual(sum(counts), 8 if bank == "written" else 2)
-                self.assertEqual([p["shortage"][bank] for p in papers], [wanted - n for n in counts])
-            for p in papers:
-                extra[p["scope"]] += sum(q["bank"] == "written" for q in p["questions"]) - 1
-        self.assertEqual(set(extra.values()), {2})
+    def test_person_shortage_does_not_borrow_from_other_banks(self):
+        self.seed_pool(written=3, duty=1, professional=1)
+        self.publish_people()
+        for p in self.service._all("paper"):
+            self.assertEqual(p["shortage"], {"written": 5, "duty": 0, "professional": 0, "supplemental": 5})
+        self.assertEqual(len(self.service._all("paper")), 6)
 
     def test_empty_pool_publishes_explicit_shortages_once(self):
-        self.service.publish(DAY)
+        self.publish_people()
         self.restart()
-        self.service.publish(DAY)
+        self.publish_people()
         papers = self.service.list_papers(ADMIN, {"page_size": 100})["items"]
         self.assertEqual(len(papers), 6)
-        for paper in papers:
-            self.assertEqual(paper["questions"], [])
-            self.assertEqual(paper["stats"]["shortage"], 10)
-            self.assertEqual(paper["status"], "pending")
+        self.assertTrue(all(p["stats"]["shortage"] == 15 and p["status"] == "pending" for p in papers))
 
     def test_manual_publication_is_durable_silent_and_does_not_repeat(self):
         self.enable(reminder_enabled=True)
@@ -356,9 +344,9 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(self.service.sync_status()["status"], "publishing")
         with patch.object(self.service, "refresh"):
             self.service.tick(CURRENT.replace(hour=7))
-        papers = copy.deepcopy(self.service._all("paper"))
-        self.assertEqual(len(papers), 6)
-        self.assertTrue(all(len(p["questions"]) == 10 and not p["notify"] for p in papers))
+        papers = copy.deepcopy(self.service._all("reserve"))
+        self.assertEqual(len(papers), 24)
+        self.assertFalse(self.service._get("publication", self.service._publication_key(DAY.isoformat()))["notify"])
         self.assertEqual(self.sender.calls, [])
         self.assertEqual(self.service._all("notification"), [])
         self.assertTrue(self.dispatch("publish", actor=ADMIN)["already_published"])
@@ -367,12 +355,12 @@ class LearningTests(unittest.TestCase):
             self.service.tick(CURRENT.replace(hour=18))
         self.assertEqual(self.sender.calls, [])
         self.assertEqual(self.service._all("notification"), [])
-        self.assertEqual(self.service._all("paper"), papers)
+        self.assertEqual(self.service._all("reserve"), papers)
         tomorrow = CURRENT + dt.timedelta(days=1)
         with patch.object(self.service, "refresh"):
             self.service.tick(tomorrow)
         self.assertEqual(len(self.sender.calls), 6)
-        self.assertTrue(self.service._get("publication", tomorrow.date().isoformat())["notify"])
+        self.assertTrue(self.service._get("publication", self.service._publication_key(tomorrow.date().isoformat()))["notify"])
 
     def test_manual_publication_works_without_enabling_automatic_schedule(self):
         self.seed_pool(written=48, duty=6, professional=6)
@@ -380,8 +368,8 @@ class LearningTests(unittest.TestCase):
         self.assertFalse(self.dispatch("publish", actor=ADMIN)["notify"])
         self.restart()
         self.service.tick(CURRENT)
-        self.assertEqual(len(self.service._all("paper")), 6)
-        self.assertFalse(self.service._get("publication", DAY.isoformat())["notify"])
+        self.assertEqual(len(self.service._all("reserve")), 24)
+        self.assertFalse(self.service._get("publication", self.service._publication_key(DAY.isoformat()))["notify"])
         self.assertFalse(self.service.settings()["enabled"])
         self.assertFalse(self.cloud.enabled)
         self.assertEqual(self.sender.calls, [])
@@ -389,7 +377,7 @@ class LearningTests(unittest.TestCase):
             self.service._put("record", "manual-answer", {"version": 1}, conn)
         self.service.tick(CURRENT + dt.timedelta(days=1))
         self.assertIn(("record", "manual-answer"), self.cloud.entities)
-        self.assertEqual(len(self.service._all("paper")), 6)
+        self.assertEqual(len(self.service._all("reserve")), 24)
         self.assertEqual(self.sender.calls, [])
 
     def test_manual_publication_requested_during_scheduled_refresh_stays_silent(self):
@@ -397,7 +385,7 @@ class LearningTests(unittest.TestCase):
         self.seed_pool(written=48, duty=6, professional=6)
         with patch.object(self.service, "refresh", side_effect=lambda: self.dispatch("publish", actor=ADMIN)):
             self.service.tick(CURRENT)
-        self.assertFalse(self.service._get("publication", DAY.isoformat())["notify"])
+        self.assertFalse(self.service._get("publication", self.service._publication_key(DAY.isoformat()))["notify"])
         self.assertEqual(self.sender.calls, [])
 
     def test_failed_manual_publication_refresh_retries_silently_after_restart(self):
@@ -407,11 +395,11 @@ class LearningTests(unittest.TestCase):
         with patch.object(self.service, "refresh", side_effect=OSError("temporary connection failure")):
             with self.assertRaises(OSError):
                 self.service.tick(CURRENT)
-        self.assertIsNone(self.service._get("publication", DAY.isoformat()))
+        self.assertIsNone(self.service._get("publication", self.service._publication_key(DAY.isoformat())))
         self.restart()
         with patch.object(self.service, "refresh"):
             self.service.tick(CURRENT)
-        self.assertEqual(len(self.service._all("paper")), 6)
+        self.assertEqual(len(self.service._all("reserve")), 24)
         self.assertEqual(self.sender.calls, [])
 
     def test_cloud_restore_keeps_manually_published_papers_silent(self):
@@ -436,26 +424,13 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(saved["year"], "")
         self.assertEqual(saved["analysis"], "")
 
-    def test_h_account_cannot_read_or_mutate_other_building(self):
+    def test_duty_accounts_can_select_other_building_people_without_admin_access(self):
         paper, question = self.fixture(attachments=True)
-        issue = self.dispatch("issue.create", {"paper_id": paper["id"], "question_id": question["id"], "description": "Check"})
-        record = self.service._get("record", paper["id"])
-        for action in ("paper.get", "paper.answer", "paper.reveal", "paper.notes"):
-            with self.subTest(action=action):
-                self.assert_status(403, self.dispatch, action,
-                                   self.answer_payload(paper, question), H_ACTOR)
-        for action in ("papers.list", "history", "profile", "review", "issues.list"):
-            with self.subTest(action=action):
-                self.assert_status(403, self.dispatch, action, actor=H_ACTOR, query={"scope": "A"})
-        self.assert_status(403, self.service.bootstrap, "A", H_ACTOR)
-        self.assert_status(403, self.dispatch, "issue.create", {
-            "paper_id": paper["id"], "question_id": question["id"], "description": "Cross scope"}, H_ACTOR)
-        self.assert_status(403, self.dispatch, "issue.update", {
-            "id": issue["id"], "version": issue["version"], "remark": "Cross scope"}, H_ACTOR)
-        self.assert_status(403, self.service.attachment, question["attachments"][0]["id"], H_ACTOR)
-        own = self.dispatch("papers.list", actor=H_ACTOR)["items"]
-        self.assertEqual({p["scope"] for p in own}, {"H"})
-        self.assertEqual(self.service._get("record", paper["id"]), record)
+        self.assertEqual(self.service.bootstrap("A", H_ACTOR)["scope"], "A")
+        answered = self.dispatch("paper.answer", self.answer_payload(paper, question), H_ACTOR)
+        self.assertEqual(answered["questions"][0]["attempt"]["operator_id"], H_ACTOR["id"])
+        self.assert_status(403, self.dispatch, "questions.list", actor=H_ACTOR)
+        self.assert_status(403, self.dispatch, "paper.delete", {"id": paper["id"]}, H_ACTOR)
 
     def test_admin_can_answer_selected_building_paper_and_contribute_to_its_progress(self):
         paper, question = self.fixture()
@@ -511,7 +486,7 @@ class LearningTests(unittest.TestCase):
         self.assertTrue(path.is_relative_to(self.root / "files"))
         self.assertEqual(path.read_bytes(), b"test content")
         self.assertEqual((name, mime), ("answer.txt", "text/plain"))
-        self.assert_status(403, self.service.attachment, answer_id, H_ACTOR)
+        self.service.attachment(answer_id, H_ACTOR)
 
     def test_mastered_marker_is_no_longer_editable_or_returned(self):
         paper, question = self.fixture()
@@ -609,12 +584,12 @@ class LearningTests(unittest.TestCase):
         expected = [ids[label] for label in "ABCD"]
         self.seed(self.question(i, kind="multiple", options=options,
                                 correct_option_ids=expected, answer_text="ABCD") for i in range(36))
-        self.service.publish(DAY)
-        paper = self.service._get("paper", f"{DAY}_A")
+        self.publish_people(DAY)
+        paper = self.service._get("paper", f"personal:{DAY}:person_A")
         cases = [("ABCD", True, [], []), ("DCBA", True, [], []), ("CABD", True, [], []),
                  ("CBA", False, [ids["D"]], []), ("EDCBA", False, [], [ids["E"]]),
                  ("ECBA", False, [ids["D"]], [ids["E"]])]
-        self.assertEqual(len(paper["questions"]), len(cases))
+        self.assertGreaterEqual(len(paper["questions"]), len(cases))
         for question, (labels, correct, missed, wrong) in zip(paper["questions"], cases):
             with self.subTest(first_submission=labels):
                 public = self.dispatch("paper.answer", self.answer_payload(
@@ -667,7 +642,7 @@ class LearningTests(unittest.TestCase):
         self.assertTrue(all(a["answer_text"] == "My explanation" and "correct" not in a for a in attempts))
         summary = self.service.profile(ACTOR, {})["summary"]
         self.assertEqual((summary["interview_total"], summary["choice_answered"], summary["accuracy"]), (1, 0, None))
-        self.assertEqual(self.service.review(ACTOR, {})["total"], 1)
+        self.assertEqual(self.service.review(ACTOR, {"person_id": "person_A"})["total"], 1)
 
     def test_duplicate_issues_merge_and_admin_reply_is_versioned_and_notified(self):
         paper, question = self.fixture()
@@ -743,7 +718,7 @@ class LearningTests(unittest.TestCase):
             self.assertTrue(self.entry(paper, original)["attempt"]["correct"])
         summary = self.service.profile(ACTOR, {})["summary"]
         self.assertEqual((summary["assigned"], summary["answered"], summary["choice_answered"]), (0, 0, 0))
-        self.assertEqual(self.service.review(ACTOR, {})["total"], 0)
+        self.assertEqual(self.service.review(ACTOR, {"person_id": "person_A"})["total"], 0)
 
     def test_metadata_edit_does_not_prevent_later_answer_regrading(self):
         self.enable()
@@ -836,7 +811,7 @@ class LearningTests(unittest.TestCase):
         self.restart()
         path, _, _ = self.service.attachment(attachment_id, ACTOR)
         self.assertEqual(path.read_bytes(), b"test content")
-        self.assert_status(403, self.service.attachment, attachment_id, H_ACTOR)
+        self.service.attachment(attachment_id, H_ACTOR)
 
     def test_uploaded_attachment_token_survives_entity_failure_without_uploading_twice(self):
         self.enable()
@@ -1005,61 +980,33 @@ class LearningTests(unittest.TestCase):
         before = self.service._all("paper")
         self.service.publish(DAY)
         self.assertEqual(self.service._all("paper"), before)
-        self.service.publish(DAY + dt.timedelta(days=1))
-        next_day = self.service._get("paper", f"{DAY + dt.timedelta(days=1)}_A")
-        self.assertEqual(next_day["questions"], [])
+        self.publish_people(DAY + dt.timedelta(days=1))
+        next_day = self.service._get("paper", f"personal:{DAY + dt.timedelta(days=1)}:person_A")
+        self.assertTrue({q['family_id'] for q in next_day['questions']}.isdisjoint({q['family_id'] for q in paper['questions']}))
 
-    def test_partial_restore_keeps_existing_papers_and_answers_and_fills_only_missing_buildings(self):
-        self.seed_pool(written=48, duty=6, professional=6)
-        self.service.publish(DAY)
-        original = {scope: self.service._get("paper", f"{DAY}_{scope}") for scope in ("A", "H")}
-        paper = original["A"]
-        self.dispatch("paper.answer", self.answer_payload(paper, paper["questions"][0]))
-        record = self.service._get("record", paper["id"])
-        self.cloud.entities = {("paper", p["id"]): p for p in original.values()}
-        self.cloud.entities["record", paper["id"]] = record
+    def test_partial_restore_keeps_claims_and_does_not_reissue_papers(self):
+        paper, q = self.fixture()
+        self.dispatch("paper.answer", self.answer_payload(paper, q))
+        self.service.sync_pending(limit=200, force=True)
+        for person in self.service._all('person'):
+            self.cloud.entities['person', person['id']] = person
         self.service = learning.LearningService(self.root / "new_machine", self.cloud, self.sender)
         self.service.restore()
-        self.assertIsNone(self.service._get("publication", DAY.isoformat()))
-        self.seed_pool(written=48, duty=6, professional=6)
-        restored = {scope: self.service._get("paper", p["id"]) for scope, p in original.items()}
-        restored_record = self.service._get("record", paper["id"])
-        publication = self.service.publish(DAY)
-        self.assertEqual(set(publication["paper_ids"]), {f"{DAY}_{scope}" for scope in learning.SCOPES})
-        for scope, p in restored.items():
-            self.assertEqual(self.service._get("paper", p["id"]), p)
-            self.assertEqual(p["questions"], original[scope]["questions"])
-            self.assertIsNone(self.service._get("notification", "publish:" + p["id"]))
-        self.assertEqual(self.service._get("record", paper["id"]), restored_record)
-        self.assertEqual(restored_record["entries"], record["entries"])
-        papers = self.service._all("paper")
-        self.assertEqual(len(papers), 6)
-        families = [q["family_id"] for p in papers for q in p["questions"]]
-        self.assertEqual(len(families), 60)
-        self.assertEqual(len(set(families)), 60)
-        self.assertEqual(len(self.service._all("notification")), 4)
-        self.assertEqual(self.sender.calls, [])
+        resumed = self.dispatch("paper.claim", {"scope": "A", "person_id": "person_A"})
+        self.assertEqual(resumed["id"], paper["id"])
+        self.assertEqual(resumed["stats"]["answered"], 1)
+        self.assertEqual(len(self.service._all("paper")), 6)
 
-    def test_publication_sync_waits_for_every_paper_and_retries_after_restart(self):
-        self.fixture()
-        failed_id = f"{DAY}_H"
-        self.cloud.fail_entity_once = ("paper", failed_id)
-        self.assertEqual(self.service.sync_pending(), {"pending_errors": 1})
-        self.assertEqual(sum(kind == "paper" for kind, _ in self.cloud.entities), 5)
-        self.assertNotIn(("publication", DAY.isoformat()), self.cloud.entities)
-        self.assertTrue(self.service._get("publication", DAY.isoformat())["_dirty"])
-        self.assertTrue(self.service._get("paper", failed_id)["_dirty"])
-        self.assertFalse(any(name == "upsert_entity" and args[0] == "publication"
-                             for name, args in self.cloud.calls))
+    def test_publication_sync_waits_for_reserves_and_retries_after_restart(self):
+        self.service.publish(DAY)
+        failed_id = self.service._all("reserve")[-1]["id"]
+        self.cloud.fail_entity_once = ("reserve", failed_id)
+        self.assertEqual(self.service.sync_pending(limit=100), {"pending_errors": 1})
+        key = self.service._publication_key(DAY.isoformat())
+        self.assertNotIn(("publication", key), self.cloud.entities)
         self.restart()
-        self.assertEqual(self.service.sync_pending(force=True), {"pending_errors": 0})
-        self.assertEqual(sum(kind == "paper" for kind, _ in self.cloud.entities), 6)
-        self.assertIn(("publication", DAY.isoformat()), self.cloud.entities)
-        self.assertFalse(self.service._get("publication", DAY.isoformat())["_dirty"])
-        uploads = [args for name, args in self.cloud.calls if name == "upsert_entity"]
-        publication_index = next(i for i, args in enumerate(uploads) if args[0] == "publication")
-        paper_indices = [i for i, args in enumerate(uploads) if args[0] == "paper"]
-        self.assertGreater(publication_index, max(paper_indices))
+        self.assertEqual(self.service.sync_pending(limit=100, force=True), {"pending_errors": 0})
+        self.assertIn(("publication", key), self.cloud.entities)
 
     @staticmethod
     def raw_question():
@@ -1239,8 +1186,8 @@ class LearningTests(unittest.TestCase):
             self.cloud.files[token] = b"historical source"
         self.service.refresh()
         self.assertTrue(all(not a["_dirty"] for a in self.service._all("attachment")))
-        self.service.publish(DAY)
-        paper = self.service._get("paper", f"{DAY}_A")
+        self.publish_people(DAY)
+        paper = self.service._get("paper", f"personal:{DAY}:person_A")
         attachment_id = paper["questions"][0]["attachments"][0]["id"]
         self.assertEqual(self.service.sync_pending(), {"pending_errors": 0})
         self.assertFalse(any(kind == "attachment" for kind, _ in self.cloud.entities))
@@ -1251,7 +1198,7 @@ class LearningTests(unittest.TestCase):
         self.service.refresh()
         self.assertEqual(self.service._all("question"), [])
         self.assertIsNotNone(self.service._get("attachment", attachment_id))
-        self.assert_status(403, self.service.attachment, attachment_id, H_ACTOR)
+        self.service.attachment(attachment_id, H_ACTOR)
         path, name, mime = self.service.attachment(attachment_id, ACTOR)
         self.assertTrue(path.is_relative_to(self.root / "attachment_restore" / "files"))
         self.assertEqual((path.read_bytes(), name, mime), (b"historical source", "source.txt", "text/plain"))
@@ -1490,9 +1437,9 @@ class LearningTests(unittest.TestCase):
             with self.subTest(query=query):
                 data, _, _ = self.service.export("questions", query, ADMIN)
                 self.assertEqual(len(json.loads(data)["questions"]), count)
-        self.service.publish(DAY - dt.timedelta(days=30))
+        self.publish_people(DAY - dt.timedelta(days=30))
         self.seed_pool(written=12)
-        self.service.publish(DAY)
+        self.publish_people(DAY)
         data, _, _ = self.service.export("results", {"period": "day", "scope": "A"}, ADMIN)
         self.assertIn(DAY.isoformat(), data.decode("utf-8-sig"))
         self.assertNotIn((DAY - dt.timedelta(days=30)).isoformat(), data.decode("utf-8-sig"))

@@ -1729,7 +1729,7 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud",
+         "bin.test_learning", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
@@ -1769,7 +1769,7 @@ def _run_packaging_preflight_tests() -> None:
     log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
 
     _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_points_adapter"],
+        [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_stability", "bin.test_plan_convergence_points_adapter"],
         cwd=PROJECT_ROOT,
         check=True,
     )

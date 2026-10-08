@@ -9,6 +9,15 @@ const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const page = readFileSync(resolve(root, "src/components/DrillManagementPage.vue"), "utf8");
 const app = readFileSync(resolve(root, "src/App.vue"), "utf8");
 const home = readFileSync(resolve(root, "src/scopeHomeUtils.ts"), "utf8");
+const monthSource = page.slice(page.indexOf('function normalizeMonth('), page.indexOf('function deepClone'));
+const normalizeMonth = new Function('currentMonth', `${ts.transpile(monthSource)}; return normalizeMonth;`)('2026-10');
+for (let month = 1; month <= 12; month++) {
+  const expected = `2026-${String(month).padStart(2, '0')}`;
+  assert.equal(normalizeMonth(expected), expected);
+  assert.equal(normalizeMonth(`2026年${month}月`), expected);
+}
+for (const invalid of ['', '2026-13', '2026-100', 'bad']) assert.equal(normalizeMonth(invalid), '2026-10');
+assert(page.includes("timeZone: 'Asia/Shanghai'"));
 
 for (const marker of [
   "refreshSignaturePeople",

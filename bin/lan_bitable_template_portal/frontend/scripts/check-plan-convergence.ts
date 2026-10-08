@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { allDraftItems, draftsSubmitKey, restoreDrafts, roomNodeKey, roomToSelParam, submittedKey, type Draft } from '../src/planConvergenceRules.ts';
+import { allDraftItems, draftsSubmitKey, restoreDrafts, roomNodeKey, roomToSelParam, submittedKey, selectionItemCount, type Draft } from '../src/planConvergenceRules.ts';
+
+assert.equal(selectionItemCount(100, 200, 100000, 50000), 5000000000);
+assert.equal(selectionItemCount(2, 3, 0, 0), 6);
+assert.equal(selectionItemCount(2, 3, 4, 5), 20);
+assert.equal(selectionItemCount(2, 3, 0, 5), 15);
+assert.equal(selectionItemCount(2, 0, 0, 5), 5);
 
 const normal: Draft[] = [{label: 'A', rule_type: 'normal', items: [{scope_type: 'zone', zone: 'Z1'}]}];
 const common: Draft[] = [{...normal[0], rule_type: 'common'}];

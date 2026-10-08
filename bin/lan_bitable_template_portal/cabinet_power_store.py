@@ -213,6 +213,23 @@ class CabinetStore:
             if changed: self._version(conn)
             return bool(changed)
 
+    def install_confirmed_baseline(self, scope, key, revision, baseline, source_hash):
+        marker = 'baseline_revision:' + revision
+        with self.connect(scope) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT 1 FROM documents WHERE key=?', (marker,)).fetchone():
+                return False
+            row = conn.execute('SELECT payload FROM documents WHERE key=?', (key,)).fetchone()
+            if not row:
+                raise CabinetError('原机柜基线未准备好，请稍后重试')
+            previous = json.loads(row[0])
+            self._put(conn, 'documents', key + ':before:' + revision, previous)
+            self._put(conn, 'documents', key, {**previous, 'racks': baseline, 'source_hash': source_hash,
+                                             'revision': revision, 'revised_at': time.time()})
+            self._put(conn, 'documents', marker, {'source_hash': source_hash, 'applied_at': time.time()})
+            self._version(conn)
+            return True
+
     def commit_operation(self, scope, journal, record=None, inventory=None, remove_id="", complete=False, baseline_ids=(), records=()):
         with self.connect(scope) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")

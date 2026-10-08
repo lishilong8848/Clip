@@ -29306,6 +29306,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         return {
             "location": str(fields.get("位置") or "").strip(),
             "content": str(fields.get("内容") or "").strip(),
+            "execution_party": str(fields.get("执行方") or "").strip(),
             "reason": str(fields.get("原因") or "").strip(),
             "impact": str(fields.get("影响") or fields.get("影响范围") or "").strip(),
             "progress": str(fields.get("进度") or "").strip(),
@@ -44237,6 +44238,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 maintenance_cycle=maintenance_cycle,
                 extra_fields={
                     "specialty": specialty,
+                    "execution_party": execution_party,
                     "progress": progress,
                 },
             )

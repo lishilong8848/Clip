@@ -117,7 +117,9 @@
 
     <LearningPage
       v-else-if="isLearningPage"
+      :key="`${auth.user?.open_id || ''}:${routeParams.get('scope') || ''}:${routeParams.get('person_id') || ''}`"
       :scope="routeParams.get('scope') || ''"
+      :person-id="routeParams.get('person_id') || ''"
       :user-id="String(auth.user?.open_id || '')"
     />
 

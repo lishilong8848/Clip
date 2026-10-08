@@ -21,7 +21,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 SCOPES = tuple("ABCDEH")
-BANKS = {"written": "阿里线上考试", "duty": "值班工程师面试", "professional": "专业工程师面试"}
+BANKS = {"written": "阿里线上考试", "duty": "值班工程师面试", "professional": "专业工程师面试", "supplemental": "专项题库"}
+QUOTAS = {"written": 8, "duty": 1, "professional": 1, "supplemental": 5}
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 100 * 1024 * 1024
@@ -81,6 +82,7 @@ def parse_options(value):
 
 def resolve_answer(value, options):
     answer = unicodedata.normalize("NFKC", text(value)).strip()
+    answer = re.sub(r"^(?:参考答案|正确答案|答案|答)\s*[:：]\s*", "", answer).strip()
     labels = {item.get("label", chr(65 + index)): item["id"] for index, item in enumerate(options)}
     if re.fullmatch(r"[A-Z\s,、;/，]+", answer) and all(c in labels for c in re.findall("[A-Z]", answer)):
         return list(dict.fromkeys(labels[c] for c in re.findall("[A-Z]", answer)))
@@ -141,9 +143,13 @@ def normalize_question(raw):
         if len(matches) == 1:
             item["id"] = matches[0]["id"]
     type_label = text(fields.get("题型"))
-    kind = "interview" if bank != "written" else "single" if type_label in {"单选", "单选题"} else "multiple" if type_label in {"多选", "多选题", "不定项", "不定项选择题"} else "unknown"
+    kind = "interview" if bank in {"duty", "professional"} else "single" if type_label in {"单选", "单选题"} else "multiple" if type_label in {"多选", "多选题", "不定项", "不定项选择题"} else "unknown"
+    if bank == 'supplemental':
+        answers = resolve_answer(fields.get('答案'), options)
+        kind = 'interview' if not text(fields.get('选项')).strip() else ('single' if len(answers) == 1 else 'multiple' if len(answers) > 1 else 'unknown')
+        type_label = {'interview': '问答题', 'single': '单选题', 'multiple': '多选题'}.get(kind, '待核对')
     attachments = copy.deepcopy(meta.get("attachments") or [])
-    source_attachments = [(item, "answer") for item in fields.get("答案图片") or []] + [(item, "material") for item in fields.get("学练资料") or []]
+    source_attachments = [(item, "answer") for item in fields.get("答案附件" if bank == 'supplemental' else "答案图片") or []] + [(item, "material") for item in fields.get("学练资料") or []]
     for item, attachment_kind in source_attachments:
         token = item.get("file_token")
         if token and token not in meta.get("removed_attachment_tokens", []) and not any(a.get("file_token") == token for a in attachments):
@@ -153,7 +159,7 @@ def normalize_question(raw):
          "year": text(fields.get("年份") or fields.get("年度")), "options": options,
          "answer_text": text(fields.get("答案")).strip(), "attachments": attachments,
          "analysis": meta.get("analysis", ""), "hint": meta.get("hint", ""), "topic": meta.get("topic", ""),
-         "specialty": meta.get("specialty", ""), "difficulty": meta.get("difficulty", "普通")}
+         "specialty": text(fields.get('专业')) if bank == 'supplemental' else meta.get("specialty", ""), "difficulty": meta.get("difficulty", "普通")}
     q["correct_option_ids"] = resolve_answer(q["answer_text"], options) if kind != "interview" else []
     if meta.get("source_answer") == q["answer_text"] and meta.get("correct_option_ids") and set(meta["correct_option_ids"]) <= {o["id"] for o in options}:
         q["correct_option_ids"] = meta["correct_option_ids"]
@@ -166,7 +172,7 @@ def normalize_question(raw):
 
 
 class LearningService:
-    def __init__(self, root=None, cloud=None, send_message=None, get_portal_url=None):
+    def __init__(self, root=None, cloud=None, send_message=None, get_portal_url=None, get_people=None):
         if root is None:
             from upload_event_module.utils import get_data_file_path
             root = Path(get_data_file_path("learning"))
@@ -177,6 +183,7 @@ class LearningService:
         self._cloud = cloud
         self._sender = send_message
         self._portal_url = get_portal_url
+        self._people_reader = get_people
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = None
@@ -185,11 +192,46 @@ class LearningService:
         self._refresh_state = "idle"
         self._schema_ready = False
         self._restored = False
+        self._restore_requested = False
+        self._people_retry_at = 0.0
         self._last_tick = 0.0
+        if self.db.exists():
+            with closing(sqlite3.connect(self.db)) as source:
+                if source.execute('PRAGMA user_version').fetchone()[0] < 2:
+                    backup = self.root / 'backups' / 'learning-before-personal.sqlite3'
+                    backup.parent.mkdir(exist_ok=True)
+                    if not backup.exists():
+                        temporary = backup.with_suffix('.tmp')
+                        with closing(sqlite3.connect(temporary)) as target:
+                            source.backup(target)
+                        temporary.replace(backup)
         with closing(self._connect()) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS documents(kind TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, dirty INTEGER NOT NULL DEFAULT 0, updated TEXT NOT NULL, PRIMARY KEY(kind,key))")
             if "retry_at" not in {row[1] for row in conn.execute("PRAGMA table_info(documents)")}:
                 conn.execute("ALTER TABLE documents ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(documents)')}
+            for column in ('person_id', 'scope', 'day'):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE documents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_person_date ON documents(kind,person_id,day)')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_scope_date ON documents(kind,scope,day)')
+            conn.execute('CREATE TABLE IF NOT EXISTS learning_usage(paper_id TEXT, family_id TEXT, person_id TEXT, scope TEXT, day TEXT, PRIMARY KEY(paper_id,family_id))')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_usage_person ON learning_usage(person_id,day)')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_usage_family ON learning_usage(family_id,day)')
+            conn.execute('CREATE TABLE IF NOT EXISTS learning_results(paper_id TEXT, question_id TEXT, person_id TEXT, scope TEXT, day TEXT, bank TEXT, type TEXT, topic TEXT, stem TEXT, correct INTEGER, assisted INTEGER, needs_review INTEGER, invalid INTEGER, practice_count INTEGER, submitted_at TEXT, self_rating TEXT, PRIMARY KEY(paper_id,question_id))')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_results_person ON learning_results(person_id,day)')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_results_scope ON learning_results(scope,day)')
+            conn.execute('CREATE TABLE IF NOT EXISTS learning_practice(paper_id TEXT, question_id TEXT, operation_id TEXT, person_id TEXT, scope TEXT, day TEXT, PRIMARY KEY(paper_id,question_id,operation_id))')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_practice_person ON learning_practice(person_id,day)')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_practice_scope ON learning_practice(scope,day)')
+            if conn.execute('PRAGMA user_version').fetchone()[0] < 2:
+                conn.execute("UPDATE documents SET person_id=COALESCE(json_extract(payload,'$.person_id'),''),scope=COALESCE(json_extract(payload,'$.scope'),''),day=COALESCE(json_extract(payload,'$.date'),'')")
+                for paper in self._all('paper', conn):
+                    self._index_paper(paper, conn)
+                conn.execute('PRAGMA user_version=2')
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_paper_identity ON documents(person_id,day) WHERE kind='paper' AND person_id<>''")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_reserve_claim ON documents(person_id,day) WHERE kind='reserve' AND person_id<>''")
+            conn.commit()
 
     def _connect(self):
         conn = sqlite3.connect(self.db, timeout=5)
@@ -243,9 +285,54 @@ class LearningService:
 
     def _put(self, kind, key, value, conn, dirty=True):
         value = {k: v for k, v in value.items() if not k.startswith("_")}
-        conn.execute("INSERT INTO documents(kind,key,payload,dirty,updated) VALUES(?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET payload=excluded.payload,revision=documents.revision+1,dirty=excluded.dirty,updated=excluded.updated,retry_at=0", (kind, key, json.dumps(value, ensure_ascii=False), int(dirty), stamp()))
+        conn.execute("INSERT INTO documents(kind,key,payload,dirty,updated,person_id,scope,day) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET payload=excluded.payload,revision=documents.revision+1,dirty=excluded.dirty,updated=excluded.updated,retry_at=0,person_id=excluded.person_id,scope=excluded.scope,day=excluded.day", (kind, key, json.dumps(value, ensure_ascii=False), int(dirty), stamp(), value.get('person_id',''), value.get('scope',''), value.get('date','')))
+        if kind in {'paper', 'record'}:
+            paper = value if kind == 'paper' else self._get('paper', key, conn)
+            if paper:
+                self._index_paper(paper, conn)
         if dirty:
             self._wake.set()
+
+    def _documents(self, kind, *, scope='', person_id='', start='', end='', legacy=False, conn=None):
+        clauses, args = ['kind=?'], [kind]
+        for column, value, op in (('scope', scope, '='), ('person_id', person_id, '='), ('day', start, '>='), ('day', end, '<=')):
+            if value:
+                clauses.append(column + op + '?'); args.append(value)
+        if kind in {'paper', 'record'}:
+            clauses.append("person_id=''" if legacy else "person_id<>''")
+        owned = conn is None
+        conn = conn or self._connect()
+        try:
+            return [{**json.loads(row['payload']), '_revision': row['revision'], '_dirty': bool(row['dirty'])}
+                    for row in conn.execute('SELECT payload,revision,dirty FROM documents WHERE ' + ' AND '.join(clauses) + ' ORDER BY day,key', args)]
+        finally:
+            if owned: conn.close()
+
+    def _index_paper(self, paper, conn):
+        person = paper.get('person_id', '')
+        for q in paper.get('questions', []):
+            conn.execute('INSERT OR IGNORE INTO learning_usage VALUES(?,?,?,?,?)', (paper['id'], q['family_id'], person, paper['scope'], paper['date']))
+        conn.execute('DELETE FROM learning_results WHERE paper_id=?', (paper['id'],))
+        conn.execute('DELETE FROM learning_practice WHERE paper_id=?', (paper['id'],))
+        if paper.get('deleted_at') or not person:
+            return
+        record = self._get('record', paper['id'], conn) or {}
+        for q in paper.get('questions', []):
+            entry = record.get('entries', {}).get(q['id'], {})
+            a = entry.get('attempt')
+            if a:
+                if not q.get('invalid'):
+                    for n, attempt in enumerate(entry.get('practice', [])):
+                        conn.execute('INSERT OR IGNORE INTO learning_practice VALUES(?,?,?,?,?,?)', (paper['id'], q['id'], attempt.get('operation_id') or str(n), person, paper['scope'], attempt['submitted_at'][:10]))
+                conn.execute('INSERT INTO learning_results VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
+                    paper['id'], q['id'], person, paper['scope'], a['submitted_at'][:10], q['bank'], q['type'],
+                    q.get('topic') or q.get('specialty') or '未分类', q['stem'], a.get('correct'), bool(a.get('assisted')),
+                    bool(entry.get('needs_review')), bool(q.get('invalid')), len(entry.get('practice', [])), a['submitted_at'],
+                    (entry.get('practice') or [a])[-1].get('self_rating', '')))
+
+    @staticmethod
+    def _publication_key(date):
+        return 'personal:' + date
 
     @property
     def cloud(self):
@@ -328,16 +415,21 @@ class LearningService:
     def _manual_publish_pending(self, date=None):
         date = date or now().date().isoformat()
         return ((self._get("local", "manual_publish") or {}).get("date") == date
-                and not self._get("publication", date))
+                and not self._get("publication", self._publication_key(date)))
 
     def tick(self, current=None):
         current = current or now()
         settings = self.settings()
         manual_mode = bool(self._get("local", "manual_publish"))
+        refreshed = False
+        if self._restore_requested and not self._restored:
+            self.restore()
+            self._restore_requested = False
         if self._refresh_requested:
             self._refresh_requested = False
             try:
                 self.refresh()
+                refreshed = True
             except Exception:
                 self._refresh_state = "error"
                 raise
@@ -355,18 +447,29 @@ class LearningService:
         self.cloud.enabled = True
         try:
             if not self._schema_ready:
+                if not refreshed:
+                    self.refresh()
+                    refreshed = True
                 self.cloud.ensure_schema()
                 self._schema_ready = True
             if not self._restored:
                 self.restore()
+            if time.time() >= self._people_retry_at and time.time() - (self._get("local", "people_sync") or {}).get("checked_at", 0) > 3600:
+                from .learning_personal import refresh_people
+                self._people_retry_at = time.time() + 300
+                try:
+                    refresh_people(self)
+                except Exception:
+                    self._last_error = "人员目录暂未刷新，保留原名单；后台稍后重试。"
             self.sync_pending(limit=40)
             day = current.date().isoformat()
             if not self.settings()["enabled"] and not manual_mode:
                 return
             due = (settings["enabled"] and current.strftime("%H:%M") >= settings["publish_time"]
                    or self._manual_publish_pending(day))
-            if due and not self._get("publication", day):
-                self.refresh()
+            if due and not self._get("publication", self._publication_key(day)):
+                if not refreshed:
+                    self.refresh()
                 if not self.settings()["enabled"] and not manual_mode:
                     return
                 self.publish(current.date())
@@ -382,11 +485,16 @@ class LearningService:
         with self.transaction() as conn:
             for item in entities:
                 kind, key, value = item.get("kind"), item.get("key"), item.get("payload")
-                if kind not in {"paper", "record", "issue", "settings", "publication", "notification", "audit", "attachment"} or not isinstance(value, dict):
+                if kind not in {"person", "reserve", "paper", "record", "issue", "settings", "publication", "notification", "audit", "attachment"} or not isinstance(value, dict):
                     continue
                 if self._get(kind, key, conn) is None:
                     self._put(kind, key, value, conn, False)
             for paper in self._all("paper", conn):
+                if paper.get("person_id"):
+                    reserve = self._get("reserve", paper.get("reserve_id", ""), conn)
+                    if reserve and not reserve.get("person_id"):
+                        self._put("reserve", reserve["id"], {**reserve, "person_id": paper["person_id"], "paper_id": paper["id"]}, conn)
+                    self._index_paper(paper, conn)
                 if paper.get("deleted_at"):
                     continue
                 for q in paper["questions"]:
@@ -397,6 +505,9 @@ class LearningService:
                 if record and self._reconcile_grades(paper, record):
                     record["version"] += 1
                     self._put("record", paper["id"], record, conn)
+            for reserve in self._all("reserve", conn):
+                if reserve.get("person_id") and not self._get("paper", reserve.get("paper_id", ""), conn):
+                    raise LearningError("个人题单云端恢复尚不完整，暂不分配新题，请稍后重试。", 503)
         self._restored = True
 
     @staticmethod
@@ -458,6 +569,8 @@ class LearningService:
             self._put("local", "refresh", {"at": stamp()}, conn, False)
         self._refresh_state = "ready"
         self._last_error = ""
+        from .learning_personal import refresh_people
+        refresh_people(self)
 
     @staticmethod
     def _question_content(q):
@@ -490,6 +603,10 @@ class LearningService:
         payload = {k: v for k, v in value.items() if not k.startswith("_")}
         operation_id = f"learning:{kind}:{key}:{revision}"
         if kind == "publication" and any((self._get("paper", pid) or {}).get("_dirty", True) for pid in payload.get("paper_ids", [])):
+            return False
+        if kind == "publication" and any((self._get("reserve", rid) or {}).get("_dirty", True) for rid in payload.get("reserve_ids", [])):
+            return False
+        if kind == "reserve" and payload.get("paper_id") and (self._get("paper", payload["paper_id"]) or {}).get("_dirty", True):
             return False
         if kind == "record" and (self._get("paper", key) or {}).get("_dirty"):
             return False
@@ -528,55 +645,9 @@ class LearningService:
                 self._put(kind, key, current, conn)
 
     def publish(self, day=None):
+        from .learning_personal import publish
         day = day or now().date()
-        if isinstance(day, str):
-            day = dt.date.fromisoformat(day)
-        date = day.isoformat()
-        with self.transaction() as conn:
-            existing = self._get("publication", date, conn)
-            if existing:
-                return existing
-            recent, last = set(), {}
-            # A hidden paper may already have been seen, so it still occupies the no-repeat window.
-            for paper in self._all("paper", conn):
-                for q in paper["questions"]:
-                    family = q["family_id"]
-                    last[family] = max(last.get(family, ""), paper["date"])
-                    if (day - dt.timedelta(days=6)).isoformat() <= paper["date"] <= date:
-                        recent.add(family)
-            candidates = [q for q in self._all("question", conn) if q.get("status") == "published" and not q.get("problems") and not q["_dirty"] and q["family_id"] not in recent]
-            candidates.sort(key=lambda q: (last.get(q["family_id"], ""), digest([date, q["family_id"]])))
-            pools = {bank: [q for q in candidates if q["bank"] == bank] for bank in BANKS}
-            existing_papers = {scope: self._get("paper", f"{date}_{scope}", conn) for scope in SCOPES}
-            notify = ((self._get("local", "manual_publish", conn) or {}).get("date") != date
-                      and all(p.get("notify", True) for p in existing_papers.values() if p))
-            assigned = {scope: copy.deepcopy(existing_papers[scope]["questions"]) if existing_papers[scope] else [] for scope in SCOPES}
-            # Round-robin shortage allocation, rotating the first building every day.
-            shift = day.toordinal() % len(SCOPES)
-            order = SCOPES[shift:] + SCOPES[:shift]
-            for bank, count in (("written", 8), ("duty", 1), ("professional", 1)):
-                for _ in range(count):
-                    for scope in order:
-                        if existing_papers[scope]:
-                            continue
-                        while pools[bank] and pools[bank][0]["family_id"] in recent:
-                            pools[bank].pop(0)
-                        if pools[bank]:
-                            q = pools[bank].pop(0)
-                            recent.add(q["family_id"])
-                            assigned[scope].append({k: v for k, v in q.items() if not k.startswith("_")})
-            for scope in SCOPES:
-                if existing_papers[scope]:
-                    continue
-                questions = assigned[scope]
-                paper = {"id": f"{date}_{scope}", "date": date, "scope": scope, "created_at": stamp(), "questions": questions, "notify": notify,
-                         "shortage": {bank: wanted - sum(q["bank"] == bank for q in questions) for bank, wanted in (("written", 8), ("duty", 1), ("professional", 1))}}
-                self._put("paper", paper["id"], paper, conn)
-                if notify:
-                    self._put("notification", f"publish:{paper['id']}", {"id": f"publish:{paper['id']}", "kind": "publish", "scope": scope, "paper_id": paper["id"], "date": date, "status": "pending"}, conn)
-            result = {"date": date, "created_at": stamp(), "paper_ids": [f"{date}_{scope}" for scope in SCOPES], "notify": notify}
-            self._put("publication", date, result, conn)
-        return result
+        return publish(self, dt.date.fromisoformat(day) if isinstance(day, str) else day)
 
     def _send(self, scope, message, identity):
         if self._sender:
@@ -598,11 +669,11 @@ class LearningService:
         link = None
         with self.transaction() as conn:
             if settings["reminder_enabled"] and current.strftime("%H:%M") >= settings["reminder_time"]:
-                for paper in self._all("paper", conn):
-                    key = "reminder:" + paper["id"]
+                for paper in self._documents("paper", start=date, end=date, conn=conn):
+                    key = "reminder:personal:" + date + ":" + paper["scope"]
                     record = self._get("record", paper["id"], conn) or {}
                     if paper["date"] == date and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and not self._completed(paper, record) and not self._get("notification", key, conn):
-                        self._put("notification", key, {"id": key, "kind": "reminder", "paper_id": paper["id"], "scope": paper["scope"], "date": date, "status": "pending"}, conn)
+                        self._put("notification", key, {"id": key, "kind": "reminder", "personal_mode": True, "scope": paper["scope"], "date": date, "status": "pending"}, conn)
         for notification in self._all("notification"):
             if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
                 continue
@@ -619,11 +690,13 @@ class LearningService:
             elif notification["kind"] == "correction" and not self._correction_matches(notification, paper):
                 notification["status"] = "superseded"
             else:
-                if paper and (paper["_dirty"] or (self._get("publication", date) or {}).get("_dirty")):
+                if (paper and paper["_dirty"]) or (self._get("publication", self._publication_key(date)) or {}).get("_dirty"):
                     continue
                 if notification["kind"] == "correction" and (self._get("record", notification.get("paper_id", "")) or {}).get("_dirty"):
                     continue
-                if notification["kind"] == "reminder" and paper and self._completed(paper, self._get("record", paper["id"]) or {}):
+                outstanding = [p for p in self._documents("paper", scope=notification["scope"], start=date, end=date)
+                               if not p.get("deleted_at") and p["questions"] and not self._completed(p, self._get("record", p["id"]) or {})] if notification["kind"] == "reminder" else []
+                if notification["kind"] == "reminder" and not outstanding:
                     notification["status"] = "skipped_completed"
                 else:
                     if link is None:
@@ -634,6 +707,10 @@ class LearningService:
                     message = notification.get("message") or f"【画像学练】{notification['scope']}楼 {date}\n" + ("今日学练已发布" if notification["kind"] == "publish" else "今日学练尚未完成")
                     if paper:
                         message += f"，共{len(paper['questions'])}题。"
+                    elif notification["kind"] == "publish" and notification.get("personal_mode"):
+                        message += "，请选择人员领取，每人15题。"
+                    elif outstanding:
+                        message += f"，已领取的{len(outstanding)}份个人题单待完成。"
                     message += f"\n{link}/learning?scope={notification['scope']}"
                     result = self._send(notification["scope"], message, notification["id"])
                     ok = result[0] if isinstance(result, tuple) else bool(result)
@@ -655,18 +732,19 @@ class LearningService:
             if not requested and actor.get("is_admin") and not write:
                 return ""
             raise LearningError("请选择 A、B、C、D、E 或 H 楼", 400)
-        if write and not actor.get("is_admin") and actor.get("scope") != requested:
-            raise LearningError("仅对应楼栋的值班账号可作答", 403)
-        if not actor.get("is_admin") and actor.get("scope") != requested:
-            raise LearningError("无权查看其他楼栋的学练记录", 403)
+        if not actor.get("is_admin") and actor.get("scope") not in SCOPES:
+            raise LearningError("仅六楼值班账号及管理员可使用学练", 403)
         return requested
 
     def bootstrap(self, scope, actor):
         scope = self._scope(actor, scope)
+        if not self._restored:
+            self._restore_requested = True
+            self._wake.set()
         if not self._get("local", "refresh") and self._refresh_state == "idle":
             self.request_refresh()
         return {"is_admin": bool(actor.get("is_admin")), "can_answer": bool(actor.get("is_admin") or actor.get("scope") in SCOPES),
-                "scopes": ([{"value": "", "label": "全部楼栋"}] if actor.get("is_admin") else []) + [{"value": s, "label": f"{s}楼"} for s in SCOPES if actor.get("is_admin") or s == actor.get("scope")],
+                "scopes": [{"value": s, "label": f"{s}楼"} for s in SCOPES],
                 "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(), "today": now().date().isoformat(), "silent_manual_publish": True,
                 "question_problem_count": sum(bool(q.get("problems")) and q.get("status") != "deleted" for q in self._all("question")) if actor.get("is_admin") else 0,
                 "summary": self.profile(actor, {"scope": scope})["summary"]}
@@ -678,6 +756,8 @@ class LearningService:
         self._scope(actor, paper["scope"], write)
         if paper.get("deleted_at"):
             raise LearningError("题单已删除", 404)
+        if write and not paper.get("person_id"):
+            raise LearningError("旧楼栋题单仅保留只读历史，请选择人员领取今日题单。", 409)
         return paper
 
     def delete_paper(self, paper_id, actor):
@@ -708,6 +788,7 @@ class LearningService:
     def public_paper(self, paper, actor, record=None):
         record = record if record is not None else self._get("record", paper["id"]) or {}
         result = {k: paper[k] for k in ("id", "date", "scope", "shortage", "created_at")}
+        result.update(person_id=paper.get("person_id", ""), person=paper.get("person"), legacy=not bool(paper.get("person_id")))
         result.update({"version": record.get("version", 0), "status": "completed" if self._completed(paper, record) else "pending", "completed_at": record.get("completed_at", ""),
                        "sync_pending": bool(paper.get("_dirty") or record.get("_dirty")), "questions": []})
         for q in paper["questions"]:
@@ -731,11 +812,13 @@ class LearningService:
     def paper_action(self, action, payload, actor):
         with self.transaction() as conn:
             paper = self._paper(payload.get("id"), actor, conn, write=True)
+            if payload.get("person_id") != paper.get("person_id"):
+                raise LearningError("答题人员已变化，请重新打开当前人员题单。", 409)
             qid = payload.get("question_id")
             q = next((q for q in paper["questions"] if q["id"] == qid), None)
             if not q:
                 raise LearningError("题目不属于当前题单", 404)
-            record = self._get("record", paper["id"], conn) or {"id": paper["id"], "scope": paper["scope"], "date": paper["date"], "entries": {}, "version": 0}
+            record = self._get("record", paper["id"], conn) or {"id": paper["id"], "person_id": paper["person_id"], "scope": paper["scope"], "date": paper["date"], "entries": {}, "version": 0}
             entry = record["entries"].setdefault(qid, {})
             if action == "answer":
                 if q.get("invalid"):
@@ -743,7 +826,10 @@ class LearningService:
                 op = clean(payload.get("operation_id", ""), 150)
                 if not op:
                     raise LearningError("缺少提交标识，请重新点击提交")
-                fingerprint = digest({k: payload.get(k) for k in ("question_id", "option_ids", "answer_text", "self_rating", "practice")})
+                values = payload.get("option_ids", [])
+                if q["type"] != "interview" and (not isinstance(values, list) or any(not isinstance(v, str) for v in values)):
+                    raise LearningError("请选择有效选项")
+                fingerprint = digest({**{k: payload.get(k) for k in ("question_id", "answer_text", "self_rating", "practice")}, "option_ids": sorted(set(values)) if q["type"] != "interview" else []})
                 prior = [entry.get("attempt") or {}, *entry.get("practice", [])]
                 match = next((a for a in prior if a.get("operation_id") == op), None)
                 if match:
@@ -756,6 +842,7 @@ class LearningService:
                 if entry.get("attempt") and not practice and not entry.get("needs_review"):
                     raise LearningError("本题已提交，可在复习中重做，首次记录不会覆盖", 409)
                 answer = {"operation_id": op, "fingerprint": fingerprint, "submitted_at": stamp(), "assisted": bool(entry.get("assisted")), "question_version": q["version"]}
+                answer.update(operator_id=actor["id"], operator_name=actor.get("name", ""))
                 if q["type"] == "interview":
                     answer["answer_text"] = clean(payload.get("answer_text", ""))
                     answer["self_rating"] = payload.get("self_rating")
@@ -786,6 +873,8 @@ class LearningService:
                     entry["assisted"] = True
                 entry["hint_seen" if kind == "hint" else "revealed"] = stamp()
             elif action == "notes":
+                if payload.get("version") != record["version"]:
+                    raise LearningError("学习记录已变化，请读取最新内容后保存笔记。", 409)
                 if "mastered" in payload:
                     raise LearningError("已掌握标记已停用")
                 if "note" in payload:
@@ -794,6 +883,7 @@ class LearningService:
                     if not isinstance(payload["favorite"], bool):
                         raise LearningError("收藏标记必须为布尔值")
                     entry["favorite"] = payload["favorite"]
+            entry.update(updated_by=actor["id"], updated_by_name=actor.get("name", ""), updated_at=stamp())
             record["version"] += 1
             if self._completed(paper, record) and not record.get("completed_at"):
                 record["completed_at"] = stamp()
@@ -804,17 +894,24 @@ class LearningService:
 
     def list_papers(self, actor, query):
         scope = self._scope(actor, query.get("scope"))
+        person_id = str(query.get("person_id") or "")
+        legacy = query.get("legacy") == "1"
+        if person_id:
+            from .learning_personal import person
+            person(self, person_id)
+            scope = ""
         if query.get("today") == "1":
             query = {**query, "date": now().date().isoformat()}
-            papers = [paper for building in ([scope] if scope else SCOPES)
-                      if (paper := self._get("paper", f"{query['date']}_{building}")) and not paper.get("deleted_at")]
-        else:
-            papers = [p for p in self._all("paper") if not p.get("deleted_at") and (not scope or p["scope"] == scope) and (not query.get("date") or p["date"] == query["date"]) and (not query.get("from") or p["date"] >= query["from"]) and (not query.get("to") or p["date"] <= query["to"])]
+        query = self._date_filters(query)
+        papers = [p for p in self._documents("paper", scope=scope, person_id=person_id,
+            start=query.get("date") or query.get("from", ""), end=query.get("date") or query.get("to", ""), legacy=legacy) if not p.get("deleted_at")]
         papers.sort(key=lambda p: (p["date"], p["scope"]), reverse=True)
         result = self._page(papers, query)
         result["items"] = [self.public_paper(p, actor) for p in result["items"]]
         if query.get("today") == "1":
             result["today"] = query["date"]
+            result["published"] = bool(self._get("publication", self._publication_key(query["date"])))
+            result["personal_mode"] = True
         return result
 
     @staticmethod
@@ -828,9 +925,11 @@ class LearningService:
 
     def review(self, actor, query):
         scope = self._scope(actor, query.get("scope"))
+        from .learning_personal import person
+        learner = person(self, query.get("person_id"))
         result = []
-        for paper in reversed(self._all("paper")):
-            if paper.get("deleted_at") or scope and paper["scope"] != scope:
+        for paper in reversed(self._documents("paper", person_id=learner["id"])):
+            if paper.get("deleted_at"):
                 continue
             public = self.public_paper(paper, actor)
             for q in public["questions"]:
@@ -854,9 +953,11 @@ class LearningService:
     @staticmethod
     def _date_filters(query):
         query = dict(query)
-        if query.get("period") in {"day", "week", "month"} and not (query.get("from") or query.get("to")):
+        if query.get("period") in {"day", "week", "month", "7", "30"} and not (query.get("from") or query.get("to")):
             today = now().date()
             start = today if query["period"] == "day" else today - dt.timedelta(days=today.weekday()) if query["period"] == "week" else today.replace(day=1)
+            if query["period"] in {"7", "30"}:
+                start = today - dt.timedelta(days=int(query["period"]) - 1)
             query.update({"from": start.isoformat(), "to": today.isoformat()})
         try:
             for key in ("from", "to"):
@@ -869,73 +970,8 @@ class LearningService:
         return query
 
     def profile(self, actor, query):
-        scope = self._scope(actor, query.get("scope"))
-        query = self._date_filters(query)
-        counts = {"assigned": 0, "answered": 0, "correct": 0, "choice_answered": 0, "independent_answered": 0, "independent_correct": 0, "hinted": 0, "review_total": 0, "interview_total": 0, "papers": 0, "completed": 0}
-        buildings, topics, question_stats = {}, {}, {}
-        records = {r["id"]: r for r in self._all("record")}
-        for paper in self._all("paper"):
-            if paper.get("deleted_at") or scope and paper["scope"] != scope or query.get("from") and paper["date"] < query["from"] or query.get("to") and paper["date"] > query["to"]:
-                continue
-            record = records.get(paper["id"]) or {}
-            b = buildings.setdefault(paper["scope"], {"scope": paper["scope"], "assigned": 0, "answered": 0, "papers": 0, "completed": 0, "choice_answered": 0, "correct": 0, "independent_answered": 0, "independent_correct": 0})
-            b["papers"] += 1
-            counts["papers"] += 1
-            if self._completed(paper, record):
-                b["completed"] += 1
-                counts["completed"] += 1
-            for q in paper["questions"]:
-                if q.get("invalid"):
-                    continue
-                counts["assigned"] += 1
-                b["assigned"] += 1
-                entry = record.get("entries", {}).get(q["id"], {})
-                a = entry.get("attempt") or {}
-                if not a:
-                    continue
-                if not entry.get("needs_review"):
-                    counts["answered"] += 1
-                    b["answered"] += 1
-                    counts["hinted"] += int(bool(a.get("assisted")))
-                weak = a.get("correct") is False or a.get("self_rating") in {"部分掌握", "需复习"} or entry.get("needs_review")
-                counts["review_total"] += int(bool(weak))
-                if q["type"] == "interview":
-                    counts["interview_total"] += 1
-                    ratings = counts.setdefault("interview_ratings", {})
-                    latest = next((item for item in reversed(entry.get("practice", [])) if item.get("self_rating")), a)
-                    rating = latest.get("self_rating", "需复习")
-                    ratings[rating] = ratings.get(rating, 0) + 1
-                else:
-                    counts["choice_answered"] += 1
-                    counts["correct"] += int(bool(a.get("correct")))
-                    b["choice_answered"] += 1
-                    b["correct"] += int(bool(a.get("correct")))
-                    if not a.get("assisted"):
-                        counts["independent_answered"] += 1
-                        counts["independent_correct"] += int(bool(a.get("correct")))
-                        b["independent_answered"] += 1
-                        b["independent_correct"] += int(bool(a.get("correct")))
-                    t = topics.setdefault(q.get("topic") or "未分类", {"topic": q.get("topic") or "未分类", "answered": 0, "correct": 0})
-                    t["answered"] += 1
-                    t["correct"] += int(bool(a.get("correct")))
-                    qs = question_stats.setdefault(q["id"], {"id": q["id"], "stem": q["stem"], "answered": 0, "wrong": 0})
-                    qs["answered"] += 1
-                    qs["wrong"] += int(not a.get("correct"))
-        ratio = lambda a, b: round(100 * a / b, 1) if b else None
-        counts.update(completion_rate=ratio(counts["answered"], counts["assigned"]), accuracy=ratio(counts["correct"], counts["choice_answered"]), independent_accuracy=ratio(counts["independent_correct"], counts["independent_answered"]), hint_rate=ratio(counts["hinted"], counts["answered"]))
-        for topic in topics.values():
-            topic["accuracy"] = ratio(topic["correct"], topic["answered"]) if topic["answered"] >= 3 else None
-        for building in buildings.values():
-            building.update(completion_rate=ratio(building["answered"], building["assigned"]), accuracy=ratio(building["correct"], building["choice_answered"]), independent_accuracy=ratio(building["independent_correct"], building["independent_answered"]))
-        for issue in self._all("issue"):
-            if scope and issue["scope"] != scope or query.get("from") and issue["created_at"][:10] < query["from"] or query.get("to") and issue["created_at"][:10] > query["to"]:
-                continue
-            qs = question_stats.setdefault(issue["question_id"], {"id": issue["question_id"], "stem": issue["question"]["stem"], "answered": 0, "wrong": 0})
-            qs["issue_count"] = qs.get("issue_count", 0) + 1
-        recent = {q["family_id"] for paper in self._all("paper") if (now().date() - dt.timedelta(days=6)).isoformat() <= paper["date"] <= now().date().isoformat() for q in paper["questions"]}
-        valid_questions = [q for q in self._all("question") if q["status"] == "published" and not q.get("problems") and not q["_dirty"]]
-        inventory = {bank: {"available": len({q["family_id"] for q in valid_questions if q["bank"] == bank}), "remaining": len({q["family_id"] for q in valid_questions if q["bank"] == bank and q["family_id"] not in recent})} for bank in BANKS}
-        return {"summary": counts, "buildings": list(buildings.values()), "topics": list(topics.values()), "questions": sorted(question_stats.values(), key=lambda q: -q["wrong"]) if actor.get("is_admin") else [], "inventory": inventory}
+        from .learning_personal import profile
+        return profile(self, actor, query)
 
     def _question(self, qid, conn=None):
         q = self._get("question", qid, conn)
@@ -981,7 +1017,7 @@ class LearningService:
         if q["bank"] not in BANKS or old.get("bank") and q["bank"] != old["bank"]:
             raise LearningError("题库无效，已存在的题目不能移动到另一来源表；可复制后调整")
         q["type"] = payload.get("type", old.get("type", "single" if q["bank"] == "written" else "interview"))
-        if q["type"] not in {"single", "multiple", "interview"} or (q["bank"] == "written") == (q["type"] == "interview"):
+        if q["type"] not in {"single", "multiple", "interview"} or q["bank"] != "supplemental" and (q["bank"] == "written") == (q["type"] == "interview"):
             raise LearningError("题型与来源题库不一致")
         q["type_label"] = "单选" if q["type"] == "single" else "面试" if q["type"] == "interview" else "不定项" if payload.get("type_label", old.get("type_label")) == "不定项" else "多选"
         q["status"] = payload.get("status", old.get("status", "draft"))
@@ -1124,11 +1160,13 @@ class LearningService:
             raise LearningError("无效质疑类别")
         with self.transaction() as conn:
             paper = self._paper(payload.get("paper_id"), actor, conn, write=True)
+            if payload.get("person_id") != paper["person_id"]:
+                raise LearningError("请核对当前质疑所属人员。", 409)
             q = next((q for q in paper["questions"] if q["id"] == payload.get("question_id")), None)
             if not q:
                 raise LearningError("请选择当前题单中的题目")
-            existing = next((i for i in self._all("issue", conn) if i["scope"] == paper["scope"] and i["question_id"] == q["id"] and i["question_version"] == q["version"] and i["status"] in {"pending", "processing", "needs_info"}), None)
-            item = existing or {"id": "i_" + uuid.uuid4().hex, "scope": paper["scope"], "paper_id": paper["id"], "question_id": q["id"], "question_version": q["version"], "category": category, "description": description,
+            existing = next((i for i in self._documents("issue", person_id=paper["person_id"], conn=conn) if i["question_id"] == q["id"] and i["question_version"] == q["version"] and i["status"] in {"pending", "processing", "needs_info"}), None)
+            item = existing or {"id": "i_" + uuid.uuid4().hex, "person_id": paper["person_id"], "person": paper["person"], "date": now().date().isoformat(), "scope": paper["scope"], "paper_id": paper["id"], "question_id": q["id"], "question_version": q["version"], "category": category, "description": description,
                                 "suggestion": clean(payload.get("suggestion", ""), 6000), "created_at": stamp(), "question": copy.deepcopy(q),
                                 "attempt": copy.deepcopy((self._get("record", paper["id"], conn) or {}).get("entries", {}).get(q["id"], {}).get("attempt")), "status": "pending", "comments": [], "attachments": [], "version": 0}
             item["comments"].append({"actor": actor["id"], "name": actor.get("name", ""), "at": stamp(), "text": description, "is_admin": False})
@@ -1172,7 +1210,8 @@ class LearningService:
 
     def list_issues(self, actor, query):
         scope = self._scope(actor, query.get("scope"))
-        items = [i for i in self._all("issue") if not scope or i["scope"] == scope]
+        identity = str(query.get("person_id") or "")
+        items = self._documents("issue", scope="" if identity else scope, person_id=identity)
         if query.get("status"):
             items = [i for i in items if i["status"] == query["status"]]
         if query.get("search"):
@@ -1191,7 +1230,7 @@ class LearningService:
             self.issue(attachment["issue_id"], actor)
             return
         for paper in self._all("paper"):
-            if paper.get("deleted_at") or paper["scope"] != scope:
+            if paper.get("deleted_at") or paper["scope"] not in SCOPES:
                 continue
             for q in paper["questions"]:
                 if not any(a["id"] == attachment["id"] for a in q.get("attachments", [])):
@@ -1343,9 +1382,10 @@ class LearningService:
         query = self._date_filters(query)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
-        writer.writerow(["日期", "楼栋", "题库", "题目", "首次正确", "使用提示", "自评", "提交时间", "无效题", "更正说明"])
+        writer.writerow(["日期", "楼栋", "姓名", "工号", "人员标识", "题库", "题目", "首次正确", "使用提示", "自评", "提交时间", "无效题", "更正说明", "操作账号"])
         safe = lambda value: "'" + str(value) if str(value).startswith(("=", "+", "-", "@", "\t", "\r")) else value
-        for p in self._all("paper"):
+        for p in self._documents("paper", person_id=str(query.get("person_id") or ""), scope=scope,
+                                 start=query.get("from", ""), end=query.get("to", ""), legacy=query.get("legacy") == "1"):
             if p.get("deleted_at") or scope and p["scope"] != scope or query.get("from") and p["date"] < query["from"] or query.get("to") and p["date"] > query["to"]:
                 continue
             record = self._get("record", p["id"]) or {}
@@ -1353,7 +1393,8 @@ class LearningService:
                 if query.get("bank") and q["bank"] != query["bank"]:
                     continue
                 a = record.get("entries", {}).get(q["id"], {}).get("attempt") or {}
-                writer.writerow([safe(value) for value in [p["date"], p["scope"], BANKS[q["bank"]], q["stem"], a.get("correct", ""), a.get("assisted", ""), a.get("self_rating", ""), a.get("submitted_at", ""), bool(q.get("invalid")), q.get("correction", "")]])
+                person = p.get("person") or {}
+                writer.writerow([safe(value) for value in [p["date"], p["scope"], person.get("name", ""), person.get("employee_no", ""), p.get("person_id", ""), BANKS[q["bank"]], q["stem"], a.get("correct", ""), a.get("assisted", ""), a.get("self_rating", ""), a.get("submitted_at", ""), bool(q.get("invalid")), q.get("correction", ""), a.get("operator_name") or a.get("operator_id", "")]])
         return output.getvalue().encode("utf-8-sig"), "学练记录.csv", "text/csv; charset=utf-8"
 
     def dispatch(self, action, payload, actor, query):
@@ -1362,6 +1403,12 @@ class LearningService:
         identity = payload.get("id")
         if action in {"papers.list", "history"}:
             return self.list_papers(actor, query)
+        if action == "people":
+            from .learning_personal import people
+            return people(self, actor, query)
+        if action == "paper.claim":
+            from .learning_personal import claim
+            return claim(self, actor, payload)
         if action == "paper.get":
             return self.public_paper(self._paper(identity, actor), actor)
         if action == "paper.delete":
@@ -1446,7 +1493,7 @@ class LearningService:
                 raise LearningError("只能发布今天的题单，不能补发往日任务")
             date = now().date().isoformat()
             with self.transaction() as conn:
-                if self._get("publication", date, conn):
+                if self._get("publication", self._publication_key(date), conn):
                     return {"queued": False, "date": date, "already_published": True}
                 self._put("local", "manual_publish", {"date": date}, conn, False)
             self._wake.set()

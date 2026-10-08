@@ -243,15 +243,22 @@ class PlanConvergenceService:
         if self._ongoing_provider is None:
             raise ValueError('本地未结束通告读取入口未接入')
         records = maintenance.ongoing_records(self._ongoing_provider('ALL'))
+        for record in records:
+            ref = self.store.get_document('notice_plan_checks', 'latest:' + record['record_id']) or {}
+            job = self.store.get_document('notice_plan_checks', ref['job_id']) if ref else None
+            if job:
+                record.update(auto_check_status=job['status'], auto_checked_at=job.get('checked_at'))
+                if job['status'] == 'ready':
+                    record['hits'] = (job.get('result', {}).get('records') or [{}])[0].get('hits', [])
         if record_id is not None:
             records = [row for row in records if row['record_id'] == str(record_id)]
             if not records:
                 raise FileNotFoundError('该检修通告已结束、删除或不在当前未结束列表中，请刷新列表')
         return records
 
-    def maintenance_check(self, record_id=None):
+    def maintenance_check(self, record_id=None, *, records=None):
         deadline = time.monotonic() + QUERY_SECONDS
-        records = self.maintenance_records(record_id)
+        records = self.maintenance_records(record_id) if records is None else records
         blocks = [row for row in self.blocks(refresh=True, deadline=deadline)['items'] if str(row.get('status')) == '1']
         details = {}
         pending, rows = {}, iter(blocks)

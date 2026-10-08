@@ -387,7 +387,7 @@ async def collect_pending(actor, query, invoke, read_cached, *, groups_only=None
         items, unpublished = [], []
         for scope in sorted(allowed):
             rows, data = await pages('/api/learning/papers', {'scope': scope, 'today': '1'}, 'items')
-            if not rows:
+            if not rows and not data.get('published'):
                 unpublished.append(scope)
                 items.append({'id': 'learning-unpublished:' + scope, 'title': '今日学练题单未发布', 'scopes': [scope], 'status': '未发布', 'url': '/learning'})
             for row in rows:
@@ -399,7 +399,9 @@ async def collect_pending(actor, query, invoke, read_cached, *, groups_only=None
                 total, answered = stats.get('total'), stats.get('answered')
                 if type(total) is not int or type(answered) is not int or not 0 <= answered <= total:
                     raise AssistantError('学练答题进度无效，数量未知。', 502)
-                items.append(project({**row, 'title': row['date'] + '学练题单', 'status': f'待答 {total - answered} 题'}, scopes, identity=row['id'], url='/learning'))
+                if total > answered:
+                    person = row.get('person') or {}
+                    items.append(project({**row, 'title': row['date'] + ' ' + person.get('name', '') + '学练题单', 'status': f'待答 {total - answered} 题'}, scopes, identity=row['id'], url='/learning'))
         return items, [], {'unpublished_scopes': unpublished}
 
     async def guard():

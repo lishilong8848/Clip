@@ -69,6 +69,9 @@ def install_plan_convergence_routes(app, controller, runtime):
                 service = PlanConvergenceService(runtime.state_store, controller._get_ongoing)
             return service
 
+    from .plan_convergence_notifications import install_notice_plan_checks
+    install_notice_plan_checks(app, runtime, get_service)
+
     def dispatch(action, method, query, payload, admin):
         from . import plan_convergence_auth as auth
         from . import plan_convergence_rules as rules

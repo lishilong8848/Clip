@@ -30,7 +30,9 @@ BANK_TABLES = {
     "written": "tbldEn2ODX9CbZ1n",
     "duty": "tblpM9nCRs4UJ8io",
     "professional": "tblnyQverizwaQcT",
+    "supplemental": "tbl1x3DulQ3nFluq",
 }
+BANK_VIEWS = {"supplemental": "vew6IeZZgN"}
 META_FIELD = "学练配置"
 MATERIAL_FIELD = "学练资料"
 ENTITY_TABLE_NAME = "画像学练数据"
@@ -212,11 +214,12 @@ class LearningCloud:
                 raise error("飞书响应缺少 data，无法确认结果")
             return payload["data"]
 
-    def _list_all(self, path, body=None):
+    def _list_all(self, path, body=None, params=None):
         items, seen = [], set()
         token = None
+        base_params = dict(params or {})
         while True:
-            params = {"page_size": 100 if path == "tables" or path.endswith("/fields") else 500}
+            params = {**base_params, "page_size": 100 if path == "tables" or path.endswith("/fields") else 500}
             if token:
                 params["page_token"] = token
             page = self._request("GET" if body is None else "POST", path, body, params)
@@ -238,7 +241,7 @@ class LearningCloud:
     def fetch_questions(self):
         result = []
         for bank, table in BANK_TABLES.items():
-            for record in self._list_all(f"tables/{table}/records"):
+            for record in self._list_all(f"tables/{table}/records", params={"view_id": BANK_VIEWS[bank]} if bank in BANK_VIEWS else None):
                 if not record.get("record_id") or not isinstance(record.get("fields"), dict):
                     raise LearningCloudError("飞书题目记录不完整，未返回部分数据")
                 result.append({"bank": bank, "record_id": record["record_id"], "fields": record["fields"]})
@@ -278,10 +281,11 @@ class LearningCloud:
             entity_fields = self._fields(table) if table else {}
             for bank, fields in sources.items():
                 required = {"题目": 1, "答案": 1}
-                required.update({"题型": 3, "选项": 1, "附件": 1} if bank == "written" else {"答案图片": 17})
+                required.update({"选项": 1, "专业": 3, "答案附件": 17} if bank == 'supplemental' else
+                                {"题型": 3, "选项": 1, "附件": 1} if bank == "written" else {"答案图片": 17})
                 self._check_fields(fields, required, required=True)
                 year = "年份" if bank == "written" else "年度"
-                if fields.get(year, {}).get("type") not in (1, 2, 3, 4):
+                if bank != 'supplemental' and fields.get(year, {}).get("type") not in (1, 2, 3, 4):
                     raise LearningCloudError(f"源表年份字段缺失或类型不支持：{year}")
                 self._check_fields(fields, EXTRA_FIELDS)
             self._check_fields(entity_fields, ENTITY_FIELDS)
@@ -374,13 +378,15 @@ class LearningCloud:
         }
         if bank == "written":
             fields.update({"题型": label, "选项": _checked_text(option_text, "选项")})
+        elif bank == 'supplemental':
+            fields.update({'选项': _checked_text(option_text, '选项'), '专业': _checked_text(q.get('specialty', ''), '专业') or None})
         year_name = "年份" if bank == "written" else "年度"
         year = q.get("year", "")
         if year is not None and not isinstance(year, (str, int, float)):
             raise ValueError("year 必须是文本或数字")
         with self._lock:
             self.ensure_schema()
-            year_type = self._source_fields[bank][year_name]["type"]
+            year_type = self._source_fields[bank].get(year_name, {}).get('type')
             if year_type == 2:
                 try:
                     value = float(year) if year not in (None, "") else None
@@ -392,7 +398,8 @@ class LearningCloud:
                 value = _checked_text("" if year is None else str(year), year_name)
                 if year_type == 4:
                     value = [value] if value else []
-            fields[year_name] = value
+            if bank != 'supplemental':
+                fields[year_name] = value
             record = self._write_record(BANK_TABLES[bank], fields, operation_id, qid, rid)
         return {**q, "id": qid, "record_id": record["record_id"]}
 

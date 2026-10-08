@@ -6421,6 +6421,12 @@ class PortalRuntime:
                         target_record_id=notice.get('paired_maintenance_target_record_id') or paired.get('target_record_id'), request=request)
         except Exception as exc:
             log_warning(f'通告已成功，推荐标签后台投递失败: {type(exc).__name__}')
+        try:
+            checks = getattr(cls, 'notice_plan_checks', None)
+            if checks is not None and not external_real_write_guard()['mock_external']:
+                checks.enqueue(notice, operation_id=operation_id, target_record_id=target_record_id, request=request)
+        except Exception as exc:
+            log_warning(f'通告已成功，检修自动核对投递失败: {type(exc).__name__}')
 
     @classmethod
     def _enqueue_qt_notice_followups(cls, data, request, operation_id, target_record_id, action):
