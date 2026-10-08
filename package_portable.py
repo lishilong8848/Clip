@@ -183,6 +183,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/lan_bitable_template_portal/lighthouse_bridge.py"),
     Path("bin/openclaw_service/assistant/openclaw/runtime.json"),
     Path("bin/openclaw_service/assistant/openclaw/native-paths.mjs"),
+    Path("bin/openclaw_service/assistant/openclaw/gateway-start.mjs"),
     Path("bin/openclaw_service/assistant/openclaw/distribution.json"),
     Path("bin/openclaw_service/assistant/openclaw/plugin/index.mjs"),
     Path("bin/openclaw_service/assistant/openclaw/plugin/package.json"),
