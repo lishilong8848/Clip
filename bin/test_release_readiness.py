@@ -44,6 +44,35 @@ class ReleaseReadinessTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 package_portable._run_preflight_check(['python', '-m', 'unittest', 'bin.test_fixture'], check=True)
 
+    def test_failed_test_details_are_repeated_after_other_shards_finish(self):
+        failed = threading.Event()
+        output = io.StringIO()
+        detail = '=' * 70 + '\nFAIL: test_formal_account (fixture.Tests)\nAssertionError: 200 != 403\n'
+
+        def run(args, **kwargs):
+            if args[-1] == 'bin.test_bad':
+                kwargs['stdout'].write(detail)
+                failed.set()
+                raise subprocess.CalledProcessError(1, args)
+            self.assertTrue(failed.wait(5))
+            kwargs['stdout'].write('Other test group: OK\n')
+
+        with patch.object(package_portable, 'PREFLIGHT_WORKERS', 2), \
+                patch.object(package_portable.subprocess, 'run', side_effect=run), redirect_stdout(output):
+            with self.assertRaises(subprocess.CalledProcessError):
+                package_portable._run_preflight_check(['python', '-m', 'unittest', 'bin.test_good', 'bin.test_bad'], check=True)
+        text = output.getvalue()
+        self.assertGreater(text.rfind('FAIL: test_formal_account'), text.index('Other test group: OK'))
+        self.assertIn('已停止打包', text)
+
+    def test_preflight_timeout_reports_details_and_still_stops(self):
+        output = io.StringIO()
+        with patch.object(package_portable.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 900)), redirect_stdout(output):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                package_portable._run_preflight_check(['python', '-m', 'unittest', 'bin.test_slow'], check=True)
+        self.assertIn('bin.test_slow', output.getvalue())
+        self.assertIn('已停止打包', output.getvalue())
+
     def test_packaging_lock_blocks_overlap_and_releases_after_failure(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(package_portable, 'BUILD_DIR', Path(directory)):
             with self.assertRaisesRegex(ValueError, 'fixture'):

@@ -598,7 +598,7 @@ class FirstQuestionStartupTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Routes: guests / scope-less accounts never warmup or spawn
+# Routes: formal accounts can read appearance; guests cannot enter the assistant.
 # ---------------------------------------------------------------------------
 
 
@@ -634,11 +634,13 @@ class StartupRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         engine_cls.assert_not_called()
 
-    def test_scope_less_formal_account_forbidden_without_engine_spawn(self):
+    def test_scope_less_formal_account_can_read_appearance_without_engine_spawn(self):
         self.session["allowed_scopes"] = []
         with patch("lan_bitable_template_portal.lighthouse_openclaw.LighthouseOpenClaw") as engine_cls:
             response = self.client.get("/api/assistant/appearance")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"], self.DEFAULT_APPEARANCE)
+        self.assertEqual(self.session["allowed_scopes"], [])
         engine_cls.assert_not_called()
 
     def test_appearance_warm_does_not_block_and_does_not_build_engine(self):

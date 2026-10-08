@@ -1555,6 +1555,7 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
     shard_size = min(8, max(1, (len(modules) + PREFLIGHT_WORKERS - 1) // PREFLIGHT_WORKERS))
     shards = [modules[index:index + shard_size] for index in range(0, len(modules), shard_size)]
     output_lock = threading.Lock()
+    failures = []
 
     def run_shard(index, names):
         label = f"测试组 {index + 1}/{len(shards)}: {names[0]} 等 {len(names)} 项"
@@ -1566,25 +1567,39 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
             env.update(CLIPFLOW_DATA_DIR=directory, PYTHONIOENCODING="utf-8")
             options = {**kwargs, "env": env}
             with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as output:
+                failed = False
                 try:
                     subprocess.run(args[:3] + names, **options, stdout=output,
                                    stderr=subprocess.STDOUT, timeout=900)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    failed = True
+                    raise
                 finally:
                     output.seek(0)
+                    detail = output.read()
                     with output_lock:
-                        print(output.read(), end="", flush=True)
+                        print(detail, end="", flush=True)
+                        if failed:
+                            failures.append((label, detail))
                         log(f"{label} 耗时 {time.monotonic() - started:.1f} 秒")
 
     log(f"测试分组并行执行，最多 {PREFLIGHT_WORKERS} 个进程，各组使用独立临时数据。")
-    with ThreadPoolExecutor(max_workers=PREFLIGHT_WORKERS) as pool:
-        futures = [pool.submit(run_shard, index, names) for index, names in enumerate(shards)]
-        try:
-            for future in as_completed(futures):
-                future.result()
-        except BaseException:
-            for future in futures:
-                future.cancel()
-            raise
+    try:
+        with ThreadPoolExecutor(max_workers=PREFLIGHT_WORKERS) as pool:
+            futures = [pool.submit(run_shard, index, names) for index, names in enumerate(shards)]
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+    finally:
+        # Repeat failures after running siblings finish, not before later OK logs.
+        for label, detail in failures:
+            log(f"未通过: {label}，已停止打包。失败详情：")
+            start = re.search(r"(?m)^={10,}\r?\n(?:FAIL|ERROR):", detail)
+            print(detail[start.start():] if start else detail[-6000:], end="\n", flush=True)
 
 
 def _run_packaging_preflight_tests() -> None:
