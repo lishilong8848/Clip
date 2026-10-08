@@ -1,0 +1,10 @@
+{
+  "group": "assistant",
+  "modules": 107,
+  "tests": 2013,
+  "failures": [],
+  "errors": [],
+  "skipped": 2,
+  "seconds": 686.8,
+  "external_connections_blocked": 0
+}

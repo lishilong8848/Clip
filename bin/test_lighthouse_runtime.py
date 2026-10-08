@@ -54,6 +54,25 @@ def _model():
 
 
 class NativeWindowsLoaderTests(unittest.TestCase):
+    def test_direct_gateway_rejects_wrong_runtime_and_invalid_port_before_import(self):
+        try:
+            node, entry = lrt.runtime_files()
+        except AssistantError:
+            self.skipTest('Verified Node runtime is not installed')
+        launcher = Path(lrt.__file__).parent / 'openclaw/gateway-start.mjs'
+        pin = json.loads(launcher.with_name('runtime.json').read_text(encoding='utf-8'))
+        self.assertTrue((entry.parent / 'dist/run-GhayMR-l.js').is_file())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for version, port in [('wrong-version', '12345'), (pin['openclaw_version'], '0')]:
+                (root / 'package.json').write_text(json.dumps({'version': version}), encoding='utf-8')
+                result = subprocess.run([str(node), str(launcher), port],
+                    env={**os.environ, 'LIGHTHOUSE_SDK_ROOT': str(root)},
+                    capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Verified gateway runtime or port is unavailable', result.stderr)
+                self.assertNotIn('ERR_MODULE_NOT_FOUND', result.stderr)
+
     def test_readonly_windows_metadata_preserves_identity_listeners_scope_and_fallback(self):
         if os.name != 'nt':
             self.skipTest('Windows metadata adapter')
@@ -254,6 +273,14 @@ fs.writeFileSync(session, 'first');
 assert.equal(fs.readFileSync(session, 'utf-8'), 'first');
 fs.writeFileSync(session, 'second');
 assert.equal(fs.readFileSync(session, 'utf-8'), 'second');
+fs.mkdirSync(resolve(root, 'dist'));
+const asset = resolve(root, 'dist/asset.json');
+assert.equal(fs.existsSync(asset), false);
+fs.writeFileSync(asset, 'first');
+assert.equal(fs.existsSync(asset), true);
+assert.equal(fs.readFileSync(asset, 'utf-8'), 'first');
+fs.writeFileSync(asset, 'second');
+assert.equal(fs.readFileSync(asset, 'utf-8'), 'second');
 console.log('Scoped native URL resolution OK');
 """, encoding='utf-8')
             result = subprocess.run([str(node), '--import', (Path(lrt.__file__).parent / 'openclaw/native-paths.mjs').resolve().as_uri(), str(entry)],
@@ -417,6 +444,8 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.popen.assert_called_once()
         self.assertEqual(self.runtime.maximum, 20)
         self.assertIn('--v8-pool-size=2', self.popen.call_args.args[0])
+        self.assertEqual(Path(self.popen.call_args.args[0][-2]).name, 'gateway-start.mjs')
+        self.assertEqual(int(self.popen.call_args.args[0][-1]), items[0]['port'])
         for field in ('port', 'token', 'process'):
             self.assertEqual(len({item[field] for item in items}), 1)
         for field in ('key', 'agent_id', 'root', 'fingerprint'):
@@ -434,6 +463,20 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError) as error:
             await self.acquire()
         self.assertEqual(error.exception.status, 409)
+
+    async def test_cancelled_waiter_does_not_release_another_active_acquisition(self):
+        active = await self.acquire()
+        async with self.runtime.locks[account_key('u-default')]:
+            waiting = asyncio.create_task(self.acquire())
+            await asyncio.sleep(0)
+            waiting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiting
+        self.assertTrue(active['busy'])
+        with self.assertRaises(AssistantError) as error:
+            await self.acquire()
+        self.assertEqual(error.exception.status, 409)
+        self.assertFalse(self.runtime.starting)
 
     async def test_warm_idle_and_same_profile_reuse_without_configuration_rpc(self):
         first = await self.acquire()
@@ -483,13 +526,17 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(item['model_key'], json.dumps(self.popen.call_args.kwargs['env']))
         self.assertEqual(config['agents']['defaults']['maxConcurrent'], 20)
         self.assertEqual(config['skills']['allowBundled'], ['lighthouse-tools'])
+        self.assertFalse(config['skills']['load']['watch'])
+        self.assertFalse(config['browser']['enabled'])
+        self.assertFalse(config['models']['catalogRefresh']['enabled'])
+        self.assertFalse(config['update']['checkOnStart'])
+        self.assertFalse(config['update']['auto']['enabled'])
         self.assertEqual(self.popen.call_args.kwargs['env']['GIT_CEILING_DIRECTORIES'], str(self.runtime.root))
         self.assertEqual(self.popen.call_args.kwargs['env']['OPENCLAW_PACKAGED_COMPILE_CACHE_RESPAWNED'], '1')
         self.assertEqual(self.popen.call_args.kwargs['env']['OPENCLAW_DISABLE_BUNDLED_PLUGINS'], '1')
         self.assertEqual(self.popen.call_args.kwargs['env']['LIGHTHOUSE_SDK_ROOT'], str(Path('openclaw.mjs').parent))
-        self.assertEqual(config['plugins']['allow'], ['openai', 'lighthouse-tools'])
-        self.assertEqual(config['plugins']['load']['paths'], [str(self.runtime.root / 'shared-gateway/plugin'),
-            str(Path('openclaw.mjs').parent / 'dist/extensions/openai')])
+        self.assertEqual(config['plugins']['allow'], ['lighthouse-tools'])
+        self.assertEqual(config['plugins']['load']['paths'], [str(self.runtime.root / 'shared-gateway/plugin')])
         self.assertEqual(self.popen.call_args.kwargs['env']['NODE_COMPILE_CACHE'], str(self.runtime.root / 'shared-gateway/node-compile-cache'))
         self.assertTrue(Path(self.popen.call_args.kwargs['env']['OPENCLAW_BUNDLED_SKILLS_DIR']).is_dir())
         self.assertEqual(sum(bool(entry.get('default')) for entry in config['agents']['entries'].values()), 1)

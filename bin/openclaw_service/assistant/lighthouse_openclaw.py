@@ -246,17 +246,19 @@ class OpenClawToolAgent:
     async def _events(self, client, prompt, history):
         from pydantic_ai import ModelRetry
         message = '\n'.join(part for part in prompt if isinstance(part, str))
-        # Native history is authoritative; import the previous UI history once.
-        saved = await client.request('chat.history', {'sessionKey': self.session_key, 'limit': 1})
-        if not saved.get('messages'):
-            legacy = []
-            for msg in history:
-                for part in msg.parts:
-                    content = getattr(part, 'content', '')
-                    if isinstance(content, str):
-                        legacy.append({'role': 'assistant' if getattr(part, 'part_kind', '') == 'text' else 'user', 'content': content})
-            if legacy:
-                message = '此前已授权会话（历史而非当前事实，不能重执行业务）：\n' + json.dumps(legacy, ensure_ascii=False) + '\n本轮问题：\n' + message
+        # Native history is authoritative. Only inspect it for initial UI-history
+        # migration; keep one confirmed session key per account, not its content.
+        if self.item.get('native_history_session') != self.session_key:
+            saved = await client.request('chat.history', {'sessionKey': self.session_key, 'limit': 1})
+            if not saved.get('messages'):
+                legacy = []
+                for msg in history:
+                    for part in msg.parts:
+                        content = getattr(part, 'content', '')
+                        if isinstance(content, str):
+                            legacy.append({'role': 'assistant' if getattr(part, 'part_kind', '') == 'text' else 'user', 'content': content})
+                if legacy:
+                    message = '此前已授权会话（历史而非当前事实，不能重执行业务）：\n' + json.dumps(legacy, ensure_ascii=False) + '\n本轮问题：\n' + message
         images = [{'type': 'image', 'mimeType': part.media_type, 'content': __import__('base64').b64encode(part.data).decode('ascii')}
                   for part in prompt if hasattr(part, 'media_type')]
         if images and not self.profile.get('vision_verified'):
@@ -421,6 +423,7 @@ class OpenClawToolAgent:
                     raise AssistantError('未取得可靠业务依据，未执行业务，请重试或明确查询内容。', 502) from None
                 message = safe_text(str(exc))
                 continue
+            self.item['native_history_session'] = self.session_key
             yield SimpleNamespace(event_kind='agent_run_result', result=SimpleNamespace(output=answer))
             return
 
@@ -471,6 +474,8 @@ class LighthouseOpenClaw(LighthouseModel):
                 cached[1].discard_events()
             except RuntimeError:
                 raise AssistantError('当前会话仍在收尾，请稍后继续；未重复提交业务。', 409) from None
+            if 'native_history_session' in cached[0]:
+                item['native_history_session'] = cached[0]['native_history_session']
             self.gateways[key] = (item, cached[1])
             return cached[1]
         if cached:

@@ -122,7 +122,7 @@ class AssistantUpdateTests(unittest.TestCase):
         from frontend_assets import FRONTEND_INDEX
         namespace = {'Path': Path, 'shutil': shutil, 'config': SimpleNamespace(auto_install_dependencies=False),
             'FRONTEND_INDEX': FRONTEND_INDEX, 'patch_deletions': lambda root, payload, deleted: deleted,
-            'log_warning': lambda *_: None}
+            'log_warning': lambda *_: None, 'log_info': lambda *_: None}
         installer = isolated_class(Path(__file__).parent / 'upload_event_module/ui/main_window_patch.py',
             'PatchUpdateMixin', {'_apply_patch_worker'}, namespace)
         for failure in ('none', 'copy', 'hash', 'delete', 'pause'):
@@ -181,7 +181,7 @@ class AssistantUpdateTests(unittest.TestCase):
         namespace = {'__package__': 'upload_event_module.ui', 'Path': Path, 'sys': sys,
             'config': SimpleNamespace(auto_install_dependencies=True),
             'DEFAULT_MODULE_TO_PACKAGE': {}, 'DEFAULT_WINDOWS_MODULE_TO_PACKAGE': {},
-            'patch_deletions': lambda *_: [], 'log_warning': lambda *_: None,
+            'patch_deletions': lambda *_: [], 'log_warning': lambda *_: None, 'log_info': lambda *_: None,
             'send_system_alert': alert, 'ensure_runtime_dependencies': lambda *args, **kwargs: (False, 'pip failed')}
         installer = isolated_class(Path(__file__).parent / 'upload_event_module/ui/main_window_patch.py',
             'PatchUpdateMixin', {'_apply_patch_worker'}, namespace)

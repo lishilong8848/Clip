@@ -1,0 +1,10 @@
+{
+  "group": "test_polling_work_order_relay",
+  "modules": 1,
+  "tests": 15,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 13.6,
+  "external_connections_blocked": 0
+}

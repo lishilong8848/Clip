@@ -1,0 +1,10 @@
+{
+  "group": "test_dependency_bootstrap",
+  "modules": 1,
+  "tests": 6,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 7.1,
+  "external_connections_blocked": 0
+}

@@ -1,0 +1,12 @@
+{
+  "group": "test_lighthouse_openclaw",
+  "modules": 1,
+  "tests": 1,
+  "failures": [
+    "bin.test_lighthouse_openclaw.OpenClawLifecycleTests.test_consecutive_turns_reuse_socket_and_do_not_reannounce_connection"
+  ],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 7.0,
+  "external_connections_blocked": 0
+}

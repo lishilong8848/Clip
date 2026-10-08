@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_undo",
+  "modules": 1,
+  "tests": 10,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 11.5,
+  "external_connections_blocked": 0
+}

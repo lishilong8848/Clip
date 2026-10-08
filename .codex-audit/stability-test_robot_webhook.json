@@ -1,0 +1,10 @@
+{
+  "group": "test_robot_webhook",
+  "modules": 1,
+  "tests": 2,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.5,
+  "external_connections_blocked": 0
+}

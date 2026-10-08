@@ -1,0 +1,10 @@
+{
+  "group": "test_process_lifetime",
+  "modules": 1,
+  "tests": 5,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.9,
+  "external_connections_blocked": 0
+}

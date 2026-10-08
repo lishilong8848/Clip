@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_navigation_cache",
+  "modules": 1,
+  "tests": 4,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 4.1,
+  "external_connections_blocked": 0
+}

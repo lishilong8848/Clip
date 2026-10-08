@@ -270,7 +270,7 @@ class TransportSafetyTests(unittest.TestCase):
 
     def test_frontend_generations_and_patch_rollback(self):
         methods = {"_apply_patch_worker", "_collect_patch_files", "_parse_deleted_files", "_is_runtime_data_patch_path", "_copy_with_retry", "_delete_with_retry", "_backup_patch_targets", "_rollback_patch", "_sha256_file"}
-        namespace = dict(Path=Path, json=json, os=os, shutil=shutil, tempfile=tempfile, time=time, hashlib=hashlib, config=SimpleNamespace(auto_install_dependencies=False), FRONTEND_INDEX=FRONTEND_INDEX, patch_deletions=patch_deletions, RUNTIME_PATCH_DATA_SUFFIXES=(), log_error=lambda *_: None, log_warning=lambda *_: None)
+        namespace = dict(Path=Path, json=json, os=os, shutil=shutil, tempfile=tempfile, time=time, hashlib=hashlib, config=SimpleNamespace(auto_install_dependencies=False), FRONTEND_INDEX=FRONTEND_INDEX, patch_deletions=patch_deletions, RUNTIME_PATCH_DATA_SUFFIXES=(), log_error=lambda *_: None, log_warning=lambda *_: None, log_info=lambda *_: None)
         installer = isolated_class(BIN / "upload_event_module/ui/main_window_patch.py", "PatchUpdateMixin", methods, namespace)
         for failure in [None, "new.js", "index.html", "oldest.js"]:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:

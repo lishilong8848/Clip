@@ -1,0 +1,10 @@
+{
+  "group": "test_drill_management",
+  "modules": 1,
+  "tests": 22,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 15.2,
+  "external_connections_blocked": 0
+}

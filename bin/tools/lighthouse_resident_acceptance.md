@@ -17,6 +17,63 @@ the obsolete detached recovery, private-console, and updater-start probes.
 
 ## Current Skills And Chat Acceptance
 
+### Conversation Reliability Recheck (2026-10-08)
+
+- Cancelling an account-lock waiter no longer clears another request's busy
+  ownership. The regression failed before the fix and preserves the active
+  acquisition afterward, including rejection of a third overlapping request.
+- Native UI-history migration reads once per confirmed account session instead
+  of on every question. Only one session key is retained, not message content;
+  new conversations, scope changes and a new runtime recheck native history.
+  Failed submissions do not set the marker. Exact-run terminal verification and
+  disconnect recovery remain unchanged.
+- Late frontend history responses and errors cannot repopulate a cleared or
+  replaced conversation. The old implementation reproduced the regression;
+  current-conversation pagination continues to work.
+- 34 runtime and 39 native-adapter tests passed, along with the component-state
+  check, Vue typecheck, production build and release-readiness check. PC acceptance with
+  the real Python host and pinned Node runtime passed input clearing, private
+  attachments, model/context switching, portal restart without replay, stopping,
+  continuing and mid-answer supplementation. Synthetic business confirmation
+  still executed exactly once and only after confirmation.
+- Twenty private accounts on one native gateway passed concurrent models/tools,
+  compaction and overflow recovery, image input, model/key switches, replay,
+  lost-terminal-response recovery, cancellation/auth isolation and restart.
+  The barrier-based concurrent phase took 67.97 s; this is isolation evidence,
+  not a production response-time promise.
+- Two native host runs measured cold/hot replies of 60.104/16.005 s and
+  35.300/2.187 s. The slow hot run did not reproduce and its cause is unassigned;
+  do not claim consistently two-second responses. Maximum synthetic portal ping
+  was 8.1 ms. In the fifteen-second idle sample, Node used 303.1 MiB private
+  memory and 2.9% of one core; Python used 72.1 MiB and 0.1% of one core.
+  Cold startup remains a limitation. No real Feishu writes or model credentials
+  were used, and owned native test processes were stopped.
+
+### Runtime Trimming (2026-10-08)
+
+- The gateway now loads only `lighthouse-tools`. Custom models retain the core
+  `openai-completions` transport without the bundled OpenAI multimedia/OAuth plugin.
+  Image input remains available through the configured private model.
+- Native browser startup, skill-directory watching, public model-catalog refresh
+  and SDK self-update checks are disabled. The portal still owns shared skills,
+  custom models and verified runtime updates.
+- Removed the additional SDK-source/existence caches and global filesystem read
+  wrappers; Node's module and compile caches remain. The previous text-cache cap
+  was 32 MiB, but its measured content was only about 0.37 MiB. Do not present
+  the cap as actual memory saved or claim a consistent RSS reduction.
+- 33 runtime tests and 37 native-adapter tests passed. The actual pinned SDK
+  passed twenty-account concurrent private models/tools, automatic compaction,
+  context-overflow recovery, completed-request replay, image input, model switching,
+  stop/auth-error isolation and restart with retained private history.
+- The synthetic concurrent phase took 82.08 s on this loaded host; this validates
+  simultaneous entry and isolation, not a production response-time guarantee.
+  No real model credentials or Feishu business records were used.
+- A separate native host/proxy run with sixty idle seconds passed. The gateway
+  used 310.1 MiB private memory and 1.5% of one core averaged over that interval;
+  the Python host used 72.2 MiB and 0.2% of one core. Cold/hot replies took
+  32.165/2.183 s and the maximum synthetic portal ping was 13.2 ms. These are
+  single-run observations, not a claim of equivalent gains on every machine.
+
 ### Latest Repair Consistency And Complete Regression Gate (2026-10-06)
 
 - The offline audit rebuilt the repair index only in its protected private

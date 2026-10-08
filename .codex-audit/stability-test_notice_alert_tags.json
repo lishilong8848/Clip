@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_alert_tags",
+  "modules": 1,
+  "tests": 13,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 17.8,
+  "external_connections_blocked": 0
+}

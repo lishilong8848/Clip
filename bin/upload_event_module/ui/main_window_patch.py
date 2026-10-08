@@ -289,6 +289,8 @@ class PatchUpdateMixin:
         ).start()
 
     def _remote_patch_download_worker(self, manifest: dict, auto_apply: bool):
+        from upload_event_module.services.process_lifetime import lower_current_thread_priority
+        lower_current_thread_priority(background_io=True)
         patch_dir = None
         error = ""
         try:
@@ -1000,6 +1002,8 @@ class PatchUpdateMixin:
         self.patch_update_finished.emit(False, f"补丁更新失败: {reason}{cleanup}")
 
     def _apply_patch_worker(self, patch_dir: Path):
+        from upload_event_module.services.process_lifetime import lower_current_thread_priority
+        lower_current_thread_priority(background_io=True)
         assistant_guard = None
         applied = False
         dependencies_ready = True
@@ -1026,13 +1030,19 @@ class PatchUpdateMixin:
             patch_meta = self._last_patch_meta if hasattr(self, "_last_patch_meta") else {}
             patch_files = self._collect_patch_files(patch_dir)
             expected_hashes = patch_meta.get("file_sha256") if isinstance(patch_meta, dict) else {}
+            verified_hashes = {src: self._sha256_file(src) for src in patch_files}
             if isinstance(expected_hashes, dict) and expected_hashes:
                 for src in patch_files:
                     rel = src.relative_to(patch_dir).as_posix()
                     expected = str(expected_hashes.get(rel) or "").lower()
-                    if not expected or self._sha256_file(src).lower() != expected:
+                    if not expected or verified_hashes[src].lower() != expected:
                         self._discard_invalid_patch(patch_dir, f"补丁文件校验失败: {rel}")
                         return
+            # Cumulative patches contain unchanged code/assets. Verify them, but
+            # do not back up, replace and compile the same bytes again.
+            patch_files = [src for src in patch_files if not (root_dir / src.relative_to(patch_dir)).is_file()
+                or self._sha256_file(root_dir / src.relative_to(patch_dir)) != verified_hashes[src]]
+            log_info(f"补丁校验完成: 总文件={len(verified_hashes)}，实际更新={len(patch_files)}，未变化跳过={len(verified_hashes) - len(patch_files)}")
             deleted_files = self._parse_deleted_files(patch_dir)
             for rel in deleted_files:
                 if rel.is_absolute() or ".." in rel.parts or not (root_dir / rel).resolve().is_relative_to(root_dir.resolve()):
@@ -1123,7 +1133,7 @@ class PatchUpdateMixin:
                     if rel == FRONTEND_INDEX:
                         continue
                     dest = root_dir / rel
-                    if self._sha256_file(dest) != self._sha256_file(src):
+                    if self._sha256_file(dest) != verified_hashes[src]:
                         raise RuntimeError(f"写入后哈希不一致: {rel}")
                     if dest.suffix.lower() == ".py":
                         py_compile.compile(str(dest), doraise=True)
@@ -1133,7 +1143,7 @@ class PatchUpdateMixin:
                 return
 
             entry = patch_dir / FRONTEND_INDEX
-            if entry.is_file() and not self._copy_with_retry(entry, root_dir / FRONTEND_INDEX):
+            if entry in patch_files and not self._copy_with_retry(entry, root_dir / FRONTEND_INDEX):
                 self._rollback_patch(backup_dir, new_files)
                 report(False, "前端入口发布失败，已回退")
                 return

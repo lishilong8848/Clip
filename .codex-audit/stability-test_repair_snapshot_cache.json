@@ -1,0 +1,10 @@
+{
+  "group": "test_repair_snapshot_cache",
+  "modules": 1,
+  "tests": 22,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 19.7,
+  "external_connections_blocked": 0
+}

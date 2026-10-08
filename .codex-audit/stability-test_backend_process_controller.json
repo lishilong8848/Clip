@@ -1,0 +1,10 @@
+{
+  "group": "test_backend_process_controller",
+  "modules": 1,
+  "tests": 17,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 2.7,
+  "external_connections_blocked": 0
+}

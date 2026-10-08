@@ -1,0 +1,10 @@
+{
+  "group": "test_event_month_selection",
+  "modules": 1,
+  "tests": 11,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 3.6,
+  "external_connections_blocked": 0
+}

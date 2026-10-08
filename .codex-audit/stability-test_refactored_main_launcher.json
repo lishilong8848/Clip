@@ -1,0 +1,10 @@
+{
+  "group": "test_refactored_main_launcher",
+  "modules": 1,
+  "tests": 3,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.2,
+  "external_connections_blocked": 0
+}

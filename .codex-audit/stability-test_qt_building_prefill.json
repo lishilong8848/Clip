@@ -1,0 +1,10 @@
+{
+  "group": "test_qt_building_prefill",
+  "modules": 1,
+  "tests": 3,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.4,
+  "external_connections_blocked": 0
+}

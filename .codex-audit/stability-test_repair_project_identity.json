@@ -1,0 +1,10 @@
+{
+  "group": "test_repair_project_identity",
+  "modules": 1,
+  "tests": 17,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 3.2,
+  "external_connections_blocked": 0
+}

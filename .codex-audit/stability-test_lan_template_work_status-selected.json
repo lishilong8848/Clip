@@ -1,0 +1,10 @@
+{
+  "group": "test_lan_template_work_status",
+  "modules": 1,
+  "tests": 1,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 7.7,
+  "external_connections_blocked": 0
+}

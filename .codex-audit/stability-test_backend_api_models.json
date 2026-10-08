@@ -1,0 +1,10 @@
+{
+  "group": "test_backend_api_models",
+  "modules": 1,
+  "tests": 23,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 8.2,
+  "external_connections_blocked": 0
+}

@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_type_guard",
+  "modules": 1,
+  "tests": 10,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 11.4,
+  "external_connections_blocked": 0
+}

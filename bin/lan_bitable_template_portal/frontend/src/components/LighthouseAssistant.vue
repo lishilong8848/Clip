@@ -864,15 +864,18 @@ function editQuestion(turn: Dict): void { draft.value = String(turn.question || 
 async function loadHistory(): Promise<void> {
   if (historyLoading.value) return;
   historyLoading.value = true;
+  const conversationId = state.value.conversation_id;
   const height = thread.value?.scrollHeight || 0;
   try {
     const before = Math.min(...state.value.turns.map((turn: Dict) => Number(turn.at || Date.now() / 1000)));
     const result = await call('history?before=' + before);
+    if (disposed || conversationId !== state.value.conversation_id) return;
     const known = new Set(state.value.turns.map((turn: Dict) => turn.operation_id));
     state.value.turns.unshift(...(result.turns || []).filter((turn: Dict) => !known.has(turn.operation_id)).map((turn: Dict) => ({ ...turn, history_loaded: true })));
     hasOlder.value = !!result.has_more;
-    await nextTick(); if (thread.value) thread.value.scrollTop += thread.value.scrollHeight - height;
-  } catch (e) { error.value = e instanceof Error ? e.message : '历史读取失败'; }
+    await nextTick();
+    if (!disposed && conversationId === state.value.conversation_id && thread.value) thread.value.scrollTop += thread.value.scrollHeight - height;
+  } catch (e) { if (!disposed && conversationId === state.value.conversation_id) error.value = e instanceof Error ? e.message : '历史读取失败'; }
   finally { historyLoading.value = false; }
 }
 

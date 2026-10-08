@@ -47,6 +47,19 @@ def _terminate_process(pid: int) -> None:
 
 @unittest.skipUnless(os.name == "nt", "Windows process lifetime behavior")
 class ProcessLifetimeTests(unittest.TestCase):
+    def test_background_io_is_opt_in_and_falls_back_when_unavailable(self):
+        from upload_event_module.services.process_lifetime import lower_current_thread_priority
+        with patch('win32api.GetCurrentThread', return_value=123), patch('win32process.SetThreadPriority') as priority:
+            lower_current_thread_priority()
+            priority.assert_called_once_with(123, -1)
+            priority.reset_mock()
+            lower_current_thread_priority(background_io=True)
+            priority.assert_called_once_with(123, 0x10000)
+            priority.reset_mock()
+            priority.side_effect = [OSError('unsupported background mode'), None]
+            lower_current_thread_priority(background_io=True)
+            self.assertEqual([call.args for call in priority.call_args_list], [(123, 0x10000), (123, -1)])
+
     def test_cleanup_only_terminates_matching_orphans(self):
         rows = [
             SimpleNamespace(

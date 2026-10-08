@@ -1,0 +1,10 @@
+{
+  "group": "test_create_record",
+  "modules": 1,
+  "tests": 0,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 1.5,
+  "external_connections_blocked": 0
+}

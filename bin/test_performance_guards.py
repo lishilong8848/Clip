@@ -214,6 +214,52 @@ class PerformanceGuardTests(unittest.TestCase):
         self.assertEqual(catalog.get(catalog._order[8])['schema']['body']['properties']['name']['type'], 'string')
         self.assertEqual(catalog.discover(keyword='missing')['items'], [])
 
+    def test_cumulative_patch_skips_unchanged_writes_without_skipping_hash_validation(self):
+        from upload_event_module.ui.main_window_patch import PatchUpdateMixin
+        from upload_event_module.config import config
+        import hashlib
+        from frontend_assets import FRONTEND_INDEX
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as temp:
+                root, payload = Path(temp) / 'app', Path(temp) / 'patch'
+                hashes, unchanged = {}, []
+                for relative, before, after in [('same.py', 'VALUE = 1\n', 'VALUE = 1\n'),
+                        (FRONTEND_INDEX.as_posix(), '<html>same</html>', '<html>same</html>'),
+                        ('changed.py', 'VALUE = 1\n', 'VALUE = 2\n')]:
+                    old, new = root / relative, payload / relative
+                    old.parent.mkdir(parents=True, exist_ok=True)
+                    new.parent.mkdir(parents=True, exist_ok=True)
+                    old.write_text(before, encoding='utf-8')
+                    new.write_text(after, encoding='utf-8')
+                    hashes[relative] = hashlib.sha256(new.read_bytes()).hexdigest()
+                    if before == after:
+                        unchanged.append((old, old.stat().st_mtime_ns))
+                if corrupt:
+                    (payload / 'same.py').write_text('tampered payload', encoding='utf-8')
+                item = PatchUpdateMixin()
+                item._last_patch_meta, item._last_patch_source = {'file_sha256': hashes}, 'local'
+                item._get_app_root_dir = lambda: root
+                item._update_build_meta = Mock()
+                item._delete_patch_dir = lambda _: ''
+                item._discard_invalid_patch = Mock()
+                item.patch_update_finished = SimpleNamespace(emit=Mock())
+                item._copy_with_retry = Mock(wraps=item._copy_with_retry)
+                with patch.object(config, 'auto_install_dependencies', False), \
+                        patch('upload_event_module.services.process_lifetime.lower_current_thread_priority') as priority:
+                    item._apply_patch_worker(payload)
+                    priority.assert_called_once_with(background_io=True)
+                for old, timestamp in unchanged:
+                    self.assertEqual(old.stat().st_mtime_ns, timestamp)
+                if corrupt:
+                    item._discard_invalid_patch.assert_called_once()
+                    item._copy_with_retry.assert_not_called()
+                    self.assertEqual((root / 'changed.py').read_text(), 'VALUE = 1\n')
+                else:
+                    item._discard_invalid_patch.assert_not_called()
+                    self.assertEqual([call.args[0].name for call in item._copy_with_retry.call_args_list], ['changed.py'])
+                    self.assertEqual((root / 'changed.py').read_text(), 'VALUE = 2\n')
+                    self.assertTrue(item.patch_update_finished.emit.call_args.args[0])
+
     def test_queue_stats_reads_details_once(self):
         from clipflow_backend.main import PortalRuntime, _queue_stats
         details = {'message': {'queued_due': 2, 'queued_future': 1}, 'qt_action': {'queued_due': 4}}

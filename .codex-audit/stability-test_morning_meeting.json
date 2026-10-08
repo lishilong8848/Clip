@@ -1,0 +1,10 @@
+{
+  "group": "test_morning_meeting",
+  "modules": 1,
+  "tests": 13,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 1.0,
+  "external_connections_blocked": 0
+}

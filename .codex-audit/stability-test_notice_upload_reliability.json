@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_upload_reliability",
+  "modules": 1,
+  "tests": 19,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 24.4,
+  "external_connections_blocked": 0
+}

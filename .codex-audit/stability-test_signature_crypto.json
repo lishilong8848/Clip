@@ -1,0 +1,10 @@
+{
+  "group": "test_signature_crypto",
+  "modules": 1,
+  "tests": 7,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.6,
+  "external_connections_blocked": 0
+}

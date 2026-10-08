@@ -1,0 +1,12 @@
+{
+  "group": "test_cabinet_power",
+  "modules": 1,
+  "tests": 160,
+  "failures": [],
+  "errors": [
+    "bin.test_cabinet_power.CabinetPowerTests.test_image_retry_preserves_corrections_and_delete_restore_invalidates_old_worker"
+  ],
+  "skipped": 0,
+  "seconds": 1028.4,
+  "external_connections_blocked": 0
+}

@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_templates",
+  "modules": 1,
+  "tests": 16,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 4.0,
+  "external_connections_blocked": 0
+}

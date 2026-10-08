@@ -1,0 +1,12 @@
+{
+  "group": "test_lighthouse_runtime",
+  "modules": 1,
+  "tests": 1,
+  "failures": [
+    "bin.test_lighthouse_runtime.SharedRuntimeTests.test_cancelled_waiter_does_not_release_another_active_acquisition"
+  ],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 2.9,
+  "external_connections_blocked": 0
+}

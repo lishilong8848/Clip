@@ -1,0 +1,10 @@
+{
+  "group": "test_daily_task_checklist",
+  "modules": 1,
+  "tests": 19,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.6,
+  "external_connections_blocked": 0
+}

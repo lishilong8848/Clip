@@ -1,0 +1,10 @@
+{
+  "group": "test_settings_save_runtime",
+  "modules": 1,
+  "tests": 6,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 1.1,
+  "external_connections_blocked": 0
+}

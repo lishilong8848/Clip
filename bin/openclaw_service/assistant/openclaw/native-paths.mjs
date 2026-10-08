@@ -10,8 +10,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 if (process.platform === 'win32' && (process.env.LIGHTHOUSE_SDK_ROOT || process.argv[1])) {
   const roots = [process.env.LIGHTHOUSE_SDK_ROOT || dirname(resolve(process.argv[1])), process.env.LIGHTHOUSE_PLUGIN_DIR]
     .filter(Boolean).map(root => realpathSync.native(root));
-  // Cache only immutable installed SDK code, never config, keys, sessions,
-  // workspaces or plugins. Actual module imports retain Node's file checks.
   const codeRoot = resolve(roots[0], 'dist');
   // Mirror the pinned SDK fast path, disabled there whenever --import is used.
   const distUrl = pathToFileURL(codeRoot + sep).href;
@@ -104,32 +102,9 @@ finally:
       try { result = read(query, options); } catch { /* Use the original bounded probe. */ }
       return result ? result.stdout : exec.call(this, file, args, remaining(options, started));
     };
-    // Refresh child_process named exports before installing the existing fs hooks.
+    // Keep named child_process imports on the same bounded native probes.
     syncBuiltinESMExports();
   }
-  const reads = new Map(), existence = new Map();
-  let bytes = 0;
-  const codePath = value => {
-    if (typeof value !== 'string' || !isAbsolute(value)) return null;
-    const key = resolve(value), path = relative(codeRoot, key);
-    return !isAbsolute(path) && path !== '..' && !path.startsWith('..' + sep) ? key : null;
-  };
-  const read = fs.readFileSync, exists = fs.existsSync;
-  fs.existsSync = function(file) {
-    const key = codePath(file);
-    if (key && existence.has(key)) return existence.get(key);
-    const result = exists.call(this, file);
-    if (key && existence.size < 20000) existence.set(key, result);
-    return result;
-  };
-  fs.readFileSync = function(file, options) {
-    const key = codePath(file);
-    if (!key || options !== 'utf-8') return read.call(this, file, options);
-    if (reads.has(key)) return reads.get(key);
-    const result = read.call(this, file, options), size = Buffer.byteLength(result);
-    if (bytes + size <= 32 * 1024 * 1024) { reads.set(key, result); bytes += size; }
-    return result;
-  };
   const original = Module._resolveFilename;
   Module._resolveFilename = function(request, ...args) {
     if (typeof request === 'string' && request.startsWith('file:')) {

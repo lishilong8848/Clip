@@ -1,0 +1,10 @@
+{
+  "group": "test_submission_reliability",
+  "modules": 1,
+  "tests": 34,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 35.5,
+  "external_connections_blocked": 0
+}

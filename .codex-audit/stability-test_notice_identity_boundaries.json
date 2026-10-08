@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_identity_boundaries",
+  "modules": 1,
+  "tests": 54,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 9.2,
+  "external_connections_blocked": 0
+}

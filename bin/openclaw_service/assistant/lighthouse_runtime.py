@@ -105,7 +105,7 @@ def model_provider_error(status, body=b''):
     return {'code': code, 'message': message}
 
 
-def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(), provider_plugin=None):
+def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=()):
     """Only the private loopback broker credential reaches the Node process."""
     entries, models = {}, []
     provider = 'lighthouse'
@@ -131,7 +131,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
         "gateway": {"mode": "local", "bind": "loopback", "port": port,
                     "auth": {"mode": "token", "token": "${LIGHTHOUSE_GATEWAY_TOKEN}"},
                     "controlUi": {"enabled": False}},
-        "models": {"mode": "replace", "providers": {provider: {
+        "models": {"mode": "replace", "catalogRefresh": {"enabled": False}, "providers": {provider: {
             'baseUrl': model_url, 'api': 'openai-completions', 'apiKey': '${LIGHTHOUSE_GATEWAY_TOKEN}', 'models': models}}},
         "agents": {"entries": entries,
                    "defaults": {"maxConcurrent": MAX_CONCURRENT_ACCOUNTS, "heartbeat": {"every": "0m"},
@@ -142,13 +142,16 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
                   "deny": ["exec", "process", "read", "write", "edit", "apply_patch", "browser", "sessions_spawn", "sessions_send", "sessions_list", "sessions_history", "agents_list", "gateway", "cron"]},
         # An empty bundled allowlist means unrestricted in the pinned SDK.
         # Lighthouse skills are authorized through the Python tool bridge.
-        "skills": {"allowBundled": ["lighthouse-tools"]}, "cron": {"enabled": False},
+        "skills": {"allowBundled": ["lighthouse-tools"], "load": {"watch": False}}, "cron": {"enabled": False},
+        "browser": {"enabled": False},
+        "update": {"checkOnStart": False, "auto": {"enabled": False}},
         "logging": {"level": "info" if os.environ.get('OPENCLAW_GATEWAY_STARTUP_TRACE') == '1' else "error", "consoleLevel": "info" if os.environ.get('OPENCLAW_GATEWAY_STARTUP_TRACE') == '1' else "error", "file": str(root / "diagnostic.log"),
                     "maxFileBytes": 2_000_000, "audit": {"enabled": False, "messages": "off"}},
         # Retain the preceding layout while widening state ownership to accounts.
         "session": {"reset": {"mode": "none"}, "store": str(root / 'agents/{agentId}/sessions/sessions.json')},
-        "plugins": {"allow": ["openai", "lighthouse-tools"], "slots": {"memory": "none"},
-                    "entries": {"openai": {"enabled": True}}},
+        # Custom models use the SDK's core openai-completions transport. The
+        # bundled OpenAI multimedia/OAuth plugin is not part of this route.
+        "plugins": {"allow": ["lighthouse-tools"], "slots": {"memory": "none"}},
     }
     # The pinned runtime prewarms its reply modules against a default agent.
     # Every user RPC still supplies the private agent ID and session explicitly.
@@ -158,8 +161,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
         config['agents']['defaults']['model'] = first['model']
         config['agents']['defaults']['workspace'] = str(root / 'workspace')
     config['gateway']['reload'] = {'mode': 'hybrid'}
-    config["plugins"].update(load={"paths": [str(plugin), *([str(provider_plugin)] if provider_plugin else [])]})
-    config["plugins"]["entries"]["lighthouse-tools"] = {"enabled": True}
+    config["plugins"].update(load={"paths": [str(plugin)]}, entries={"lighthouse-tools": {"enabled": True}})
     return config
 
 
@@ -172,7 +174,7 @@ class OpenClawRuntime:
         self.accounts, self.locks = {}, {}
         self.lock = asyncio.Lock()
         self.closing = False
-        self.starting = set()
+        self.starting = {}
         self.startup_timeout = startup_timeout
         self.prepared = None
         self.prepare_lock = asyncio.Lock()
@@ -218,7 +220,7 @@ class OpenClawRuntime:
 
     async def acquire(self, actor, model, profile, **kwargs):
         task = asyncio.current_task()
-        self.starting.add(task)
+        self.starting[task] = None
         try:
             item = await self._acquire(actor, model, profile, **kwargs)
             if not item.get('configured'):
@@ -230,12 +232,12 @@ class OpenClawRuntime:
                     raise
             return item
         except asyncio.CancelledError:
-            item = self.accounts.get(account_key(actor['id']))
-            if item:
+            item = self.starting.get(task)
+            if item is not None:
                 item['busy'] = False
             raise
         finally:
-            self.starting.discard(task)
+            self.starting.pop(task, None)
 
     async def _acquire(self, actor, model, profile, *, plugin=None, tool_names=(), bridge_token="", bridge_url="", model_parameters=None, progress=lambda _: None):
         key = account_key(actor["id"])
@@ -255,6 +257,7 @@ class OpenClawRuntime:
                 if sum(bool(item.get('busy')) for item in self.accounts.values()) >= self.maximum:
                     raise AssistantError('助手正在处理其他会话，请稍后继续。', 503)
                 existing["used_at"], existing["busy"] = time.monotonic(), True
+                self.starting[asyncio.current_task()] = existing
                 return existing
             node, entry = await self.prepare(progress=progress)
             async with self.lock:
@@ -291,6 +294,7 @@ class OpenClawRuntime:
                 if existing and existing.get('configured') and not existing.get('stopped') and existing.get('config_fingerprint') == config_fingerprint:
                     item['configured'] = True
                 self.accounts[key] = item
+                self.starting[asyncio.current_task()] = item
                 if self.startup is None:
                     self.plugin_hash = plugin_hash
                     self.startup = asyncio.create_task(self._start_shared(node, entry, plugin, tool_names, bridge_url))
@@ -314,7 +318,7 @@ class OpenClawRuntime:
     async def _write_configuration(self, tool_names, accounts=None):
         gateway = self.gateway
         config = build_configuration(gateway['root'], self.accounts if accounts is None else accounts, gateway['port'], model_url=self.model_url(),
-                                     plugin=gateway['plugin'], tool_names=tool_names, provider_plugin=gateway.get('provider_plugin'))
+                                     plugin=gateway['plugin'], tool_names=tool_names)
         digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         if gateway.get('config_digest') == digest:
             return
@@ -348,7 +352,7 @@ class OpenClawRuntime:
                             shutil.copyfile(file, shared_plugin / file.name)
                 port, token = free_port(), secrets.token_urlsafe(32)
                 # Load the existing allowlist explicitly, not the unused bundled inventory.
-                gateway = {'root': root, 'plugin': shared_plugin, 'provider_plugin': entry.parent / 'dist/extensions/openai',
+                gateway = {'root': root, 'plugin': shared_plugin,
                            'port': port, 'token': token, 'bridge_url': bridge_url}
                 self.gateway = gateway
                 first_key = next(iter(self.accounts))
@@ -376,7 +380,8 @@ class OpenClawRuntime:
                 try:
                     preload = Path(__file__).parent / 'openclaw/native-paths.mjs'
                     # Bound native compilation workers, not the twenty asynchronous account sessions.
-                    process = subprocess.Popen([str(node), '--v8-pool-size=2', '--import', preload.resolve().as_uri(), str(entry), "gateway", "run", "--port", str(port), "--bind", "loopback"],
+                    gateway_entry = preload.with_name('gateway-start.mjs')
+                    process = subprocess.Popen([str(node), '--v8-pool-size=2', '--import', preload.resolve().as_uri(), str(gateway_entry), str(port)],
                                                cwd=root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags)
                 except OSError:
                     raise AssistantStartupError('助手进程未能启动，原消息已保留。', 503) from None

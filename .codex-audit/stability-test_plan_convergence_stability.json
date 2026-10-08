@@ -1,0 +1,10 @@
+{
+  "group": "test_plan_convergence_stability",
+  "modules": 1,
+  "tests": 8,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 9.3,
+  "external_connections_blocked": 0
+}

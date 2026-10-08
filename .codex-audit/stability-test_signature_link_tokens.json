@@ -1,0 +1,10 @@
+{
+  "group": "test_signature_link_tokens",
+  "modules": 1,
+  "tests": 3,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 1.9,
+  "external_connections_blocked": 0
+}

@@ -1,0 +1,12 @@
+{
+  "group": "test_notice_connection",
+  "modules": 1,
+  "tests": 16,
+  "failures": [
+    "bin.test_notice_connection.NoticeConnectionTests.test_release_guard_allows_exception_types_not_network_clients"
+  ],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 3.1,
+  "external_connections_blocked": 0
+}

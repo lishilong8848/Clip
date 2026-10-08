@@ -25,7 +25,7 @@ from openclaw_service.assistant.lighthouse_runtime import OpenClawRuntime, free_
 
 async def run(account_count=20, *, compaction=False, replay=False, faults=False, legacy_state=False,
               read_profile=False, cpu_profile=False, no_cache_respawn=False, diagnose_runs=False,
-              lose_terminal_response=False, startup_profile=False, cache_profile=False, flush_cache=False, spawn_profile=False):
+              lose_terminal_response=False, startup_profile=False, cache_profile=False, flush_cache=False, spawn_profile=False, images=False):
     if not 2 <= account_count <= 20:
         raise ValueError('Fixture account count must be between 2 and 20')
     os.environ['OPENCLAW_GATEWAY_STARTUP_TRACE'] = '1'
@@ -108,6 +108,7 @@ async def run(account_count=20, *, compaction=False, replay=False, faults=False,
             setattr(engine, name, getattr(LighthouseOpenClaw, name).__get__(engine))
         install_model_route(app, manager)
         arrivals, requests, tool_calls = set(), [], []
+        image_owners = set()
         memory = 'SYNTHETIC_MEMORY_00=7362'
         compact = {'fill': False, 'summaries': 0, 'events': 0, 'recalls': 0,
                    'summaries_with_memory': 0, 'overflow_rejections': 0, 'event_owners': set()}
@@ -129,6 +130,9 @@ async def run(account_count=20, *, compaction=False, replay=False, faults=False,
             assert payload['model'] == f'fixture-model-{index}'
             owner = index % 20
             serialized = json.dumps(payload.get('messages', []))
+            if 'data:image/png;base64,' in serialized:
+                assert owner == 0, 'Image crossed account boundary'
+                image_owners.add(owner)
             assert all(f'fixture-owner-{other:02d}' not in serialized for other in range(20) if other != owner), 'Cross-account history'
             assert owner == 0 or memory not in serialized, 'Cross-account compacted memory'
             if index == 20:
@@ -220,9 +224,9 @@ async def run(account_count=20, *, compaction=False, replay=False, faults=False,
                 return query_owner
             agent.tool_plain(bind(actor['id']))
             agents.append(agent)
-        async def answer(agent, question='Call query_owner and answer briefly.'):
+        async def answer(agent, question='Call query_owner and answer briefly.', attachments=()):
             result = None
-            async with agent.run_stream_events([question], message_history=[]) as events:
+            async with agent.run_stream_events([question, *attachments], message_history=[]) as events:
                 async for event in events:
                     if event.event_kind == 'agent_run_result':
                         result = event.result.output
@@ -297,6 +301,16 @@ async def run(account_count=20, *, compaction=False, replay=False, faults=False,
                 print('[SharedGateway] completion response loss recovered without new inference/callback PASS', flush=True)
             print('[SharedGateway] concurrent models/callbacks', account_count, 'PASS seconds=', round(time.monotonic() - start, 2), flush=True)
             concurrent_phase['enabled'] = False
+            if images:
+                import io
+                from PIL import Image
+                agents[0].profile = {**agents[0].profile, 'vision_verified': True}
+                agents[0].turn = {'operation_id': 'image-input'}
+                png = io.BytesIO()
+                Image.new('RGB', (2, 2), (0, 0, 0)).save(png, format='PNG')
+                await answer(agents[0], attachments=[SimpleNamespace(media_type='image/png', data=png.getvalue())])
+                assert image_owners == {0}, 'Verified image did not reach its private provider'
+                print('[SharedGateway] image input through core custom-model transport PASS', flush=True)
             # A second turn must use private native history without changing PID.
             pid = items[0]['process'].pid
             agents[0].turn = {'operation_id': 'second-turn'}
@@ -413,10 +427,11 @@ if __name__ == '__main__':
     parser.add_argument('--profile-cache', action='store_true')
     parser.add_argument('--profile-spawns', action='store_true')
     parser.add_argument('--flush-cache', action='store_true')
+    parser.add_argument('--images', action='store_true')
     args = parser.parse_args()
     asyncio.run(run(args.accounts, compaction=args.compaction, replay=args.replay, faults=args.faults,
                    legacy_state=args.legacy_state, read_profile=args.profile_reads, cpu_profile=args.profile_cpu,
                    no_cache_respawn=args.no_cache_respawn, diagnose_runs=args.diagnose_runs,
                    lose_terminal_response=args.lose_terminal_response, startup_profile=args.profile_startup,
                    cache_profile=args.profile_cache or args.flush_cache, flush_cache=args.flush_cache,
-                   spawn_profile=args.profile_spawns))
+                   spawn_profile=args.profile_spawns, images=args.images))

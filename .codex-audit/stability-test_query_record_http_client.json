@@ -1,0 +1,10 @@
+{
+  "group": "test_query_record_http_client",
+  "modules": 1,
+  "tests": 4,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.7,
+  "external_connections_blocked": 0
+}

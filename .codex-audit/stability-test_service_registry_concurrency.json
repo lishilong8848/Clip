@@ -1,0 +1,10 @@
+{
+  "group": "test_service_registry_concurrency",
+  "modules": 1,
+  "tests": 2,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 0.3,
+  "external_connections_blocked": 0
+}

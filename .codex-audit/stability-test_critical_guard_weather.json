@@ -1,0 +1,10 @@
+{
+  "group": "test_critical_guard_weather",
+  "modules": 1,
+  "tests": 36,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 15.9,
+  "external_connections_blocked": 0
+}

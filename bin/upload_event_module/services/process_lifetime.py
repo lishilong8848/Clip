@@ -10,7 +10,7 @@ _job_handle = None
 _job_closed = False
 
 
-def lower_current_thread_priority() -> None:
+def lower_current_thread_priority(*, background_io: bool = False) -> None:
     """Keep background maintenance from competing with desktop input."""
     if os.name != "nt":
         return
@@ -18,6 +18,14 @@ def lower_current_thread_priority() -> None:
         import win32api
         import win32process
 
+        if background_io:
+            try:
+                # Only dedicated file-transfer workers opt in: background CPU,
+                # disk I/O and memory priority end when their thread exits.
+                win32process.SetThreadPriority(win32api.GetCurrentThread(), 0x10000)
+                return
+            except Exception:
+                pass
         win32process.SetThreadPriority(
             win32api.GetCurrentThread(),
             win32process.THREAD_PRIORITY_BELOW_NORMAL,

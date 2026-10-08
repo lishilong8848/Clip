@@ -1,0 +1,10 @@
+{
+  "group": "test_cabinet_reliability",
+  "modules": 1,
+  "tests": 27,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 185.6,
+  "external_connections_blocked": 0
+}

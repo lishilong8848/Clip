@@ -1,0 +1,12 @@
+{
+  "group": "business",
+  "modules": 63,
+  "tests": 1,
+  "failures": [],
+  "errors": [
+    "unittest.loader._FailedTest.business"
+  ],
+  "skipped": 0,
+  "seconds": 0.0,
+  "external_connections_blocked": 0
+}

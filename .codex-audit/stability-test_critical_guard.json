@@ -1,0 +1,10 @@
+{
+  "group": "test_critical_guard",
+  "modules": 1,
+  "tests": 33,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 27.2,
+  "external_connections_blocked": 0
+}

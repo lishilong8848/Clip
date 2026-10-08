@@ -1,0 +1,10 @@
+{
+  "group": "test_state_store_migrations",
+  "modules": 1,
+  "tests": 18,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 8.6,
+  "external_connections_blocked": 0
+}

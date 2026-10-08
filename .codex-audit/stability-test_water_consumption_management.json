@@ -1,0 +1,10 @@
+{
+  "group": "test_water_consumption_management",
+  "modules": 1,
+  "tests": 24,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 10.8,
+  "external_connections_blocked": 0
+}

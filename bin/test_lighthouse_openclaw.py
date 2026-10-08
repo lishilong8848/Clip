@@ -489,6 +489,7 @@ class OpenClawLifecycleTests(unittest.IsolatedAsyncioTestCase):
         client = FakeGatewayClient.instances[0]
         self.assertFalse(client.closed)
         self.assertEqual(sum(method == 'agent' for method, _ in client.calls), 2)
+        self.assertEqual(sum(method == 'chat.history' for method, _ in client.calls), 1)
         self.assertEqual(sum(value.get('label') == '正在连接助手' for _, value in emitted), 1)
         await client.close()
 
@@ -613,6 +614,41 @@ def _recovery_agent(engine=None, *, turn=None):
 class OpenClawRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         FakeGatewayClient._reset()
+
+    async def test_history_migration_once_per_session_rechecked_after_reset_and_restart(self):
+        agent = _recovery_agent()
+        client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+        agent.client = client
+        history = [SimpleNamespace(parts=[SimpleNamespace(content='legacy input', part_kind='user-prompt')])]
+        for number in range(2):
+            agent.turn = {'operation_id': 'history-' + str(number)}
+            _ = [event async for event in agent._events(client, ['hello'], history)]
+        messages = [params['message'] for method, params in client.calls if method == 'agent']
+        self.assertIn('legacy input', messages[0])
+        self.assertEqual(messages[1], 'hello')
+        self.assertEqual(sum(method == 'chat.history' for method, _ in client.calls), 1)
+        agent.session_key += '-new-conversation'
+        agent.turn = {'operation_id': 'after-reset'}
+        _ = [event async for event in agent._events(client, ['new question'], [])]
+        self.assertEqual(sum(method == 'chat.history' for method, _ in client.calls), 2)
+        agent.item = {'port': 19999, 'token': 'new-gateway-token'}
+        client.history = {'messages': [{'role': 'assistant', 'content': 'native history'}]}
+        agent.turn = {'operation_id': 'after-restart'}
+        _ = [event async for event in agent._events(client, ['hello again'], history)]
+        self.assertEqual(sum(method == 'chat.history' for method, _ in client.calls), 3)
+        self.assertEqual(next(params['message'] for method, params in reversed(client.calls) if method == 'agent'), 'hello again')
+
+    async def test_failed_native_submission_does_not_mark_history_migrated(self):
+        agent = _recovery_agent()
+        client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token',
+                                   fail={'agent': GatewayError('REQUEST_REJECTED')})
+        agent.client = client
+        with self.assertRaises(GatewayError):
+            _ = [event async for event in agent._events(client, ['hello'], [])]
+        self.assertNotIn('native_history_session', agent.item)
+        client.fail.clear()
+        _ = [event async for event in agent._events(client, ['hello'], [])]
+        self.assertEqual(sum(method == 'chat.history' for method, _ in client.calls), 2)
 
     async def test_native_model_failures_are_actionable_without_exposing_provider_details(self):
         from lan_bitable_template_portal.lighthouse_stream import failure_detail

@@ -1,0 +1,10 @@
+{
+  "group": "test_state_store_lightweight_meta",
+  "modules": 1,
+  "tests": 8,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 3.6,
+  "external_connections_blocked": 0
+}

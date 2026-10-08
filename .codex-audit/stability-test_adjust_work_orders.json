@@ -1,0 +1,10 @@
+{
+  "group": "test_adjust_work_orders",
+  "modules": 1,
+  "tests": 5,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 7.0,
+  "external_connections_blocked": 0
+}

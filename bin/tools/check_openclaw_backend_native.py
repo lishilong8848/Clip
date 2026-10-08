@@ -74,7 +74,7 @@ def process_resources(pid):
         handle.Close()
 
 
-async def check(runtime, *, browser_check=False):
+async def check(runtime, *, browser_check=False, idle_seconds=3, observe_latency=False):
     control_loop = asyncio.get_running_loop()
     with tempfile.TemporaryDirectory(prefix='resident-native-') as directory:
         root = Path(directory)
@@ -83,6 +83,7 @@ async def check(runtime, *, browser_check=False):
         actor_id = 'isolated-resident-account'
         provider_port = free_port()
         reads, writes, model_calls = [], [], []
+        model_times = []
         delayed_calls = set()
         mode = {'proposal': False, 'delay': 0, 'generation': 0}
         provider = FastAPI()
@@ -92,6 +93,7 @@ async def check(runtime, *, browser_check=False):
             assert request.headers.get('authorization') == 'Bearer synthetic-native-key'
             payload = await request.json()
             model_calls.append(payload)
+            model_times.append(time.monotonic())
             if mode['delay']:
                 task = asyncio.current_task()
                 delayed_calls.add(task)
@@ -228,6 +230,7 @@ async def check(runtime, *, browser_check=False):
         async def timed_query(browser, base, payload):
             before = process_resources(child.pid)
             began = time.monotonic()
+            began_at, model_offset = time.time(), len(model_times)
             task = asyncio.create_task(browser.post(base + '/api/assistant/messages', headers={'Origin': base}, json=payload))
             latencies = []
             while not task.done():
@@ -237,6 +240,7 @@ async def check(runtime, *, browser_check=False):
                 latencies.append(time.monotonic() - tick)
                 await asyncio.sleep(.1)
             ack = data(await task)
+            accepted_ms = (time.monotonic() - began) * 1000
             observer = asyncio.create_task(settled(browser, base, ack['run_id']))
             while not observer.done():
                 tick = time.monotonic()
@@ -252,7 +256,14 @@ async def check(runtime, *, browser_check=False):
                 f'portal_max_ms={max(latencies) * 1000:.1f} host_cpu_core_pct=' 
                 f'{(after["cpu_seconds"] - before["cpu_seconds"]) / duration * 100:.1f} '
                 f'host_private_mib={after["private_mib"]:.1f}', flush=True)
-            assert max(latencies) < 1, 'Assistant blocked isolated portal responses for a second'
+            print('[ResidentTiming]', json.dumps({'accepted_ms': round(accepted_ms, 1),
+                'model_arrival_ms': [round((at - began) * 1000, 1) for at in model_times[model_offset:]],
+                'phases': [{'label': row['label'], 'ms': round((row['at'] - began_at) * 1000, 1)}
+                           for row in turn.get('process', [])], 'total_ms': round(duration * 1000, 1)}, ensure_ascii=False), flush=True)
+            if observe_latency and max(latencies) >= 1:
+                print('[ResidentPerformance] latency limit exceeded; continuing pressure sampling', flush=True)
+            else:
+                assert max(latencies) < 1, 'Assistant blocked isolated portal responses for a second'
             return ack, turn, duration
 
         async def settled(browser, base, run):
@@ -315,7 +326,7 @@ async def check(runtime, *, browser_check=False):
                     assert health['gateways'][0]['pid'] == gateway, 'Portal restart cold-started the existing account gateway'
                     idle_start = {pid: process_resources(pid) for pid in (child.pid, gateway)}
                     began = time.monotonic()
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(idle_seconds)
                     idle_end = {pid: process_resources(pid) for pid in idle_start}
                     duration = time.monotonic() - began
                     for pid, sample in idle_end.items():
@@ -397,6 +408,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--runtime', type=Path, default=PROJECT / 'build_output/lighthouse_openclaw_verified')
     parser.add_argument('--browser', action='store_true')
+    parser.add_argument('--idle-seconds', type=int, default=3)
+    parser.add_argument('--observe-latency', action='store_true')
     args = parser.parse_args()
     # This proxy probe borrows its explicit fixture worker; production portals
     # own their workers. The integrated lifecycle has its own native probe.
@@ -405,4 +418,5 @@ if __name__ == '__main__':
             raise AssertionError('The proxy fixture must not start a second worker')
         return ResidentRuntime(*values, **options, launch=forbidden_launch)
     with patch('openclaw_service.client.ResidentRuntime', side_effect=fixture_client):
-        asyncio.run(check(args.runtime, browser_check=args.browser))
+        asyncio.run(check(args.runtime, browser_check=args.browser, idle_seconds=max(3, args.idle_seconds),
+                          observe_latency=args.observe_latency))
