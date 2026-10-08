@@ -17,6 +17,9 @@ class CredentialTests(unittest.TestCase):
         self.setting = patch.object(auth, 'config', self.config)
         self.setting.start()
         self.addCleanup(self.setting.stop)
+        self.errors = patch.object(auth, 'log_error')
+        self.error_log = self.errors.start()
+        self.addCleanup(self.errors.stop)
         self.client = Mock(request_json=Mock(return_value={'code': 10014, 'msg': 'app secret invalid'}))
         self.manager = auth.FeishuTokenManager(self.client)
 
@@ -50,6 +53,7 @@ class CredentialTests(unittest.TestCase):
         with patch.object(auth.time, 'monotonic', return_value=162):
             self.assertEqual(self.manager.get_app_access_token(), 'fixed-token')
         self.assertEqual(self.client.request_json.call_count, 3)
+        self.assertEqual(self.error_log.call_count, 2)
 
     def test_explicit_credentials_do_not_fallback_on_rejection(self):
         with patch.object(self.manager, '_request_tenant_token_sdk') as sdk:
@@ -57,6 +61,7 @@ class CredentialTests(unittest.TestCase):
         self.assertEqual(token, '')
         self.assertIn('10014', message)
         sdk.assert_not_called()
+        self.error_log.assert_called_once()
 
     def test_transport_failure_still_uses_existing_sdk_fallback(self):
         self.client.request_json.side_effect = auth.FeishuHTTPError('fixture network error')
@@ -64,6 +69,7 @@ class CredentialTests(unittest.TestCase):
                 patch.object(self.manager, '_save_tenant_token', return_value='token'):
             self.assertEqual(self.manager.refresh_tenant_token(), 'token')
         sdk.assert_called_once()
+        self.assertIn('fixture network error', self.error_log.call_args.args[0])
 
 
 if __name__ == '__main__':

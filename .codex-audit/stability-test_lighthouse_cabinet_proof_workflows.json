@@ -1,10 +1,10 @@
 {
-  "group": "test_release_readiness",
+  "group": "test_lighthouse_cabinet_proof_workflows",
   "modules": 1,
-  "tests": 6,
+  "tests": 11,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 10.4,
+  "seconds": 50.0,
   "external_connections_blocked": 0
 }

@@ -173,16 +173,19 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                 )
 
                 restarted_manager = PortalAuthManager()
-                with self.assertRaises(PortalAuthStateError) as caught:
-                    restarted_manager.complete_login(
-                        code="expired-code",
-                        state=state,
-                        redirect_uri=(
-                            "http://127.0.0.1:18766/api/auth/feishu/callback"
-                        ),
-                    )
-
-                self.assertEqual(caught.exception.next_path, "/engineer/mop?scope=E")
+                try:
+                    with self.assertRaises(PortalAuthStateError) as caught:
+                        restarted_manager.complete_login(
+                            code="expired-code",
+                            state=state,
+                            redirect_uri=(
+                                "http://127.0.0.1:18766/api/auth/feishu/callback"
+                            ),
+                        )
+                    self.assertEqual(caught.exception.next_path, "/engineer/mop?scope=E")
+                finally:
+                    restarted_manager._cleanup_executor.shutdown(wait=True)
+                    manager._cleanup_executor.shutdown(wait=True)
 
     def test_disabling_user_revokes_a_persisted_session_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:

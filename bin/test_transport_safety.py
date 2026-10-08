@@ -183,11 +183,22 @@ class TransportSafetyTests(unittest.TestCase):
                 )
 
     def test_cabinet_templates_are_always_included_in_patch(self):
-        root = Path("bin/lan_bitable_template_portal/templates/cabinet_power")
-        for scope in "ABCDE":
-            self.assertTrue(portable_packaging._should_force_include_in_patch(root / f"{scope}.xlsm"))
-            self.assertTrue(portable_packaging._should_force_include_in_patch(root / f"{scope}.layouts.json.gz"))
-        self.assertTrue(portable_packaging._should_force_include_in_patch(root / "layouts.json.gz"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, baseline = root / 'source', root / 'baseline'
+            templates = Path('bin/lan_bitable_template_portal/templates/cabinet_power')
+            files = [templates / f'{scope}{suffix}' for scope in 'ABCDE' for suffix in ('.xlsm', '.layouts.json.gz')]
+            files += [Path('bin/static.json'), Path('bin/helper.dll'), Path('bin/ui/page.html')]
+            for relative in files:
+                path = source / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'unchanged runtime fixture')
+            shutil.copytree(source, baseline)
+            with patch.object(portable_packaging, 'PROJECT_ROOT', source), patch.object(portable_packaging, 'BUILD_DIR', root / 'build'):
+                portable_packaging.build_patch(root / 'unused', baseline, 'complete')
+            for relative in files:
+                with self.subTest(path=relative):
+                    self.assertEqual((root / 'build/complete_patch_only' / relative).read_bytes(), (source / relative).read_bytes())
 
     def test_manifest_fetch_bypasses_mutable_url_cache(self):
         updater = RemotePatchUpdater(
@@ -425,6 +436,33 @@ class TransportSafetyTests(unittest.TestCase):
             self.assertFalse(patch_dir.exists())
             self.assertIsNone(instance._patch_dir)
             self.assertEqual(results[-1][0], False)
+
+    def test_updated_baseline_does_not_omit_current_frontend_for_old_clients(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source, baseline, build = root / "source", root / "baseline", root / "build"
+            assets = source / FRONTEND_DIST / "assets"
+            assets.mkdir(parents=True)
+            (source / FRONTEND_INDEX).write_text('<script src="/assets/home.js"></script>', encoding="utf-8")
+            (source / FRONTEND_INDEX.with_name("assistant.html")).write_text(
+                '<script src="/assets/bot.js"></script>', encoding="utf-8")
+            (assets / "home.js").write_text('import "./guide.js";import "./shared.js"', encoding="utf-8")
+            (assets / "bot.js").write_text('import "./shared.js"', encoding="utf-8")
+            (assets / "guide.js").write_text('// guide', encoding="utf-8")
+            (assets / "shared.js").write_text('// shared', encoding="utf-8")
+            shutil.copytree(source, baseline)
+            with patch.object(portable_packaging, "PROJECT_ROOT", source), \
+                    patch.object(portable_packaging, "BUILD_DIR", build):
+                portable_packaging.build_patch(root / "unused", baseline, "fixture")
+            overlay = build / "fixture_patch_only"
+            required = {FRONTEND_INDEX, FRONTEND_INDEX.with_name("assistant.html"), *referenced_assets(source)}
+            meta = json.loads((overlay / "bin/patch_meta.json").read_text(encoding="utf-8"))
+            for relative in required:
+                with self.subTest(path=relative):
+                    content = (source / relative).read_bytes()
+                    self.assertEqual((overlay / relative).read_bytes(), content)
+                    self.assertEqual(meta["file_sha256"][relative.as_posix()], hashlib.sha256(content).hexdigest())
+
 
     def test_patch_bundles_complete_frontend_generation(self):
         with tempfile.TemporaryDirectory() as tmp:

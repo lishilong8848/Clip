@@ -27,6 +27,7 @@ from .portal_service import (
     PortalError,
 )
 from .state_store import DEFAULT_STATE_DB_NAME, LanPortalStateStore
+from .cabinet_guest import GUEST_SCOPES, GUEST_SESSION_PREFIX, is_cabinet_guest
 
 
 AUTH_COOKIE_NAME = "lan_portal_session"
@@ -1015,8 +1016,24 @@ class PortalAuthManager:
             "user_id": str(user.get("user_id") or ""),
             "name": str(user.get("name") or user.get("en_name") or "飞书用户"),
             "avatar_url": str(user.get("avatar_url") or user.get("avatar_thumb") or ""),
-            "role": "admin" if self.is_admin(session) else "building",
+            "role": "guest" if is_cabinet_guest(session) else "admin" if self.is_admin(session) else "building",
         }
+
+    def create_guest_session(self) -> str:
+        session_id = GUEST_SESSION_PREFIX + secrets.token_urlsafe(32)
+        now = time.time()
+        session = {
+            "user": {"open_id": "guest_" + secrets.token_hex(16), "name": "机柜访客"},
+            "role": "guest", "allowed_scopes": list(GUEST_SCOPES),
+            "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at_ts": now, "expires_at": now + AUTH_SESSION_TTL_SECONDS,
+        }
+        with self._lock:
+            self._cleanup_expired_locked(now)
+            self._sessions[session_id] = session
+            self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
+            self._state_store.put_auth_session(self._secret_hash(session_id), session)
+        return session_id
 
     def start_login(self, *, redirect_uri: str, next_path: str = "/") -> str:
         if not self.configured():
@@ -1122,7 +1139,9 @@ class PortalAuthManager:
                 self._state_store.revoke_auth_session(self._secret_hash(session_id))
                 return None
             open_id = str((session.get("user") or {}).get("open_id") or "").strip()
-            if open_id:
+            if is_cabinet_guest(session):
+                session["allowed_scopes"] = list(GUEST_SCOPES)
+            elif open_id:
                 if self._open_id_explicitly_disabled(open_id):
                     self._sessions.pop(session_id, None)
                     self._state_store.revoke_auth_session(

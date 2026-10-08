@@ -1,10 +1,10 @@
 {
-  "group": "test_release_readiness",
+  "group": "test_learning",
   "modules": 1,
-  "tests": 6,
+  "tests": 72,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 10.4,
+  "seconds": 75.7,
   "external_connections_blocked": 0
 }

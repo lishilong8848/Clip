@@ -302,12 +302,18 @@ class CabinetPowerTests(unittest.TestCase):
     def setUpClass(cls):
         cls.models,cls.source_records,cls.directory_records,cls.configs=fixtures()
 
-    def setUp(self):
+    def setUp(self, *, scopes=None):
         self.tmp=tempfile.TemporaryDirectory(); self.store=MemoryStore()
         self.store.db_path=Path(self.tmp.name)/"state.sqlite"
-        self.remote=FakeFeishu(self.source_records); self.service=CabinetPowerService(self.store,self.remote,self.tmp.name)
-        self.service._directory=FakeFeishu(self.directory_records)
-        self.service.do_refresh("",{}, {})
+        selected={scope+"楼" for scope in scopes} if scopes is not None else None
+        records=self.source_records if selected is None else [r for r in self.source_records if r["fields"].get("楼栋") in selected]
+        directory=self.directory_records if selected is None else [r for r in self.directory_records if r["fields"].get("楼栋") in selected]
+        self.remote=FakeFeishu(records); self.service=CabinetPowerService(self.store,self.remote,self.tmp.name)
+        self.service._directory=FakeFeishu(directory)
+        if scopes is None:
+            self.service.do_refresh("",{}, {})
+        else:
+            for scope in scopes: self.service.do_refresh(scope,{}, {})
 
     def tearDown(self):
         self.service.shutdown(); self.tmp.cleanup()

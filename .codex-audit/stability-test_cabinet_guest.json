@@ -1,10 +1,10 @@
 {
-  "group": "test_release_readiness",
+  "group": "test_cabinet_guest",
   "modules": 1,
-  "tests": 6,
+  "tests": 7,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 10.4,
+  "seconds": 5.1,
   "external_connections_blocked": 0
 }

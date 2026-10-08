@@ -169,6 +169,11 @@ RUNTIME_DATA_SUFFIXES = {
 
 FORCE_PATCH_INCLUDE_FILES = {
 
+    # The local baseline can already be updated while clients are still older.
+    # Always ship both entries; their complete asset closure is copied below.
+    FRONTEND_INDEX,
+    FRONTEND_INDEX.with_name("assistant.html"),
+
     Path("bin") / "upload_event_module" / "web" / "index.html",
 
     Path("bin") / "upload_event_module" / "services" / "process_lifetime.py",
@@ -1363,7 +1368,7 @@ def _is_development_only_path(path: Path, root: Path, *, relative_path: Path | N
         registry = root / 'bin/openclaw_service/assistant/openclaw/skills/workbuddy-registry.json'
         if registry.is_file():
             stamp = registry.stat()
-            registered = _registered_skill_resources(str(registry.resolve()), stamp.st_mtime_ns, stamp.st_size)
+            registered = _registered_skill_resources(str(registry), stamp.st_mtime_ns, stamp.st_size)
             if Path(*rel.parts[5:]).as_posix() in registered:
                 return False
             if len(parts) > 5 and parts[5] == 'workbuddy' and path.is_file():
@@ -1486,7 +1491,7 @@ def _scan_runtime_data_files(root: Path) -> list[Path]:
 
             continue
 
-        if _is_runtime_data_path(path, root):
+        if _is_runtime_data_path(path, root, relative_path=path.relative_to(root)):
 
             found.append(path)
 
@@ -1516,7 +1521,7 @@ def _assert_no_development_files_in_output(root: Path, label: str) -> None:
     found = [
         path
         for path in Path(root).rglob("*")
-        if path.is_file() and _is_development_only_path(path, Path(root))
+        if path.is_file() and _is_development_only_path(path, Path(root), relative_path=path.relative_to(root))
     ]
     if found:
         preview = ", ".join(str(path.relative_to(root)) for path in found[:10])
@@ -1529,7 +1534,7 @@ def _assert_project_iterator_excludes_runtime_data() -> None:
     leaked = [
         path
         for path in _iter_project_files(PROJECT_ROOT, exclude_venv=True)
-        if _is_runtime_data_path(path, PROJECT_ROOT)
+        if _is_runtime_data_path(path, PROJECT_ROOT, relative_path=path.relative_to(PROJECT_ROOT))
     ]
 
     if leaked:
@@ -1539,6 +1544,17 @@ def _assert_project_iterator_excludes_runtime_data() -> None:
         raise RuntimeError(f"源码复制列表包含运行数据，已中止: {preview}")
 
     log("源码复制列表运行数据排除检查通过。")
+
+
+def _run_preflight_check(args: list[str], **kwargs) -> None:
+    label = (f"{args[3]} 等 {len(args) - 3} 个测试模块" if args[1:3] == ["-m", "unittest"]
+             else "Python 语法检查" if args[1] == "-c" else Path(args[1]).name)
+    started = time.monotonic()
+    log(f"检查开始: {label}")
+    try:
+        subprocess.run(args, **kwargs)
+    finally:
+        log(f"检查耗时: {label}，{time.monotonic() - started:.1f} 秒")
 
 
 def _run_packaging_preflight_tests() -> None:
@@ -1623,7 +1639,7 @@ def _run_packaging_preflight_tests() -> None:
     if py_targets:
         with tempfile.TemporaryDirectory(prefix="clipflow_pycompile_") as pycache_dir:
             compile_script = "import pathlib,py_compile,sys\nfor index,source in enumerate(sys.argv[2:]): py_compile.compile(source,cfile=str(pathlib.Path(sys.argv[1])/f'{index}.pyc'),doraise=True)"
-            subprocess.run(
+            _run_preflight_check(
                 [test_python, "-c", compile_script, pycache_dir, *[os.fspath(path) for path in py_targets]],
                 cwd=PROJECT_ROOT,
                 check=True,
@@ -1636,7 +1652,7 @@ def _run_packaging_preflight_tests() -> None:
     readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
     if readiness_script.exists():
         _ensure_packaging_preflight_dependencies(Path(test_python))
-        subprocess.run(
+        _run_preflight_check(
             [test_python, os.fspath(readiness_script)],
             cwd=PROJECT_ROOT,
             check=True,
@@ -1647,7 +1663,7 @@ def _run_packaging_preflight_tests() -> None:
 
     notice_flow_smoke = PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py"
     if notice_flow_smoke.exists():
-        subprocess.run(
+        _run_preflight_check(
             [test_python, os.fspath(notice_flow_smoke)],
             cwd=PROJECT_ROOT,
             check=True,
@@ -1656,14 +1672,14 @@ def _run_packaging_preflight_tests() -> None:
     else:
         raise RuntimeError("缺少通告链路静态烟测脚本，已中止打包。")
 
-    subprocess.run(
+    _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_notice_identity_boundaries"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("通告 ID 边界测试通过。")
 
-    subprocess.run(
+    _run_preflight_check(
         [test_python, "-m", "unittest",
          "bin.test_learning", "bin.test_learning_routes", "bin.test_learning_cloud",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
@@ -1693,7 +1709,7 @@ def _run_packaging_preflight_tests() -> None:
         check=True,
     )
     log("画像学练与灯塔助手专项测试通过。")
-    subprocess.run(
+    _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_openclaw_service", "bin.test_openclaw_service_client",
          "bin.test_openclaw_service_launcher", "bin.test_openclaw_service_store", "bin.test_openclaw_service_update",
          "bin.test_openclaw_backend_proxy", "bin.test_openclaw_packaging_imports",
@@ -1704,14 +1720,14 @@ def _run_packaging_preflight_tests() -> None:
     )
     log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
 
-    subprocess.run(
+    _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_points_adapter"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("计划收敛审查专项测试通过。")
 
-    subprocess.run(
+    _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_submission_reliability",
          "bin.test_event_remote_atomicity", "bin.test_notice_upload_reliability", "bin.test_notice_undo",
          "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
@@ -1720,15 +1736,15 @@ def _run_packaging_preflight_tests() -> None:
     )
     log("通告与维修可靠性、恢复及进程退出测试通过。")
 
-    subprocess.run(
+    _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_critical_guard"],
         cwd=PROJECT_ROOT,
         check=True,
     )
     log("重保管理专项测试通过。")
 
-    subprocess.run(
-        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials"],
+    _run_preflight_check(
+        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest"],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -1830,7 +1846,9 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
 
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        rel_base = base.relative_to(root)
+        # Resolve each directory once, including junctions; ordinary files do
+        # not need repeated Windows final-path lookups through every ancestor.
+        rel_base = base.resolve().relative_to(root)
         kept_dirnames: list[str] = []
         for dirname in dirnames:
             child = base / dirname
@@ -1842,7 +1860,7 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
                 continue
             if dirname == "build_output":
                 continue
-            relative = child.resolve().relative_to(root)
+            relative = child.resolve().relative_to(root) if child.is_symlink() or child.is_junction() else rel_base / dirname
             if _is_development_only_path(child, root, relative_path=relative):
                 continue
             if _is_runtime_data_path(child, root, relative_path=relative):
@@ -1858,7 +1876,8 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
                 continue
             if path.suffix.lower() == ".zip" and base == root:
                 continue
-            if _is_excluded(path, root=root, exclude_venv=exclude_venv, relative_path=path.resolve().relative_to(root)):
+            relative = path.resolve().relative_to(root) if path.is_symlink() else rel_base / filename
+            if _is_excluded(path, root=root, exclude_venv=exclude_venv, relative_path=relative):
                 continue
             files.append(path)
 
@@ -1866,15 +1885,6 @@ def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]
 
 
 
-
-
-def _should_force_include_in_patch(relative_path: Path) -> bool:
-
-    norm = Path(str(relative_path).replace("\\", "/"))
-
-    cabinet_templates = Path("bin/lan_bitable_template_portal/templates/cabinet_power")
-    return (norm in FORCE_PATCH_INCLUDE_FILES or norm.is_relative_to(cabinet_templates)
-            or norm.is_relative_to(Path("bin/openclaw_service")))
 
 
 def _include_frontend_generation(root: Path, patch_dir: Path) -> int:
@@ -2776,83 +2786,20 @@ def build_patch(
 
     current_files = _iter_project_files(PROJECT_ROOT, exclude_venv=exclude_venv)
 
+    # Ship the complete runtime, even when this machine's baseline was updated.
+    # The baseline is used only to identify retired files, never to omit files.
     for src in current_files:
-
         rel = src.relative_to(PROJECT_ROOT)
-
         if rel.is_relative_to(IMPORTED_SKILLS_DIR):
             continue
-
         if rel.suffix.lower() == ".py":
-
             forced_py += 1
-
-            if baseline_files and rel in baseline_files:
-
-                changed += 1
-
-            else:
-
-                added += 1
-
-            dest = patch_dir / rel
-
-            dest.parent.mkdir(parents=True, exist_ok=True)
-
-            shutil.copy2(src, dest)
-
-            continue
-
-        if _should_force_include_in_patch(rel):
-
-            if baseline_files and rel in baseline_files:
-
-                changed += 1
-
-            else:
-
-                added += 1
-
-            dest = patch_dir / rel
-
-            dest.parent.mkdir(parents=True, exist_ok=True)
-
-            shutil.copy2(src, dest)
-
-            continue
-
-        if baseline_files:
-
-            old = baseline_files.get(rel)
-
-            if old and old.exists():
-
-                try:
-
-                    if _hash_file(src) == _hash_file(old):
-
-                        continue
-
-                except Exception:
-
-                    pass
-
-                changed += 1
-
-            else:
-
-                added += 1
-
+        if rel in baseline_files:
+            changed += 1
         else:
-
             added += 1
-
-
-
         dest = patch_dir / rel
-
         dest.parent.mkdir(parents=True, exist_ok=True)
-
         shutil.copy2(src, dest)
 
 
@@ -3542,6 +3489,7 @@ def main() -> None:
 
         )
 
+    log("本次包含全部运行文件，不依赖用户已安装的补丁版本；保留用户数据与配置。")
     added, changed, deleted = build_patch(
 
         dist_dir,

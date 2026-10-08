@@ -1534,6 +1534,122 @@ class ActiveNoticeModelTests(unittest.TestCase):
             harness._probe_event_upload(data)
         self.assertEqual(ActiveNoticeModel.action_label_for_record(item.data(Qt.ItemDataRole.UserRole)), "待核验")
 
+    def test_event_waiting_without_uploading_flag_has_bounded_recovery(self):
+        class InlineThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        for status, queued in (
+            ("executing", True), ("remote_written", True),
+            ("unavailable", True), ("remote_written", False),
+        ):
+            with self.subTest(status=status, queued=queued):
+                harness = _ReplaceRecordIdHarness()
+                harness._closing = False
+                harness.current_screenshot_record_id = ""
+                harness._upsert_active_cache_record = lambda _data: True
+                harness.request_active_cache_save = lambda *_args, **_kwargs: None
+                harness._enqueue_ui_mutation = lambda _tag, fn: fn()
+                harness.list_active_event.itemChanged.connect(
+                    lambda _item: harness._active_notice_store().invalidate()
+                )
+                operation_id = "qt_notice:waiting-timeout"
+                record_id = "rec-waiting-timeout"
+                original = {
+                    "record_id": record_id,
+                    "target_record_id": record_id,
+                    "notice_type": "事件通告",
+                    "text": "【事件通告】状态：更新\n【标题】A楼事件\n【概述】原提交",
+                }
+                if status == "executing":
+                    original["_upload_started_monotonic"] = time.monotonic() - 301
+                item = QListWidgetItem("waiting")
+                harness.list_active_event.addItem(item)
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    **original,
+                    "text": original["text"].replace("原提交", "下一条") if queued else original["text"],
+                    "_upload_in_progress": False,
+                    "_upload_operation_id": operation_id,
+                    "_queued_after_upload": queued,
+                    "_queued_upload_requested": queued,
+                    "_event_inflight_retry_snapshot": original,
+                    "_upload_verification_pending": status == "remote_written",
+                })
+                harness.pending_action_record_ids = {record_id}
+                harness.pending_action_types = {record_id: "update"}
+                if queued:
+                    harness.pending_upload_rollback_by_record_id[record_id] = {"old_data": original}
+                    harness.pending_update_after_upload[record_id] = {"data": {"text": "下一条"}}
+                harness._event_upload_probe_first_seen = {
+                    operation_id: time.monotonic() - (0 if status == "executing" else 301),
+                }
+                resumed = []
+                finished = []
+                harness._post_request_finished = lambda *args: finished.append(args)
+
+                def get_operation(_id):
+                    if status == "unavailable":
+                        raise TimeoutError("backend temporarily unavailable")
+                    return {
+                        "status": status, "operation_type": "update",
+                        "target_record_id": record_id, "updated_at": 0,
+                    }
+
+                harness.lan_template_portal_controller = type("Controller", (), {
+                    "get_qt_notice_operation": staticmethod(get_operation),
+                    "execute_qt_notice_upload": staticmethod(
+                        lambda payload: resumed.append(payload) or {"ok": False}
+                    ),
+                })()
+                with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+                    result = harness._recover_stale_upload_states()
+                    data = item.data(Qt.ItemDataRole.UserRole)
+                    self.assertEqual(result["stale_upload_recovered"], 1)
+                    self.assertEqual(data["text"], original["text"])
+                    self.assertEqual(data["_upload_operation_id"], operation_id)
+                    self.assertTrue(data["_remote_written_pending_verification"])
+                    self.assertEqual(data["_remote_written_retry_action"], "update")
+                    self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "失败可重试")
+                    self.assertEqual(ActiveNoticeModel.action_for_record(data), "update")
+                    self.assertNotIn(record_id, harness.pending_action_record_ids)
+                    self.assertNotIn(record_id, harness.pending_update_after_upload)
+                    resume_count = len(resumed)
+                    harness._event_upload_probe_last = {}
+                    self.assertEqual(harness._recover_stale_upload_states()["stale_upload_recovered"], 0)
+                    self.assertEqual(ActiveNoticeModel.action_for_record(item.data(Qt.ItemDataRole.UserRole)), "update")
+                    self.assertEqual(len(resumed), resume_count)
+                    harness.lan_template_portal_controller.get_qt_notice_operation = lambda _id: {
+                        "status": "completed", "operation_type": "update",
+                        "target_record_id": record_id,
+                    }
+                    harness._event_upload_probe_last = {}
+                    harness._recover_stale_upload_states()
+                    self.assertEqual(finished, [("更新", True, record_id, record_id, operation_id)])
+
+    def test_event_queue_watchdog_preserves_request_before_deadline(self):
+        harness = _ReplaceRecordIdHarness()
+        harness.current_screenshot_record_id = ""
+        item = QListWidgetItem("waiting")
+        harness.list_active_event.addItem(item)
+        item.setData(Qt.ItemDataRole.UserRole, {
+            "record_id": "rec-still-running",
+            "notice_type": "事件通告",
+            "_upload_operation_id": "qt_notice:still-running",
+            "_upload_in_progress": False,
+            "_queued_after_upload": True,
+            "_queued_upload_requested": True,
+            "_event_inflight_retry_snapshot": {"_upload_started_monotonic": time.monotonic()},
+        })
+        harness.pending_action_record_ids = {"rec-still-running"}
+        harness.pending_update_after_upload["rec-still-running"] = {"data": {"text": "next"}}
+        self.assertEqual(harness._recover_stale_upload_states()["stale_upload_recovered"], 0)
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(item.data(Qt.ItemDataRole.UserRole)), "已排队")
+        self.assertIn("rec-still-running", harness.pending_update_after_upload)
+        self.assertIn("rec-still-running", harness.pending_action_record_ids)
+
     def test_queued_event_upload_failure_rolls_back_and_discards_next_generation(self):
         harness = _ReplaceRecordIdHarness()
         harness._closing = False

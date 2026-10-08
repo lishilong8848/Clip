@@ -5,8 +5,9 @@
   </section>
 
   <section v-else-if="!loggedIn" class="center-state">
-    <strong>请先使用飞书登录</strong>
+    <strong>登录灯塔</strong>
     <a class="btn blue" :href="loginUrl || '/api/auth/login'">飞书扫码登录</a>
+    <form action="/api/auth/guest" method="post"><button class="btn" type="submit">访客查看机柜</button></form>
   </section>
 
   <section v-else class="center-state request-panel">

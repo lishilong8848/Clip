@@ -1,14 +1,14 @@
 <template>
   <main class="cabinet-page">
     <header class="heading">
-      <VnetBackButton :to="scope ? '/cabinet-power' : '/?entry=capacity'" />
+      <VnetBackButton v-if="scope || !readOnly" :to="scope ? '/cabinet-power' : '/?entry=capacity'" />
       <div class="heading-title"><h1>{{ scope ? scope + '楼机柜上下电' : '机柜上下电' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>
       <div class="actions">
-        <button :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
+        <button v-if="!readOnly" :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
         <button v-if="isAdmin" :disabled="serverStorageLoading" @click="loadServerStorage"><HardDrive :size="16" /><LoadingIndicator v-if="serverStorageLoading">读取缓存中</LoadingIndicator><template v-else>本地缓存</template></button>
-        <button @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
-        <button @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
-        <button v-if="!scope" class="primary" :disabled="!allExportReady || allExportBusy || ['running','checking','interrupted','failed'].includes(allExportStatus)" @click="startAllExports"><CloudUpload :size="16" /><LoadingIndicator v-if="allExportBusy">各楼正在导出</LoadingIndicator><template v-else>一键导出/上传所有楼栋</template></button>
+        <button v-if="!readOnly" @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
+        <button v-if="!readOnly" @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
+        <button v-if="!scope && !readOnly" class="primary" :disabled="!allExportReady || allExportBusy || ['running','checking','interrupted','failed'].includes(allExportStatus)" @click="startAllExports"><CloudUpload :size="16" /><LoadingIndicator v-if="allExportBusy">各楼正在导出</LoadingIndicator><template v-else>一键导出/上传所有楼栋</template></button>
         <template v-if="scope">
           <button class="primary" :disabled="!overview.rooms || busy" @click="startJob('exports')"><FileSpreadsheet :size="16" />{{ pendingExportRequest ? '继续上次导出' : '导出' }}</button>
       <button :disabled="exportHistoryLoading" @click="showExports()"><History :size="16" /><LoadingIndicator v-if="exportHistoryLoading">读取历史中</LoadingIndicator><template v-else>导出历史</template></button>
@@ -48,7 +48,7 @@
         <small v-if="item.error">{{ item.error }}</small>
       </div></div>
     </section>
-    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status"><LoadingIndicator>正在读取导出历史…</LoadingIndicator></p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th>操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档记录</a></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table><footer v-if="exportTotal > 20" class="pagination"><span>共 {{ exportTotal }} 个文件</span><button :disabled="exportPage <= 1 || exportHistoryLoading" @click="showExports(exportPage - 1)"><ChevronLeft :size="16" /></button><button v-for="page in paginationPages(exportPage,exportPageCount)" :key="page" class="page-number" :disabled="exportHistoryLoading" :aria-label="'导出历史第 ' + page + ' 页'" @click="showExports(page)">{{ page }}</button><button :disabled="exportPage >= exportPageCount || exportHistoryLoading" @click="showExports(exportPage + 1)"><ChevronRight :size="16" /></button></footer></section>
+    <section v-if="exportListOpen" class="table-wrap mobile-card-table"><div class="section-title"><h3>导出历史</h3><button @click="exportListOpen = false" aria-label="关闭导出历史"><X :size="16" /></button></div><p v-if="exportHistoryLoading" class="notice" role="status"><LoadingIndicator>正在读取导出历史…</LoadingIndicator></p><p v-else-if="!exportList.length && !error" class="empty">暂无导出文件</p><table v-else-if="exportList.length"><thead><tr><th>文件</th><th>生成时间</th><th>统计状态</th><th>云端归档</th><th>下载</th><th v-if="!readOnly">操作</th></tr></thead><tbody><tr v-for="item in exportList" :key="item.export_id"><td data-label="文件">{{ item.filename }}</td><td data-label="生成时间">{{ item.created_at }}</td><td data-label="统计状态"><span :class="item.is_stale ? 'danger-text' : ''">{{ item.is_stale ? '已过期' : '当前版本' }}</span><small v-if="item.is_stale">{{ item.stale_reason }}</small></td><td data-label="云端归档"><span>{{ cloudUploadLabel(item) }}</span><a v-if="!readOnly && item.archive_url && item.cloud_upload_status === 'succeeded'" :href="item.archive_url" target="_blank" rel="noopener">打开归档记录</a></td><td data-label="下载"><a v-if="item.file_available !== false" :href="api + '/exports/' + item.export_id + '/download'">下载</a><span v-else>本地已清理</span></td><td v-if="!readOnly" data-label="操作"><button v-if="item.file_available !== false" title="清理导出文件" aria-label="清理导出文件" :disabled="item.cloud_upload_status === 'uploading' || item._cleaning" @click="confirmCleanup(item)"><Trash2 :size="16" /></button></td></tr></tbody></table><footer v-if="exportTotal > 20" class="pagination"><span>共 {{ exportTotal }} 个文件</span><button :disabled="exportPage <= 1 || exportHistoryLoading" @click="showExports(exportPage - 1)"><ChevronLeft :size="16" /></button><button v-for="page in paginationPages(exportPage,exportPageCount)" :key="page" class="page-number" :disabled="exportHistoryLoading" :aria-label="'导出历史第 ' + page + ' 页'" @click="showExports(page)">{{ page }}</button><button :disabled="exportPage >= exportPageCount || exportHistoryLoading" @click="showExports(exportPage + 1)"><ChevronRight :size="16" /></button></footer></section>
 
     <section v-if="!scope" class="buildings">
       <button v-for="building in buildings" :key="building.scope" class="building" :disabled="building.bootstrap_status !== 'succeeded'" @click="navigate('/cabinet-power?scope=' + building.scope)">
@@ -77,7 +77,7 @@
       </section>
       <section v-else-if="tab === 'racks' || tab === 'carrier'">
         <div class="filter-bar"><select v-model="rackState" aria-label="筛选机柜状态"><option value="">全部状态</option><option value="powered">已上电</option><option v-for="(label, state) in stateLabels" :key="state" :value="state">{{ label }}</option></select><select v-model="rackRoom" aria-label="筛选机柜包间"><option value="">全部包间</option><option v-for="room in rackRooms" :key="room.id" :value="room.id">{{ room.carrier ? 'B-' + room.id + '运营商机房' : room.name }}</option></select><label class="search"><Search :size="16" /><input v-model="rackSearch" placeholder="机柜号" aria-label="筛选机柜号" /></label></div>
-        <div v-if="tab === 'carrier'" class="carrier-summary"><div v-for="room in rackRooms" :key="room.id"><h3>B-{{ room.id }}运营商机房</h3><span>共 {{ room.total }} 柜</span><button v-for="state in ['formal','test','off','unknown']" :key="state" class="link" @click="rackState = state; rackRoom = room.id">{{ stateLabels[state] }} {{ room.counts[state] }}</button><button v-if="room.sheet" class="link" @click="tab = 'layout'; selectRoom(room.id)">查看平面图</button><button :disabled="!room.unlocated || saving" @click="registerCarrier(room.id)"><Plus :size="16" />补登机柜编号</button></div></div>
+        <div v-if="tab === 'carrier'" class="carrier-summary"><div v-for="room in rackRooms" :key="room.id"><h3>B-{{ room.id }}运营商机房</h3><span>共 {{ room.total }} 柜</span><button v-for="state in ['formal','test','off','unknown']" :key="state" class="link" @click="rackState = state; rackRoom = room.id">{{ stateLabels[state] }} {{ room.counts[state] }}</button><button v-if="room.sheet" class="link" @click="tab = 'layout'; selectRoom(room.id)">查看平面图</button><button v-if="!readOnly" :disabled="!room.unlocated || saving" @click="registerCarrier(room.id)"><Plus :size="16" />补登机柜编号</button></div></div>
         <div class="table-wrap mobile-card-table"><table aria-label="机柜状态明细"><thead><tr><th>包间</th><th>机柜</th><th>状态</th><th>类型</th><th>最近成功操作</th><th>操作</th></tr></thead><tbody><tr v-for="rack in stateRacks.slice((rackPage-1)*50,rackPage*50)" :key="rack.room + rack.rack"><td data-label="包间">{{ rack.room }}</td><td data-label="机柜"><button class="link" @click="openHistory(rack.room,rack.rack)">{{ rack.rack }}</button></td><td data-label="状态"><span><i :style="{ background: stateColors[rack.state] }" /> {{ stateLabels[rack.state] }}</span></td><td data-label="类型">{{ rack.rack_type || '未填写' }}</td><td data-label="最近成功操作">{{ rack.last_operation || '无已完成操作' }}</td><td data-label="操作"><button class="link" @click="openHistory(rack.room,rack.rack)">操作历史</button><button v-if="rack.positions?.length" class="link rack-map-link" @click="locateRack(rack)">查看平面图</button><span v-else class="rack-map-link">无平面图</span></td></tr><tr v-for="room in unnumberedRooms" :key="room.id + '-unnumbered'"><td data-label="包间">{{ room.id }}</td><td data-label="机柜">编号未提供（{{ unnumberedCount(room) }} 柜）</td><td data-label="状态">{{ rackState ? stateLabels[rackState] : '原表汇总' }}</td><td data-label="类型">网络机柜</td><td data-label="最近成功操作">原汇总数量</td><td data-label="操作"><button class="link" @click="tab = 'carrier'; rackRoom = room.id">运营商机房</button></td></tr></tbody></table><p v-if="!stateRacks.length && !unnumberedRooms.length" class="empty">没有符合条件的机柜</p></div>
         <footer class="pagination"><span>{{ stateRacks.length }} 个已编号机柜<span v-if="unnumberedRooms.length">，另有 {{ unnumberedRooms.reduce((n: number,r: Dict) => n + unnumberedCount(r),0) }} 柜编号未提供</span></span><template v-for="(page,i) in rackPageNumbers" :key="page"><span v-if="i && page-rackPageNumbers[i-1]>1">…</span><button class="page-number" :class="{ active: page === rackPage }" :aria-label="'第 ' + page + ' 页'" @click="rackPage = page">{{ page }}</button></template></footer>
       </section>
@@ -111,12 +111,12 @@
           <thead><tr><th v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4 }" :style="frozenStyle(column)">{{ column.label }}<small v-if="column.group !== undefined">{{ groupLabel(column.group, activeFormat) }}</small></th><th class="row-actions">操作</th></tr></thead>
           <tbody><tr v-for="op in records.items || []" :key="op.record_id" :class="{ 'source-issue': op.issues.length }">
             <td v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4, 'empty-cell': !sourceCell(op, column) }" :data-label="column.group === undefined ? column.label : groupLabel(column.group, activeFormat) + ' · ' + column.label" :style="frozenStyle(column)"><button v-if="column.field === 'rack'" :disabled="recordsLoading" class="link" @click="openHistory(op.room, op.rack)">{{ op.rack }}</button><span v-else>{{ sourceCell(op, column) }}</span></td>
-            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button :disabled="recordsLoading" class="icon-button" :title="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" :aria-label="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)"><Trash2 v-if="isResidualEmptyRecord(op)" :size="16" /><Pencil v-else :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
+            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button v-if="!readOnly" :disabled="recordsLoading" class="icon-button" :title="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" :aria-label="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)"><Trash2 v-if="isResidualEmptyRecord(op)" :size="16" /><Pencil v-else :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
           </tr></tbody>
         </table><p v-if="!recordsLoading && !records.total" class="empty">没有符合条件的记录</p></div>
         <footer class="pagination"><span>共 {{ records.total || 0 }} 条记录</span><button :disabled="recordsLoading || records.page <= 1" aria-label="上一页" @click="loadRecords(records.page - 1)"><ChevronLeft :size="16" /></button><template v-for="(pageNumber, index) in pageNumbers" :key="pageNumber"><span v-if="index && pageNumber - pageNumbers[index - 1] > 1" class="ellipsis">…</span><button class="page-number" :class="{ active: pageNumber === records.page }" :disabled="recordsLoading" :aria-label="'第 ' + pageNumber + ' 页'" :aria-current="pageNumber === records.page ? 'page' : undefined" @click="loadRecords(pageNumber)">{{ pageNumber }}</button></template><button :disabled="recordsLoading || records.page >= totalPages" aria-label="下一页" @click="loadRecords(records.page + 1)"><ChevronRight :size="16" /></button></footer>
       </section>
-      <details v-if="overview.issues.length && tab === 'overview'" class="issues"><summary>{{ overview.issues.length }} 项资料待核实</summary><div class="issue-scroll"><button v-for="(issue, i) in overview.issues" :key="i" class="issue-row" @click="editIssue(issue.record_id)"><span>{{ issue.room }} / {{ issue.rack }} · {{ issue.message }}</span><small>{{ issue.source }} {{ issue.source_row ? '第 ' + issue.source_row + ' 行' : '' }}</small><Pencil :size="14" /></button></div></details>
+      <details v-if="overview.issues.length && tab === 'overview'" class="issues"><summary>{{ overview.issues.length }} 项资料待核实</summary><div class="issue-scroll"><button v-for="(issue, i) in overview.issues" :key="i" class="issue-row" :disabled="readOnly" @click="editIssue(issue.record_id)"><span>{{ issue.room }} / {{ issue.rack }} · {{ issue.message }}</span><small>{{ issue.source }} {{ issue.source_row ? '第 ' + issue.source_row + ' 行' : '' }}</small><Pencil v-if="!readOnly" :size="14" /></button></div></details>
     </template>
 
     <UiTransition name="ui-overlay" appear>
@@ -124,12 +124,12 @@
       <section class="drawer modal" role="dialog" aria-modal="true" aria-label="机柜完整历史" tabindex="-1">
         <header><div><h2>{{ historyRoom }} / {{ historyRack }}</h2><p v-if="selectedRack">当前状态：{{ stateLabels[selectedRack.state] }} · {{ selectedRack.rack_type }}</p></div><button @click="historyOpen = false" aria-label="关闭历史"><X :size="20" /></button></header>
         <div class="drawer-body">
-          <div v-if="selectedRack" class="rack-power"><span>机柜功率 <strong>{{ selectedRack.power == null || selectedRack.power === '' ? '未填写' : selectedRack.power + ' W' }}</strong></span><button class="icon-button" title="修改机柜功率" aria-label="修改机柜功率" :disabled="saving" @click="openPowerEditor"><Pencil :size="16" /></button></div>
+          <div v-if="selectedRack" class="rack-power"><span>机柜功率 <strong>{{ selectedRack.power == null || selectedRack.power === '' ? '未填写' : selectedRack.power + ' W' }}</strong></span><button v-if="!readOnly" class="icon-button" title="修改机柜功率" aria-label="修改机柜功率" :disabled="saving" @click="openPowerEditor"><Pencil :size="16" /></button></div>
           <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}{{ selectedRack.latest_success.baseline_correction ? '（平面图基线校正）' : '' }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual || '未填写' }}</dd></div></dl>
-          <div v-if="selectedRack" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
+          <div v-if="selectedRack && !readOnly" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading" role="status"><LoadingIndicator>正在读取完整历史…</LoadingIndicator></p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
-            <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
+            <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button v-if="!readOnly" class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
             <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div><div v-if="documentsWithIds(event).length" class="history-documents"><a v-for="file in documentsWithIds(event)" :key="file.file_id" :href="documentUrl(op.record_id,file.file_id)">{{ file.name }}</a></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
@@ -141,7 +141,7 @@
     </div>
     </UiTransition>
     <UiTransition name="ui-overlay" appear>
-    <div v-if="editorOpen" class="scrim editor-layer" :inert="discardDialogOpen || restoreDialogOpen || deleteRecordConfirmOpen">
+    <div v-if="editorOpen && !readOnly" class="scrim editor-layer" :inert="discardDialogOpen || restoreDialogOpen || deleteRecordConfirmOpen">
       <section class="editor modal" :class="{ 'power-editor': form.power_only }" role="dialog" aria-modal="true" :aria-label="form.power_only ? '修改机柜功率' : '编辑机柜记录'" tabindex="-1">
         <header><h2>{{ form.power_only ? '修改机柜功率' : editingId ? '编辑机柜记录' : '新增机柜记录' }}</h2><button :disabled="saving" @click="closeEditor" aria-label="关闭编辑"><X :size="20" /></button></header>
         <form @submit.prevent="saveRecord(false)">
@@ -231,7 +231,7 @@ import { navigate, registerNavigationGuard } from '../navigation';
 import { isAssistantEvent } from '../modalState';
 import ConfirmDialog from './ConfirmDialog.vue';
 import VnetBackButton from './VnetBackButton.vue';
-const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string }>();
+const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string; readOnly?: boolean }>();
 const api = '/api/cabinet-power';
 const read = (path: string, params: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs, signal });
 const write = (path: string, data: Dict, method = 'POST') => requestJson(api + '/' + path, { method, body: JSON.stringify({ ...data, scope: data.scope || props.scope }), timeoutMs: 90000 });
@@ -360,7 +360,7 @@ const allExportReady = computed(() => 'ABCDE'.split('').every(scope => buildings
 const allExportCompleted = computed(() => allExportItems.value.filter(item => item.status === 'succeeded').length);
 const resultExportTime = (item:Dict) => { const direct=String(item.result?.created_at || ''); if(direct)return direct; const match=String(item.result?.filename || '').match(/_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.xlsm$/i); return match ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}` : ''; };
 const allExportTime = computed(() => { const times=allExportItems.value.map(resultExportTime).filter(Boolean).sort(); return times.length ? times[0] === times[times.length-1] ? times[0] : `${times[0]} 至 ${times[times.length-1]}` : allExportStartedAt.value; });
-const storageKey = 'cabinet-job:' + props.scope;
+const storageKey = 'cabinet-job:' + props.scope + (props.readOnly ? ':' + props.userId : '');
 const exportRequestKey = 'cabinet-export-request:v1:' + props.scope + ':' + (props.userId || 'anonymous');
 const allExportStorageKey = 'cabinet-all-export:v2:' + (props.userId || 'anonymous');
 const cloudUploadLabel = (item: Dict) => ({ local_only:'仅本地', succeeded:'已归档', replaced:'归档已被新批次覆盖', uploading:'正在归档' }[String(item.cloud_upload_status || '')] || '仅本地');
@@ -372,6 +372,7 @@ function allExportLabel(item: Dict): string {
   return item.status === 'running' ? exportPhaseLabel(item.phase) : '等待执行';
 }
 async function startJob(path: string): Promise<void> {
+  if (props.readOnly && path !== 'exports') return;
   if (busy.value) return; startingJob.value = true; startingKind.value = path; error.value = '';
   let requestId = '';
   try {
@@ -566,6 +567,7 @@ async function changeRecordScope(scope: string): Promise<void> {
 }
 let editBaseline = '', writeId = '', writeHash = '';
 function openEditor(op?: Dict): void {
+  if (props.readOnly) return;
   if (saving.value) { if (saveStatus.value.operation_id) void showSubmission(saveStatus.value.operation_id); return; }
   editingId.value = op?.meta?.baseline_correction ? '' : op?.record_id || ''; Object.keys(form).forEach(k => delete form[k]);
   form.scope = props.scope;
@@ -575,6 +577,7 @@ function openEditor(op?: Dict): void {
   writeId = ''; writeHash = ''; saveError.value = ''; editBaseline = JSON.stringify(form); discardDialogOpen.value = false; editorOpen.value = true; void focusModal();
 }
 function openPowerEditor(): void {
+  if (props.readOnly) return;
   const rack=selectedRack.value; if (!rack || saving.value) return;
   Object.keys(form).forEach(k=>delete form[k]);
   Object.assign(form,{scope:props.scope,room:rack.room,rack:rack.rack,power:rack.power ?? '',expected_version:rack.power_version,power_only:true});
@@ -716,6 +719,7 @@ onMounted(async () => {
       if (pendingExportRequest.value) void startJob('exports');
     }
   }
+  if (props.readOnly) { await load(); return; }
   if (!props.scope) restoreAllExports();
   await startBootstrap(); if (disposed) return;
   void loadBatchCount();

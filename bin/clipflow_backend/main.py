@@ -793,6 +793,9 @@ class FastAPIPortalController:
                     rate_limited=rate_limited,
                 )
 
+        from lan_bitable_template_portal.cabinet_guest import install_cabinet_guest_access
+        install_cabinet_guest_access(app, self, PortalRuntime)
+
         # Keep compression outside the request-timing middleware so cancelled
         # streaming responses do not surface as false application errors.
         app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)

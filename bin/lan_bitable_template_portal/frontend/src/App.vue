@@ -167,6 +167,7 @@
       :key="`cabinet:${routeParams.get('scope') || ''}`"
       :scope="routeParams.get('scope') || ''"
       :is-admin="isAdmin"
+      :read-only="isGuest"
       :user-id="String(auth.user?.open_id || '')"
     />
 
@@ -373,6 +374,7 @@ const criticalGuardScope = computed(() => {
 const drillScope = computed(() => normalizeScopeValue(routeParams.value.get("scope") || "", ""));
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("request_id") || routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+const isGuest = computed(() => auth.user?.role === 'guest');
 watch([isAdmin, () => routeParams.value.get("admin")], ([admin, tab]) => {
   if (admin && (tab === "status" || tab === "permissions" || tab === "handover")) {
     adminInitialTab.value = tab;
@@ -597,6 +599,10 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     auth.user = data.user || {};
     auth.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
     auth.loginUrl = data.login_url || "/api/auth/login";
+    if (isGuest.value && routePath.value !== '/cabinet-power') {
+      window.history.replaceState({}, '', '/cabinet-power');
+      updateLocationRefs();
+    }
     const nextOverviewKey = nextLoggedIn ? overviewKey(auth.user, auth.scopeOptions) : '';
     setReadCacheIdentity(nextOverviewKey);
     if (currentOverviewKey !== nextOverviewKey) {
@@ -622,6 +628,7 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
 }
 
 async function loadOverview(): Promise<void> {
+  if (isGuest.value) return;
   const key = currentOverviewKey, serial = ++overviewRequest;
   overviewLoading.value = true;
   try {
@@ -639,6 +646,7 @@ async function loadOverview(): Promise<void> {
 }
 
 async function loadHandoverLinks(): Promise<void> {
+  if (isGuest.value) return;
   const key = currentOverviewKey, serial = ++handoverRequest;
   try {
     const data = await portalRequest("/api/handover-links");
@@ -686,6 +694,7 @@ function refreshButtonTitle(key: keyof typeof refreshCooldown): string {
 }
 
 function updateLocationRefs(): void {
+  if (isGuest.value && normalizedPath() !== '/cabinet-power') window.history.replaceState({}, '', '/cabinet-power');
   const wasHome = routePath.value === "/" && !routeParams.value.get("mode");
   routePath.value = normalizedPath();
   routeParams.value = new URLSearchParams(window.location.search);

@@ -5,6 +5,7 @@ import hashlib
 import json
 import sys
 import unittest
+from itertools import permutations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -600,6 +601,45 @@ class LearningTests(unittest.TestCase):
                 self.assertEqual((attempt["correct"], attempt["missed"], attempt["wrong"]),
                                  (correct, missed, wrong))
         self.assertEqual(self.service.profile(ACTOR, {})["summary"]["accuracy"], 25.0)
+
+    def test_four_correct_options_ignore_click_order_on_submission_and_practice(self):
+        options = [{"id": f"option-{label}", "label": label, "text": f"Choice {label}"}
+                   for label in "ABCDE"]
+        ids = {option["label"]: option["id"] for option in options}
+        expected = [ids[label] for label in "ABCD"]
+        self.seed(self.question(i, kind="multiple", options=options,
+                                correct_option_ids=expected, answer_text="ABCD") for i in range(36))
+        self.service.publish(DAY)
+        paper = self.service._get("paper", f"{DAY}_A")
+        cases = [("ABCD", True, [], []), ("DCBA", True, [], []), ("CABD", True, [], []),
+                 ("CBA", False, [ids["D"]], []), ("EDCBA", False, [], [ids["E"]]),
+                 ("ECBA", False, [ids["D"]], [ids["E"]])]
+        self.assertEqual(len(paper["questions"]), len(cases))
+        for question, (labels, correct, missed, wrong) in zip(paper["questions"], cases):
+            with self.subTest(first_submission=labels):
+                public = self.dispatch("paper.answer", self.answer_payload(
+                    paper, question, option_ids=[ids[label] for label in labels]))
+                attempt = self.entry(paper, question)["attempt"]
+                self.assertEqual((attempt["correct"], attempt["missed"], attempt["wrong"]),
+                                 (correct, missed, wrong))
+                visible = next(q for q in public["questions"] if q["id"] == question["id"])
+                self.assertEqual(visible["attempt"], attempt)
+        self.assertEqual(self.service.profile(ACTOR, {})["summary"]["accuracy"], 50.0)
+
+        question = paper["questions"][3]
+        first = copy.deepcopy(self.entry(paper, question)["attempt"])
+        for labels in permutations("ABCD"):
+            with self.subTest(practice="".join(labels)):
+                self.dispatch("paper.answer", self.answer_payload(
+                    paper, question, option_ids=[ids[label] for label in labels], practice=True))
+                attempt = self.entry(paper, question)["practice"][-1]
+                self.assertEqual((attempt["correct"], attempt["missed"], attempt["wrong"]),
+                                 (True, [], []))
+                self.assertEqual(attempt["option_ids"], expected)
+        self.restart()
+        self.assertEqual(self.entry(paper, question)["attempt"], first)
+        self.assertEqual(len(self.entry(paper, question)["practice"]), 24)
+        self.assertEqual(self.service.profile(ACTOR, {})["summary"]["accuracy"], 50.0)
 
     def test_invalid_answers_are_rejected_without_persisting_partial_records(self):
         paper, question = self.fixture()

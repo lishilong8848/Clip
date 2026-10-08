@@ -261,6 +261,12 @@ class MainWindowRecordsMixin:
             if not item or not self._is_valid_list_item(item):
                 return
             current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+            if (
+                current.get("_last_upload_error")
+                and not current.get("_upload_in_progress")
+                and not current.get("_queued_upload_requested")
+            ):
+                return
             if current.get("_upload_verification_pending"):
                 return
             current["_upload_verification_pending"] = True
@@ -300,9 +306,11 @@ class MainWindowRecordsMixin:
                     finish(name, False, str(operation.get("error") or "上传失败，可重试。"))
                 elif status == "remote_written" and target:
                     self._enqueue_ui_mutation("event_upload_verification", mark_waiting)
-                    if action in {"upload", "update", "end"} and time.time() - float(
-                        operation.get("updated_at") or 0
-                    ) >= 10:
+                    if (
+                        not data.get("_last_upload_error")
+                        and action in {"upload", "update", "end"}
+                        and time.time() - float(operation.get("updated_at") or 0) >= 10
+                    ):
                         retry_data = dict(original)
                         retry_data.update({
                             "_remote_written_pending_verification": True,
@@ -341,17 +349,36 @@ class MainWindowRecordsMixin:
         for list_widget, item, data in entries:
             if not self._is_valid_list_item(item) or not isinstance(data, dict):
                 continue
-            if str(data.get("notice_type") or "") == "事件通告" and (
+            is_event = str(data.get("notice_type") or "") == "事件通告"
+            waiting_event = is_event and bool(
+                data.get("_queued_upload_requested")
+                or data.get("_upload_verification_pending")
+            )
+            if is_event and (
                 data.get("_queued_upload_requested")
                 or data.get("_remote_written_pending_verification")
                 or data.get("_upload_verification_pending")
                 or (data.get("_upload_in_progress") and data.get("_upload_operation_id"))
             ):
                 self._probe_event_upload(data)
-            if not bool(data.get("_upload_in_progress")):
+            if not data.get("_upload_in_progress") and not waiting_event:
                 continue
-            if self._upload_state_is_busy(data):
+            if self._upload_state_is_busy(data) or waiting_event:
                 started_at = float(data.get("_upload_started_monotonic") or 0.0)
+                if is_event and not started_at:
+                    # Queued content clears its uploading flag/timestamp, but
+                    # still waits for the original operation to finish.
+                    original = data.get("_event_inflight_retry_snapshot")
+                    original = original if isinstance(original, dict) else {}
+                    started_at = float(original.get("_upload_started_monotonic") or 0.0)
+                    if not started_at:
+                        first_seen = getattr(self, "_event_upload_probe_first_seen", None)
+                        if first_seen is None:
+                            first_seen = self._event_upload_probe_first_seen = {}
+                        key = str(
+                            data.get("_upload_operation_id") or data.get("record_id") or ""
+                        )
+                        started_at = first_seen.setdefault(key, now)
                 dialog_active = False
                 is_dialog_active = getattr(self, "_is_screenshot_dialog_active", None)
                 if callable(is_dialog_active):
@@ -365,6 +392,7 @@ class MainWindowRecordsMixin:
                 if not started_at or 0.0 <= age < hard_timeout:
                     continue
                 data = self._rollback_queued_event_for_retry(data)
+                data.pop("_upload_verification_pending", None)
                 operation_id = str(data.get("_upload_operation_id") or "").strip()
                 if (
                     operation_id
@@ -394,7 +422,7 @@ class MainWindowRecordsMixin:
                             else "update"
                         ),
                     )
-                    item.setData(Qt.ItemDataRole.UserRole, data)
+                item.setData(Qt.ItemDataRole.UserRole, data)
                 clear_state = getattr(self, "clear_upload_runtime_state_for_ids", None)
                 if callable(clear_state):
                     clear_state(

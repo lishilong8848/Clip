@@ -61,7 +61,7 @@ class CabinetTextWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.wf._cleanups.clear()
 
         self.cabfix = cb.CabinetPowerTests()
-        self.cabfix.setUp()
+        self.cabfix.setUp(scopes=("A", "E"))
         self.addCleanup(self.cabfix.tearDown)
         self.service = self.cabfix.service
 
@@ -638,7 +638,7 @@ class CabinetTextRouteTests(unittest.IsolatedAsyncioTestCase):
         self.wf._cleanups.clear()
 
         self.cabfix = cb.CabinetPowerTests()
-        self.cabfix.setUp()
+        self.cabfix.setUp(scopes=("A", "E"))
         self.addCleanup(self.cabfix.tearDown)
         self.service = self.cabfix.service
 

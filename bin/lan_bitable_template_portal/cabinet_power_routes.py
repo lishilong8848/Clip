@@ -6,6 +6,7 @@ from .cabinet_power import CabinetPowerService
 from .cabinet_power_batches import MAX_FILE_BYTES, MAX_TOTAL_BYTES
 from .cabinet_power_excel import CabinetError, TOTALS
 from pathlib import Path
+from .cabinet_guest import cabinet_guest_api_allowed, is_cabinet_guest
 
 def install_cabinet_power_routes(app,controller,runtime):
     service=CabinetPowerService(runtime.state_store)
@@ -19,6 +20,9 @@ def install_cabinet_power_routes(app,controller,runtime):
         if session is None: return controller._auth_required_response()
         try:
             path=request.url.path.removeprefix("/api/cabinet-power").strip("/")
+            guest=is_cabinet_guest(session)
+            if guest and not cabinet_guest_api_allowed(request.method,request.url.path):
+                raise CabinetError("访客仅可查看机柜数据和导出单楼文件。",403)
             admin=runtime.auth_manager.is_admin(session)
             owner=str(session.get("open_id") or session.get("user",{}).get("open_id") or "")
             if not owner: raise CabinetError("登录身份不完整",401)
@@ -204,6 +208,11 @@ def install_cabinet_power_routes(app,controller,runtime):
                     data=await asyncio.to_thread(service.export_batch_status,batch_id,owner,admin)
                 return controller._json_ok(request,session,data)
             payload=await controller._read_json_request(request,max_bytes=512*1024) if request.method in ("POST","PATCH") else {}
+            if guest and request.method=="POST":
+                # Visitors share the current snapshot export instead of queuing
+                # unlimited identical exports with arbitrary request IDs.
+                payload={"scope":str(payload.get("scope") or query.get("scope") or ""),
+                         "batch_id":"guest-current-export"}
             scope=str(payload.get("scope") or query.get("scope") or "")
             if path=="bootstrap":
                 if scope and scope not in allowed: raise CabinetError("无权访问该楼栋",403)
@@ -216,6 +225,10 @@ def install_cabinet_power_routes(app,controller,runtime):
                 if not resource: raise CabinetError("对象不存在",404)
                 scope=resource["scope"]
             if scope not in allowed: raise CabinetError("无权访问该楼栋",403)
+            if guest and path.startswith("jobs/") and resource.get("kind")!="export":
+                raise CabinetError("访客仅可查看单楼导出任务。",403)
+            if guest and not path.startswith(("jobs/","exports/")) and not service.local.version(scope):
+                raise CabinetError("该楼机柜资料尚未就绪，请联系已登录人员初始化。",409)
             if path.startswith("exports/") and path.endswith("/download"):
                 if resource.get("deleted") or not Path(resource["path"]).is_file(): raise CabinetError("导出文件已清理或不可用",410)
                 return FileResponse(resource["path"],filename=resource["filename"],media_type="application/vnd.ms-excel.sheet.macroEnabled.12",headers={"Cache-Control":"no-store"})

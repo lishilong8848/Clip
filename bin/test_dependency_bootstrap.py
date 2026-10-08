@@ -13,6 +13,12 @@ from upload_event_module.services import dependency_bootstrap as deps
 
 
 class DependencyTests(unittest.TestCase):
+    def setUp(self):
+        for target, value in (('handlers', [logging.NullHandler()]), ('propagate', False)):
+            guard = patch.object(deps._LOG, target, value)
+            guard.start()
+            self.addCleanup(guard.stop)
+
     def test_installer_logs_output_before_process_exits_and_redacts_urls(self):
         output, saw_line = io.StringIO(), threading.Event()
         class Handler(logging.StreamHandler):

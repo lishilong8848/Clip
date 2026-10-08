@@ -47,7 +47,7 @@
         <Settings v-if="homeMode" :size="18" aria-hidden="true" />
         <span v-else class="settings-icon" aria-hidden="true"></span>
       </button>
-      <button type="button" v-if="auth.loggedIn" class="btn danger-text" title="退出当前飞书登录" @click="emit('logout')">
+      <button type="button" v-if="auth.loggedIn" class="btn danger-text" title="退出当前登录" @click="emit('logout')">
         <LogOut v-if="homeMode" :size="16" aria-hidden="true" />
         <span>退出</span>
       </button>
