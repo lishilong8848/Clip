@@ -50,6 +50,7 @@ class RepairProjectIdentityTests(unittest.TestCase):
         }
         self.service._load_repair_management_project_records = Mock(return_value=([], {}, [self.project]))
         self.service._load_repair_management_event_records = Mock(return_value=([], {}, [self.event]))
+        self.service._current_repair_event_fields = Mock(return_value={"是否转检修": True})
         self.service.create_repair_management_record = Mock(return_value={"record_id": "rec_new_project"})
 
     def ensure(self, event=None):
@@ -163,6 +164,79 @@ class RepairProjectIdentityTests(unittest.TestCase):
         self.service._load_repair_management_project_records.assert_not_called()
         self.service._load_repair_management_event_records.return_value = ([], {}, [event])
         self.assertEqual(self.service.list_unlinked_transferred_events_for_repair(), [])
+
+    def test_completed_events_are_never_backfilled_even_with_different_old_event_id(self):
+        for completed in (
+            {"最终状态": "事件闭环转检修完成"},
+            {"检修进度": "检修完成"},
+            {"检修进展": 1},
+            {"检修进展": "100%"},
+            {"检修进展": {"type": 2, "value": [1]}},
+            {"最终状态": {"type": 3, "value": ["事件闭环转检修完成"]}},
+        ):
+            with self.subTest(completed=completed):
+                self.project["raw_fields"]["关联事件单-L"] = "rec_old_event"
+                event = copy.deepcopy(self.event)
+                event["display_fields"].update(completed)
+                self.service._load_repair_management_event_records.return_value = ([], {}, [event])
+                self.assertEqual(self.service.list_unlinked_transferred_events_for_repair(), [])
+                result = self.ensure(event)
+                self.assertTrue(result["skipped"])
+                self.assertFalse(result["created"])
+        self.service.create_repair_management_record.assert_not_called()
+        self.service._current_repair_event_fields.assert_not_called()
+
+    def test_queued_transfer_rechecks_current_completion_and_transfer_flag(self):
+        self.service._load_repair_management_project_records.return_value = ([], {}, [])
+        for current in ({"是否转检修": True, "检修进展": "100%"}, {"是否转检修": False}):
+            with self.subTest(current=current):
+                self.service._current_repair_event_fields.return_value = current
+                self.assertTrue(self.ensure()["skipped"])
+        self.service.create_repair_management_record.assert_not_called()
+
+    def test_live_event_read_failure_does_not_create_from_old_queue_fields(self):
+        self.service._load_repair_management_project_records.return_value = ([], {}, [])
+        self.service._current_repair_event_fields.side_effect = PortalError("fixture read timeout")
+        with self.assertRaisesRegex(PortalError, "fixture read timeout"):
+            self.ensure()
+        self.service.create_repair_management_record.assert_not_called()
+
+    def test_unfinished_transfer_is_still_created_and_uses_current_fields(self):
+        self.service._load_repair_management_project_records.return_value = ([], {}, [])
+        for progress in (0, .58, "99%", "已记录100次检查"):
+            with self.subTest(progress=progress):
+                current = {"是否转检修": True, "检修进度": "检修中", "检修进展": progress}
+                self.service._current_repair_event_fields.return_value = current
+                self.assertTrue(self.ensure()["created"])
+
+    def test_live_completion_formula_options_are_normalized_before_use(self):
+        self.service._event_source_config = Mock(return_value=("fixture-app", "fixture-table", "event_notice"))
+        self.service._load_repair_management_event_records.return_value = ([], {"schema": "fixture"}, [])
+        self.service._load_table_records_by_ids = Mock(return_value=[{
+            "raw_fields": {"是否转检修": True, "检修进度": ["opt_done"]},
+            "display_fields": {"是否转检修": "True", "检修进度": "检修完成"},
+        }])
+        fields = MaintenancePortalService._current_repair_event_fields(self.service, "rec_current")
+        self.assertEqual(fields["检修进度"], "检修完成")
+        self.assertEqual(self.service._load_table_records_by_ids.call_args.kwargs["record_ids"], ["rec_current"])
+
+    def test_cloud_corrected_history_stays_completed_without_inventing_followups(self):
+        self.service._field_meta_by_name = {}
+        record = {"record_id": "rec_corrected", "raw_fields": {"流程": "维修完成", "当前维修进度": 1},
+                  "display_fields": {"流程": "维修完成", "当前维修进度": "1"}}
+        payload = self.service._repair_management_record_payload(record, authoritative_followups=[])
+        self.assertTrue(payload["is_completed"])
+        self.assertEqual(payload["workflow"], "维修完成")
+        self.assertEqual(payload["progress_percent"], 100)
+        self.assertEqual(payload["followup_count"], 0)
+        self.assertNotIn("维修结束时间（2026）", payload["raw_fields"])
+        # Existing followups remain authoritative when they say work is ongoing.
+        payload = self.service._repair_management_record_payload(record, authoritative_followups=[{
+            "record_id": "rec_followup_active", "raw_fields": {"维修进度": .58}, "display_fields": {},
+        }])
+        self.assertFalse(payload["is_completed"])
+        self.assertEqual(payload["workflow"], "维修中")
+        self.assertEqual(payload["progress_percent"], 58)
 
     def test_transferred_unlinked_event_does_not_require_specific_status_or_fault_fields(self):
         self.service._load_repair_management_project_records.return_value = ([], {}, [])

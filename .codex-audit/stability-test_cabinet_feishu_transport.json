@@ -1,10 +1,10 @@
 {
-  "group": "test_repair_project_identity",
+  "group": "test_cabinet_feishu_transport",
   "modules": 1,
-  "tests": 23,
+  "tests": 4,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 9.8,
+  "seconds": 1.1,
   "external_connections_blocked": 0
 }

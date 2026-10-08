@@ -143,6 +143,9 @@ class _TestMaintenancePortalService(MaintenancePortalService):
     def ensure_loaded(self) -> None:
         return
 
+    def _current_repair_event_fields(self, record_id):
+        return {"是否转检修": True}
+
 
 class _TargetLookupService(_TestMaintenancePortalService):
     def __init__(self):

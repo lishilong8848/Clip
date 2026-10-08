@@ -166,11 +166,15 @@ class CabinetFeishu:
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
-        for attempt in range(3 if read_request else 1):
+        for attempt in range(3):
             data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if read_request else 0)
-            if not read_request or data.get("code") not in (1255002,1254290,1254291,1254607) or attempt==2: break
+            # 1254608 explicitly rejects the duplicate request. Preserve its
+            # body/client_token; unknown write outcomes are never replayed here.
+            retryable=data.get("code")==1254608 or read_request and data.get("code") in (1255002,1254290,1254291,1254607)
+            if not retryable or attempt==2: break
             time.sleep(0.5*(2**attempt))
         if data.get("code"):
+            if data["code"]==1254608: raise CabinetError("飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。")
             if data["code"] in (99991663,99991664,99991665): self._expires=0
             raise CabinetError(f"机柜台账请求失败：code={data['code']}，{data.get('msg','')}")
         return data.get("data",{})

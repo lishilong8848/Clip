@@ -14228,6 +14228,13 @@ class MaintenancePortalService(RepairOperationsMixin):
             if isinstance(record.get("raw_fields"), dict)
             else {}
         )
+        # Historical records may have an explicitly corrected cloud workflow
+        # without followup rows. Reading them must not reopen the repair.
+        if not has_followup and cls._repair_management_plain_text(
+            raw_fields.get(REPAIR_MANAGEMENT_WORKFLOW_STORAGE_FIELD_NAME,
+                           raw_fields.get(REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME))
+        ) == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW:
+            return REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
         display_fields = (
             record.get("display_fields")
             if isinstance(record.get("display_fields"), dict)
@@ -14588,6 +14595,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                 1 for value in progress_values if value is not None and value >= 100
             )
             progress_percent = round(latest_progress_percent or 0)
+            if is_completed and not linked:
+                progress_percent = round(self._repair_followup_progress_percent(
+                    project_raw_fields.get("当前维修进度") or project_fields.get("当前维修进度")
+                ) or 0)
             item_state = (
                 "completed"
                 if is_completed
@@ -15097,6 +15108,11 @@ class MaintenancePortalService(RepairOperationsMixin):
             meta_by_name=meta_by_name,
         )
         is_completed = workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        if is_completed and not has_followup:
+            normalized_progress_percent = round(self._repair_followup_progress_percent(
+                raw_fields.get("当前维修进度")
+            ) or 0)
+            display_fields["当前维修进度"] = f"{normalized_progress_percent}%"
         payload = {
             "record_id": str(item.get("record_id") or ""),
             "record_version": self._repair_record_version(item),
@@ -15820,6 +15836,27 @@ class MaintenancePortalService(RepairOperationsMixin):
             "raw_fields": display_fields,
         }
 
+    @classmethod
+    def _event_repair_is_completed(cls, fields: dict[str, Any]) -> bool:
+        for name in ("最终状态", "检修进度", "事件目前进展"):
+            text = cls._repair_management_plain_text(fields.get(name)).strip()
+            if text in {"事件闭环转检修完成", "检修完成", "维修完成"}:
+                return True
+        progress = cls._repair_management_plain_text(fields.get("检修进展")).strip().replace("％", "%")
+        return bool(re.fullmatch(r"\d+(?:\.\d+)?%?", progress)
+                    and (cls._repair_followup_progress_percent(progress) or 0) >= 100)
+
+    def _current_repair_event_fields(self, record_id: str) -> dict[str, Any]:
+        app_token, table_id, _source_key = self._event_source_config()
+        _metas, meta_by_name, _records = self._load_repair_management_event_records()
+        records = self._load_table_records_by_ids(
+            app_token=app_token, table_id=table_id, meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_EVENT, notice_type=NOTICE_TYPE_EVENT, record_ids=[record_id],
+        )
+        if not records:
+            raise PortalError("来源事件已不存在，未自动补建维修单。")
+        return {**(records[0].get("raw_fields") or {}), **(records[0].get("display_fields") or {})}
+
     def ensure_repair_management_record_for_event_notice(
         self,
         *,
@@ -15841,6 +15878,9 @@ class MaintenancePortalService(RepairOperationsMixin):
                 # Successful auto-creation is final, including an intentional deletion.
                 return {"record_id": operation["record_id"], "created": False,
                         "idempotent_replay": True, "warnings": []}
+            if self._event_repair_is_completed(remote_fields or {}):
+                return {"record_id": "", "created": False, "skipped": True,
+                        "reason": "来源事件已检修完成，不自动补建未开始维修单。"}
             transfer_value = (remote_fields or {}).get("是否转检修")
             if transfer_value in (None, "", [], {}):
                 transfer_value = (notice_data or {}).get("transfer_to_overhaul")
@@ -15872,9 +15912,14 @@ class MaintenancePortalService(RepairOperationsMixin):
                         summary_record_id=record_id, result=result, error="",
                     )
                 return result
+            # A queued transfer may be older than the current completion state.
+            current_fields = self._current_repair_event_fields(event_record_id)
+            if self._event_repair_is_completed(current_fields) or not self._truthy_flag(current_fields.get("是否转检修")):
+                return {"record_id": "", "created": False, "skipped": True,
+                        "reason": "来源事件已检修完成或已取消转检修，不自动补建。"}
             event_record = self._repair_management_event_from_notice_payload(
                 record_id=event_record_id, notice_data=notice_data,
-                remote_fields=remote_fields, scope=scope,
+                remote_fields=current_fields, scope=scope,
             )
             response = self.create_repair_management_record(
                 {},
@@ -20827,7 +20872,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         *,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Return transferred, still-open repair projections missing a project."""
+        """Return transferred, unfinished repairs missing a project."""
         _project_metas, _project_meta_by_name, projects = (
             self._load_repair_management_project_records()
         )
@@ -20853,6 +20898,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if isinstance(event.get("display_fields"), dict)
                 else {}
             )
+            if self._event_repair_is_completed({**raw_fields, **display_fields}):
+                continue
             if not self._truthy_flag(
                 raw_fields.get("是否转检修")
                 if raw_fields.get("是否转检修") not in (None, "", [], {})

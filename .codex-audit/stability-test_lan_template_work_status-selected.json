@@ -1,10 +1,14 @@
 {
   "group": "test_lan_template_work_status",
   "modules": 1,
-  "tests": 1,
-  "failures": [],
-  "errors": [],
+  "tests": 5,
+  "failures": [
+    "bin.test_lan_template_work_status.LanTemplateWorkStatusTests.test_repair_management_delete_resumes_without_redeleting_followups"
+  ],
+  "errors": [
+    "bin.test_lan_template_work_status.LanTemplateWorkStatusTests.test_repair_management_delete_cascades_followup_records"
+  ],
   "skipped": 0,
-  "seconds": 7.7,
+  "seconds": 8.3,
   "external_connections_blocked": 0
 }

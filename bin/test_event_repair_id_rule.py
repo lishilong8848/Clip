@@ -47,6 +47,9 @@ class _TestMaintenancePortalService(MaintenancePortalService):
     def ensure_loaded(self) -> None:
         return
 
+    def _current_repair_event_fields(self, record_id):
+        return {"是否转检修": True}
+
 
 class EventRepairIdRuleTests(unittest.TestCase):
     def _new_temp_service(self, root: Path):
