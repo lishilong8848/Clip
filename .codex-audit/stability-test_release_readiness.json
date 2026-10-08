@@ -1,10 +1,10 @@
 {
   "group": "test_release_readiness",
   "modules": 1,
-  "tests": 6,
+  "tests": 9,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 10.4,
+  "seconds": 5.4,
   "external_connections_blocked": 0
 }

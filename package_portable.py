@@ -19,6 +19,9 @@ import tempfile
 import time
 
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+import threading
 
 from pathlib import Path
 from functools import lru_cache
@@ -58,6 +61,8 @@ LEGACY_PATCH_ZIP_NAME = "ClipFlow_patch_only.zip"
 
 REMOTE_PATCH_HISTORY = 3
 
+PREFLIGHT_WORKERS = min(4, os.cpu_count() or 1)
+
 AUTO_UPLOAD_GITEE = True  # 将zip补丁上传gitee
 
 # 版本命名模式：
@@ -73,6 +78,8 @@ VERSION_NAMING = "base_simple"
 DEFAULT_FORCE_UI_UPDATE = True  # 是否强制用户重启程序以更新UI界面
 
 EXCLUDE_FILES = {
+
+    "vc_redist.x64.exe",
 
     "package_portable.py",
 
@@ -1066,39 +1073,22 @@ def _get_venv_hash(venv_python: Path) -> str:
 
 
 def _missing_runtime_modules(venv_python: Path) -> list[str]:
-    modules = list(RUNTIME_MODULE_TO_PACKAGE.keys())
-    script_lines = [
-        "import importlib",
-        "import importlib.metadata",
-        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0')}",
-        "mods = " + repr(modules),
-        "missing = []",
-        "for name in mods:",
-        "    try:",
-        "        importlib.import_module(name)",
-        "        if name in pinned and importlib.metadata.version(pinned[name][0]) != pinned[name][1]: missing.append(name)",
-        "    except Exception:",
-        "        missing.append(name)",
-        "print('\\n'.join(missing))",
-    ]
-    ok, output = _run_cmd_capture([str(venv_python), "-c", "\n".join(script_lines)])
-    if not ok:
-        # Fall back to conservative install behavior if the probe itself fails.
-        return modules
-    return [line.strip() for line in output.splitlines() if line.strip()]
+    return _missing_selected_modules(venv_python, list(RUNTIME_MODULE_TO_PACKAGE))
 
 
 def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str]:
+    # Match startup's lightweight dependency check. Runtime imports and behavior
+    # are checked by the separate smoke check and preflight tests.
     script_lines = [
-        "import importlib",
+        "import importlib.util",
         "import importlib.metadata",
         "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0')}",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
         "    try:",
-        "        importlib.import_module(name)",
-        "        if name in pinned and importlib.metadata.version(pinned[name][0]) != pinned[name][1]: missing.append(name)",
+        "        if importlib.util.find_spec(name) is None: missing.append(name)",
+        "        elif name in pinned and importlib.metadata.version(pinned[name][0]) != pinned[name][1]: missing.append(name)",
         "    except Exception:",
         "        missing.append(name)",
         "print('\\n'.join(missing))",
@@ -1552,9 +1542,49 @@ def _run_preflight_check(args: list[str], **kwargs) -> None:
     started = time.monotonic()
     log(f"检查开始: {label}")
     try:
-        subprocess.run(args, **kwargs)
+        if args[1:3] == ["-m", "unittest"]:
+            _run_preflight_test_shards(args, **kwargs)
+        else:
+            subprocess.run(args, **kwargs)
     finally:
         log(f"检查耗时: {label}，{time.monotonic() - started:.1f} 秒")
+
+
+def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
+    modules = args[3:]
+    shard_size = min(8, max(1, (len(modules) + PREFLIGHT_WORKERS - 1) // PREFLIGHT_WORKERS))
+    shards = [modules[index:index + shard_size] for index in range(0, len(modules), shard_size)]
+    output_lock = threading.Lock()
+
+    def run_shard(index, names):
+        label = f"测试组 {index + 1}/{len(shards)}: {names[0]} 等 {len(names)} 项"
+        started = time.monotonic()
+        with output_lock:
+            log(f"{label} 开始")
+        with tempfile.TemporaryDirectory(prefix="clipflow_preflight_") as directory:
+            env = dict(kwargs.get("env", os.environ))
+            env.update(CLIPFLOW_DATA_DIR=directory, PYTHONIOENCODING="utf-8")
+            options = {**kwargs, "env": env}
+            with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as output:
+                try:
+                    subprocess.run(args[:3] + names, **options, stdout=output,
+                                   stderr=subprocess.STDOUT, timeout=900)
+                finally:
+                    output.seek(0)
+                    with output_lock:
+                        print(output.read(), end="", flush=True)
+                        log(f"{label} 耗时 {time.monotonic() - started:.1f} 秒")
+
+    log(f"测试分组并行执行，最多 {PREFLIGHT_WORKERS} 个进程，各组使用独立临时数据。")
+    with ThreadPoolExecutor(max_workers=PREFLIGHT_WORKERS) as pool:
+        futures = [pool.submit(run_shard, index, names) for index, names in enumerate(shards)]
+        try:
+            for future in as_completed(futures):
+                future.result()
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 def _run_packaging_preflight_tests() -> None:
@@ -1651,7 +1681,10 @@ def _run_packaging_preflight_tests() -> None:
 
     readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
     if readiness_script.exists():
+        dependency_started = time.monotonic()
+        log("检查开始: 测试依赖安装状态")
         _ensure_packaging_preflight_dependencies(Path(test_python))
+        log(f"测试依赖检查通过，耗时 {time.monotonic() - dependency_started:.1f} 秒")
         _run_preflight_check(
             [test_python, os.fspath(readiness_script)],
             cwd=PROJECT_ROOT,
@@ -2497,7 +2530,7 @@ def _publish_patch(
 
 
 def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manifest_path: str) -> None:
-    from urllib.error import URLError
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
     manifest_url = (
@@ -2508,6 +2541,7 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
     expected_size = int(manifest["zip_size"])
     last_error = ""
     for attempt in range(10):
+        stage = "远端清单"
         try:
             manifest_request = Request(
                 manifest_url + ("&" if "?" in manifest_url else "?")
@@ -2524,6 +2558,7 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
                 raise RuntimeError("远端清单尚未更新到本次补丁")
             hasher = hashlib.sha256()
             size = 0
+            stage = "补丁文件"
             with urlopen(Request(manifest["zip_url"]), timeout=60) as archive:
                 for chunk in iter(lambda: archive.read(1024 * 1024), b""):
                     size += len(chunk)
@@ -2534,8 +2569,24 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
                 raise RuntimeError("远端补丁 ZIP 的大小或 SHA256 与本地清单不一致")
             log("Gitee 补丁下载核验通过。")
             return
+        except HTTPError as exc:
+            with exc:
+                detail = exc.read(2048).decode("utf-8", errors="replace").lower()
+            if exc.code in {401, 403}:
+                reason = ("Gitee 拒绝匿名下载大文件，需要登录；请移除补丁中的安装器等非运行文件后重新打包"
+                          if "large file require login" in detail
+                          else "Gitee 拒绝匿名下载，请检查仓库公开权限或下载限制")
+                raise RuntimeError(
+                    f"Gitee 已推送但下载核验失败，暂不要通知用户更新：{stage} HTTP {exc.code}，{reason}。"
+                    "本地补丁已保留，未将推送成功视为更新成功。"
+                ) from exc
+            last_error = f"{stage} HTTP {exc.code}"
+            log(f"下载核验暂未通过（{attempt + 1}/10）：{last_error}")
+            if attempt < 9:
+                time.sleep(5)
         except (URLError, OSError, ValueError, RuntimeError) as exc:
-            last_error = str(exc)
+            last_error = f"{stage}：{exc}"
+            log(f"下载核验暂未通过（{attempt + 1}/10）：{last_error}")
             if attempt < 9:
                 time.sleep(5)
     raise RuntimeError(f"Gitee 已推送但下载核验失败，暂不要通知用户更新：{last_error}")
@@ -2962,6 +3013,33 @@ def _ensure_lighthouse_distribution(python_exe):
         cwd=PROJECT_ROOT, check=True)
     subprocess.run([str(python_exe), str(BIN_DIR / 'tools/publish_lighthouse_runtime.py'), '--runtime', str(runtime),
         '--output', str(BUILD_DIR / 'lighthouse_dependencies'), '--publish'], cwd=PROJECT_ROOT, check=True)
+
+
+@contextmanager
+def _packaging_lock():
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    with (BUILD_DIR / ".package.lock").open("a+b") as handle:
+        if not handle.tell():
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            release = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            release = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
+        try:
+            acquire()
+        except OSError as exc:
+            raise RuntimeError("已有打包或发布任务正在运行，请勿同时启动多个打包程序；单次任务已启用并行测试。") from exc
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            release()
 
 
 def main() -> None:
@@ -3624,6 +3702,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-
-    main()
+    with _packaging_lock():
+        main()
 

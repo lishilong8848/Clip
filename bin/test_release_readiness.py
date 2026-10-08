@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import unittest
+import io
+from contextlib import redirect_stdout
 import tempfile
+import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +15,46 @@ import package_portable
 
 
 class ReleaseReadinessTests(unittest.TestCase):
+    def test_preflight_shards_run_concurrently_with_isolated_data_and_all_modules(self):
+        barrier = threading.Barrier(3, timeout=5)
+        calls = []
+        modules = [f'bin.test_fixture_{index}' for index in range(17)]
+
+        def run(args, **kwargs):
+            directory = Path(kwargs['env']['CLIPFLOW_DATA_DIR'])
+            self.assertTrue(directory.is_dir())
+            self.assertEqual(kwargs['env']['PYTHONIOENCODING'], 'utf-8')
+            self.assertTrue(kwargs['check'])
+            self.assertEqual(kwargs['timeout'], 900)
+            calls.append((args[3:], directory))
+            barrier.wait()
+            kwargs['stdout'].write('isolated test output\n')
+
+        with patch.object(package_portable, 'PREFLIGHT_WORKERS', 3), \
+                patch.object(package_portable.subprocess, 'run', side_effect=run), \
+                patch.object(package_portable, 'log'):
+            package_portable._run_preflight_check(['python', '-m', 'unittest', *modules], check=True)
+        self.assertEqual(sorted(name for names, _ in calls for name in names), sorted(modules))
+        self.assertEqual(len({directory for _, directory in calls}), 3)
+        self.assertTrue(all(not directory.exists() for _, directory in calls))
+
+    def test_preflight_shard_failure_stops_packaging(self):
+        with patch.object(package_portable.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'fixture')), \
+                patch.object(package_portable, 'log'):
+            with self.assertRaises(subprocess.CalledProcessError):
+                package_portable._run_preflight_check(['python', '-m', 'unittest', 'bin.test_fixture'], check=True)
+
+    def test_packaging_lock_blocks_overlap_and_releases_after_failure(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(package_portable, 'BUILD_DIR', Path(directory)):
+            with self.assertRaisesRegex(ValueError, 'fixture'):
+                with package_portable._packaging_lock():
+                    with self.assertRaisesRegex(RuntimeError, '已有打包'):
+                        with package_portable._packaging_lock():
+                            self.fail('second packager acquired the lock')
+                    raise ValueError('fixture')
+            with package_portable._packaging_lock():
+                pass
+
     def test_requests_imports_are_blocked_but_local_lists_are_not(self) -> None:
         cases = [
             ('requests = []\nrequests.append(1)\n', True),
@@ -69,6 +113,21 @@ class ReleaseReadinessTests(unittest.TestCase):
             self.assertEqual(package_portable._missing_selected_modules(python, ['pydantic']), [])
         self.assertEqual(run.call_args.args[0][:2], [str(python), '-c'])
         self.assertNotIn('sys.path', run.call_args.args[0][2])
+
+    def test_dependency_probe_checks_missing_and_pinned_versions_without_loading_sdk(self) -> None:
+        def capture(args):
+            output = io.StringIO()
+            with patch('importlib.util.find_spec', side_effect=lambda name: None if name == 'missing_fixture' else object()), \
+                    patch('importlib.metadata.version', return_value='2.52.0'), \
+                    patch('importlib.import_module', side_effect=AssertionError('must not load the SDK')), \
+                    redirect_stdout(output):
+                exec(args[2], {})
+            return True, output.getvalue()
+
+        with patch.object(package_portable, '_run_cmd_capture', side_effect=capture):
+            self.assertEqual(package_portable._missing_selected_modules(
+                Path('python'), ['lark_oapi', 'missing_fixture', 'pydantic_ai', 'openai']),
+                ['missing_fixture', 'openai'])
 
     def test_frontend_dist_rejects_native_prompt(self) -> None:
         dist_index = (

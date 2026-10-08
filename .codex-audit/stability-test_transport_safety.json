@@ -1,10 +1,10 @@
 {
   "group": "test_transport_safety",
   "modules": 1,
-  "tests": 19,
+  "tests": 21,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 52.6,
+  "seconds": 51.3,
   "external_connections_blocked": 0
 }

@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 import zipfile
+from urllib.error import HTTPError
 
 from starlette.requests import Request
 
@@ -181,6 +183,42 @@ class TransportSafetyTests(unittest.TestCase):
                     manifest, repo_url="https://example.invalid/repo.git",
                     branch="master", manifest_path="updates/latest_patch.json"
                 )
+
+    def test_public_download_denial_fails_promptly_with_stage_and_reason(self):
+        manifest = {'target_patch_version': 453, 'zip_name': 'patch.zip',
+                    'zip_url': 'https://example.invalid/patch.zip',
+                    'zip_sha256': hashlib.sha256(b'patch').hexdigest(), 'zip_size': 5}
+        for archive_denied in (False, True):
+            with self.subTest(archive_denied=archive_denied):
+                denied = HTTPError(manifest['zip_url'], 403, 'Forbidden', {},
+                                   io.BytesIO(b'large file require login for access.'))
+                responses = [io.BytesIO(json.dumps(manifest).encode()), denied] if archive_denied else [denied]
+                with patch('urllib.request.urlopen', side_effect=responses) as get, patch('time.sleep') as sleep:
+                    with self.assertRaisesRegex(RuntimeError, ('补丁文件' if archive_denied else '远端清单') + ' HTTP 403.*需要登录'):
+                        portable_packaging._verify_published_patch(manifest, repo_url='https://example.invalid/repo.git',
+                                                                  branch='master', manifest_path='latest.json')
+                self.assertEqual(get.call_count, len(responses))
+                sleep.assert_not_called()
+
+    def test_installer_is_not_packaged_or_deleted_from_existing_installations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, baseline = root / 'source', root / 'baseline'
+            for folder in (source, baseline):
+                (folder / 'bin').mkdir(parents=True)
+                (folder / 'vc_redist.x64.exe').write_bytes(b'installer')
+                (folder / 'bin/app.py').write_text('print("runtime")', encoding='utf-8')
+            with patch.object(portable_packaging, 'PROJECT_ROOT', source), \
+                    patch.object(portable_packaging, 'BUILD_DIR', root / 'build'):
+                portable_packaging.build_patch(root / 'unused', baseline, 'complete')
+                portable_packaging.copy_project(root / 'full')
+                archive = portable_packaging._zip_patch_dir(root / 'build/complete_patch_only')
+            self.assertFalse((root / 'full/vc_redist.x64.exe').exists())
+            self.assertTrue((baseline / 'vc_redist.x64.exe').exists())
+            with zipfile.ZipFile(archive) as z:
+                self.assertNotIn('complete_patch_only/vc_redist.x64.exe', z.namelist())
+                self.assertIn('complete_patch_only/bin/app.py', z.namelist())
+                self.assertNotIn(b'vc_redist', z.read('complete_patch_only/patch_manifest.txt'))
 
     def test_cabinet_templates_are_always_included_in_patch(self):
         with tempfile.TemporaryDirectory() as tmp:
