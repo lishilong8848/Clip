@@ -75,6 +75,7 @@ try {
   let details = 0;
   let detailGate = null;
   let reviewKind = 'maintenance';
+  let checkTagRecovery = false, tagReads = 0;
   const planReads = [];
   await context.route(base + '/api/**', async route => {
     const url = new URL(route.request().url());
@@ -85,6 +86,13 @@ try {
     if (url.pathname === '/api/workbench/draft' && route.request().method() === 'PUT') return route.fulfill({ json: { ok: true, data: { draft: { version: 1 } } } });
     assert.equal(route.request().method(), 'GET', 'Browser test must never submit business');
     let data = {};
+    if (url.pathname === '/api/notice-alert-tags' && checkTagRecovery) {
+      tagReads++;
+      data = { status: tagReads === 1 ? 'failed' : tagReads === 2 ? 'pending' : 'ready', action: 'update',
+        retry_after: Date.now() / 1000, error: '推荐标签获取失败，通告业务不受影响。',
+        tags: [{ label: '维护', content: '测试维护', basis: '已发维保通告', notes: '现场核对' }] };
+      return route.fulfill({ json: { ok: true, data } });
+    }
     if (url.pathname.startsWith('/api/plan-convergence/')) {
       planReads.push(url.pathname + url.search);
       if (url.pathname === '/api/plan-convergence/bootstrap') data = { is_admin: true, catalog_ready: true, points_ready: false,
@@ -146,6 +154,14 @@ try {
       detailGate = null; releaseDetail();
       await page.waitForTimeout(450);
       assert.equal(await page.locator('[name=content]').inputValue(), 'User edit must survive background verification');
+      checkTagRecovery = true;
+      await page.evaluate(() => refreshNoticeTags());
+      await page.locator('#lite-alert-tags').getByText('推荐标签获取失败，通告业务不受影响。', { exact: true }).waitFor();
+      await page.locator('#lite-alert-tags .tag-loading').waitFor({ timeout: 16000 });
+      await page.locator('#lite-alert-tags').getByText('【维护】测试维护', { exact: true }).waitFor({ timeout: 10000 });
+      assert.equal(tagReads, 3);
+      await page.screenshot({ path: path.join(output, 'recovered-tags.png'), animations: 'disabled' });
+      checkTagRecovery = false;
       await page.screenshot({ path: path.join(output, 'ongoing-detail.png') });
       await page.evaluate(() => {
         const form = document.getElementById('lite-notice-form');

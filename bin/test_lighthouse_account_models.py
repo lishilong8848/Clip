@@ -51,6 +51,10 @@ class MemoryStore:
     def put_document(self, namespace, key, data):
         self.docs[namespace, key] = copy.deepcopy(data)
 
+    def list_documents(self, namespace, *, key_prefix=''):
+        return [{'key': key, 'payload': copy.deepcopy(value)} for (ns, key), value in self.docs.items()
+                if ns == namespace and key.startswith(key_prefix)]
+
 
 def chat_endpoint_path(model_id):
     return "https://model." + model_id + ".example/v1/chat/completions"
@@ -104,7 +108,7 @@ class ForActorModelTests(unittest.TestCase):
         self.assertEqual(self.store.get_document(NAMESPACE, "model"), global_before)
 
     def test_new_account_copies_independent_snapshot_from_global(self):
-        """A new account first copies an independent deep snapshot from global config."""
+        """A new account can use shared defaults without owning or changing them."""
         self.store.put_document(NAMESPACE, "model", {
             "enabled": True,
             "active_model_id": "default",
@@ -404,6 +408,88 @@ class LighthouseAssistantModelForTests(unittest.TestCase):
             self.assertEqual(run["_turn"]["_profile"]["key_cipher"], "encrypted:key-" + actor["id"])
             self.assertNotIn("key_cipher", json.dumps(public))
             self.assertNotIn("_profile", json.dumps(self.store.get_document("lighthouse_runs", run["id"])))
+
+
+class SharedDefaultModelsTests(unittest.TestCase):
+    def setUp(self):
+        self.store = MemoryStore()
+        model, client = account_bound_model(self.store, 'fixture')
+        self.addCleanup(client.close)
+        self.service = LighthouseAssistant(self.store, lambda *_: [], model=model)
+        self.admin = {'id': 'admin', 'is_admin': True, 'scopes': ['A', 'B']}
+        self.user = {'id': 'user', 'is_admin': False, 'scopes': ['A']}
+
+    def shared(self, identity='first', **changes):
+        return self.service.model_settings(self.admin, {'scope': 'shared', 'action': 'upsert', 'profile': {
+            'id': identity, 'name': identity, 'endpoint': ENDPOINT, 'model': MODEL,
+            'api_key': 'fixture-shared-key', **changes}})
+
+    def test_administrator_add_edit_delete_is_live_for_every_account(self):
+        for name in ('MiniMax', 'GLM', 'Qwen', 'Deepseek'):
+            self.shared(name, model='WanWu/' + name + '-Auto')
+        settings = self.service.model_settings(self.user)
+        self.assertEqual(len(settings['models']), 4)
+        self.assertTrue(all(row['shared'] and row['configured'] for row in settings['models']))
+        self.assertFalse(settings['can_manage_shared'])
+        self.assertNotIn('fixture-shared-key', json.dumps(settings))
+        self.assertNotIn('key_cipher', json.dumps(settings))
+        self.assertEqual(self.store.get_document(NAMESPACE, 'model:user')['models'], [])
+        self.shared('Deepseek', name='Updated', api_key='replacement-key')
+        profile = self.service.model_for(self.user).profile('shared_Deepseek')
+        self.assertEqual(profile['name'], 'Updated')
+        self.assertEqual(unprotect(profile['key_cipher']), 'replacement-key')
+        self.service.model_settings(self.admin, {'scope': 'shared', 'action': 'delete', 'id': 'shared_Deepseek'})
+        self.assertEqual(len(self.service.model_settings(self.user)['models']), 3)
+        with self.assertRaises(AssistantError):
+            self.service.model_for(self.user).profile('shared_Deepseek')
+
+    def test_non_admin_cannot_change_shared_models_even_through_personal_endpoint(self):
+        self.shared()
+        before = copy.deepcopy(self.store.docs)
+        for payload in (
+            {'scope': 'shared', 'action': 'delete', 'id': 'shared_first'},
+            {'action': 'delete', 'id': 'shared_first'},
+            {'action': 'upsert', 'profile': {'id': 'shared_first'}},
+            {'scope': 'shared', 'action': 'upsert', 'profile': {'id': 'new'}},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(AssistantError) as failed:
+                self.service.model_settings(self.user, payload)
+            self.assertEqual(failed.exception.status, 403)
+        self.assertEqual(self.store.get_document(NAMESPACE, 'model'), before[NAMESPACE, 'model'])
+
+    def test_dormant_legacy_copies_retire_but_personal_edits_and_selection_survive(self):
+        self.shared()
+        legacy = self.store.get_document(NAMESPACE, 'model')
+        legacy['active_model_id'] = 'first'
+        self.store.put_document(NAMESPACE, 'model:dormant', legacy)
+        edited = copy.deepcopy(legacy)
+        edited['models'][0]['name'] = 'Personal copy'
+        self.store.put_document(NAMESPACE, 'model:user', edited)
+        self.service.model_settings(self.admin, {'scope': 'shared', 'action': 'delete', 'id': 'shared_first'})
+        self.assertEqual(self.service.model_settings({'id': 'dormant'})['models'], [])
+        own = self.service.model_settings(self.user)
+        self.assertEqual([m['name'] for m in own['models']], ['Personal copy'])
+        self.assertEqual(own['active_model_id'], 'first')
+        self.assertFalse(own['models'][0]['shared'])
+        self.store.put_document(NAMESPACE, 'model:legacy_single', {'enabled': True, 'key_cipher': 'encrypted:personal-legacy-key'})
+        legacy_model = self.service.model_for({'id': 'legacy_single'})
+        self.assertEqual(legacy_model.profile()['key_cipher'], 'encrypted:personal-legacy-key')
+        self.assertFalse(legacy_model.settings()['models'][0]['shared'])
+
+    def test_unassigned_formal_account_can_chat_but_cannot_query_business(self):
+        from types import SimpleNamespace
+        from lan_bitable_template_portal.lighthouse_stream import LighthouseStream
+        self.shared()
+        actor = {**self.user, 'scopes': []}
+        stream = LighthouseStream(SimpleNamespace(assistant=self.service, files=None), engine=object())
+        conversation = self.service._state(actor)['id']
+        run, _ = stream._accept(actor, {'question': '你好', 'conversation_id': conversation,
+                                       'operation_id': 'scope_free_general_question'})
+        self.assertEqual(run['scopes'], [])
+        for question in ('今天E楼有几条事件', '有几条进行中的通告'):
+            with self.subTest(question=question), self.assertRaises(AssistantError):
+                stream._accept(actor, {'question': question, 'conversation_id': conversation,
+                                      'operation_id': 'scope_free_business_question'})
 
 
 if __name__ == "__main__":

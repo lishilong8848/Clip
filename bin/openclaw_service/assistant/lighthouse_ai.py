@@ -17,6 +17,7 @@ from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttp
 ENDPOINT = "https://wan.vnet.com/v1/chat/completions"
 MODEL = "WanWu/Deepseek-Auto"
 NAMESPACE = "lighthouse_ai"
+SHARED_MODEL_PREFIX = "shared_"
 PRIVATE_REPLY = "不能提供人员身份证号、家庭住址或其他私密身份信息。可以查询人员姓名、工号及有权限的业务信息。"
 SENSITIVE = re.compile(r"身份证|身份證|证件号|證件號|护照(?:号|号码)|家庭住址|家庭地址|居住地址|居住地|住宅地址|户籍|戶籍|住址|home.?address|residential.?address|passport.?number|national.?id|identity.?(?:card|number)|id.?card", re.I)
 SECRET = re.compile(r"token|secret|password|authorization|api.?key|cookie|密码|密钥|口令|签名|signature|base64|cipher|private|file_path|local_file|raw_(?:json|data)|url|image|attachment|截图|附件|照片|证明|open_?id|user_?id|phone|mobile|email|电话|手机|邮箱|联系方式", re.I)
@@ -169,16 +170,39 @@ class CustomModel:
     def _config(self):
         with self._lock:
             saved = self.store.get_document(NAMESPACE, self._config_key)
-            if saved is None and self._config_key != "model":
+            if self._config_key != "model":
                 template = copy.copy(self)
                 template._config_key = "model"
-                saved = copy.deepcopy(template._config())
-                self.store.put_document(NAMESPACE, self._config_key, saved)
+                shared = template._config()
+                if saved is None:
+                    saved = {"enabled": shared.get("enabled", True), "models": [],
+                             "active_model_id": SHARED_MODEL_PREFIX + str(shared.get("active_model_id") or "")}
+                if not saved.get("shared_models_linked"):
+                    if 'models' not in saved and saved.get('key_cipher'):
+                        saved = {**saved, 'active_model_id': 'default', 'models': [
+                            {'id': 'default', 'name': '灯塔默认模型', 'endpoint': saved.get('endpoint') or ENDPOINT,
+                             'model': saved.get('model') or MODEL, 'key_cipher': saved['key_cipher']}]}
+                    # Retire only untouched copies inherited by the previous UI.
+                    # Personally edited models and their credentials remain private.
+                    inherited = {p['id']: p for p in shared['models']}
+                    own = []
+                    for profile in saved.get('models', []):
+                        prior = inherited.get(profile.get('id'))
+                        if prior and all(profile.get(k) == prior.get(k) for k in ('id', 'name', 'endpoint', 'model', 'key_cipher')):
+                            if saved.get('active_model_id') == profile['id']:
+                                saved['active_model_id'] = SHARED_MODEL_PREFIX + profile['id']
+                        else:
+                            own.append(profile)
+                    saved.update(models=own, shared_models_linked=True)
+                    self.store.put_document(NAMESPACE, self._config_key, saved)
+                return {**saved, "models": [
+                    {**p, "id": SHARED_MODEL_PREFIX + p['id'], "shared": True} for p in shared['models']
+                ] + saved.get('models', [])}
             saved = saved or {}
             if "models" not in saved:
                 saved = {"enabled": saved.get("enabled", True), "active_model_id": "default", "models": [
                     {"id": "default", "name": "灯塔默认模型", "endpoint": ENDPOINT, "model": MODEL,
-                     **({"key_cipher": saved["key_cipher"]} if saved.get("key_cipher") else {})}]}
+                     "key_cipher": saved["key_cipher"]}] if saved.get("key_cipher") else []}
                 self.store.put_document(NAMESPACE, self._config_key, saved)
             return saved
 
@@ -192,7 +216,7 @@ class CustomModel:
         saved = self._config()
         active = self._default(saved)
         return {"enabled": bool(saved["enabled"]), "active_model_id": active["id"] if active else "",
-                "models": [{k: p[k] for k in ("id", "name", "endpoint", "model")} | {"configured": bool(p.get("key_cipher"))} for p in saved["models"]],
+                "models": [{k: p[k] for k in ("id", "name", "endpoint", "model")} | {"configured": bool(p.get("key_cipher")), "shared": bool(p.get("shared"))} for p in saved["models"]],
                 "endpoint": active["endpoint"] if active else "", "model": active["model"] if active else "",
                 "configured": bool(active and active.get("key_cipher"))}
 
@@ -246,6 +270,8 @@ class CustomModel:
                 if set(payload) - {"api_key", "enabled", "clear_key"}:
                     raise AssistantError("模型设置格式无效。")
                 selected = self._default(saved) or {"id": "default", "name": "灯塔默认模型", "endpoint": ENDPOINT, "model": MODEL}
+                if selected.get('shared'):
+                    selected = {**selected, 'id': selected['id'].removeprefix(SHARED_MODEL_PREFIX)}
                 payload = {"action": "upsert", "profile": {**selected, "api_key": payload.get("api_key", ""), "clear_key": payload.get("clear_key", False)},
                            **({"enabled": payload["enabled"]} if "enabled" in payload else {})}
                 action = "upsert"
@@ -260,8 +286,10 @@ class CustomModel:
                 identity = item.get("id") or uuid.uuid4().hex
                 if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity):
                     raise AssistantError("模型标识无效。")
+                if identity.startswith(SHARED_MODEL_PREFIX):
+                    raise AssistantError("共享默认模型须由管理员通过默认模型设置修改。", 403)
                 old = next((p for p in saved["models"] if p["id"] == identity), None)
-                if not old and len(saved["models"]) >= 10:
+                if not old and sum(not p.get('shared') for p in saved["models"]) >= 10:
                     raise AssistantError("最多配置 10 个模型。")
                 profile = {"id": identity}
                 for field, maximum in (("name", 60), ("model", 200)):
@@ -269,7 +297,7 @@ class CustomModel:
                     if not isinstance(value, str) or not value.strip() or len(value) > maximum or any(ord(c) < 32 for c in value) or API_KEY.search(value) or private_identifier(value):
                         raise AssistantError("请填写有效的显示名称和模型名称。")
                     profile[field] = value.strip()
-                if any(p["id"] != identity and p["name"] == profile["name"] for p in saved["models"]):
+                if any(not p.get('shared') and p["id"] != identity and p["name"] == profile["name"] for p in saved["models"]):
                     raise AssistantError("模型显示名称已存在，请使用不同名称。")
                 profile["endpoint"] = self._endpoint(item.get("endpoint"))
                 key, clear = item.get("api_key", ""), item.get("clear_key", False)
@@ -289,6 +317,8 @@ class CustomModel:
                 selected = next((p for p in saved["models"] if p["id"] == payload.get("id")), None)
                 if not selected:
                     raise AssistantError("模型不存在，请重新读取设置。", 404)
+                if action == 'delete' and selected.get('shared'):
+                    raise AssistantError("共享默认模型只能由管理员删除。", 403)
                 if action == "select":
                     if not selected.get("key_cipher"):
                         raise AssistantError("请先为所选模型填写 API Key。")
@@ -299,7 +329,8 @@ class CustomModel:
                 raise AssistantError("模型设置操作无效。")
             elif "enabled" not in payload:
                 raise AssistantError("请明确选择助手启用状态。")
-            self.store.put_document(NAMESPACE, self._config_key, saved)
+            self.store.put_document(NAMESPACE, self._config_key,
+                                    {**saved, 'models': [p for p in saved['models'] if not p.get('shared')]})
             return self.settings()
 
     def complete(self, messages, *, profile=None, max_tokens=1800, structured=False):
@@ -388,6 +419,32 @@ class LighthouseAssistant:
     def model_for(self, actor):
         return self.model.for_actor(actor["id"]) if isinstance(self.model, CustomModel) else self.model
 
+    def model_settings(self, actor, payload=None):
+        model = self.model_for(actor)
+        if payload is not None:
+            payload = dict(payload)
+            scope = payload.pop('scope', 'personal')
+            if scope == 'shared':
+                if not actor.get('is_admin'):
+                    raise AssistantError('只有管理员可以维护共享默认模型。', 403)
+                if payload.get('action') not in {'upsert', 'delete'}:
+                    raise AssistantError('默认模型只支持新增、修改和删除。')
+                if payload.get('id'):
+                    payload['id'] = str(payload['id']).removeprefix(SHARED_MODEL_PREFIX)
+                if isinstance(payload.get('profile'), dict):
+                    payload['profile'] = {**payload['profile'], 'id': str(payload['profile'].get('id') or '').removeprefix(SHARED_MODEL_PREFIX)}
+                with self.model._lock:
+                    # Link dormant legacy accounts before a shared model is
+                    # removed or changed, so an old copy cannot survive it.
+                    for row in self.store.list_documents(NAMESPACE, key_prefix='model:'):
+                        self.model.for_actor(row['key'].removeprefix('model:'))._config()
+                    self.model.configure(payload)
+            elif scope == 'personal':
+                model.configure(payload)
+            else:
+                raise AssistantError('模型配置范围无效。')
+        return {**model.settings(), 'can_manage_shared': bool(actor.get('is_admin'))}
+
     @staticmethod
     def _key(actor):
         return "conversation:" + actor["id"]
@@ -407,7 +464,8 @@ class LighthouseAssistant:
     def _selected(data, settings):
         available = [p for p in settings.get("models", []) if p["configured"]]
         return next((p for p in available if p["id"] == data.get("model_id")),
-                    next((p for p in available if p["id"] == settings.get("active_model_id")), None))
+                    next((p for p in available if p.get('shared') and p['id'] == SHARED_MODEL_PREFIX + str(data.get('model_id') or '')),
+                         next((p for p in available if p["id"] == settings.get("active_model_id")), None)))
 
     @staticmethod
     def _interactions(sources, actor):

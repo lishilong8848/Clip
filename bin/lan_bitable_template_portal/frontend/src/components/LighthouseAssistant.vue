@@ -54,14 +54,16 @@
             <div class="settings-section-label">已配置模型</div>
             <div class="model-list">
               <article v-for="m in adminModels" :key="m.id" class="model-card compact-row" :class="{ active: isSelectedForEdit(m) }">
-                <button type="button" class="list-row" :disabled="busy || settingBusy" @click="beginEditAction({ kind: 'edit', id: String(m.id) })">
+                <button type="button" class="list-row" :disabled="busy || settingBusy" @click="canEditModel(m) ? beginEditAction({ kind: 'edit', id: String(m.id) }) : setDefault(m)">
                   <span class="list-name">{{ m.name }}</span>
                   <span class="list-model">{{ m.model }}</span>
+                  <span v-if="m.shared" class="model-flag">共享默认</span>
                   <span v-if="isDefault(m)" class="model-flag">默认</span>
                   <span v-else-if="!m.configured" class="model-flag warn">未配置</span>
                 </button>
                 <div class="model-actions">
                   <button
+                    v-if="canEditModel(m)"
                     type="button"
                     class="icon-tool"
                     :disabled="busy || settingBusy"
@@ -78,6 +80,7 @@
                     @click="setDefault(m)"
                   ><Star :size="14" /></button>
                   <button
+                    v-if="canEditModel(m)"
                     type="button"
                     class="icon-tool danger"
                     :disabled="busy || settingBusy"
@@ -90,10 +93,11 @@
               <div v-if="!adminModels.length" class="model-empty">尚无已配置模型</div>
             </div>
 
-            <button type="button" class="add-model" :disabled="busy || settingBusy" @click="addStart"><Plus :size="15" />添加模型</button>
+            <button type="button" class="add-model" :disabled="busy || settingBusy" @click="addStart(false)"><Plus :size="15" />添加模型</button>
+            <button v-if="modelSettings.can_manage_shared" type="button" class="add-model" :disabled="busy || settingBusy" @click="addStart(true)"><Plus :size="15" />添加默认模型</button>
 
             <section v-if="editProfile" class="profile-form">
-              <div class="settings-section-label">{{ editingExisting ? '编辑模型' : '添加模型' }}</div>
+              <div class="settings-section-label">{{ editingExisting ? '编辑' : '添加' }}{{ editProfile.shared ? '共享默认模型' : '个人模型' }}</div>
               <label class="field-label">显示名称<input v-model="editProfile.name" type="text" maxlength="60" :disabled="busy || settingBusy" /></label>
               <label class="field-label">接口地址<input v-model="editProfile.endpoint" type="text" maxlength="2000" :disabled="busy || settingBusy" placeholder="https://…/v1/chat/completions" /></label>
               <label class="field-label">模型名称<input v-model="editProfile.model" type="text" maxlength="200" :disabled="busy || settingBusy" /></label>
@@ -313,8 +317,8 @@ async function loadAppearance(): Promise<void> {
   finally { if (appearanceController === controller) { appearanceController = undefined; appearanceLoading.value = false; } }
 }
 
-type EditProfile = { id: string; name: string; endpoint: string; model: string; api_key: string };
-type EditAction = { kind: 'edit'; id: string } | { kind: 'add' };
+type EditProfile = { id: string; name: string; endpoint: string; model: string; api_key: string; shared: boolean };
+type EditAction = { kind: 'edit'; id: string } | { kind: 'add'; shared?: boolean };
 type TurnInteraction = { kind: 'navigate'; label: string; url: string; title: string };
 type DraftFile = { localId: string; id?: string; name: string; mime?: string; size?: number; url?: string; preview?: string; uploading: boolean; error: string; is_image?: boolean };
 
@@ -464,7 +468,7 @@ const canSaveProfile = computed(() => Boolean(editProfile.value && editProfile.v
 const deleteMessage = computed(() => {
   if (!deleteTarget.value) return '';
   const editingThis = Boolean(editProfile.value && String(editProfile.value.id) === String(deleteTarget.value.id) && isDirty());
-  const base = `删除模型「${String(deleteTarget.value.name || '')}」？删除后无法恢复。`;
+  const base = `删除模型「${String(deleteTarget.value.name || '')}」？${deleteTarget.value.shared ? '所有账号将无法再选择此默认模型，个人模型和会话保留。' : '删除后无法恢复。'}`;
   return editingThis ? `${base}该模型当前有未保存的编辑内容，将一并丢弃。` : base;
 });
 
@@ -1413,7 +1417,7 @@ async function showSettings(): Promise<void> {
 function primeEditing(settings: Dict): void {
   const models: Dict[] = settings?.models || [];
   const active = models.find((m: Dict) => String(m.id) === String(settings.active_model_id));
-  const target = active || models[0];
+  const target = active && canEditModel(active) ? active : models.find(canEditModel);
   if (target) startEdit(target);
   else { editProfile.value = null; editingExisting.value = false; }
 }
@@ -1424,11 +1428,14 @@ function newModelId(): string {
   return id;
 }
 function startEdit(m: Dict): void {
-  editProfile.value = { id: String(m.id || ''), name: String(m.name || ''), endpoint: String(m.endpoint || ''), model: String(m.model || ''), api_key: '' };
+  if (!canEditModel(m)) return;
+  editProfile.value = { id: String(m.id || ''), name: String(m.name || ''), endpoint: String(m.endpoint || ''), model: String(m.model || ''), api_key: '', shared: !!m.shared };
   editingExisting.value = true;
 }
-function startAdd(): void {
-  editProfile.value = { id: newModelId(), name: '', endpoint: '', model: '', api_key: '' };
+function canEditModel(m: Dict): boolean { return !m.shared || !!modelSettings.value.can_manage_shared; }
+function startAdd(shared = false): void {
+  if (shared && !modelSettings.value.can_manage_shared) return;
+  editProfile.value = { id: (shared ? 'shared_' : '') + newModelId(), name: '', endpoint: '', model: '', api_key: '', shared };
   editingExisting.value = false;
 }
 function isDirty(): boolean {
@@ -1442,7 +1449,7 @@ function isDirty(): boolean {
     || Boolean(editProfile.value.api_key);
 }
 function applyEditAction(action: EditAction): void {
-  if (action.kind === 'add') { startAdd(); return; }
+  if (action.kind === 'add') { startAdd(!!action.shared); return; }
   const m = (modelSettings.value.models || []).find((x: Dict) => String(x.id) === action.id);
   if (m) startEdit(m);
 }
@@ -1453,8 +1460,8 @@ function beginEditAction(action: EditAction): void {
   if (isDirty()) { pendingEditAction = action; editSwitchOpen.value = true; return; }
   applyEditAction(action);
 }
-function addStart(): void {
-  beginEditAction({ kind: 'add' });
+function addStart(shared = false): void {
+  beginEditAction({ kind: 'add', shared });
 }
 function confirmEditSwitch(yes: boolean): void {
   editSwitchOpen.value = false;
@@ -1505,7 +1512,7 @@ async function saveModel(): Promise<void> {
   try {
     const profile: Dict = { id: p.id, name: p.name.trim(), endpoint: p.endpoint.trim(), model: p.model.trim() };
     if (p.api_key.trim()) profile.api_key = p.api_key.trim();
-    const result = await call('settings', 'PUT', { action: 'upsert', profile });
+    const result = await call('settings', 'PUT', { action: 'upsert', profile, scope: p.shared ? 'shared' : 'personal' });
     if (disposed) return;
     modelSettings.value = result;
     const saved = (result.models || []).find((m: Dict) => String(m.id) === String(p.id));
@@ -1527,7 +1534,7 @@ async function setDefault(m: Dict): Promise<void> {
   finally { settingBusy.value = false; }
 }
 function requestDelete(m: Dict): void {
-  if (busy.value) return;
+  if (busy.value || !canEditModel(m)) return;
   deleteTarget.value = m; deleteModelOpen.value = true;
 }
 async function confirmDeleteModel(yes: boolean): Promise<void> {
@@ -1536,7 +1543,7 @@ async function confirmDeleteModel(yes: boolean): Promise<void> {
   if (!yes || !target || busy.value) return;
   settingBusy.value = true; settingsError.value = '';
   try {
-    const result = await call('settings', 'PUT', { action: 'delete', id: target.id });
+    const result = await call('settings', 'PUT', { action: 'delete', id: target.id, scope: target.shared ? 'shared' : 'personal' });
     if (disposed) return;
     modelSettings.value = result;
     if (editProfile.value && String(editProfile.value.id) === String(target.id)) {
@@ -1978,6 +1985,8 @@ onBeforeUnmount(() => {
   --lh-accent-strong: color-mix(in srgb, var(--bot-color) 32%, #fafdfb);
   --lh-accent-soft: color-mix(in srgb, var(--bot-color) 34%, #26342d);
   --lh-accent-ring: color-mix(in srgb, var(--lh-accent) 25%, transparent);
+  --lh-action: color-mix(in srgb, var(--bot-color) 15%, #08917c);
+  --lh-action-hover: color-mix(in srgb, var(--bot-color) 10%, #087c6b);
   --lh-danger: #eea99b;
   --lh-danger-soft: #47342f;
   --lh-warn: #dec58f;
@@ -2000,7 +2009,8 @@ onBeforeUnmount(() => {
 .lighthouse :deep(.confirm-content p), .lighthouse :deep(.confirm-content header span) { color: var(--lh-muted); }
 .lighthouse :deep(.confirm-icon) { background: var(--lh-accent-soft); color: var(--lh-accent); box-shadow: none; }
 .lighthouse :deep(.confirm-close), .lighthouse :deep(.confirm-content .btn.ghost) { background: var(--lh-surface-subtle); border-color: var(--lh-border-strong); color: var(--lh-charcoal); }
-.lighthouse :deep(.confirm-content .btn:not(.ghost)) { background: var(--lh-accent); border-color: var(--lh-accent); color: #162519; }
+.lighthouse :deep(.confirm-content .btn:not(.ghost)) { background: var(--lh-action); border-color: var(--lh-action); color: #fff; }
+.lighthouse :deep(.confirm-content .btn:not(.ghost):not(.danger):hover:not(:disabled)) { background: var(--lh-action-hover); }
 .lighthouse :deep(.confirm-content .btn.danger) { background: var(--lh-danger); border-color: var(--lh-danger); color: #30201c; }
 .lighthouse :deep(.async-page-state) { background: var(--lh-surface-subtle); color: var(--lh-charcoal); border-color: var(--lh-border-strong); box-shadow: none; }
 .lighthouse :deep(.async-page-state strong) { color: var(--lh-charcoal-strong); }
@@ -2110,7 +2120,8 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; }
 .model-select-small { min-width: 0; flex: 0 1 auto; max-width: 220px; }
 .native-model-select { height: 34px; max-width: 220px; width: 100%; padding: 0 8px; border: 1px solid var(--lh-input-border); border-radius: 8px; font: inherit; font-size: 13px; text-overflow: ellipsis; }
-.send { width: 40px; height: 40px; padding: 0; flex-shrink: 0; }.send.round { border-radius: 50%; }.primary { color: #162519; border-color: var(--lh-accent); background: var(--lh-accent); }.primary:hover:not(:disabled) { background: var(--lh-accent-strong); }
+.send { width: 40px; height: 40px; padding: 0; flex-shrink: 0; }.send.round { border-radius: 50%; }.primary { color: #fff; border-color: var(--lh-action); background: var(--lh-action); }.primary:hover:not(:disabled) { background: var(--lh-action-hover); }
+.primary:disabled { color: var(--lh-faint-muted); border-color: var(--lh-border); background: var(--lh-surface-hover); }
 .model-settings { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .settings-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 16px 18px 8px; }
 .model-settings h3 { font-size: 15px; margin: 0; }.settings-header-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.settings-section-label { font-size: 12px; color: var(--lh-faint-muted); }.model-settings .enabled { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--lh-charcoal); }

@@ -78,6 +78,7 @@ query返回的query_ref可用read_query读取本轮已查询列表的后续片�
 修改、发送、删除等只可用prepare_business准备；绝不能直接写入。目标不明确时先追问，必要确认由原业务流程处理。
 会话内容或生成文件发给人员用POST /api/message-delivery/send（不是通告上传）。先查GET /api/message-delivery/recipients，按姓名及工号核对可接收人员，recipient_ids用查询返回record_id；“发给我/自己”填__self__，不猜登录人的姓名或openid。text保留用户选定的完整内容，files.files引用有权限的会话文件。已有下载链接先调用其原鉴权下载API取得会话文件，不发送本机链接或编造文件ID。确认后发送，失败用原delivery_id的retry接口，只补未成功部分。
 发送内容不一定是上一条。根据用户所指主题、日期、文件名查search_history；可用query_ref引用items.N.answer完整文本，不能把展示的截断摘要当全文。无法唯一定位时先准备发送表单，text留空，平台提供有权限的历史文字和文件多选项，请用户选择，不默认只发送上一条或擅自概括。明确指向某段文字或文件时预选对应内容。
+用户要求完整未结束/进行中通告时，调用ongoing_notices获取全量分页结果。发送时text用其query_ref引用message_text，不抄写10条预览或40条片段。complete=false时不能准备完整清单发送；普通“把这发给我”仍转发用户指向的原答复。
 prepare_business的operations逐项使用api_id、params、path_params、body、files。缺失字段用fields=[{name,label,type,required,operation_index,section,path,options:[{value,label}]}]让用户补充；type为text/textarea/number/date/time/month/datetime-local/select/multiselect/checkbox/file/object/array，section为body/params/path_params/files。已声明子字段的对象和列表用object/array，平台从真实schema生成填写项，不自行编造children/item结构。日期、时间、单选、多选必须使用相应控件；不能要求用户手写记录ID、人员ID或JSON选项列表。维修关联记录可用options_source=repair_events/repair_notices/repair_projects/repair_devices搜索选择。
 用户要求填写、重新填写或编辑时，即使没有提供新日期、姓名和签名人，也必须先调用prepare_business展示原生填写表单，不能以一段“请一次性提供日期、人员”等文字清单结束。已有记录保留原值供选择修改，不要求用户先在聊天中手打再生成表单。正文不展示PUT、version、execution_version等内部字段。
 六类非事件通告发送使用notice_command，平台自动生成通告正文、楼栋、时间及选项表单，不重复声明patch或patch.*填写项。维保、轮巡、调整开始时另有SOP/操作人/审核人及设备指向选择，目录在表单内读取；不手写polling_*编号或擅自勾选不使用工单。更新/结束前先读取GET /api/workbench的ongoing原记录；目标不明确时先由选择器选定，再展示原值表单。附件及SOP选择继续沿用原流程，不因为表单出现而认定已经发送。
@@ -628,9 +629,47 @@ class LighthouseModel:
             add_source("未完成工作", data, "/workbench-lite")
             return data
 
+        async def full_notices(notice_type=""):
+            if notice_type and notice_type not in {"maintenance", "change", "repair", "polling", "adjust", "power"}:
+                raise AssistantError("通告类型无效。")
+            current = await current_actor()
+            data = await collect_pending(current, "未结束通告", invoke, None,
+                groups_only={"notices"}, notice_type=notice_type, item_limit=None,
+                on_progress=lambda label: emit("status", {"label": label}))
+            data['message_text'] = pending_reply(data) if data['complete'] else ''
+            visible = {key: value for key, value in data.items() if key != 'message_text'}
+            result = add_source("完整未结束通告", data, "/workbench-lite", public_data=visible)
+            return data, {**result, "complete": data['complete'], "message_path": "message_text"}
+
         async def direct(answer):
             await emit("text", {"delta": answer})
             return {"answer": answer, "sources": sources, "_references": references}
+
+        from .lighthouse_message_delivery import full_notice_self_request
+        if not warm_only and not permitted_files and full_notice_self_request(question):
+            from .lighthouse_pending import NOTICE_TYPES
+            kinds = [kind for kind, label in NOTICE_TYPES.items() if label in question]
+            if len(kinds) <= 1:
+                data, source = await full_notices(kinds[0] if kinds else "")
+                if not data['complete']:
+                    return await direct('完整通告清单尚未读取完成，未发送。\n\n' + pending_reply(data))
+                people = await invoke({'api_id': 'GET /api/message-delivery/recipients'})
+                directory = people.get('_raw', people.get('data')) or {}
+                if not people.get('ok') or not directory.get('self'):
+                    return await direct('未能核对当前登录人的飞书收件身份，未发送；请核对姓名、工号及是否可直接接收消息。')
+                add_source('飞书收件人', directory, '/')
+                current = await current_actor()
+                prepared = await asyncio.to_thread(self.portal.prepare, current,
+                    {'title': '发送完整未结束通告至本人', 'operations': [{'api_id': 'POST /api/message-delivery/send',
+                     'body': {'recipient_ids': ['__self__'], 'text': {'$query': {'ref': source['query_ref'], 'path': 'message_text'}}}}]},
+                    turn['operation_id'], [], references, queries, question=question)
+                prepared['assistant_run_id'] = turn.get('run_id', '')
+                await asyncio.to_thread(self.portal.store.put_document, 'lighthouse_agent_plans', prepared['id'], prepared)
+                public = await asyncio.to_thread(self.portal.amend, current, prepared['id'], {'version': prepared['version'],
+                    'values': {field['name']: field['value'] for field in prepared['fields'] if 'value' in field}})
+                answer = f"已备齐当前范围全部 **{data['groups'][0]['count']} 条**未结束通告，确认后发送给本人。"
+                await emit('text', {'delta': answer})
+                return {'answer': answer, 'sources': sources, 'plan': public, '_references': references}
 
         if not warm_only and public_capability_request(question):
             await current_actor()
@@ -1113,6 +1152,19 @@ class LighthouseModel:
                 if date_window(question) and not current_pending:
                     raise ModelRetry("此工具读取当前重保状态；指定历史发布日期时请查原重保任务列表并按created_at筛选。")
                 return safe_data(await pending_data({"guard"}))
+
+            @agent.tool_plain
+            async def ongoing_notices(notice_type: str = "") -> dict:
+                """Full current ongoing notices, including every page. Optional maintenance/change/repair/polling/adjust/power.
+
+                For forwarding, use query_ref + message_path as a $query text reference; never transcribe a preview.
+                Historical dates or extra filters need their native query instead.
+                """
+                require_business_intent()
+                if date_window(question) and not current_pending:
+                    raise ModelRetry("此工具读取当前未结束通告；历史日期请查原接口并按时间筛选。")
+                _, result = await full_notices(notice_type)
+                return result
 
             @agent.tool_plain
             async def pending_work() -> dict:

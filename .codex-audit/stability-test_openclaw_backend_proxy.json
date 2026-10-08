@@ -1,0 +1,10 @@
+{
+  "group": "test_openclaw_backend_proxy",
+  "modules": 1,
+  "tests": 20,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 62.2,
+  "external_connections_blocked": 0
+}

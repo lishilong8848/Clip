@@ -1,0 +1,10 @@
+{
+  "group": "test_lighthouse_fast_paths",
+  "modules": 1,
+  "tests": 13,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 4.4,
+  "external_connections_blocked": 0
+}

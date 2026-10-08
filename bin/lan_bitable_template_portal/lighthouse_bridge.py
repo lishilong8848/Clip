@@ -34,8 +34,6 @@ async def actor_for(controller, runtime, request):
         'scopes': sorted(allowed & SCOPES), 'can_manage_settings': True}
     actor['learning_scopes'] = sorted(set('ABCDEH') & set(actor['scopes'])) if actor['is_admin'] else [
         code for code in 'ABCDEH' if BUILDING_OPEN_ID_MAP.get(code) == identity and code in actor['scopes']]
-    if not actor['scopes']:
-        raise AssistantError('当前账号尚无业务访问权限。', 403)
     return actor
 
 

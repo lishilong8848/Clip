@@ -877,6 +877,39 @@ class TestAssistantBackendProxy(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(secret, json.dumps(model))
 
     # -- 3. forged query actor id cannot switch account ------------------------
+    async def test_shared_models_require_admin_and_formal_unassigned_user_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            world = World(directory)
+            self._host_for_cleanup = world.host
+            world.sessions['unassigned'] = {'open_id': 'formal-unassigned', 'scopes': [], 'is_admin': False}
+            async with world.activate():
+                client = world.portal_client()
+                await world.warm(client)
+                headers = {'Origin': 'http://127.0.0.1:%d' % world.portal_port}
+                body = {'scope': 'shared', 'action': 'upsert', 'profile': {'id': 'team-model', 'name': 'Shared fixture',
+                    'endpoint': 'https://example.com/v1/chat/completions', 'model': 'fixture', 'api_key': 'fixture-secret-only'}}
+                denied = await client.put('/api/assistant/settings', json=body, cookies={'sid': 'alice'}, headers=headers)
+                self.assertEqual(denied.status_code, 403, denied.text)
+                saved = await client.put('/api/assistant/settings', json=body, cookies={'sid': 'admin'}, headers=headers)
+                self.assertEqual(saved.status_code, 200, saved.text)
+                self.assertNotIn('fixture-secret-only', saved.text)
+                for sid in ('alice', 'bob', 'unassigned'):
+                    response = await client.get('/api/assistant/settings', cookies={'sid': sid})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    data = response.json()['data']
+                    self.assertFalse(data['can_manage_shared'])
+                    self.assertTrue(any(m['id'] == 'shared_team-model' and m['configured'] for m in data['models']))
+                    conversation = await client.get('/api/assistant/conversation', cookies={'sid': sid})
+                    self.assertEqual(conversation.status_code, 200, conversation.text)
+                    self.assertTrue(conversation.json()['data']['configured'])
+                removed = await client.put('/api/assistant/settings', json={'scope': 'shared', 'action': 'delete',
+                    'id': 'shared_team-model'}, cookies={'sid': 'admin'}, headers=headers)
+                self.assertEqual(removed.status_code, 200, removed.text)
+                response = await client.get('/api/assistant/settings', cookies={'sid': 'bob'})
+                self.assertNotIn('shared_team-model', response.text)
+                guest = await client.get('/api/assistant/settings', cookies={'sid': 'guest'})
+                self.assertEqual(guest.status_code, 403)
+
     async def test_forged_query_actor_cannot_switch_account(self):
         with tempfile.TemporaryDirectory() as directory:
             world = World(directory)

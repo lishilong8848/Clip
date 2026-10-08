@@ -225,6 +225,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
+import { LighthouseAssistant } from './lighthouseEntry';
 import AsyncPageState from "./components/AsyncPageState.vue";
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity } from "./api/client";
 import { navigate, navigateHard } from "./navigation";
@@ -250,7 +251,6 @@ const DailyTaskChecklistPage = asyncPage(() => import("./components/DailyTaskChe
 const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
 const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergencePage.vue"));
 const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
-const LighthouseAssistant = defineAsyncComponent(() => import("./components/LighthouseAssistant.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));

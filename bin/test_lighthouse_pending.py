@@ -136,6 +136,16 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('维修项目', reply)
         self.assertNotIn('学练', reply)
 
+    async def test_full_notice_list_keeps_all_pages_instead_of_ten_row_preview(self):
+        data = await collect_pending(ACTOR, '完整未结束通告', self.invoke, None, groups_only={'notices'}, item_limit=None)
+        group = data['groups'][0]
+        self.assertTrue(data['complete'])
+        self.assertEqual(len(group['items']), 42)
+        self.assertEqual(group['remaining'], 0)
+        self.assertIn('A楼旧维保40', pending_reply(data))
+        self.assertNotIn('另有', pending_reply(data))
+        self.assertNotIn('ended', [row['id'] for row in group['items']])
+
     async def test_user_benchmark_250_plans_7_ongoing_and_per_type_counts(self):
         plans = [{"record_id": f"p{i}", "scope": "A", "source_progress": "未开始", "title": f"隔离计划{i}",
                   "work_type": "maintenance" if i < 247 else "change" if i < 249 else "repair"} for i in range(250)]

@@ -245,6 +245,51 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         vue = (Path(__file__).parent / 'lan_bitable_template_portal/frontend/src/components/LighthouseAssistant.vue').read_text(encoding='utf-8')
         self.assertNotIn('forwardTurn', vue)
 
+    async def test_complete_ongoing_forward_pages_and_prepares_native_send_without_llm(self):
+        from test_lighthouse_fast_paths import no_model
+        calls = []
+        rows = [{'record_id': f'n{i}', 'title': f'A楼测试通告-{i:03}', 'scope': 'A',
+                 'work_type': 'maintenance', 'status': '进行中'} for i in range(205)]
+        rows.append({'record_id': 'ended', 'title': '已结束不可转发', 'scope': 'A', 'status': '已结束'})
+        @self.app.get('/api/workbench')
+        async def workbench(scope: str, ongoing_page: int = 1, ongoing_page_size: int = 200):
+            calls.append((scope, ongoing_page))
+            page = rows[(ongoing_page - 1) * ongoing_page_size:ongoing_page * ongoing_page_size]
+            return {'ok': True, 'data': {'source_snapshot_ready': True, 'ongoing': page,
+                'ongoing_pagination': {'total': len(rows), 'has_more': ongoing_page * ongoing_page_size < len(rows)}}}
+        self.agent.catalog = PortalAPICatalog(self.app)
+        engine = LighthouseModel(self.agent, model_factory=no_model)
+        async def authorize(): return self.actor.copy()
+        async def emit(*_): pass
+        turn = {'question': '将完整的所有进行中的通告发给我', 'operation_id': 'full_notices_001',
+                '_profile': {'name': 'fixture', 'model': 'fixture'}}
+        result = await engine.answer(self.actor, turn, [], self.request, emit, authorize, {})
+        self.assertEqual(calls, [('A', 1), ('A', 2)])
+        self.assertEqual(result['plan']['status'], 'awaiting_confirmation')
+        plan = self.agent.get_plan(self.actor, result['plan']['id'])
+        operation = plan['operations'][0]
+        self.assertEqual(operation['api_id'], 'POST /api/message-delivery/send')
+        self.assertEqual(operation['body']['recipient_ids'], ['__self__'])
+        text = operation['body']['text']
+        for i in range(205):
+            self.assertIn(f'A楼测试通告-{i:03}', text)
+        self.assertNotIn('已结束不可转发', text)
+        self.assertNotIn('另有', text)
+        self.controller._submit_background.assert_not_called()
+
+        rows.append({'record_id': 'hidden', 'title': 'B楼不应可见', 'scope': 'B', 'status': '进行中'})
+        result = await engine.answer(self.actor, {**turn, 'operation_id': 'full_notices_002'}, [], self.request, emit, authorize, {})
+        self.assertNotIn('plan', result)
+        self.assertIn('未发送', result['answer'])
+        self.assertNotIn('B楼不应可见', result['answer'])
+
+    def test_full_forward_recognizer_does_not_replace_summary_or_filtered_requests(self):
+        from openclaw_service.assistant.lighthouse_message_delivery import full_notice_self_request
+        for text in ('把这发给我', '将完整的所有进行中的通告发给李世龙', '将完整的高风险进行中的通告发给我',
+                     '将昨天开始的所有进行中的通告发给我'):
+            self.assertFalse(full_notice_self_request(text), text)
+        self.assertTrue(full_notice_self_request('请将A楼所有进行中的维保通告发给我'))
+
     async def test_archived_topic_search_keeps_full_answer_and_filters_other_scope(self):
         from openclaw_service.assistant.lighthouse_model import instructions_for_question
         self.assertIn('发送内容不一定是上一条', instructions_for_question('把前面的内容发给我'))

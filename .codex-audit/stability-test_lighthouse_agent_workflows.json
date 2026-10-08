@@ -1,0 +1,10 @@
+{
+  "group": "test_lighthouse_agent_workflows",
+  "modules": 1,
+  "tests": 47,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 18.1,
+  "external_connections_blocked": 0
+}

@@ -6,6 +6,15 @@ import re
 MESSAGE_INTENT = re.compile(r"发给|发送给|转发给|(?:发|发送|转发).{0,30}(?:飞书|本人|自己)|飞书.{0,20}(?:发|发送|转发)|(?:给|向).{1,30}(?:发|发送|转发)")
 
 
+def full_notice_self_request(question):
+    """Only unqualified current notice lists; other recipients/filters use tools."""
+    return bool(re.search(r'完整|全部|所有', question) and re.search(r'进行中|未结束', question)
+        and re.fullmatch(r'(?:请|帮我|麻烦|把|将|的|完整|全部|所有|当前|现在|今天|今日|'
+                         r'[ABCDEH]楼?|110站?|、|，|\s|进行中|未结束|维保|变更|检修|轮巡|设备调整|上下电)*'
+                         r'通告(?:清单|列表|明细)?(?:的|完整|全部|所有|\s)*'
+                         r'(?:发给|发送给|转发给)(?:我|本人|自己)[。！!\s]*', question, re.I))
+
+
 def turn_downloads(turn):
     links = list(turn.get('downloads') or [])
     for result in (turn.get('plan') or {}).get('results', []):

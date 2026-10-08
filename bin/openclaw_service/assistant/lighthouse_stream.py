@@ -123,7 +123,8 @@ class LighthouseStream:
             from .lighthouse_commands import resolve
             selected_commands, command_context = resolve(self.store, actor, getattr(self.portal, 'catalog', None), selections)
             scopes = resolve_scopes(actor, question, state.get("query_scopes") if query_refinement(clean_question) else None)
-            if not scopes:
+            from .lighthouse_ai import is_business_query
+            if not scopes and (actor['scopes'] or is_business_query(question)):
                 raise AssistantError("所选范围内没有可访问楼栋，请重新选择。", 403)
             model = self.assistant.model_for(actor)
             selected = self.assistant._selected(state, model.settings())

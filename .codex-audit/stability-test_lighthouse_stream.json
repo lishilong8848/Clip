@@ -1,0 +1,10 @@
+{
+  "group": "test_lighthouse_stream",
+  "modules": 1,
+  "tests": 38,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 6.5,
+  "external_connections_blocked": 0
+}

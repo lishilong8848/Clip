@@ -7355,7 +7355,7 @@ def render_workbench_lite(
       noticeTagsRequest = controller;
       const timeout = window.setTimeout(() => controller.abort(), 8000);
       const line = (tag, text) => {{ const node = document.createElement(tag); node.textContent = text; panel.appendChild(node); return node; }};
-      let pending = false;
+      let pending = false, retryDelay = 0;
       try {{
         const query = new URLSearchParams({{target_record_id:target,work_type:String(previewValue(form,'work_type')||'')}});
         const response = await fetch('/api/notice-alert-tags?' + query, {{credentials:'same-origin',signal:controller.signal}});
@@ -7367,6 +7367,7 @@ def render_workbench_lite(
         if (!data) return;
         const heading = line('header', '已发通告推荐标签 · ' + (data.action === 'start' ? '开始' : '更新'));
         pending = data.status === 'pending';
+        retryDelay = pending ? 5000 : data.status === 'failed' ? Math.max(10000, Math.min(60000, Number(data.retry_after || 0) * 1000 - Date.now())) : 0;
         if (pending) {{ const spinner = document.createElement('span'); spinner.className = 'tag-loading'; heading.prepend(spinner); line('p','正在后台生成推荐标签…'); }}
         else if (data.status === 'ready') {{
           for (const tag of data.tags || []) {{ line('strong','【' + tag.label + '】' + tag.content); line('p','依据：' + tag.basis + '\\n注意：' + tag.notes); }}
@@ -7378,7 +7379,7 @@ def render_workbench_lite(
         line('p','推荐标签暂不可用，通告发送不受影响。');
       }} finally {{
         window.clearTimeout(timeout);
-        if (sequence === noticeTagsSequence) {{ noticeTagsRequest = null; if (pending) noticeTagsTimer = window.setTimeout(refreshNoticeTags,5000); }}
+        if (sequence === noticeTagsSequence) {{ noticeTagsRequest = null; if (retryDelay) noticeTagsTimer = window.setTimeout(refreshNoticeTags,retryDelay); }}
       }}
     }}
     function setSubmitButtons(form, action) {{

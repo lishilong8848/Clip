@@ -1,0 +1,10 @@
+{
+  "group": "test_lighthouse_pending",
+  "modules": 1,
+  "tests": 38,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 3.2,
+  "external_connections_blocked": 0
+}

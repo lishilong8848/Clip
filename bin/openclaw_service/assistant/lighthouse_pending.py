@@ -172,7 +172,7 @@ def cached_items(kind, scopes, runtime, *, allowed=None):
     raise AssistantError("未知的未完成工作类别。")
 
 
-async def collect_pending(actor, query, invoke, read_cached, *, groups_only=None, notice_type="", on_progress=None):
+async def collect_pending(actor, query, invoke, read_cached, *, groups_only=None, notice_type="", on_progress=None, item_limit=10):
     requested = codes(query)
     if re.search(r"园区|ABCDE|(?<![A-Z])CAMPUS(?![A-Z])", query, re.I):
         requested.update("ABCDE")
@@ -251,7 +251,7 @@ async def collect_pending(actor, query, invoke, read_cached, *, groups_only=None
         items = list(unique.values())
         group_out[order_index] = {"key": key, "label": label, "url": url, "count": len(items) if not error and not warnings else None,
                        "known_count": len(items), "available": not error and not warnings, "error": error,
-                       "warnings": list(dict.fromkeys(warnings)), "items": items[:10], "remaining": max(0, len(items) - 10),
+                       "warnings": list(dict.fromkeys(warnings)), "items": items[:item_limit], "remaining": max(0, len(items) - (item_limit if item_limit is not None else len(items))),
                        "stats": stats if not error and not warnings else None,
                        "source_freshness": (stats or {}).get('source_freshness', []),
                        "type_counts": {kind: sum(row.get("type") == kind for row in items) for kind in NOTICE_TYPES.values()} if key in {"notices", "plans"} else {}}

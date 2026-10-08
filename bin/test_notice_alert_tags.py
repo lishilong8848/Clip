@@ -173,6 +173,55 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[1][0] for call in self.sender.call_args_list], ['ou_E', 'ou_li', 'ou_li'])
         self.assertEqual(self.sender.call_args_list[1].kwargs['message_uuid'], self.sender.call_args_list[2].kwargs['message_uuid'])
 
+    async def test_old_failure_regenerates_for_display_only_without_resending(self):
+        self.enqueue()
+        await self.tags.tick()
+        original = self.store.list_documents(NS, key_prefix='job:')[0]
+        job = {**original['payload'], 'status': 'failed', 'tags': [], 'finished_at': 1, 'error': 'old failure'}
+        self.store.put_document(NS, original['key'], job)
+        receipts = copy.deepcopy(self.store.list_documents(NS, key_prefix='batch:'))
+        self.sender.reset_mock()
+        self.calls.clear()
+        self.assertIsNone(self.tags.latest('recE', 'maintenance', ['A']))
+        self.assertEqual(self.store.list_outbox_events(CHANNEL), [])
+        for _ in range(3):
+            self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['status'], 'pending')
+        self.assertEqual(len(self.store.list_outbox_events(CHANNEL)), 1)
+        self.store.lease_outbox_events(CHANNEL)
+        self.store.release_outbox_leases(CHANNEL)
+        restarted = NoticeAlertTags(self.service, self.tags.recommend, self.sender)
+        await restarted.tick()
+        visible = restarted.latest('recE', 'maintenance', ['E'])
+        self.assertEqual(visible['status'], 'ready')
+        self.assertEqual(visible['tags'], tags('one'))
+        self.assertEqual(len(self.calls), 1)
+        self.sender.assert_not_called()
+        self.assertEqual(self.store.get_document(NS, original['key']), job)
+        self.assertEqual(self.store.list_documents(NS, key_prefix='batch:'), receipts)
+
+    async def test_display_failure_backs_off_and_superseded_update_is_not_overwritten(self):
+        self.enqueue()
+        await self.tags.tick()
+        original = self.store.list_documents(NS, key_prefix='job:')[0]
+        self.store.put_document(NS, original['key'], {**original['payload'], 'status': 'failed', 'finished_at': 1})
+        now = [1000]
+        self.tags.clock = lambda: now[0]
+        async def fail(*_): raise TimeoutError()
+        self.tags.recommend = fail
+        self.sender.reset_mock()
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['status'], 'pending')
+        await self.tags.tick()
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['status'], 'failed')
+        self.assertEqual(self.store.list_outbox_events(CHANNEL), [])
+        now[0] += 61
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['status'], 'pending')
+        self.enqueue('new', action='update')
+        async def success(owner, notices): return {row['id']: tags(row['title']) for row in notices}
+        self.tags.recommend = success
+        await self.tags.tick()
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['tags'], tags('new'))
+        self.assertEqual(self.sender.call_count, 2)  # New update only, never the display retry.
+
     async def test_restart_recovers_leased_tag_jobs_only(self):
         self.enqueue()
         self.store.lease_outbox_events(CHANNEL)

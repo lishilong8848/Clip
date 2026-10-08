@@ -408,8 +408,7 @@ def install_assistant_routes(app, host):
                 else:
                     fn, args = (current.clear, (actor,)) if request.method == "DELETE" else (current.conversation, (actor,))
             else:
-                model = await asyncio.to_thread(current.model_for, actor)
-                fn, args = (model.configure, (payload,)) if request.method == "PUT" else (model.settings, ())
+                fn, args = current.model_settings, (actor, payload if request.method == "PUT" else None)
             data = await asyncio.to_thread(fn, *args)
             if action == "conversation":
                 current_streams = await ready_streams()

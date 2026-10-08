@@ -34,6 +34,8 @@ async function read(): Promise<void> {
     data.value = value?.status ? value : null;
     error.value = '';
     if (data.value?.status === 'pending') timer = window.setTimeout(read, 5000);
+    else if (data.value?.status === 'failed') timer = window.setTimeout(read,
+      Math.max(10000, Math.min(60000, (Number(data.value.retry_after || 0) * 1000) - Date.now())));
   } catch {
     if (current === sequence) error.value = '推荐标签暂不可用，通告业务不受影响。';
   }

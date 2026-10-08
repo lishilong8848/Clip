@@ -1,0 +1,10 @@
+{
+  "group": "test_lighthouse_assistant",
+  "modules": 1,
+  "tests": 32,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 14.9,
+  "external_connections_blocked": 0
+}
