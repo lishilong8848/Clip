@@ -133,7 +133,7 @@ async function loadSops(item: Dict, query = ''): Promise<void> {
   const identity = run.value.id, entry = reactive<Dict>({ ...sopDirectories[item.key], loading: true, error: '' });
   sopDirectories[item.key] = entry;
   try {
-    const result = await api('/' + identity + '/sop-options?' + new URLSearchParams({ item_key: item.key, q: query }));
+    const result = await requestJson(base + '/' + identity + '/sop-options?' + new URLSearchParams({ item_key: item.key, q: query }), { timeoutMs: 15000 });
     if (disposed || run.value?.id !== identity || sopDirectories[item.key] !== entry) return;
     const people = new Map<string, Dict>((entry.field?.people || []).map((person: Dict) => [person.record_id, person]));
     for (const person of result.field.people || []) people.set(person.record_id, person);
@@ -197,16 +197,13 @@ function receive(value: Dict, restore = false): void {
   }
   if (value.state === 'edit') for (const item of run.value!.items || []) if (!inCurrentView(item)) item.selected = false;
 }
-async function api(path = '', method = 'GET', body?: Dict, signal?: AbortSignal): Promise<Dict> {
-  return requestJson(base + path, { method, body: body ? JSON.stringify(body) : undefined, signal, timeoutMs: 15000 });
-}
 async function loadCurrent(latest = false): Promise<void> {
   if (!scope.value || !props.active || !meta.value.edition || busy.value) return;
   saveLocal(); controller?.abort(); const pending = new AbortController(); controller = pending; const epoch = ++serial;
   loading.value = true; error.value = ''; conflict.value = false; draftWarning.value = ''; search.value = ''; page.value = 1;
   if (latest || !slot.value || run.value?.date !== meta.value.edition.date && run.value) slot.value = meta.value.edition.slot;
   if (slot.value === meta.value.edition.slot) editionPending = false;
-  try { const result = await api('/open', 'POST', { scope: scope.value, slot: slot.value }, pending.signal); if (!disposed && serial === epoch) receive(result.run, true); }
+  try { const result = await requestJson(base + '/open', { method: 'POST', body: JSON.stringify({ scope: scope.value, slot: slot.value }), signal: pending.signal, timeoutMs: 15000 }); if (!disposed && serial === epoch) receive(result.run, true); }
   catch (e) { if (!pending.signal.aborted && !disposed && serial === epoch) error.value = e instanceof Error ? e.message : '待办读取失败'; }
   finally { if (!disposed && serial === epoch) { loading.value = false; schedule(); } }
 }
@@ -218,7 +215,7 @@ async function refreshRows(): Promise<void> {
 async function readLatest(): Promise<void> {
   if (!run.value || busy.value || !window.confirm('读取最新草稿会替换当前尚未提交的填写，是否继续？')) return;
   busy.value = true;
-  try { const result = await api('/' + run.value.id); receive(result.run); conflict.value = false; error.value = ''; draftWarning.value = ''; saveLocal(); }
+  try { const result = await requestJson(base + '/' + run.value.id, { timeoutMs: 15000 }); receive(result.run); conflict.value = false; error.value = ''; draftWarning.value = ''; saveLocal(); }
   catch (e) { error.value = e instanceof Error ? e.message : '读取未完成'; }
   finally { busy.value = false; schedule(); }
 }
@@ -229,7 +226,7 @@ async function act(action: string): Promise<void> {
   try {
     const body: Dict = { action, revision: run.value.revision };
     if (action === 'save' || action === 'preview') body.changes = changes();
-    const result = await api('/' + id + '/action', 'POST', body);
+    const result = await requestJson(base + '/' + id + '/action', { method: 'POST', body: JSON.stringify(body), timeoutMs: 15000 });
     if (disposed) return;
     receive(result.run);
     if (action === 'preview' && result.run.state === 'confirm') { search.value = ''; page.value = 1; }
@@ -241,7 +238,7 @@ async function act(action: string): Promise<void> {
     if (!disposed) error.value = e instanceof Error ? e.message : '操作未完成，填写已保留';
     if (e instanceof ApiError && e.status === 409) conflict.value = true;
     if (['confirm', 'retry', 'confirm_unmatched'].includes(action)) {
-      try { const result = await api('/' + id); if (!disposed) receive(result.run, true); } catch { /* Keep the original operation for retry. */ }
+      try { const result = await requestJson(base + '/' + id, { timeoutMs: 15000 }); if (!disposed) receive(result.run, true); } catch { /* Keep the original operation for retry. */ }
     }
   } finally { busy.value = false; if (!disposed) schedule(); }
 }
@@ -250,7 +247,7 @@ async function poll(): Promise<void> {
   if (disposed || document.hidden || busy.value || loading.value) { schedule(); return; }
   polling = true;
   try {
-    const next = await api(); if (disposed) return;
+    const next = await requestJson(base, { timeoutMs: 15000 }); if (disposed) return;
     if (next.edition?.id && next.edition.id !== meta.value.edition?.id) editionPending = true;
     meta.value = next;
     emit('availability', !!meta.value.edition || !!run.value);
@@ -261,7 +258,7 @@ async function poll(): Promise<void> {
       if (!scope.value && meta.value.scopes?.length === 1) scope.value = meta.value.scopes[0].value;
     }
     if (props.active && scope.value && meta.value.edition && !running.value && (editionPending || !run.value)) { editionPending = false; await loadCurrent(true); return; }
-    if (run.value && props.active && (preparing.value || running.value)) { const result = await api('/' + run.value.id); if (!disposed) { const wasRunning = running.value; receive(result.run); if (wasRunning && !running.value) window.dispatchEvent(new Event('clipflow-business-changed')); } }
+    if (run.value && props.active && (preparing.value || running.value)) { const result = await requestJson(base + '/' + run.value.id, { timeoutMs: 15000 }); if (!disposed) { const wasRunning = running.value; receive(result.run); if (wasRunning && !running.value) window.dispatchEvent(new Event('clipflow-business-changed')); } }
     if (editionPending && props.active && scope.value && !running.value) { editionPending = false; await loadCurrent(true); }
   } catch (e) { if (!disposed) { error.value = e instanceof Error ? e.message : '待办读取失败'; if (e instanceof ApiError && [401, 403].includes(e.status)) { run.value = null; original = null; scope.value = ''; } } }
   finally { polling = false; schedule(); }

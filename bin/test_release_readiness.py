@@ -15,6 +15,10 @@ import package_portable
 
 
 class ReleaseReadinessTests(unittest.TestCase):
+    def test_production_frontend_uses_shared_api_client(self):
+        ok, offenders = readiness.check_frontend_api_client()
+        self.assertTrue(ok, '\n'.join(offenders))
+
     def test_preflight_shards_run_concurrently_with_isolated_data_and_all_modules(self):
         barrier = threading.Barrier(3, timeout=5)
         calls = []
